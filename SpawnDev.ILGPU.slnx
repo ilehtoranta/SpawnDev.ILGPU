@@ -1,0 +1,7 @@
+<Solution>
+  <Project Path="ILGPU.Algorithms/ILGPU.Algorithms.csproj" />
+  <Project Path="ILGPU/ILGPU.csproj" />
+  <Project Path="PlaywrightTestRunner/PlaywrightTestRunner.csproj" />
+  <Project Path="SpawnDev.ILGPU.Demo/SpawnDev.ILGPU.Demo.csproj" />
+  <Project Path="SpawnDev.ILGPU/SpawnDev.ILGPU.csproj" Id="21af58b2-0004-41c4-bb4e-3265e99632e6" />
+</Solution>

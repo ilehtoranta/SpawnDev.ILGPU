@@ -1,0 +1,853 @@
+@page "/mandelbrot"
+@implements IAsyncDisposable
+@using SpawnDev.ILGPU.WebGPU
+@using SpawnDev.ILGPU.WebGPU.Backend
+@using SpawnDev.BlazorJS
+@using SpawnDev.BlazorJS.JSObjects
+@using ILGPU
+@using System.Diagnostics
+@using System.Runtime.InteropServices
+@using global::ILGPU
+@using global::ILGPU.Runtime
+
+<PageTitle>Mandelbrot Explorer</PageTitle>
+
+<h1>Mandelbrot Explorer</h1>
+
+<div class="row mb-3">
+    <div class="col-md-8">
+        <div class="card">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <span>Performance Comparison</span>
+                <div class="d-flex gap-3 align-items-center">
+                    <div class="form-check form-switch mb-0">
+                        <input class="form-check-input" type="checkbox" id="modePerturbation" @bind="_usePerturbationMode" />
+                        <label class="form-check-label" for="modePerturbation">Perturbation Deep Zoom</label>
+                    </div>
+                    <div class="form-check form-switch mb-0">
+                        <input class="form-check-input" type="checkbox" id="mode64bit" @bind="_use64BitMode" disabled="@_usePerturbationMode" />
+                        <label class="form-check-label" for="mode64bit">64-bit Precision</label>
+                    </div>
+                </div>
+            </div>
+            <div class="card-body">
+                <div class="row">
+                    <div class="col-md-4">
+                        <label class="form-label">ILGPU Time</label>
+                        <div class="form-control-plaintext"><strong class="text-primary">@_ilgpuRenderTime</strong></div>
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label">Raw WebGPU Time</label>
+                        <div class="form-control-plaintext"><strong class="text-success">@_webgpuRenderTime</strong></div>
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label">Max Iterations</label>
+                        <input type="number" class="form-control" @bind="_maxIterations" min="50" max="5000" step="50" />
+                    </div>
+                </div>
+                <div class="row mt-2">
+                    <div class="col-md-12">
+                        <small class="text-muted">
+                            <strong>Zoom:</strong> @FormatZoom() | 
+                            <strong>Center:</strong> (@FormatCoord(_centerX), @FormatCoord(_centerY))
+                            @if (_usePerturbationMode)
+                            {
+                                <span> | <strong>Ref Orbit:</strong> @_refOrbitInfo</span>
+                            }
+                        </small>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-4">
+        <div class="card">
+            <div class="card-header">Instructions</div>
+            <div class="card-body">
+                <ul class="mb-0">
+                    <li><strong>Zoom:</strong> Mouse wheel</li>
+                    <li><strong>Pan:</strong> Click and drag</li>
+                    <li><strong>Reset:</strong> Double-click</li>
+                </ul>
+                <hr />
+                <small class="text-muted">
+                    @if (_usePerturbationMode)
+                    {
+                        <span><strong>Perturbation Mode:</strong> CPU computes reference orbit at full precision, GPU computes pixel deltas. Zoom to ~10^26.</span>
+                    }
+                    else if (_use64BitMode)
+                    {
+                        <span><strong>64-bit Mode:</strong> Uses emulated f64 precision for deeper zooms (ILGPU only).</span>
+                    }
+                    else
+                    {
+                        <span>Alternates between ILGPU and Raw WebGPU each frame for comparison.</span>
+                    }
+                </small>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="row">
+    <div class="col-md-12 text-center">
+        <canvas @ref="mandelbrotCanvas" 
+                width="@_width" 
+                height="@_height" 
+                style="border: 1px solid #ccc; cursor: crosshair;"
+                tabindex="0"
+                @onwheel="OnWheel"
+                @onwheel:preventDefault
+                @onmousedown="OnMouseDown"
+                @onmousemove="OnMouseMove"
+                @onmouseup="OnMouseUp"
+                @onmouseleave="OnMouseUp"
+                @ondblclick="OnDoubleClick"></canvas>
+    </div>
+</div>
+
+@code {
+    [Inject]
+    BlazorJSRuntime JS { get; set; } = default!;
+
+    ElementReference mandelbrotCanvas;
+
+    // Canvas size
+    private int _width = 800;
+    private int _height = 600;
+
+    // Mandelbrot parameters - use decimal for high-precision coordinate tracking
+    private decimal _centerX = -0.5m;
+    private decimal _centerY = 0.0m;
+    private double _zoom = 1.0;
+    private int _maxIterations = 500;
+
+    // Alternating renderer state
+    private bool _useILGPU = true;
+    private int _frameCount = 0;
+
+    // Mode toggles
+    private bool _use64BitMode = false;
+    private bool _usePerturbationMode = false;
+    private bool _currentKernelUsesF64 = false;
+
+    // Status
+    private bool _isRunning = false;
+    private bool _disposed = false;
+    private string _ilgpuRenderTime = "-";
+    private string _webgpuRenderTime = "-";
+    private string _refOrbitInfo = "-";
+
+    // UI update throttling
+    private DateTime _lastUiUpdate = DateTime.MinValue;
+    private const int UI_UPDATE_INTERVAL_MS = 100;
+
+    // Mouse drag tracking
+    private bool _isDragging = false;
+    private double _lastMouseX;
+    private double _lastMouseY;
+    private DateTime _lastDragTime = DateTime.MinValue;
+
+    // Cached ILGPU resources (standard mode)
+    private Context? _ilgpuContext;
+    private Accelerator? _ilgpuAccelerator;
+    private Action<Index2D, ArrayView2D<uint, Stride2D.DenseX>, int, int, int, double, double, double>? _ilgpuKernel;
+    private MemoryBuffer2D<uint, Stride2D.DenseX>? _ilgpuBuffer;
+
+    // Cached ILGPU resources (perturbation mode)
+    private Context? _pertContext;
+    private Accelerator? _pertAccelerator;
+    private Action<Index2D, ArrayView2D<uint, Stride2D.DenseX>, ArrayView<float>, ArrayView<float>,
+        int, int, int, float>? _pertKernel;
+    private MemoryBuffer2D<uint, Stride2D.DenseX>? _pertBuffer;
+    private MemoryBuffer1D<float, Stride1D.Dense>? _pertRefRealBuf;
+    private MemoryBuffer1D<float, Stride1D.Dense>? _pertRefImagBuf;
+    // Cache tracking — avoid recomputing orbit every frame
+    private decimal _cachedPertCenterX;
+    private decimal _cachedPertCenterY;
+    private double _cachedPertZoom;
+    private int _cachedPertMaxIter;
+    private int _cachedOrbitLength;
+    private string _cachedRefOrbitInfo = "";
+
+    // Cached Raw WebGPU resources
+    private GPUDevice? _webgpuDevice;
+    private GPUComputePipeline? _webgpuPipeline;
+    private GPUBuffer? _webgpuOutputBuffer;
+    private GPUBuffer? _webgpuUniformBuffer;
+    private GPUBuffer? _webgpuReadBuffer;
+    private GPUBindGroup? _webgpuBindGroup;
+    private GPUBindGroupLayout? _webgpuBindGroupLayout;
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender)
+        {
+            _ = RenderLoop();
+        }
+    }
+
+    private async Task RenderLoop()
+    {
+        try
+        {
+            await InitializeILGPU();
+            await InitializeRawWebGPU();
+
+            while (!_disposed)
+            {
+                if (_isRunning)
+                {
+                    await Task.Delay(10);
+                    continue;
+                }
+
+                bool isActivelyDragging = _isDragging && (DateTime.UtcNow - _lastDragTime).TotalMilliseconds < 100;
+
+                _frameCount++;
+
+                if (_usePerturbationMode)
+                {
+                    // Perturbation mode: ILGPU only with reference orbit
+                    await RenderWithPerturbation();
+                }
+                else if (_use64BitMode)
+                {
+                    if (!_currentKernelUsesF64)
+                    {
+                        await ReloadKernel(enableF64: true);
+                        _currentKernelUsesF64 = true;
+                    }
+                    
+                    if (!isActivelyDragging)
+                    {
+                        await RenderWithILGPU();
+                    }
+                }
+                else
+                {
+                    if (_currentKernelUsesF64)
+                    {
+                        await ReloadKernel(enableF64: false);
+                        _currentKernelUsesF64 = false;
+                    }
+                    if (_useILGPU)
+                    {
+                        await RenderWithILGPU();
+                    }
+                    else
+                    {
+                        await RenderWithWebGPU();
+                    }
+                    _useILGPU = !_useILGPU;
+                }
+
+                ThrottledStateHasChanged();
+                await Task.Yield();
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine(ex);
+        }
+    }
+
+    private void ThrottledStateHasChanged()
+    {
+        var now = DateTime.UtcNow;
+        if ((now - _lastUiUpdate).TotalMilliseconds >= UI_UPDATE_INTERVAL_MS)
+        {
+            _lastUiUpdate = now;
+            StateHasChanged();
+        }
+    }
+
+    private string FormatZoom() => _zoom.ToString("G6");
+    private string FormatCoord(decimal val) => ((double)val).ToString("G10");
+
+    private void OnWheel(WheelEventArgs e)
+    {
+        double mouseX = e.OffsetX;
+        double mouseY = e.OffsetY;
+
+        double scale = 4.0 / _zoom;
+        decimal mouseRealBefore = _centerX + (decimal)((mouseX - _width / 2.0) * scale / _width);
+        decimal mouseImagBefore = _centerY + (decimal)((mouseY - _height / 2.0) * scale / _height);
+
+        double zoomFactor = e.DeltaY < 0 ? 1.2 : 1.0 / 1.2;
+        _zoom *= zoomFactor;
+
+        double maxZoom = _usePerturbationMode ? 1e26 : 1e12;
+        _zoom = Math.Max(0.5, Math.Min(_zoom, maxZoom));
+
+        double newScale = 4.0 / _zoom;
+        _centerX = mouseRealBefore - (decimal)((mouseX - _width / 2.0) * newScale / _width);
+        _centerY = mouseImagBefore - (decimal)((mouseY - _height / 2.0) * newScale / _height);
+    }
+
+    private void OnMouseDown(MouseEventArgs e)
+    {
+        _isDragging = true;
+        _lastMouseX = e.OffsetX;
+        _lastMouseY = e.OffsetY;
+    }
+
+    private void OnMouseMove(MouseEventArgs e)
+    {
+        if (!_isDragging) return;
+
+        double dx = e.OffsetX - _lastMouseX;
+        double dy = e.OffsetY - _lastMouseY;
+        
+        if (Math.Abs(dx) < 0.5 && Math.Abs(dy) < 0.5) return;
+
+        double scale = 4.0 / _zoom;
+        _centerX -= (decimal)(dx * scale / _width);
+        _centerY -= (decimal)(dy * scale / _height);
+
+        _lastMouseX = e.OffsetX;
+        _lastMouseY = e.OffsetY;
+        _lastDragTime = DateTime.UtcNow;
+    }
+
+    private void OnMouseUp(MouseEventArgs e)
+    {
+        _isDragging = false;
+    }
+
+    private void OnDoubleClick(MouseEventArgs e)
+    {
+        _centerX = -0.5m;
+        _centerY = 0.0m;
+        _zoom = 1.0;
+    }
+
+    // ========== Standard ILGPU Rendering ==========
+
+    private async Task InitializeILGPU()
+    {
+        if (_ilgpuContext != null) return;
+
+        var webGpuDevice = await WebGPUDevice.GetDefaultDeviceAsync();
+        if (webGpuDevice == null) throw new Exception("No WebGPU device found");
+
+        _ilgpuContext = Context.Create(builder => builder.Default());
+        var ilgpuDevice = new WebGPUILGPUDevice(webGpuDevice, 0);
+        _ilgpuAccelerator = await ilgpuDevice.CreateAcceleratorAsync(_ilgpuContext);
+        _ilgpuKernel = _ilgpuAccelerator.LoadAutoGroupedStreamKernel<Index2D, ArrayView2D<uint, Stride2D.DenseX>, int, int, int, double, double, double>(MandelbrotKernel);
+        _ilgpuBuffer = _ilgpuAccelerator.Allocate2DDenseX<uint>(new Index2D(_width, _height));
+    }
+
+    private async Task ReloadKernel(bool enableF64 = false)
+    {
+        var originalVerbose = WebGPUBackend.VerboseLogging;
+        WebGPUBackend.VerboseLogging = false;
+        
+        try
+        {
+            if (_ilgpuAccelerator != null)
+            {
+                await _ilgpuAccelerator.SynchronizeAsync();
+            }
+            
+            _ilgpuKernel = null;
+            _ilgpuBuffer?.Dispose();
+            _ilgpuBuffer = null;
+            _ilgpuAccelerator?.Dispose();
+            _ilgpuAccelerator = null;
+            _ilgpuContext?.Dispose();
+            _ilgpuContext = null;
+            
+            var webGpuDevice = await WebGPUDevice.GetDefaultDeviceAsync();
+            if (webGpuDevice == null) throw new Exception("No WebGPU device found");
+            
+            _ilgpuContext = Context.Create(builder => builder.Default());
+            var ilgpuDevice = new WebGPUILGPUDevice(webGpuDevice, 0);
+            
+            var options = new WebGPUBackendOptions { EnableF64Emulation = enableF64 };
+            _ilgpuAccelerator = await ilgpuDevice.CreateAcceleratorAsync(_ilgpuContext, options);
+            
+            _ilgpuKernel = _ilgpuAccelerator.LoadAutoGroupedStreamKernel<Index2D, ArrayView2D<uint, Stride2D.DenseX>, int, int, int, double, double, double>(MandelbrotKernel);
+            _ilgpuBuffer = _ilgpuAccelerator.Allocate2DDenseX<uint>(new Index2D(_width, _height));
+        }
+        finally
+        {
+            WebGPUBackend.VerboseLogging = originalVerbose;
+        }
+    }
+
+    private async Task RenderWithILGPU()
+    {
+        _isRunning = true;
+
+        try
+        {
+            var sw = Stopwatch.StartNew();
+
+            _ilgpuKernel!(_ilgpuBuffer!.IntExtent, _ilgpuBuffer.View, _width, _height, _maxIterations, (double)_centerX, (double)_centerY, _zoom);
+            
+            await _ilgpuAccelerator!.SynchronizeAsync();
+
+            var webGpuMemBuffer = (WebGPUMemoryBuffer)((IArrayView)_ilgpuBuffer).Buffer;
+            var bytes = await webGpuMemBuffer.NativeBuffer.CopyToHostAsync();
+
+            var result = new uint[_width * _height];
+            Buffer.BlockCopy(bytes, 0, result, 0, bytes.Length);
+
+            sw.Stop();
+            _ilgpuRenderTime = $"{sw.ElapsedMilliseconds} ms";
+
+            await DrawToCanvas(result);
+        }
+        finally
+        {
+            _isRunning = false;
+        }
+    }
+
+    static void MandelbrotKernel(Index2D index, ArrayView2D<uint, Stride2D.DenseX> output, int width, int height, int maxIterations, double centerX, double centerY, double zoom)
+    {
+        int x = index.X;
+        int y = index.Y;
+
+        if (x >= width || y >= height)
+            return;
+
+        double scale = 4.0 / zoom;
+        double real = centerX + (x - width / 2.0) * scale / width;
+        double imag = centerY + (y - height / 2.0) * scale / height;
+
+        double cReal = real;
+        double cImag = imag;
+        double zReal = 0;
+        double zImag = 0;
+
+        int iterations = 0;
+        while (iterations < maxIterations && (zReal * zReal + zImag * zImag) < 4.0)
+        {
+            double temp = zReal * zReal - zImag * zImag + cReal;
+            zImag = 2.0 * zReal * zImag + cImag;
+            zReal = temp;
+            iterations++;
+        }
+
+        uint color;
+        if (iterations == maxIterations)
+        {
+            color = 0xFF000000;
+        }
+        else
+        {
+            uint r = (uint)(iterations * 10) % 255;
+            uint g = (uint)(iterations * 5) % 255;
+            uint b = (uint)(iterations * 20) % 255;
+            color = (0xFFu << 24) | (b << 16) | (g << 8) | r;
+        }
+
+        output[index] = color;
+    }
+
+    // ========== Perturbation Theory Rendering ==========
+
+    private async Task InitializePerturbation()
+    {
+        if (_pertContext != null) return;
+
+        var webGpuDevice = await WebGPUDevice.GetDefaultDeviceAsync();
+        if (webGpuDevice == null) throw new Exception("No WebGPU device found");
+
+        _pertContext = Context.Create(builder => builder.Default());
+        var ilgpuDevice = new WebGPUILGPUDevice(webGpuDevice, 0);
+        
+        _pertAccelerator = await ilgpuDevice.CreateAcceleratorAsync(_pertContext);
+        _pertKernel = _pertAccelerator.LoadAutoGroupedStreamKernel<
+            Index2D, ArrayView2D<uint, Stride2D.DenseX>, ArrayView<float>, ArrayView<float>,
+            int, int, int, float>(PerturbationKernel);
+        _pertBuffer = _pertAccelerator.Allocate2DDenseX<uint>(new Index2D(_width, _height));
+    }
+
+    /// <summary>
+    /// Compute reference orbit at (centerR, centerI) using C# decimal precision (~28 digits).
+    /// Returns arrays of f32 for GPU upload plus the orbit length.
+    /// </summary>
+    private (float[] refReal, float[] refImag, int length) ComputeReferenceOrbit(decimal cR, decimal cI, int maxIter)
+    {
+        var refReal = new float[maxIter];
+        var refImag = new float[maxIter];
+
+        decimal zR = 0m;
+        decimal zI = 0m;
+
+        int length = 0;
+        for (int i = 0; i < maxIter; i++)
+        {
+            // Store current Z_n as f32 for GPU consumption
+            refReal[i] = (float)zR;
+            refImag[i] = (float)zI;
+            length = i + 1;
+
+            // Check escape: |Z|² > 1e12 (large bailout for reference stability)
+            decimal magSq = zR * zR + zI * zI;
+            if (magSq > 1_000_000_000_000m)
+                break;
+
+            // Z_{n+1} = Z_n² + C  (full decimal precision)
+            decimal newR = zR * zR - zI * zI + cR;
+            decimal newI = 2m * zR * zI + cI;
+            zR = newR;
+            zI = newI;
+        }
+
+        return (refReal, refImag, length);
+    }
+
+    private async Task RenderWithPerturbation()
+    {
+        _isRunning = true;
+
+        try
+        {
+            var sw = Stopwatch.StartNew();
+
+            // Initialize perturbation ILGPU resources if needed
+            await InitializePerturbation();
+
+            // 1. Only recompute reference orbit if center/zoom/iterations changed
+            bool needNewOrbit = _pertRefRealBuf == null ||
+                _cachedPertCenterX != _centerX ||
+                _cachedPertCenterY != _centerY ||
+                _cachedPertZoom != _zoom ||
+                _cachedPertMaxIter != _maxIterations;
+
+            if (needNewOrbit)
+            {
+                var refSw = Stopwatch.StartNew();
+                var (refReal, refImag, orbitLength) = ComputeReferenceOrbit(_centerX, _centerY, _maxIterations);
+                refSw.Stop();
+
+                // Upload reference orbit to GPU
+                _pertRefRealBuf?.Dispose();
+                _pertRefImagBuf?.Dispose();
+                _pertRefRealBuf = _pertAccelerator!.Allocate1D(refReal.AsSpan().Slice(0, orbitLength).ToArray());
+                _pertRefImagBuf = _pertAccelerator!.Allocate1D(refImag.AsSpan().Slice(0, orbitLength).ToArray());
+
+                // Update cache
+                _cachedPertCenterX = _centerX;
+                _cachedPertCenterY = _centerY;
+                _cachedPertZoom = _zoom;
+                _cachedPertMaxIter = _maxIterations;
+                _cachedOrbitLength = orbitLength;
+                _cachedRefOrbitInfo = $"{orbitLength} iters, {refSw.ElapsedMilliseconds}ms CPU";
+            }
+
+            // 2. Pre-compute limit and scale on CPU
+            int limit = Math.Min(_maxIterations, _cachedOrbitLength);
+            float deltaScale = (float)(4.0 / _zoom);
+
+            // 3. Dispatch perturbation kernel (8 params max to stay within WebGPU
+            //    default limit of 8 storage buffers per shader stage)
+            _pertKernel!(
+                _pertBuffer!.IntExtent, _pertBuffer.View,
+                _pertRefRealBuf!.View, _pertRefImagBuf!.View,
+                _width, _height, limit, deltaScale
+            );
+
+            await _pertAccelerator!.SynchronizeAsync();
+
+            // 4. Read back results
+            var webGpuMemBuffer = (WebGPUMemoryBuffer)((IArrayView)_pertBuffer).Buffer;
+            var bytes = await webGpuMemBuffer.NativeBuffer.CopyToHostAsync();
+
+            var result = new uint[_width * _height];
+            Buffer.BlockCopy(bytes, 0, result, 0, bytes.Length);
+
+            sw.Stop();
+            _ilgpuRenderTime = $"{sw.ElapsedMilliseconds} ms";
+            _refOrbitInfo = _cachedRefOrbitInfo;
+
+            await DrawToCanvas(result);
+        }
+        finally
+        {
+            _isRunning = false;
+        }
+    }
+
+    /// <summary>
+    /// Perturbation theory kernel: each pixel computes δZ relative to a precomputed reference orbit.
+    /// Parameter count kept to 8 total (WebGPU limit: 8 storage buffers per shader stage).
+    /// Bindings: output(2) + refOrbitReal(1) + refOrbitImag(1) + width(1) + height(1) + limit(1) + scale(1) = 8
+    /// </summary>
+    static void PerturbationKernel(
+        Index2D index,
+        ArrayView2D<uint, Stride2D.DenseX> output,
+        ArrayView<float> refOrbitReal,
+        ArrayView<float> refOrbitImag,
+        int width, int height,
+        int limit, float scale)
+    {
+        int x = index.X;
+        int y = index.Y;
+
+        if (x >= width || y >= height)
+            return;
+
+        // δC: pixel offset from center (small, fits in f32 even at deep zoom)
+        float dCr = (x - width / 2.0f) * scale / width;
+        float dCi = (y - height / 2.0f) * scale / height;
+
+        // δZ starts at 0
+        float dZr = 0.0f;
+        float dZi = 0.0f;
+
+        int iterations = 0;
+
+        while (iterations < limit)
+        {
+            float Zr = refOrbitReal[iterations];
+            float Zi = refOrbitImag[iterations];
+
+            // Check escape BEFORE updating δZ: |Z_n + δZ_n|² > 4
+            // This is the correct full z value at iteration n
+            float fullR = Zr + dZr;
+            float fullI = Zi + dZi;
+            if (fullR * fullR + fullI * fullI > 4.0f)
+                break;
+
+            // δZ_{n+1} = 2·Z_n·δZ_n + δZ_n² + δC
+            float newDZr = 2.0f * (Zr * dZr - Zi * dZi) + dZr * dZr - dZi * dZi + dCr;
+            float newDZi = 2.0f * (Zr * dZi + Zi * dZr) + 2.0f * dZr * dZi + dCi;
+
+            dZr = newDZr;
+            dZi = newDZi;
+
+            iterations++;
+        }
+
+        uint color;
+        if (iterations == limit)
+        {
+            color = 0xFF000000;
+        }
+        else
+        {
+            uint r = (uint)(iterations * 10) % 255;
+            uint g = (uint)(iterations * 5) % 255;
+            uint b = (uint)(iterations * 20) % 255;
+            color = (0xFFu << 24) | (b << 16) | (g << 8) | r;
+        }
+
+        output[index] = color;
+    }
+
+    // ========== Canvas Drawing ==========
+
+    private async Task DrawToCanvas(uint[] pixels)
+    {
+        using var canvas = new HTMLCanvasElement(mandelbrotCanvas);
+        using var context = canvas.GetContext<CanvasRenderingContext2D>("2d");
+        using var uint32Array = new Uint32Array(pixels);
+        using var uint8ClampedArray = new Uint8ClampedArray(uint32Array.Buffer);
+        using var imageDataFromBuffer = new ImageData(uint8ClampedArray, (ulong)_width, (ulong)_height);
+        context!.PutImageData(imageDataFromBuffer, 0, 0);
+    }
+
+    // ========== Raw WebGPU Rendering ==========
+
+    private async Task InitializeRawWebGPU()
+    {
+        if (_webgpuDevice != null) return;
+
+        if (!WebGPUDevice.IsSupported) throw new Exception("WebGPU not supported");
+
+        var navigator = JS.Get<Navigator>("navigator");
+        using var gpu = navigator.Gpu;
+        using var adapter = await gpu!.RequestAdapter();
+        _webgpuDevice = await adapter.RequestDevice();
+
+        var wgsl = @"
+struct Params {
+    width: u32,
+    height: u32,
+    maxIterations: u32,
+    _pad: u32,
+    centerX: f32,
+    centerY: f32,
+    zoom: f32,
+};
+
+@group(0) @binding(0) var<storage, read_write> output : array<u32>;
+@group(0) @binding(1) var<uniform> params : Params;
+
+@compute @workgroup_size(16, 16)
+fn main(@builtin(global_invocation_id) global_id : vec3<u32>) {
+    let x = global_id.x;
+    let y = global_id.y;
+    
+    if (x >= params.width || y >= params.height) {
+        return;
+    }
+    
+    let width_f = f32(params.width);
+    let height_f = f32(params.height);
+    let scale = 4.0 / params.zoom;
+    
+    let real = params.centerX + (f32(x) - width_f / 2.0) * scale / width_f;
+    let imag = params.centerY + (f32(y) - height_f / 2.0) * scale / height_f;
+    
+    var zReal = 0.0;
+    var zImag = 0.0;
+    let cReal = real;
+    let cImag = imag;
+    
+    var iterations = 0u;
+    while (iterations < params.maxIterations && (zReal * zReal + zImag * zImag) < 4.0) {
+        let temp = zReal * zReal - zImag * zImag + cReal;
+        zImag = 2.0 * zReal * zImag + cImag;
+        zReal = temp;
+        iterations = iterations + 1u;
+    }
+    
+    var color = 0u;
+    if (iterations == params.maxIterations) {
+        color = 0xFF000000u;
+    } else {
+        let r = (iterations * 10u) % 255u;
+        let g = (iterations * 5u) % 255u;
+        let b = (iterations * 20u) % 255u;
+        color = (0xFFu << 24) | (b << 16) | (g << 8) | r;
+    }
+    
+    let index = y * params.width + x;
+    output[index] = color;
+}
+";
+        using var shaderModule = _webgpuDevice.CreateShaderModule(new GPUShaderModuleDescriptor
+        {
+            Code = wgsl,
+            Label = "Mandelbrot Shader"
+        });
+
+        _webgpuPipeline = await _webgpuDevice.CreateComputePipelineAsync(new GPUComputePipelineDescriptor
+        {
+            Compute = new GPUProgrammableStage
+            {
+                Module = shaderModule,
+                EntryPoint = "main"
+            },
+            Layout = "auto"
+        });
+
+        ulong bufferSize = (ulong)(_width * _height * 4);
+        _webgpuOutputBuffer = _webgpuDevice.CreateBuffer(new GPUBufferDescriptor
+        {
+            Size = bufferSize,
+            Usage = GPUBufferUsage.Storage | GPUBufferUsage.CopySrc,
+            Label = "Output Buffer"
+        });
+
+        _webgpuUniformBuffer = _webgpuDevice.CreateBuffer(new GPUBufferDescriptor
+        {
+            Size = 32,
+            Usage = GPUBufferUsage.Uniform | GPUBufferUsage.CopyDst,
+            Label = "Params Buffer"
+        });
+
+        _webgpuReadBuffer = _webgpuDevice.CreateBuffer(new GPUBufferDescriptor
+        {
+            Size = bufferSize,
+            Usage = GPUBufferUsage.MapRead | GPUBufferUsage.CopyDst,
+            Label = "ReadBuffer"
+        });
+
+        _webgpuBindGroupLayout = _webgpuPipeline.GetBindGroupLayout(0);
+        _webgpuBindGroup = _webgpuDevice.CreateBindGroup(new GPUBindGroupDescriptor
+        {
+            Layout = _webgpuBindGroupLayout,
+            Entries = new GPUBindGroupEntry[]
+            {
+                new GPUBindGroupEntry { Binding = 0, Resource = new GPUBufferBinding { Buffer = _webgpuOutputBuffer } },
+                new GPUBindGroupEntry { Binding = 1, Resource = new GPUBufferBinding { Buffer = _webgpuUniformBuffer } }
+            }
+        });
+    }
+
+    private async Task RenderWithWebGPU()
+    {
+        _isRunning = true;
+
+        try
+        {
+            var sw = Stopwatch.StartNew();
+
+            var paramsBytes = new byte[32];
+            BitConverter.GetBytes((uint)_width).CopyTo(paramsBytes, 0);
+            BitConverter.GetBytes((uint)_height).CopyTo(paramsBytes, 4);
+            BitConverter.GetBytes((uint)_maxIterations).CopyTo(paramsBytes, 8);
+            BitConverter.GetBytes((uint)0).CopyTo(paramsBytes, 12);
+            BitConverter.GetBytes((float)_centerX).CopyTo(paramsBytes, 16);
+            BitConverter.GetBytes((float)_centerY).CopyTo(paramsBytes, 20);
+            BitConverter.GetBytes((float)_zoom).CopyTo(paramsBytes, 24);
+
+            _webgpuDevice!.Queue.WriteBuffer(_webgpuUniformBuffer!, 0, paramsBytes);
+
+            using var commandEncoder = _webgpuDevice.CreateCommandEncoder();
+            using var passEncoder = commandEncoder.BeginComputePass();
+            passEncoder.SetPipeline(_webgpuPipeline!);
+            passEncoder.SetBindGroup(0, _webgpuBindGroup!);
+            passEncoder.DispatchWorkgroups((uint)Math.Ceiling(_width / 16.0), (uint)Math.Ceiling(_height / 16.0));
+            passEncoder.End();
+
+            ulong bufferSize = (ulong)(_width * _height * 4);
+            commandEncoder.CopyBufferToBuffer(_webgpuOutputBuffer!, 0, _webgpuReadBuffer!, 0, bufferSize);
+
+            using var commands = commandEncoder.Finish();
+            _webgpuDevice.Queue.Submit(new[] { commands });
+
+            await _webgpuReadBuffer!.MapAsync(GPUMapMode.Read);
+
+            uint[] pixels = new uint[_width * _height];
+            using (var mappedRange = _webgpuReadBuffer.GetMappedRange())
+            {
+                using var uintArray = new Uint32Array(mappedRange);
+                var bytes = uintArray.ReadBytes();
+                Buffer.BlockCopy(bytes, 0, pixels, 0, bytes.Length);
+            }
+            _webgpuReadBuffer.Unmap();
+
+            sw.Stop();
+            _webgpuRenderTime = $"{sw.ElapsedMilliseconds} ms";
+
+            await DrawToCanvas(pixels);
+        }
+        finally
+        {
+            _isRunning = false;
+        }
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        _disposed = true;
+
+        // Dispose standard ILGPU
+        _ilgpuBuffer?.Dispose();
+        _ilgpuAccelerator?.Dispose();
+        _ilgpuContext?.Dispose();
+
+        // Dispose perturbation ILGPU
+        _pertRefRealBuf?.Dispose();
+        _pertRefImagBuf?.Dispose();
+        _pertBuffer?.Dispose();
+        _pertAccelerator?.Dispose();
+        _pertContext?.Dispose();
+
+        // Dispose WebGPU resources
+        _webgpuReadBuffer?.Dispose();
+        _webgpuOutputBuffer?.Dispose();
+        _webgpuUniformBuffer?.Dispose();
+        _webgpuBindGroup?.Dispose();
+        _webgpuPipeline?.Dispose();
+        _webgpuDevice?.Dispose();
+    }
+}
