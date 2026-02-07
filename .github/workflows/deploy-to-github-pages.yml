@@ -12,7 +12,7 @@ jobs:
     steps:
     # uses GitHub's checkout action to checkout code form the master branch
     - uses: actions/checkout@v2
-    
+
     # sets up .NET Core SDK
     - name: Setup .NET Core SDK
       uses: actions/setup-dotnet@v3.0.3
@@ -25,11 +25,11 @@ jobs:
 
     # publishes Blazor project to the publish-folder
     - name: Publish .NET Core Project
-      run: dotnet publish ./SpawnDev.ILGPU.WebGPU.Demo/ --nologo -c:Release --output publish
+      run: dotnet publish ./SpawnDev.ILGPU.Demo/ --nologo -c:Release --output publish
 
-    # changes the base-tag in index.html from '/' to '/SpawnDev.ILGPU.WebGPU/' to match GitHub Pages repository subdirectory
-    - name: Change base-tag in index.html from / to /SpawnDev.ILGPU.WebGPU/
-      run: sed -i 's/<base href="\/"/<base href="\/SpawnDev.ILGPU.WebGPU\/"/g' publish/wwwroot/index.html
+    # changes the base-tag in index.html from '/' to '/SpawnDev.ILGPU/' to match GitHub Pages repository subdirectory
+    - name: Change base-tag in index.html from / to /SpawnDev.ILGPU/
+      run: sed -i 's/<base href="\/"/<base href="\/SpawnDev.ILGPU\/"/g' publish/wwwroot/index.html
     
     # copy index.html to 404.html to serve the same file when a file is not found
     - name: copy index.html to 404.html
