@@ -187,19 +187,21 @@ _test.bat
 
 ### 64-bit Emulation
 
-WebGPU hardware typically only supports 32-bit operations. SpawnDev.ILGPU provides software emulation for 64-bit types (`double`/f64 and `long`/i64):
+WebGPU hardware typically only supports 32-bit operations. SpawnDev.ILGPU provides software emulation for 64-bit types (`double`/f64 and `long`/i64), **enabled by default** for full precision parity with CPU and Workers backends.
+
+To disable emulation for better performance (at the cost of precision):
 
 ```csharp
 using SpawnDev.ILGPU.WebGPU.Backend;
 
-var options = new WebGPUBackendOptions { EnableF64Emulation = true };
+var options = new WebGPUBackendOptions { EnableF64Emulation = false, EnableI64Emulation = false };
 using var accelerator = await device.CreateAcceleratorAsync(context, options);
 ```
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `EnableF64Emulation` | `false` | 64-bit float (`double`) emulation via `vec2<f32>` |
-| `EnableI64Emulation` | `false` | 64-bit integer (`long`) emulation via `vec2<u32>` |
+| `EnableF64Emulation` | `true` | 64-bit float (`double`) emulation via `vec2<f32>` |
+| `EnableI64Emulation` | `true` | 64-bit integer (`long`) emulation via `vec2<u32>` |
 
 ## Workers Backend
 
@@ -210,7 +212,7 @@ The Workers backend transpiles ILGPU kernels to JavaScript and executes them acr
 | Mode | When | Workers | Memory |
 |------|------|---------|--------|
 | **Parallel** | `WorkerCount > 1` + SharedArrayBuffer | N workers | Zero-copy via SAB |
-| **Off-thread** | `WorkerCount == 1` or no SAB | 1 worker | ArrayBuffer copy |
+| **Off-thread** | `WorkerCount == 1` or no SAB | 1 worker | Zero-copy via transfer |
 
 ### Worker Count
 

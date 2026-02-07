@@ -298,9 +298,8 @@
         _ilgpuContext = Context.Create(builder => builder.Default());
         var ilgpuDevice = new WebGPUILGPUDevice(webGpuDevice, 0);
 
-        // Always use f64 emulation for maximum precision
-        var options = new WebGPUBackendOptions { EnableF64Emulation = true };
-        _ilgpuAccelerator = await ilgpuDevice.CreateAcceleratorAsync(_ilgpuContext, options);
+        // F64 emulation is enabled by default for full precision
+        _ilgpuAccelerator = await ilgpuDevice.CreateAcceleratorAsync(_ilgpuContext);
 
         _kernel = _ilgpuAccelerator.LoadAutoGroupedStreamKernel<
             Index2D, ArrayView2D<uint, Stride2D.DenseX>,

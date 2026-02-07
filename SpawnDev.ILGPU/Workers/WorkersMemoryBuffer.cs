@@ -96,6 +96,19 @@ namespace SpawnDev.ILGPU.Workers
         /// </summary>
         public Uint8Array? Uint8View => _uint8View;
 
+        /// <summary>
+        /// Replaces the underlying ArrayBuffer with a new one (used after transfer back from Worker).
+        /// This is only valid for non-shared buffers and enables zero-copy ArrayBuffer transfers.
+        /// </summary>
+        internal void ReplaceArrayBuffer(ArrayBuffer newBuffer)
+        {
+            if (_isShared) throw new InvalidOperationException("Cannot replace buffer on shared memory buffer");
+            _uint8View?.Dispose();
+            _arrayBuffer?.Dispose();
+            _arrayBuffer = newBuffer;
+            _uint8View = new Uint8Array(_arrayBuffer);
+        }
+
         #endregion
 
         #region MemoryBuffer Implementation

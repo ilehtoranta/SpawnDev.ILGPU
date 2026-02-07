@@ -193,7 +193,7 @@ namespace SpawnDev.ILGPU.Workers
         /// <summary>
         /// Dispatches kernel work to Web Workers.
         /// With SharedArrayBuffer: splits work across N workers (zero-copy parallel).
-        /// Without SharedArrayBuffer: sends all work to 1 worker with copied ArrayBuffers.
+        /// Without SharedArrayBuffer: sends all work to 1 worker with zero-copy transferred ArrayBuffers.
         /// </summary>
         private static Task DispatchToWorkers(
             string jsSource,
@@ -241,9 +241,9 @@ namespace SpawnDev.ILGPU.Workers
 
                     if (!isShared)
                     {
-                        // Non-shared mode: worker posts back modified ArrayBuffers
-                        // Copy results back to the original buffers
-                        CopyResultsFromWorker(msg, jsArgs);
+                        // Non-shared mode: worker transfers ArrayBuffers back (zero-copy)
+                        // Replace the underlying buffers in WorkersMemoryBuffer
+                        ReceiveTransferredBuffers(msg, jsArgs);
                     }
 
                     tcs.TrySetResult();
@@ -262,8 +262,16 @@ namespace SpawnDev.ILGPU.Workers
                 worker.OnError += errHandler;
 
                 // Build message data for this worker
-                var messageArgs = BuildWorkerMessage(jsArgs, startIdx, endIdx, isShared);
-                worker.PostMessage(messageArgs);
+                var (messageArgs, transferList) = BuildWorkerMessage(jsArgs, startIdx, endIdx, isShared);
+                if (transferList != null)
+                {
+                    // Transfer ArrayBuffers to worker (zero-copy, ownership moves)
+                    worker.PostMessage(messageArgs, transferList);
+                }
+                else
+                {
+                    worker.PostMessage(messageArgs);
+                }
 
                 tasks.Add(tcs.Task);
             }
@@ -325,19 +333,21 @@ namespace SpawnDev.ILGPU.Workers
 
             if (!isShared)
             {
-                // Non-shared mode: post back modified buffer data
-                sb.AppendLine("  // Post back modified buffers");
+                // Non-shared mode: transfer ArrayBuffers back to main thread (zero-copy)
+                sb.AppendLine("  // Transfer modified buffers back (zero-copy)");
                 sb.AppendLine("  var resultBuffers = [];");
+                sb.AppendLine("  var transferList = [];");
                 argIdx = 0;
                 for (int a = 0; a < jsArgs.Count; a++)
                 {
                     if (jsArgs[a] is BufferArg)
                     {
-                        sb.AppendLine($"  resultBuffers.push({{ index: {argIdx}, buffer: _p{argIdx}.buffer.slice(0) }});");
+                        sb.AppendLine($"  resultBuffers.push({{ index: {argIdx}, buffer: _p{argIdx}.buffer }});");
+                        sb.AppendLine($"  transferList.push(_p{argIdx}.buffer);");
                     }
                     argIdx++;
                 }
-                sb.AppendLine("  self.postMessage({ done: true, buffers: resultBuffers });");
+                sb.AppendLine("  self.postMessage({ done: true, buffers: resultBuffers }, transferList);");
             }
             else
             {
@@ -351,23 +361,28 @@ namespace SpawnDev.ILGPU.Workers
 
         /// <summary>
         /// Builds the message object sent to each worker via PostMessage.
+        /// Returns both the message and a transfer list for non-shared ArrayBuffers.
         /// </summary>
-        private static object BuildWorkerMessage(List<object?> jsArgs, int startIdx, int endIdx, bool isShared)
+        private static (object message, object[]? transferList) BuildWorkerMessage(List<object?> jsArgs, int startIdx, int endIdx, bool isShared)
         {
             var args = new List<object>();
+            var transfers = isShared ? null : new List<object>();
             for (int a = 0; a < jsArgs.Count; a++)
             {
                 var arg = jsArgs[a];
                 if (arg is BufferArg bufArg)
                 {
+                    var underlyingBuffer = bufArg.MemoryBuffer.UnderlyingBuffer;
                     // Pass the underlying buffer (SharedArrayBuffer or ArrayBuffer)
                     args.Add(new
                     {
-                        buffer = bufArg.MemoryBuffer.UnderlyingBuffer,
+                        buffer = underlyingBuffer,
                         byteOffset = bufArg.ByteOffset,
                         elementCount = bufArg.LengthInBytes / bufArg.ElementSize,
                         arrayType = GetTypedArrayName(bufArg.ElementType, bufArg.ElementSize)
                     });
+                    // For non-shared mode, add buffers to transfer list (zero-copy)
+                    transfers?.Add(underlyingBuffer);
                 }
                 else
                 {
@@ -375,14 +390,16 @@ namespace SpawnDev.ILGPU.Workers
                 }
             }
 
-            return new { startIdx, endIdx, args = args.ToArray() };
+            var message = new { startIdx, endIdx, args = args.ToArray() };
+            return (message, transfers?.ToArray());
         }
 
         /// <summary>
-        /// Copies modified buffer data back from a worker's response message.
+        /// Receives transferred ArrayBuffers back from a worker and replaces the
+        /// underlying buffer references in WorkersMemoryBuffer (zero-copy).
         /// Used only in non-SharedArrayBuffer mode.
         /// </summary>
-        private static void CopyResultsFromWorker(MessageEvent msg, List<object?> jsArgs)
+        private static void ReceiveTransferredBuffers(MessageEvent msg, List<object?> jsArgs)
         {
             try
             {
@@ -395,24 +412,19 @@ namespace SpawnDev.ILGPU.Workers
                 {
                     using var bufObj = buffersArr[i];
                     var argIndex = bufObj.JSRef!.Get<int>("index");
-                    using var resultBuffer = bufObj.JSRef!.Get<ArrayBuffer>("buffer");
+                    // Get the transferred ArrayBuffer (do NOT dispose — we're taking ownership)
+                    var transferredBuffer = bufObj.JSRef!.Get<ArrayBuffer>("buffer");
 
-                    // Find the corresponding BufferArg
+                    // Replace the underlying ArrayBuffer in the WorkersMemoryBuffer
                     if (argIndex < jsArgs.Count && jsArgs[argIndex] is BufferArg bufArg)
                     {
-                        // Copy the result ArrayBuffer back into our local buffer
-                        using var srcView = new Uint8Array(resultBuffer);
-                        var destView = bufArg.MemoryBuffer.Uint8View;
-                        if (destView != null)
-                        {
-                            destView.Set(srcView, bufArg.ByteOffset);
-                        }
+                        bufArg.MemoryBuffer.ReplaceArrayBuffer(transferredBuffer);
                     }
                 }
             }
             catch (Exception ex)
             {
-                WorkersBackend.Log($"[Workers] Error copying results from worker: {ex.Message}");
+                WorkersBackend.Log($"[Workers] Error receiving transferred buffers: {ex.Message}");
             }
         }
 

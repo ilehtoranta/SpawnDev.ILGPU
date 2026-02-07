@@ -1,0 +1,321 @@
+using ILGPU;
+using ILGPU.Runtime;
+using SpawnDev.Blazor.UnitTesting;
+
+namespace SpawnDev.ILGPU.Demo.UnitTests
+{
+    // Part 2: Advanced tests (dynamic shared, int math, matrix, intrinsics, bit ops, histogram, loops, trig, barriers, select, advanced math, bitwise, large buffer, sequential, unsigned, atomic min/max, buffer reuse, grid/group dims)
+    public abstract partial class BackendTestBase
+    {
+        [TestMethod]
+        public async Task DynamicSharedMemoryTest() => await RunTest(async accelerator =>
+        {
+            int len = 64;
+            var data = new int[len];
+            for (int i = 0; i < len; i++) data[i] = i;
+            using var buf = accelerator.Allocate1D(data);
+            var kernel = accelerator.LoadStreamKernel<Index1D, ArrayView<int>>(DynamicSharedKernel);
+            kernel(new KernelConfig(1, len, SharedMemoryConfig.RequestDynamic<int>(len)), (Index1D)len, buf.View);
+            await accelerator.SynchronizeAsync();
+            var result = await buf.CopyToHostAsync<int>();
+            for (int i = 0; i < len; i++)
+                if (result[i] != 63 - i) throw new Exception($"Dynamic shared failed at {i}. Expected {63 - i}, got {result[i]}");
+        });
+
+        [TestMethod]
+        public async Task IntMathTest() => await RunTest(async accelerator =>
+        {
+            var input = new int[] { -5, 5, 20, 10, 3, -100 };
+            int len = input.Length;
+            using var bufIn = accelerator.Allocate1D(input);
+            using var bufOut = accelerator.Allocate1D<int>(len);
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<int>, ArrayView<int>>(IntMathKernel);
+            kernel((Index1D)len, bufIn.View, bufOut.View);
+            await accelerator.SynchronizeAsync();
+            var result = await bufOut.CopyToHostAsync<int>();
+            int[] expected = { 5, 5, 15, 15, 3, -100 };
+            for (int i = 0; i < len; i++)
+                if (result[i] != expected[i]) throw new Exception($"Int math failed at {i}. Expected {expected[i]}, got {result[i]}");
+        });
+
+        [TestMethod]
+        public async Task MatrixMulTest() => await RunTest(async accelerator =>
+        {
+            int size = 4;
+            var a = new float[size * size]; var b = new float[size * size];
+            for (int i = 0; i < size; i++) for (int j = 0; j < size; j++) { a[i * size + j] = (i == j) ? 2.0f : 0.0f; b[i * size + j] = i + j; }
+            using var bufA = accelerator.Allocate1D(a);
+            using var bufB = accelerator.Allocate1D(b);
+            using var bufC = accelerator.Allocate1D<float>(size * size);
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<Index2D, ArrayView<float>, ArrayView<float>, ArrayView<float>, int>(MatrixMulKernel);
+            kernel(new Index2D(size, size), bufA.View, bufB.View, bufC.View, size);
+            await accelerator.SynchronizeAsync();
+            var result = await bufC.CopyToHostAsync<float>();
+            for (int i = 0; i < size * size; i++)
+                if (MathF.Abs(result[i] - b[i] * 2.0f) > 0.01f) throw new Exception($"MatMul failed at {i}");
+        });
+
+        [TestMethod]
+        public async Task SpecializedIntrinsicsTest() => await RunTest(async accelerator =>
+        {
+            var input = new float[] { 4.0f, 2.5f, -3.7f, 1.0f, 2.0f };
+            int len = input.Length;
+            using var bufIn = accelerator.Allocate1D(input);
+            using var bufOut = accelerator.Allocate1D<float>(len);
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<float>, ArrayView<float>>(SpecializedIntrinsicsKernel);
+            kernel((Index1D)len, bufIn.View, bufOut.View);
+            await accelerator.SynchronizeAsync();
+            var result = await bufOut.CopyToHostAsync<float>();
+            if (MathF.Abs(result[0] - (1.0f / MathF.Sqrt(4.0f))) > 0.01f) throw new Exception($"Rsqrt failed. Got {result[0]}");
+            if (MathF.Abs(result[4] - 0.5f) > 0.01f) throw new Exception($"Rcp failed. Got {result[4]}");
+        });
+
+        [TestMethod]
+        public async Task BitManipulationTest() => await RunTest(async accelerator =>
+        {
+            var input = new int[] { 0xFF, 16, 256, 0x0F0F0F0F };
+            int len = input.Length;
+            using var bufIn = accelerator.Allocate1D(input);
+            using var bufOut = accelerator.Allocate1D<int>(len);
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<int>, ArrayView<int>>(BitManipulationKernel);
+            kernel((Index1D)len, bufIn.View, bufOut.View);
+            await accelerator.SynchronizeAsync();
+            var result = await bufOut.CopyToHostAsync<int>();
+            if (result[0] != System.Numerics.BitOperations.PopCount((uint)0xFF)) throw new Exception($"PopCount failed");
+        });
+
+        [TestMethod]
+        public async Task HistogramTest() => await RunTest(async accelerator =>
+        {
+            int numBins = 4;
+            var data = new int[] { 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3 };
+            int len = data.Length;
+            using var bufData = accelerator.Allocate1D(data);
+            using var bufBins = accelerator.Allocate1D<int>(numBins);
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<int>, ArrayView<int>>(HistogramKernel);
+            kernel((Index1D)len, bufData.View, bufBins.View);
+            await accelerator.SynchronizeAsync();
+            var result = await bufBins.CopyToHostAsync<int>();
+            for (int i = 0; i < numBins; i++)
+                if (result[i] != 4) throw new Exception($"Histogram bin {i} failed. Expected 4, got {result[i]}");
+        });
+
+        [TestMethod]
+        public async Task NestedLoopBreakTest() => await RunTest(async accelerator =>
+        {
+            int len = 8;
+            using var buf = accelerator.Allocate1D<int>(len);
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<int>>(NestedLoopBreakKernel);
+            kernel((Index1D)len, buf.View);
+            await accelerator.SynchronizeAsync();
+            var result = await buf.CopyToHostAsync<int>();
+            for (int i = 0; i < len; i++)
+                if (result[i] != 9) throw new Exception($"Nested loop break failed at {i}. Expected 9, got {result[i]}");
+        });
+
+        [TestMethod]
+        public async Task HyperbolicTest() => await RunTest(async accelerator =>
+        {
+            var input = new float[] { 0.5f, 0.5f, 0.5f };
+            int len = input.Length;
+            using var bufIn = accelerator.Allocate1D(input);
+            using var bufOut = accelerator.Allocate1D<float>(len);
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<float>, ArrayView<float>>(HyperbolicKernel);
+            kernel((Index1D)len, bufIn.View, bufOut.View);
+            await accelerator.SynchronizeAsync();
+            var result = await bufOut.CopyToHostAsync<float>();
+            if (MathF.Abs(result[0] - MathF.Sinh(0.5f)) > 0.01f) throw new Exception($"Sinh failed. Got {result[0]}");
+            if (MathF.Abs(result[1] - MathF.Cosh(0.5f)) > 0.01f) throw new Exception($"Cosh failed. Got {result[1]}");
+            if (MathF.Abs(result[2] - MathF.Tanh(0.5f)) > 0.01f) throw new Exception($"Tanh failed. Got {result[2]}");
+        });
+
+        [TestMethod]
+        public async Task SharedMemoryBarrierTest() => await RunTest(async accelerator =>
+        {
+            int len = 64;
+            using var buf = accelerator.Allocate1D<int>(len);
+            var kernel = accelerator.LoadStreamKernel<Index1D, ArrayView<int>>(SharedMemoryBarrierKernel);
+            kernel(new KernelConfig(1, len), (Index1D)len, buf.View);
+            await accelerator.SynchronizeAsync();
+            var result = await buf.CopyToHostAsync<int>();
+            for (int i = 32; i < len; i++)
+                if (result[i] != (i - 32) * 2) throw new Exception($"Barrier test failed at {i}. Expected {(i - 32) * 2}, got {result[i]}");
+        });
+
+        [TestMethod]
+        public async Task SelectTest() => await RunTest(async accelerator =>
+        {
+            var input = new int[] { -5, -1, 0, 1, 5, 100, -100, 50 };
+            int len = input.Length;
+            using var bufIn = accelerator.Allocate1D(input);
+            using var bufOut = accelerator.Allocate1D<int>(len);
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<int>, ArrayView<int>>(SelectKernel);
+            kernel((Index1D)len, bufIn.View, bufOut.View);
+            await accelerator.SynchronizeAsync();
+            var result = await bufOut.CopyToHostAsync<int>();
+            for (int i = 0; i < len; i++)
+            {
+                int expected = (input[i] > 0) ? 1 : -1;
+                if (result[i] != expected) throw new Exception($"Select failed at {i}. Expected {expected}, got {result[i]}");
+            }
+        });
+
+        [TestMethod]
+        public async Task LinearBarrierTest() => await RunTest(async accelerator =>
+        {
+            int len = 64;
+            using var buf = accelerator.Allocate1D<int>(len);
+            var kernel = accelerator.LoadStreamKernel<Index1D, ArrayView<int>>(LinearBarrierKernel);
+            kernel(new KernelConfig(1, len), (Index1D)len, buf.View);
+            await accelerator.SynchronizeAsync();
+            var result = await buf.CopyToHostAsync<int>();
+            for (int i = 0; i < len; i++)
+                if (result[i] != (i + 1) % 64) throw new Exception($"Linear barrier failed at {i}. Expected {(i + 1) % 64}, got {result[i]}");
+        });
+
+        [TestMethod]
+        public async Task AdvancedMathTest() => await RunTest(async accelerator =>
+        {
+            var input = new float[] { 0.5f, 1.0f, 1.5f, 2.0f };
+            int len = input.Length;
+            using var bufIn = accelerator.Allocate1D(input);
+            using var bufOut = accelerator.Allocate1D<float>(len);
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<float>, ArrayView<float>>(AdvancedMathKernel);
+            kernel((Index1D)len, bufIn.View, bufOut.View);
+            await accelerator.SynchronizeAsync();
+            var result = await bufOut.CopyToHostAsync<float>();
+            for (int i = 0; i < len; i++)
+            {
+                float val = input[i];
+                float expected = MathF.Tan(val) + MathF.Exp(val) + MathF.Log(MathF.Abs(val) + 1.0f) + MathF.Pow(val, 2.0f) + MathF.Min(val, 2.0f) + MathF.Max(val, 3.0f);
+                if (MathF.Abs(result[i] - expected) > 0.1f)
+                    throw new Exception($"Advanced math failed at {i}. Expected {expected}, got {result[i]}");
+            }
+        });
+
+        [TestMethod]
+        public async Task BitwiseTest() => await RunTest(async accelerator =>
+        {
+            var data = new int[] { 0, 1, 5, 10, -1, 127, 255, 1024 };
+            int len = data.Length;
+            using var buf = accelerator.Allocate1D(data);
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<int>>(BitwiseKernel);
+            kernel((Index1D)len, buf.View);
+            await accelerator.SynchronizeAsync();
+            var result = await buf.CopyToHostAsync<int>();
+            for (int i = 0; i < len; i++)
+            {
+                int val = data[i];
+                int expected = (val << 1) + (val >> 1) + (val & 1) + (val | 1) + (val ^ 1) + (~val);
+                if (result[i] != expected) throw new Exception($"Bitwise failed at {i}. Expected {expected}, got {result[i]}");
+            }
+        });
+
+        [TestMethod]
+        public async Task InverseTrigTest() => await RunTest(async accelerator =>
+        {
+            var input = new float[] { 0.5f, 0.5f, 1.0f };
+            int len = input.Length;
+            using var bufIn = accelerator.Allocate1D(input);
+            using var bufOut = accelerator.Allocate1D<float>(len);
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<float>, ArrayView<float>>(InverseTrigKernel);
+            kernel((Index1D)len, bufIn.View, bufOut.View);
+            await accelerator.SynchronizeAsync();
+            var result = await bufOut.CopyToHostAsync<float>();
+            if (MathF.Abs(result[0] - MathF.Asin(0.5f)) > 0.01f) throw new Exception($"Asin failed");
+            if (MathF.Abs(result[1] - MathF.Acos(0.5f)) > 0.01f) throw new Exception($"Acos failed");
+            if (MathF.Abs(result[2] - MathF.Atan(1.0f)) > 0.01f) throw new Exception($"Atan failed");
+        });
+
+        [TestMethod]
+        public async Task LargeBufferTest() => await RunTest(async accelerator =>
+        {
+            int len = 4096;
+            var data = new int[len]; for (int i = 0; i < len; i++) data[i] = i;
+            using var buf = accelerator.Allocate1D(data);
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<int>>(LargeBufferKernel);
+            kernel((Index1D)len, buf.View);
+            await accelerator.SynchronizeAsync();
+            var result = await buf.CopyToHostAsync<int>();
+            for (int i = 0; i < len; i += 100)
+                if (result[i] != i * 2) throw new Exception($"Large buffer failed at {i}. Expected {i * 2}, got {result[i]}");
+        });
+
+        [TestMethod]
+        public async Task SequentialKernelTest() => await RunTest(async accelerator =>
+        {
+            int len = 64;
+            var data = new int[len]; for (int i = 0; i < len; i++) data[i] = i;
+            using var buf = accelerator.Allocate1D(data);
+            var k1 = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<int>>(SequentialKernel1);
+            var k2 = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<int>>(SequentialKernel2);
+            k1((Index1D)len, buf.View); await accelerator.SynchronizeAsync();
+            k2((Index1D)len, buf.View); await accelerator.SynchronizeAsync();
+            var result = await buf.CopyToHostAsync<int>();
+            for (int i = 0; i < len; i++)
+                if (result[i] != i * 2 + 10) throw new Exception($"Sequential failed at {i}. Expected {i * 2 + 10}, got {result[i]}");
+        });
+
+        [TestMethod]
+        public async Task UnsignedIntTest() => await RunTest(async accelerator =>
+        {
+            var data = new uint[] { 100, 100, 100, 100 };
+            int len = data.Length;
+            using var buf = accelerator.Allocate1D(data);
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<uint>>(UnsignedIntKernel);
+            kernel((Index1D)len, buf.View);
+            await accelerator.SynchronizeAsync();
+            var result = await buf.CopyToHostAsync<uint>();
+            uint[] expected = { 33, 0, 101, 200 };
+            for (int i = 0; i < len; i++)
+                if (result[i] != expected[i]) throw new Exception($"uint failed at {i}. Expected {expected[i]}, got {result[i]}");
+        });
+
+        [TestMethod]
+        public async Task AtomicMinMaxTest() => await RunTest(async accelerator =>
+        {
+            int len = 64;
+            var minData = new int[] { int.MaxValue };
+            var maxData = new int[] { int.MinValue };
+            using var bufMin = accelerator.Allocate1D(minData);
+            using var bufMax = accelerator.Allocate1D(maxData);
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<int>, ArrayView<int>>(AtomicMinMaxKernel);
+            kernel((Index1D)len, bufMin.View, bufMax.View);
+            await accelerator.SynchronizeAsync();
+            var minResult = await bufMin.CopyToHostAsync<int>();
+            var maxResult = await bufMax.CopyToHostAsync<int>();
+            if (minResult[0] != 0) throw new Exception($"Atomic min failed. Expected 0, got {minResult[0]}");
+            if (maxResult[0] != 63) throw new Exception($"Atomic max failed. Expected 63, got {maxResult[0]}");
+        });
+
+        [TestMethod]
+        public async Task BufferReuseTest() => await RunTest(async accelerator =>
+        {
+            int len = 64;
+            var data = new int[len]; for (int i = 0; i < len; i++) data[i] = i;
+            using var buf = accelerator.Allocate1D(data);
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<int>>(BufferReuseKernel);
+            for (int iter = 0; iter < 3; iter++) { kernel((Index1D)len, buf.View); await accelerator.SynchronizeAsync(); }
+            var result = await buf.CopyToHostAsync<int>();
+            for (int i = 0; i < len; i++)
+                if (result[i] != i + 3) throw new Exception($"Buffer reuse failed at {i}. Expected {i + 3}, got {result[i]}");
+        });
+
+        [TestMethod]
+        public async Task GridGroupDimensionTest() => await RunTest(async accelerator =>
+        {
+            int numThreads = 64;
+            using var buf = accelerator.Allocate1D<int>(numThreads * 4);
+            var kernel = accelerator.LoadStreamKernel<Index1D, ArrayView<int>>(GridGroupDimensionKernel);
+            kernel(new KernelConfig(1, numThreads), (Index1D)numThreads, buf.View);
+            await accelerator.SynchronizeAsync();
+            var result = await buf.CopyToHostAsync<int>();
+            for (int i = 0; i < numThreads; i++)
+            {
+                int baseIdx = i * 4;
+                if (result[baseIdx] != i) throw new Exception($"GlobalId failed at {i}. Got {result[baseIdx]}");
+                if (result[baseIdx + 3] != numThreads) throw new Exception($"GroupDim failed at {i}. Got {result[baseIdx + 3]}");
+            }
+        });
+    }
+}
