@@ -8,6 +8,7 @@ var builder = WebAssemblyHostBuilder.CreateDefault(args);
 builder.Services.AddBlazorJSRuntime();
 builder.Services.AddSingleton<WebGPUTests>();
 builder.Services.AddSingleton<WorkerTests>();
+builder.Services.AddSingleton<CPUTests>();
 builder.Services.AddSingleton<DefaultTests>();
 builder.Services.AddScoped(sp => new HttpClient { BaseAddress = new Uri(builder.HostEnvironment.BaseAddress) });
 

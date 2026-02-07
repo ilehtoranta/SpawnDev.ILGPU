@@ -107,10 +107,26 @@ namespace ILGPU.Runtime.CPU
             NumThreads = description.NumThreads;
             Mode = mode;
             ThreadPriority = threadPriority;
+
+#if NET10_0_OR_GREATER
+            IsWasm = OperatingSystem.IsBrowser();
+#endif
+
             UsesSequentialExecution =
                 Mode == CPUAcceleratorMode.Sequential ||
                 Mode == CPUAcceleratorMode.Auto && Debugger.IsAttached;
-            finishedEventPerMultiprocessor = new Barrier(NumMultiprocessors + 1);
+
+            if (IsWasm)
+            {
+                // WASM: no thread synchronization needed
+                finishedEventPerMultiprocessor = null!;
+                taskConcurrencyLimit = null!;
+            }
+            else
+            {
+                finishedEventPerMultiprocessor = new Barrier(NumMultiprocessors + 1);
+            }
+
             multiprocessors = new CPUMultiprocessor[NumMultiprocessors];
             for (int i = 0, e = NumMultiprocessors; i < e; ++i)
             {
@@ -150,6 +166,11 @@ namespace ILGPU.Runtime.CPU
         /// Returns the number of threads.
         /// </summary>
         public int NumThreads { get; }
+
+        /// <summary>
+        /// Returns true if running in a WASM (browser) environment.
+        /// </summary>
+        internal bool IsWasm { get; }
 
         /// <summary>
         /// Returns the IL backend of this accelerator.
@@ -406,6 +427,14 @@ namespace ILGPU.Runtime.CPU
         {
             Debug.Assert(task != null, "Invalid accelerator task");
 
+            if (IsWasm)
+            {
+                // WASM: execute inline on the calling thread
+                foreach (var multiprocessor in multiprocessors)
+                    multiprocessor.ExecuteInline(task);
+                return;
+            }
+
             taskConcurrencyLimit.Wait();
             try
             {
@@ -508,6 +537,14 @@ namespace ILGPU.Runtime.CPU
         {
             if (!disposing)
                 return;
+
+            if (IsWasm)
+            {
+                // WASM: no threads or barriers to dispose
+                foreach (var multiprocessor in multiprocessors)
+                    multiprocessor.Dispose();
+                return;
+            }
 
             // Dispose task engine
             lock (taskSynchronizationObject)

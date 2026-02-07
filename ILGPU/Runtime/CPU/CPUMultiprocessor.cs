@@ -41,10 +41,16 @@ namespace ILGPU.Runtime.CPU
         public static CPUMultiprocessor Create(
             CPUAccelerator accelerator,
             int processorIndex,
-            bool usesSequentialProcessing) =>
-            usesSequentialProcessing
-            ? new SequentialProcessor(accelerator, processorIndex) as CPUMultiprocessor
-            : new ParallelProcessor(accelerator, processorIndex);
+            bool usesSequentialProcessing)
+        {
+#if NET10_0_OR_GREATER
+            if (OperatingSystem.IsBrowser())
+                return new WasmProcessor(accelerator, processorIndex);
+#endif
+            return usesSequentialProcessing
+                ? new SequentialProcessor(accelerator, processorIndex) as CPUMultiprocessor
+                : new ParallelProcessor(accelerator, processorIndex);
+        }
 
         #endregion
 
@@ -66,7 +72,10 @@ namespace ILGPU.Runtime.CPU
         /// </summary>
         /// <param name="accelerator">The parent accelerator.</param>
         /// <param name="processorIndex">The index of the multiprocessor.</param>
-        protected CPUMultiprocessor(CPUAccelerator accelerator, int processorIndex)
+        protected CPUMultiprocessor(
+            CPUAccelerator accelerator,
+            int processorIndex,
+            bool skipThreadCreation = false)
         {
             Accelerator = accelerator;
             ProcessorIndex = processorIndex;
@@ -77,6 +86,14 @@ namespace ILGPU.Runtime.CPU
             groupContext = new CPURuntimeGroupContext(this);
             for (int i = 0; i < NumWarpsPerMultiprocessor; ++i)
                 warpContexts[i] = new CPURuntimeWarpContext(this, WarpSize);
+
+            if (skipThreadCreation)
+            {
+                // WASM mode: no threads needed
+                threads = Array.Empty<Thread>();
+                maxNumLaunchedThreadsPerGroup = 0;
+                return;
+            }
 
             // Instantiate all runtime threads
             threads = new Thread[MaxNumThreadsPerMultiprocessor];
@@ -322,6 +339,12 @@ namespace ILGPU.Runtime.CPU
                 }
             }
         }
+
+        /// <summary>
+        /// Executes a task inline on the calling thread (WASM mode).
+        /// </summary>
+        /// <param name="task">The task to execute.</param>
+        public virtual void ExecuteInline(CPUAcceleratorTask task) { }
 
         #endregion
 
@@ -713,5 +736,77 @@ namespace ILGPU.Runtime.CPU
         }
 
         #endregion
+
+        /// <summary>
+        /// A WASM-compatible single-threaded multiprocessor.
+        /// Executes all work inline on the calling thread without
+        /// spawning any Thread objects.
+        /// </summary>
+        private sealed class WasmProcessor : CPUMultiprocessor
+        {
+            public WasmProcessor(CPUAccelerator accelerator, int processorIndex)
+                : base(accelerator, processorIndex, skipThreadCreation: true)
+            { }
+
+            protected override void BeginLaunch(CPUAcceleratorTask task) { }
+            protected override void BeginThreadProcessing() { }
+            protected override void EndThreadProcessing() { }
+            protected override void FinishThreadProcessing() { }
+            public override int WarpBarrier() => 1;
+            public override int GroupBarrier() => 1;
+
+            /// <summary>
+            /// Executes the kernel inline on the calling thread.
+            /// Iterates over all grid points and all threads per group
+            /// assigned to this processor.
+            /// </summary>
+            public override void ExecuteInline(CPUAcceleratorTask task)
+            {
+                SetupRuntimeClasses(task);
+
+                var launcher = task.KernelExecutionDelegate;
+                int linearGridDim = task.GridDim.Size;
+                int groupSize = task.GroupDim.Size;
+                int gridChunkSize = IntrinsicMath.DivRoundUp(
+                    linearGridDim, Accelerator.NumMultiprocessors);
+                int gridOffset = gridChunkSize * ProcessorIndex;
+                int linearUserDim = task.TotalUserDim.Size;
+
+                // Setup group context once
+                groupContext.MakeCurrent();
+
+                for (int i = gridOffset, e = gridOffset + gridChunkSize; i < e; ++i)
+                {
+                    if (i >= linearGridDim) break;
+
+                    // Iterate over all threads in the group
+                    for (int threadIdx = 0; threadIdx < groupSize; ++threadIdx)
+                    {
+                        int laneIdx = threadIdx % WarpSize;
+                        int warpIdx = threadIdx / WarpSize;
+
+                        var threadContext = new CPURuntimeThreadContext(
+                            laneIdx: laneIdx, warpIndex: warpIdx)
+                        {
+                            LinearGroupIndex = threadIdx
+                        };
+                        threadContext.MakeCurrent();
+                        warpContexts[warpIdx].MakeCurrent();
+
+                        threadContext.GroupIndex = Stride3D.DenseXY
+                            .ReconstructFromElementIndex(threadIdx, task.GroupDim);
+                        threadContext.GridIndex = Stride3D.DenseXY
+                            .ReconstructFromElementIndex(i, task.GridDim);
+
+                        int globalIndex = i * groupSize + threadIdx;
+                        if (globalIndex < linearUserDim)
+                            launcher(task, globalIndex);
+                    }
+                }
+
+                groupContext.TearDown();
+            }
+        }
+
     }
 }
