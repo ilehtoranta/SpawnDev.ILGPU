@@ -333,7 +333,8 @@
 
         _ilgpuContext = Context.Create(builder => builder.Default());
         var ilgpuDevice = new WebGPUILGPUDevice(webGpuDevice, 0);
-        _ilgpuAccelerator = await ilgpuDevice.CreateAcceleratorAsync(_ilgpuContext);
+        var options = new WebGPUBackendOptions { EnableF64Emulation = false, EnableI64Emulation = false };
+        _ilgpuAccelerator = await ilgpuDevice.CreateAcceleratorAsync(_ilgpuContext, options);
         _ilgpuKernel = _ilgpuAccelerator.LoadAutoGroupedStreamKernel<Index2D, ArrayView2D<uint, Stride2D.DenseX>, int, int, int, double, double, double>(MandelbrotKernel);
         _ilgpuBuffer = _ilgpuAccelerator.Allocate2DDenseX<uint>(new Index2D(_width, _height));
     }

@@ -90,6 +90,11 @@ namespace ILGPU.Backends
         /// A Web Workers/JavaScript source backend.
         /// </summary>
         Workers,
+
+        /// <summary>
+        /// A WebAssembly compute backend.
+        /// </summary>
+        Wasm,
     }
 
     /// <summary>

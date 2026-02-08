@@ -145,10 +145,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
         public override void GenerateHeader(StringBuilder builder)
         {
-            // Emit struct definitions first
-            TypeGenerator.GenerateTypeDefinitions(builder);
-
-            // Emit emulation library if needed
+            // Emit emulation library FIRST (type aliases + helper functions must precede struct definitions
+            // that reference emu_i64/emu_f64 types — WGSL requires types be defined before use)
             if (Backend.Options.EnableF64Emulation || Backend.Options.EnableI64Emulation)
             {
                 builder.AppendLine("// ============ 64-bit Emulation Library ============");
@@ -156,6 +154,9 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     Backend.Options.EnableF64Emulation,
                     Backend.Options.EnableI64Emulation));
             }
+
+            // Emit struct definitions (may reference emu_i64/emu_f64 from the library above)
+            TypeGenerator.GenerateTypeDefinitions(builder);
 
             int bindingIdx = 0;
             int paramOffset = KernelParamOffset;
@@ -406,7 +407,14 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         /// </summary>
         private static string InferWgslType(string expr)
         {
-            // Comparison operators produce bool
+            // Comparison operators and emulated comparison functions produce bool
+            if (expr.Contains("f64_lt") || expr.Contains("f64_le") || expr.Contains("f64_gt") ||
+                expr.Contains("f64_ge") || expr.Contains("f64_eq") || expr.Contains("f64_ne") ||
+                expr.Contains("i64_lt") || expr.Contains("i64_le") || expr.Contains("i64_gt") ||
+                expr.Contains("i64_ge") || expr.Contains("i64_eq") || expr.Contains("i64_ne") ||
+                expr.Contains("u64_lt") || expr.Contains("u64_le") || expr.Contains("u64_gt") ||
+                expr.Contains("u64_ge"))
+                return "bool";
             if (expr.Contains(" != ") || expr.Contains(" == ") || expr.Contains(" >= ") ||
                 expr.Contains(" <= ") || expr.Contains(" > ") || expr.Contains(" < ") ||
                 expr.Contains(" | ") || expr.Contains(" & "))
@@ -414,10 +422,24 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             // emu_f64 emulation functions return vec2<f32>
             if (expr.Contains("f64_from_f32") || expr.Contains("f64_add") || expr.Contains("f64_sub") ||
                 expr.Contains("f64_mul") || expr.Contains("f64_div") || expr.Contains("f64_neg") ||
-                expr.Contains("f64_from_ieee754") || expr.Contains("emu_f64("))
+                expr.Contains("f64_from_ieee754") || expr.Contains("emu_f64(") ||
+                expr.Contains("f64_abs") || expr.Contains("f64_min") || expr.Contains("f64_max"))
                 return "vec2<f32>";
+            // emu_i64 emulation functions return vec2<u32>
+            if (expr.Contains("i64_from_i32") || expr.Contains("u64_from_u32") ||
+                expr.Contains("i64_add") || expr.Contains("i64_sub") || expr.Contains("i64_mul") ||
+                expr.Contains("u64_mul") || expr.Contains("i64_neg") || expr.Contains("i64_abs") ||
+                expr.Contains("i64_and") || expr.Contains("i64_or") || expr.Contains("i64_xor") ||
+                expr.Contains("i64_shl") || expr.Contains("i64_shr") || expr.Contains("u64_shr") ||
+                expr.Contains("i64_not") || expr.Contains("emu_i64(") || expr.Contains("emu_u64("))
+                return "vec2<u32>";
+            // Extraction functions return scalars
             if (expr.Contains("f64_to_f32") || expr.Contains("f32("))
                 return "f32";
+            if (expr.Contains("i64_to_i32"))
+                return "i32";
+            if (expr.Contains("u64_to_u32"))
+                return "u32";
             if (expr.Contains("i32("))
                 return "i32";
             if (expr.Contains("u32("))
@@ -425,6 +447,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             // Default to bool (most common for unlisted patterns like comparisons)
             return "bool";
         }
+
         private string GetWorkgroupSize()
         {
             return EntryPoint.IndexType switch
@@ -1452,69 +1475,138 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             var sourceType = TypeGenerator[value.Value.Type];
 
             bool isVectorSource = sourceType.StartsWith("vec");
-            bool isScalarTarget = !targetType.StartsWith("vec") && !targetType.StartsWith("mat") && !targetType.StartsWith("array");
+            bool isScalarTarget = !targetType.StartsWith("vec") && !targetType.StartsWith("mat") && !targetType.StartsWith("array")
+                                  && targetType != "emu_f64" && targetType != "emu_i64" && targetType != "emu_u64";
 
-            // CRITICAL FIX: When target is emulated emu_f64 (vec2<f32>), we can't just do emu_f64(i32)
-            // because vec2<f32> doesn't accept i32 as a single argument.
-            // We need to convert through f32 first: f64_from_f32(f32(source))
+            // Emulated type detection
             bool isEmulatedF64Target = Backend.Options.EnableF64Emulation && targetType == "emu_f64";
+            bool isEmulatedI64Target = Backend.Options.EnableI64Emulation && (targetType == "emu_i64" || targetType == "emu_u64");
+            bool isEmulatedF64Source = Backend.Options.EnableF64Emulation && sourceType == "emu_f64";
+            bool isEmulatedI64Source = Backend.Options.EnableI64Emulation && (sourceType == "emu_i64" || sourceType == "emu_u64");
 
-            if (isVectorSource && isScalarTarget)
+            // ---- TARGET is emulated emu_f64 ----
+            if (isEmulatedF64Target)
             {
-                // Extract X component. 
-                if (isEmulatedF64Target)
+                if (isEmulatedF64Source)
                 {
-                    // Convert to emu_f64 from extracted scalar
+                    // emu_f64 → emu_f64: just assign
+                    AppendLine($"{prefix}{target} = {source};");
+                }
+                else if (isEmulatedI64Source)
+                {
+                    // emu_i64 → emu_f64: extract i32 then convert through f32
+                    AppendLine($"{prefix}{target} = f64_from_f32(f32(i64_to_i32({source})));");
+                }
+                else if (isVectorSource)
+                {
+                    // vec → emu_f64: extract .x component
                     AppendLine($"{prefix}{target} = f64_from_f32(f32({source}.x));");
                 }
-                else
-                {
-                    AppendLine($"{prefix}{target} = {targetType}({source}.x);");
-                }
-            }
-            else if (isEmulatedF64Target)
-            {
-                // Source is scalar but target is emulated emu_f64
-                // Need to convert source to f32 first, then to emu_f64 via f64_from_f32
-                if (sourceType == "f32")
+                else if (sourceType == "f32")
                 {
                     AppendLine($"{prefix}{target} = f64_from_f32({source});");
                 }
-                else if (sourceType == "emu_f64")
-                {
-                    // emu_f64 to emu_f64 - just assign
-                    AppendLine($"{prefix}{target} = {source};");
-                }
                 else
                 {
-                    // Integer or other type - convert to f32 first
+                    // Integer or other scalar → emu_f64: convert to f32 first
                     AppendLine($"{prefix}{target} = f64_from_f32(f32({source}));");
                 }
+                return;
             }
-            else
+
+            // ---- TARGET is emulated emu_i64/emu_u64 ----
+            if (isEmulatedI64Target)
             {
-                // Check if source is emulated emu_f64 but target is NOT emu_f64
-                bool isEmulatedF64Source = Backend.Options.EnableF64Emulation && sourceType == "emu_f64";
-                if (isEmulatedF64Source && isScalarTarget)
+                if (isEmulatedI64Source)
                 {
-                    // Source is emulated emu_f64 (vec2<f32>), target is a scalar type (i32, u32, f32, etc.)
-                    // Must extract f32 value via f64_to_f32() first, then cast to target type
-                    if (targetType == "f32")
-                    {
-                        // emu_f64 -> f32: just extract
-                        AppendLine($"{prefix}{target} = f64_to_f32({source});");
-                    }
+                    // emu_i64 → emu_i64 (or emu_u64 → emu_u64): just assign
+                    AppendLine($"{prefix}{target} = {source};");
+                }
+                else if (isEmulatedF64Source)
+                {
+                    // emu_f64 → emu_i64: extract f32, cast to i32, then widen
+                    AppendLine($"{prefix}{target} = i64_from_i32(i32(f64_to_f32({source})));");
+                }
+                else if (isVectorSource)
+                {
+                    // Generic vec → emu_i64: extract .x, cast to i32, then widen
+                    if (targetType == "emu_u64")
+                        AppendLine($"{prefix}{target} = u64_from_u32(u32({source}.x));");
                     else
-                    {
-                        // emu_f64 -> i32/u32/etc: extract to f32, then cast
-                        AppendLine($"{prefix}{target} = {targetType}(f64_to_f32({source}));");
-                    }
+                        AppendLine($"{prefix}{target} = i64_from_i32(i32({source}.x));");
+                }
+                else if (sourceType == "i32")
+                {
+                    AppendLine($"{prefix}{target} = i64_from_i32({source});");
+                }
+                else if (sourceType == "u32")
+                {
+                    if (targetType == "emu_u64")
+                        AppendLine($"{prefix}{target} = u64_from_u32({source});");
+                    else
+                        AppendLine($"{prefix}{target} = i64_from_i32(i32({source}));");
+                }
+                else if (sourceType == "f32")
+                {
+                    // f32 → emu_i64: cast to i32 first
+                    AppendLine($"{prefix}{target} = i64_from_i32(i32({source}));");
                 }
                 else
                 {
-                    AppendLine($"{prefix}{target} = {targetType}({source});");
+                    // Other scalar → emu_i64: cast to i32 first
+                    AppendLine($"{prefix}{target} = i64_from_i32(i32({source}));");
                 }
+                return;
             }
+
+            // ---- SOURCE is emulated emu_f64, target is scalar ----
+            if (isEmulatedF64Source && isScalarTarget)
+            {
+                if (targetType == "f32")
+                {
+                    AppendLine($"{prefix}{target} = f64_to_f32({source});");
+                }
+                else
+                {
+                    // emu_f64 → i32/u32/etc: extract to f32, then cast
+                    AppendLine($"{prefix}{target} = {targetType}(f64_to_f32({source}));");
+                }
+                return;
+            }
+
+            // ---- SOURCE is emulated emu_i64/emu_u64, target is scalar ----
+            if (isEmulatedI64Source && isScalarTarget)
+            {
+                if (targetType == "i32")
+                {
+                    AppendLine($"{prefix}{target} = i64_to_i32({source});");
+                }
+                else if (targetType == "u32")
+                {
+                    AppendLine($"{prefix}{target} = u64_to_u32({source});");
+                }
+                else if (targetType == "f32")
+                {
+                    // emu_i64 → f32: extract low word as i32, then cast to f32
+                    AppendLine($"{prefix}{target} = f32(i64_to_i32({source}));");
+                }
+                else
+                {
+                    // emu_i64 → other scalar: extract low word and cast
+                    AppendLine($"{prefix}{target} = {targetType}(i64_to_i32({source}));");
+                }
+                return;
+            }
+
+            // ---- Generic vector → scalar (non-emulated) ----
+            if (isVectorSource && isScalarTarget)
+            {
+                AppendLine($"{prefix}{target} = {targetType}({source}.x);");
+                return;
+            }
+
+            // ---- Standard scalar → scalar ----
+            AppendLine($"{prefix}{target} = {targetType}({source});");
         }
 
         public override void GenerateCode(global::ILGPU.IR.Values.GetField value)
@@ -1558,6 +1650,12 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                                 // Check hoisting to prevent shadowing
                                 string prefix = _hoistedPrimitives.Contains(value) ? "" : "let ";
 
+                                // Helper: wrap i32 expression with i64_from_i32 when target expects emu_i64
+                                var targetWgslType = TypeGenerator[value.Type];
+                                bool needsI64Wrap = Backend.Options.EnableI64Emulation &&
+                                    (targetWgslType == "emu_i64" || targetWgslType == "emu_u64");
+                                string WrapI32(string expr) => needsI64Wrap ? $"i64_from_i32({expr})" : expr;
+
                                 if (is3DView)
                                 {
                                     var width = $"param{param.Index}_stride[0]";
@@ -1573,11 +1671,11 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
                                     switch (value.FieldSpan.Index)
                                     {
-                                        case 1: AppendLine($"{prefix}{target} = {width};"); return;
-                                        case 2: AppendLine($"{prefix}{target} = {height};"); return;
-                                        case 3: AppendLine($"{prefix}{target} = {depth};"); return;
-                                        case 4: AppendLine($"{prefix}{target} = {width};"); return;
-                                        case 5: AppendLine($"{prefix}{target} = {width} * {height};"); return;
+                                        case 1: AppendLine($"{prefix}{target} = {WrapI32(width)};"); return;
+                                        case 2: AppendLine($"{prefix}{target} = {WrapI32(height)};"); return;
+                                        case 3: AppendLine($"{prefix}{target} = {WrapI32(depth)};"); return;
+                                        case 4: AppendLine($"{prefix}{target} = {WrapI32(width)};"); return;
+                                        case 5: AppendLine($"{prefix}{target} = {WrapI32($"{width} * {height}")};"); return;
                                     }
                                 }
                                 else if (is2DView)
@@ -1592,9 +1690,9 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
                                     switch (value.FieldSpan.Index)
                                     {
-                                        case 1: AppendLine($"{prefix}{target} = {width};"); return;
-                                        case 2: AppendLine($"{prefix}{target} = {height};"); return;
-                                        case 3: AppendLine($"{prefix}{target} = {width};"); return;
+                                        case 1: AppendLine($"{prefix}{target} = {WrapI32(width)};"); return;
+                                        case 2: AppendLine($"{prefix}{target} = {WrapI32(height)};"); return;
+                                        case 3: AppendLine($"{prefix}{target} = {WrapI32(width)};"); return;
                                     }
                                 }
                                 else if (is1DView)
@@ -1606,13 +1704,13 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
                                     switch (value.FieldSpan.Index)
                                     {
-                                        case 1: AppendLine($"{prefix}{target} = 0;"); return;       // Index (Assume 0 for base view)
-                                        case 2: AppendLine($"{prefix}{target} = {totalLen};"); return; // Length
+                                        case 1: AppendLine($"{prefix}{target} = {WrapI32("0")};"); return;       // Index (Assume 0 for base view)
+                                        case 2: AppendLine($"{prefix}{target} = {WrapI32(totalLen)};"); return; // Length
                                     }
                                 }
 
                                 // Fallback for unknown length access
-                                AppendLine($"{prefix}{target} = {totalLen};");
+                                AppendLine($"{prefix}{target} = {WrapI32(totalLen)};");
                                 return;
                             }
                         }

@@ -10,6 +10,7 @@
 
 using global::ILGPU;
 using global::ILGPU.Runtime;
+using SpawnDev.ILGPU.Wasm;
 using SpawnDev.ILGPU.WebGPU;
 using SpawnDev.ILGPU.WebGPU.Backend;
 using SpawnDev.ILGPU.Workers;
@@ -153,6 +154,15 @@ namespace SpawnDev.ILGPU
                 return result;
             }
 
+            // Check for Wasm buffer
+            if (iView.Buffer is WasmMemoryBuffer wasmBuffer)
+            {
+                var byteData = wasmBuffer.TypedArrayView.ReadBytes();
+                var result = new T[buffer.Length];
+                MemoryMarshal.Cast<byte, T>(byteData).CopyTo(new Span<T>(result));
+                return result;
+            }
+
             // CPU buffer — use standard ILGPU synchronous copy
             var cpuResult = new T[buffer.Length];
             buffer.AsArrayView<T>(0, buffer.Length).CopyToCPU(cpuResult);
@@ -179,6 +189,10 @@ namespace SpawnDev.ILGPU
             else if (accelerator is WorkersAccelerator workersAccelerator)
             {
                 await WorkersAcceleratorExtensions.SynchronizeAsync(workersAccelerator);
+            }
+            else if (accelerator is WasmAccelerator wasmAccelerator)
+            {
+                await wasmAccelerator.SynchronizeAsync();
             }
             else
             {
