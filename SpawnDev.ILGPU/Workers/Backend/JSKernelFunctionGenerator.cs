@@ -57,6 +57,20 @@ namespace SpawnDev.ILGPU.Workers.Backend
         private int _parameterCount;
 
         /// <summary>
+        /// Whether this kernel uses shared memory or barriers.
+        /// When true, the kernel is emitted as a JS generator function (function*)
+        /// and barriers emit 'yield;' for lockstep execution.
+        /// </summary>
+        public bool HasBarriers { get; private set; }
+
+        /// <summary>
+        /// Preamble for shared memory declarations.
+        /// These are emitted as a tagged block so BuildWorkerScript can extract
+        /// them and emit inside the group loop (shared across all generators).
+        /// </summary>
+        private readonly StringBuilder _sharedMemoryPreamble = new();
+
+        /// <summary>
         /// The set of atomic buffer parameters, for which we need Int32Array views.
         /// </summary>
         private readonly HashSet<int> _atomicBufferParams = new();
@@ -110,10 +124,28 @@ namespace SpawnDev.ILGPU.Workers.Backend
             var originalBuilder = Builder;
             Builder = builder;
 
+            // Emit metadata marker for the dispatch layer to detect barrier kernels
+            if (HasBarriers)
+            {
+                builder.AppendLine("// __HAS_BARRIERS__");
+
+                // Emit shared memory declarations as a tagged block
+                // BuildWorkerScript extracts these and emits them inside the group loop
+                // so they are shared across all generators in a workgroup
+                if (_sharedMemoryPreamble.Length > 0)
+                {
+                    builder.AppendLine("// __SHARED_DECLS_START__");
+                    builder.Append(_sharedMemoryPreamble);
+                    builder.AppendLine("// __SHARED_DECLS_END__");
+                }
+            }
+
             // Generate the JS function signature using already-populated parameter bindings
             // _dimX/_dimY/_dimZ are total grid dimensions for multi-D index decomposition
             // _groupDimX/_groupDimY/_groupDimZ are group dimensions from KernelConfig
-            builder.Append("function kernel(_globalIndex, _dimX, _dimY, _dimZ, _groupDimX, _groupDimY, _groupDimZ");
+            // For barrier kernels: use function* (generator) so barriers can yield
+            var funcKeyword = HasBarriers ? "function*" : "function";
+            builder.Append($"{funcKeyword} kernel(_globalIndex, _dimX, _dimY, _dimZ, _groupDimX, _groupDimY, _groupDimZ");
 
             foreach (var binding in _parameterBindings)
             {
@@ -180,9 +212,13 @@ namespace SpawnDev.ILGPU.Workers.Backend
             // Setup local allocations
             SetupAllocations(Allocas.LocalAllocations, MemoryAddressSpace.Local);
 
-            // Setup shared memory allocations (required for SharedMemory.Allocate kernels)
-            SetupAllocations(Allocas.SharedAllocations, MemoryAddressSpace.Shared);
-            SetupAllocations(Allocas.DynamicSharedAllocations, MemoryAddressSpace.Shared);
+            // Setup shared memory allocations — emit to preamble (outside kernel function)
+            // so they are shared across all generators in a workgroup.
+            SetupSharedAllocations(Allocas.SharedAllocations);
+            SetupSharedAllocations(Allocas.DynamicSharedAllocations);
+
+            // Detect if this kernel uses shared memory or barriers
+            HasBarriers = _sharedMemoryPreamble.Length > 0;
 
             // Single block: no control flow needed
             if (blocks.Count == 1)
@@ -451,7 +487,36 @@ namespace SpawnDev.ILGPU.Workers.Backend
             return BasicValueType.Int32; // Default
         }
 
+
         #endregion
+
+        /// <summary>
+        /// Sets up shared memory allocations, emitting declarations to the preamble
+        /// (tagged block in JS source) so they are shared across all generators.
+        /// Variable bindings are still registered for IR reference resolution.
+        /// </summary>
+        private void SetupSharedAllocations(AllocaKindInformation allocas)
+        {
+            foreach (var allocaInfo in allocas)
+            {
+                var variable = Allocate(allocaInfo.Alloca);
+
+                if (allocaInfo.IsDynamicArray)
+                {
+                    // Dynamic shared memory: size determined at runtime via SharedMemoryConfig
+                    // Emit a placeholder that BuildWorkerScript replaces with the actual size
+                    _sharedMemoryPreamble.AppendLine($"var {variable.Name} = new Array(__DYNSHARED_SIZE__).fill(0);");
+                }
+                else if (allocaInfo.IsArray)
+                {
+                    _sharedMemoryPreamble.AppendLine($"var {variable.Name} = new Array({allocaInfo.ArraySize}).fill(0);");
+                }
+                else
+                {
+                    _sharedMemoryPreamble.AppendLine($"var {variable.Name} = 0;");
+                }
+            }
+        }
 
         #region Code Generation Overrides
 
@@ -874,6 +939,116 @@ namespace SpawnDev.ILGPU.Workers.Backend
                     AppendLine("return;");
                 }
             }
+        }
+
+        #endregion
+
+        #region Atomics
+
+        /// <summary>
+        /// Override for GenericAtomic: uses JS Atomics API on SharedArrayBuffer-backed typed arrays.
+        /// Decomposes element addresses into (array, index) for Atomics.add/and/or/xor/exchange.
+        /// For Min/Max, uses a compareExchange loop since JS Atomics lacks native min/max.
+        /// </summary>
+        public override void GenerateCode(GenericAtomic value)
+        {
+            var target = Load(value);
+            var address = Load(value.Target);
+            var val = Load(value.Value);
+            Declare(target);
+
+            // Decompose the address into (array, index) for Atomics API
+            if (_elementAddresses.TryGetValue(address.Name, out var elemAddr))
+            {
+                string array = $"{elemAddr.Array}";
+                string index = $"{elemAddr.Index}";
+
+                switch (value.Kind)
+                {
+                    case AtomicKind.Add:
+                        AppendLine($"{target} = Atomics.add({array}, {index}, {val});");
+                        break;
+                    case AtomicKind.And:
+                        AppendLine($"{target} = Atomics.and({array}, {index}, {val});");
+                        break;
+                    case AtomicKind.Or:
+                        AppendLine($"{target} = Atomics.or({array}, {index}, {val});");
+                        break;
+                    case AtomicKind.Xor:
+                        AppendLine($"{target} = Atomics.xor({array}, {index}, {val});");
+                        break;
+                    case AtomicKind.Exchange:
+                        AppendLine($"{target} = Atomics.exchange({array}, {index}, {val});");
+                        break;
+                    case AtomicKind.Min:
+                        // CAS loop for atomic min: while (val < current) { try CAS }
+                        AppendLine($"{{ let _old = Atomics.load({array}, {index});");
+                        AppendLine($"  while ({val} < _old) {{");
+                        AppendLine($"    let _prev = Atomics.compareExchange({array}, {index}, _old, {val});");
+                        AppendLine($"    if (_prev === _old) break;");
+                        AppendLine($"    _old = _prev;");
+                        AppendLine($"  }}");
+                        AppendLine($"  {target} = _old; }}");
+                        break;
+                    case AtomicKind.Max:
+                        // CAS loop for atomic max: while (val > current) { try CAS }
+                        AppendLine($"{{ let _old = Atomics.load({array}, {index});");
+                        AppendLine($"  while ({val} > _old) {{");
+                        AppendLine($"    let _prev = Atomics.compareExchange({array}, {index}, _old, {val});");
+                        AppendLine($"    if (_prev === _old) break;");
+                        AppendLine($"    _old = _prev;");
+                        AppendLine($"  }}");
+                        AppendLine($"  {target} = _old; }}");
+                        break;
+                    default:
+                        AppendLine($"{target} = Atomics.add({array}, {index}, {val}); // fallback");
+                        break;
+                }
+            }
+            else
+            {
+                // Fallback: direct array access (non-atomic, for non-shared buffers)
+                AppendLine($"{target} = {address}; // atomic fallback (non-shared)");
+                AppendLine($"{address} += {val};");
+            }
+        }
+
+        /// <summary>
+        /// Override for AtomicCAS: uses JS Atomics.compareExchange on SharedArrayBuffer-backed typed arrays.
+        /// </summary>
+        public override void GenerateCode(AtomicCAS value)
+        {
+            var target = Load(value);
+            var address = Load(value.Target);
+            var cmp = Load(value.Value);         // Expected value
+            var val = Load(value.CompareValue);   // New value to set
+            Declare(target);
+
+            if (_elementAddresses.TryGetValue(address.Name, out var elemAddr))
+            {
+                string array = $"{elemAddr.Array}";
+                string index = $"{elemAddr.Index}";
+                AppendLine($"{target} = Atomics.compareExchange({array}, {index}, {cmp}, {val});");
+            }
+            else
+            {
+                // Fallback: non-atomic CAS
+                AppendLine($"if ({address} === {cmp}) {{ {target} = {address}; {address} = {val}; }} else {{ {target} = {address}; }}");
+            }
+        }
+
+        /// <summary>
+        /// Override for Barrier: emit 'yield;' to pause the generator function.
+        /// The worker loop steps all generators in lockstep, so all work items
+        /// complete the pre-barrier code before any work item starts post-barrier code.
+        /// </summary>
+        public override void GenerateCode(global::ILGPU.IR.Values.Barrier value)
+        {
+            // For generator-based kernels: yield pauses execution until the worker
+            // loop advances all generators past the barrier
+            AppendLine("yield; // Group.Barrier()");
+            // Also set HasBarriers in case it wasn't detected from allocations alone
+            HasBarriers = true;
         }
 
         #endregion

@@ -183,18 +183,24 @@ namespace SpawnDev.ILGPU.Workers
             var (groupDimX, groupDimY, groupDimZ) = GetGroupDimensions(dimension);
             WorkersBackend.Log($"[Workers-Debug] Grid dimensions: ({dimX}, {dimY}, {dimZ}), Total: {totalItems}, GroupDim: ({groupDimX}, {groupDimY}, {groupDimZ})");
 
+            // Extract dynamic shared memory size from KernelConfig
+            int dynamicSharedElements = 0;
+            if (dimension is KernelConfig kConfig)
+                dynamicSharedElements = kConfig.SharedMemoryConfig.NumElements;
+
             // Marshal arguments for JS execution
             var jsArgs = MarshalArguments(compiledKernel, args);
 
             // Dispatch to workers — fire and forget
             workersAccel.PendingWorkTasks.Add(DispatchToWorkers(
-                compiledKernel.JSSource, totalItems, dimX, dimY, dimZ, groupDimX, groupDimY, groupDimZ, jsArgs, workersAccel));
+                compiledKernel.JSSource, totalItems, dimX, dimY, dimZ, groupDimX, groupDimY, groupDimZ, jsArgs, workersAccel, dynamicSharedElements));
         }
 
         /// <summary>
         /// Dispatches kernel work to Web Workers.
         /// With SharedArrayBuffer: splits work across N workers (zero-copy parallel).
         /// Without SharedArrayBuffer: sends all work to 1 worker with zero-copy transferred ArrayBuffers.
+        /// For barrier kernels: work is distributed in complete workgroups.
         /// </summary>
         private static Task DispatchToWorkers(
             string jsSource,
@@ -202,87 +208,132 @@ namespace SpawnDev.ILGPU.Workers
             int dimX, int dimY, int dimZ,
             int groupDimX, int groupDimY, int groupDimZ,
             List<object?> jsArgs,
-            WorkersAccelerator accelerator)
+            WorkersAccelerator accelerator,
+            int dynamicSharedElements = 0)
         {
             int workerCount = accelerator.WorkerCount;
             bool canUseShared = WorkersMemoryBuffer.IsCrossOriginIsolated;
             bool isShared = canUseShared && workerCount > 1;
             if (!canUseShared) workerCount = 1;
 
-            WorkersBackend.Log($"[Workers] Dispatching kernel: {totalItems} items across {workerCount} worker(s), SharedArrayBuffer={isShared}");
+            // Detect if this kernel uses barriers (generator-based execution)
+            bool hasBarriers = jsSource.Contains("// __HAS_BARRIERS__");
+
+            // For barrier kernels: ensure work is distributed in complete workgroups
+            int groupSize = groupDimX * groupDimY * groupDimZ;
+            if (hasBarriers && groupSize > 0)
+            {
+                int numGroups = totalItems / groupSize;
+                // Limit workers to number of groups (each worker needs at least 1 complete group)
+                if (numGroups < workerCount)
+                    workerCount = Math.Max(1, numGroups);
+            }
+
+            WorkersBackend.Log($"[Workers] Dispatching kernel: {totalItems} items across {workerCount} worker(s), SharedArrayBuffer={isShared}, HasBarriers={hasBarriers}");
 
             // Build the worker script
-            var workerScript = BuildWorkerScript(jsSource, jsArgs, isShared, dimX, dimY, dimZ, groupDimX, groupDimY, groupDimZ);
+            var workerScript = BuildWorkerScript(jsSource, jsArgs, isShared, dimX, dimY, dimZ, groupDimX, groupDimY, groupDimZ, hasBarriers, dynamicSharedElements);
 
             // Create workers
             var workers = QuickWorker.CreateWorkersFromJS(workerScript, workerCount);
             var tasks = new List<Task>();
 
             // Calculate work distribution
-            int itemsPerWorker = totalItems / workerCount;
-            int remainder = totalItems % workerCount;
-
-            for (int w = 0; w < workerCount; w++)
+            if (hasBarriers && groupSize > 0)
             {
-                var worker = workers[w];
-                int startIdx = w * itemsPerWorker + Math.Min(w, remainder);
-                int endIdx = startIdx + itemsPerWorker + (w < remainder ? 1 : 0);
+                // Group-aligned distribution: each worker gets complete workgroups
+                int numGroups = totalItems / groupSize;
+                int groupsPerWorker = numGroups / workerCount;
+                int groupRemainder = numGroups % workerCount;
 
-                var tcs = new TaskCompletionSource();
-                Action<MessageEvent>? msgHandler = null;
-                Action<Event>? errHandler = null;
-
-                msgHandler = new Action<MessageEvent>((msg) =>
+                for (int w = 0; w < workerCount; w++)
                 {
-                    worker.OnMessage -= msgHandler!;
-                    worker.OnError -= errHandler!;
-                    worker.Terminate();
-                    worker.Dispose();
+                    var worker = workers[w];
+                    int startGroup = w * groupsPerWorker + Math.Min(w, groupRemainder);
+                    int endGroup = startGroup + groupsPerWorker + (w < groupRemainder ? 1 : 0);
+                    int startIdx = startGroup * groupSize;
+                    int endIdx = endGroup * groupSize;
 
-                    // Check if the worker reported an error via try/catch
-                    var done = msg.JSRef!.Get<bool>("data.done");
-                    if (!done)
-                    {
-                        var errorMsg = msg.JSRef!.Get<string?>("data.error") ?? "Unknown worker script error";
-                        tcs.TrySetException(new Exception($"[Workers] Worker {w} JS error: {errorMsg}"));
-                        return;
-                    }
-
-                    if (!isShared)
-                    {
-                        ReceiveTransferredBuffers(msg, jsArgs);
-                    }
-
-                    tcs.TrySetResult();
-                });
-
-                errHandler = new Action<Event>((err) =>
-                {
-                    worker.OnMessage -= msgHandler!;
-                    worker.OnError -= errHandler!;
-                    worker.Terminate();
-                    worker.Dispose();
-                    tcs.TrySetException(new Exception($"[Workers] Worker {w} error during kernel execution"));
-                });
-
-                worker.OnMessage += msgHandler;
-                worker.OnError += errHandler;
-
-                // Build message data for this worker
-                var (messageArgs, transferList) = BuildWorkerMessage(jsArgs, startIdx, endIdx, isShared);
-                if (transferList != null)
-                {
-                    worker.PostMessage(messageArgs, transferList);
+                    DispatchSingleWorker(worker, w, jsArgs, startIdx, endIdx, isShared, tasks);
                 }
-                else
-                {
-                    worker.PostMessage(messageArgs);
-                }
+            }
+            else
+            {
+                // Flat distribution: items are distributed evenly
+                int itemsPerWorker = totalItems / workerCount;
+                int remainder = totalItems % workerCount;
 
-                tasks.Add(tcs.Task);
+                for (int w = 0; w < workerCount; w++)
+                {
+                    var worker = workers[w];
+                    int startIdx = w * itemsPerWorker + Math.Min(w, remainder);
+                    int endIdx = startIdx + itemsPerWorker + (w < remainder ? 1 : 0);
+
+                    DispatchSingleWorker(worker, w, jsArgs, startIdx, endIdx, isShared, tasks);
+                }
             }
 
             return Task.WhenAll(tasks);
+        }
+
+        /// <summary>
+        /// Dispatches a single worker with the given start/end indices.
+        /// </summary>
+        private static void DispatchSingleWorker(
+            Worker worker, int workerIndex, List<object?> jsArgs,
+            int startIdx, int endIdx, bool isShared, List<Task> tasks)
+        {
+            var tcs = new TaskCompletionSource();
+            Action<MessageEvent>? msgHandler = null;
+            Action<Event>? errHandler = null;
+            int w = workerIndex;
+
+            msgHandler = new Action<MessageEvent>((msg) =>
+            {
+                worker.OnMessage -= msgHandler!;
+                worker.OnError -= errHandler!;
+                worker.Terminate();
+                worker.Dispose();
+
+                var done = msg.JSRef!.Get<bool>("data.done");
+                if (!done)
+                {
+                    var errorMsg = msg.JSRef!.Get<string?>("data.error") ?? "Unknown worker script error";
+                    tcs.TrySetException(new Exception($"[Workers] Worker {w} JS error: {errorMsg}"));
+                    return;
+                }
+
+                if (!isShared)
+                {
+                    ReceiveTransferredBuffers(msg, jsArgs);
+                }
+
+                tcs.TrySetResult();
+            });
+
+            errHandler = new Action<Event>((err) =>
+            {
+                worker.OnMessage -= msgHandler!;
+                worker.OnError -= errHandler!;
+                worker.Terminate();
+                worker.Dispose();
+                tcs.TrySetException(new Exception($"[Workers] Worker {w} error during kernel execution"));
+            });
+
+            worker.OnMessage += msgHandler;
+            worker.OnError += errHandler;
+
+            var (messageArgs, transferList) = BuildWorkerMessage(jsArgs, startIdx, endIdx, isShared);
+            if (transferList != null)
+            {
+                worker.PostMessage(messageArgs, transferList);
+            }
+            else
+            {
+                worker.PostMessage(messageArgs);
+            }
+
+            tasks.Add(tcs.Task);
         }
 
         /// <summary>
@@ -290,8 +341,10 @@ namespace SpawnDev.ILGPU.Workers
         /// The worker receives a message with: { startIdx, endIdx, args: [...] }
         /// where each arg is either { sab, arrayType, byteOffset, elementCount } for buffers
         /// or { value } for scalars.
+        /// For barrier kernels: uses a generator-based loop that steps all items
+        /// through yield points in lockstep.
         /// </summary>
-        private static string BuildWorkerScript(string jsSource, List<object?> jsArgs, bool isShared, int dimX, int dimY, int dimZ, int groupDimX, int groupDimY, int groupDimZ)
+        private static string BuildWorkerScript(string jsSource, List<object?> jsArgs, bool isShared, int dimX, int dimY, int dimZ, int groupDimX, int groupDimY, int groupDimZ, bool hasBarriers, int dynamicSharedElements = 0)
         {
             var sb = new System.Text.StringBuilder();
             sb.AppendLine("self.onmessage = function(e) {");
@@ -301,8 +354,23 @@ namespace SpawnDev.ILGPU.Workers
             sb.AppendLine();
 
             // Emit kernel function
+            // For barrier kernels: strip the shared memory tagged block from jsSource
+            // (it will be emitted inside the group loop instead)
+            var cleanedSource = jsSource;
+            if (hasBarriers)
+            {
+                var startMarker = "// __SHARED_DECLS_START__";
+                var endMarker = "// __SHARED_DECLS_END__";
+                int sIdx = cleanedSource.IndexOf(startMarker);
+                int eIdx = cleanedSource.IndexOf(endMarker);
+                if (sIdx >= 0 && eIdx > sIdx)
+                {
+                    cleanedSource = cleanedSource.Substring(0, sIdx) +
+                        cleanedSource.Substring(eIdx + endMarker.Length);
+                }
+            }
             sb.AppendLine("  // Kernel function");
-            sb.AppendLine("  " + jsSource.Replace("\n", "\n  "));
+            sb.AppendLine("  " + cleanedSource.Replace("\n", "\n  "));
             sb.AppendLine();
 
             // Create typed array views from args
@@ -329,14 +397,79 @@ namespace SpawnDev.ILGPU.Workers
             sb.AppendLine();
             sb.AppendLine("  // Execute kernel for assigned range");
             sb.AppendLine("  try {");
-            // Pass dimension info as extra args after _globalIndex
-            sb.Append($"    for (var _i = startIdx; _i < endIdx; _i++) {{ kernel(_i, {dimX}, {dimY}, {dimZ}, {groupDimX}, {groupDimY}, {groupDimZ}");
-            foreach (var name in callArgs)
+
+            if (hasBarriers)
             {
-                sb.Append(", ");
-                sb.Append(name);
+                // Generator-based barrier execution:
+                // For each workgroup, create generators for all items, step in lockstep
+                int groupSize = groupDimX * groupDimY * groupDimZ;
+
+                // Extract shared memory declarations from the tagged block
+                // These are emitted inside the group loop so they're shared across generators
+                string sharedDecls = "";
+                var sharedStartMarker = "// __SHARED_DECLS_START__";
+                var sharedEndMarker = "// __SHARED_DECLS_END__";
+                int sharedStart = jsSource.IndexOf(sharedStartMarker);
+                int sharedEnd = jsSource.IndexOf(sharedEndMarker);
+                if (sharedStart >= 0 && sharedEnd > sharedStart)
+                {
+                    sharedDecls = jsSource.Substring(
+                        sharedStart + sharedStartMarker.Length,
+                        sharedEnd - sharedStart - sharedStartMarker.Length).Trim();
+
+                    // Replace dynamic shared memory size placeholder with actual element count
+                    if (dynamicSharedElements > 0)
+                        sharedDecls = sharedDecls.Replace("__DYNSHARED_SIZE__", dynamicSharedElements.ToString());
+                }
+
+                sb.AppendLine($"    var _groupSize = {groupSize};");
+                sb.AppendLine($"    for (var _gStart = startIdx; _gStart < endIdx; _gStart += _groupSize) {{");
+
+                // Emit shared memory declarations inside group loop (shared across all generators)
+                if (!string.IsNullOrEmpty(sharedDecls))
+                {
+                    sb.AppendLine($"      // Shared memory (reset per group)");
+                    // Emit each declaration line
+                    foreach (var line in sharedDecls.Split('\n', StringSplitOptions.RemoveEmptyEntries))
+                    {
+                        sb.AppendLine($"      {line.Trim()}");
+                    }
+                }
+
+                sb.AppendLine($"      var _gens = [];");
+                sb.AppendLine($"      for (var _li = 0; _li < _groupSize; _li++) {{");
+
+                // Build kernel call with all params
+                sb.Append($"        _gens.push(kernel(_gStart + _li, {dimX}, {dimY}, {dimZ}, {groupDimX}, {groupDimY}, {groupDimZ}");
+                foreach (var name in callArgs)
+                {
+                    sb.Append(", ");
+                    sb.Append(name);
+                }
+                sb.AppendLine("));");
+                sb.AppendLine($"      }}");
+
+                // Step all generators in lockstep through yield barriers
+                sb.AppendLine($"      var _allDone = false;");
+                sb.AppendLine($"      while (!_allDone) {{");
+                sb.AppendLine($"        _allDone = true;");
+                sb.AppendLine($"        for (var _gi = 0; _gi < _gens.length; _gi++) {{");
+                sb.AppendLine($"          if (!_gens[_gi].next().done) _allDone = false;");
+                sb.AppendLine($"        }}");
+                sb.AppendLine($"      }}");
+                sb.AppendLine($"    }}");
             }
-            sb.AppendLine("); }");
+            else
+            {
+                // Standard flat loop (no barriers)
+                sb.Append($"    for (var _i = startIdx; _i < endIdx; _i++) {{ kernel(_i, {dimX}, {dimY}, {dimZ}, {groupDimX}, {groupDimY}, {groupDimZ}");
+                foreach (var name in callArgs)
+                {
+                    sb.Append(", ");
+                    sb.Append(name);
+                }
+                sb.AppendLine("); }");
+            }
 
             if (!isShared)
             {

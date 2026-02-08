@@ -20,54 +20,8 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
             return Task.FromResult<(Context, Accelerator)>((context, accelerator));
         }
 
-        // Shared memory & barrier tests require inter-worker synchronization
-        // which the current architecture doesn't support (each work item = 1 worker)
-        [TestMethod]
-        public new async Task SharedMemoryTest() =>
-            throw new UnsupportedTestException("Workers: shared memory requires inter-worker sync");
-
-        [TestMethod]
-        public new async Task CSharpSharedMemoryTest() =>
-            throw new UnsupportedTestException("Workers: shared memory requires inter-worker sync");
-
-        [TestMethod]
-        public new async Task DynamicSharedMemoryTest() =>
-            throw new UnsupportedTestException("Workers: shared memory requires inter-worker sync");
-
-        [TestMethod]
-        public new async Task SharedMemoryBarrierTest() =>
-            throw new UnsupportedTestException("Workers: barriers require inter-worker sync");
-
-        [TestMethod]
-        public new async Task LinearBarrierTest() =>
-            throw new UnsupportedTestException("Workers: barriers require inter-worker sync");
-
-        // Atomic tests require SharedArrayBuffer-backed typed arrays
-        // which only work with cross-origin isolation
-        [TestMethod]
-        public new async Task AtomicTest() =>
-            throw new UnsupportedTestException("Workers: atomics require SharedArrayBuffer");
-
-        [TestMethod]
-        public new async Task AtomicCASTest() =>
-            throw new UnsupportedTestException("Workers: atomics require SharedArrayBuffer");
-
-        [TestMethod]
-        public new async Task AtomicMinMaxTest() =>
-            throw new UnsupportedTestException("Workers: atomics require SharedArrayBuffer");
-
-        [TestMethod]
-        public new async Task HistogramTest() =>
-            throw new UnsupportedTestException("Workers: atomics require SharedArrayBuffer");
-
-        [TestMethod]
-        public new async Task ReductionTest() =>
-            throw new UnsupportedTestException("Workers: atomics require SharedArrayBuffer");
-
-        [TestMethod]
-        public new async Task ParallelSumTest() =>
-            throw new UnsupportedTestException("Workers: atomics require SharedArrayBuffer");
-
+        // Subgroup tests require hardware subgroup/warp operations
+        // which are not available in the Workers backend
         [TestMethod]
         public new async Task BroadcastTest() =>
             throw new UnsupportedTestException("Workers: subgroups not supported");
