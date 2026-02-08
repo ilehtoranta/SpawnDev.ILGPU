@@ -88,16 +88,18 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
         public async Task HistogramTest() => await RunTest(async accelerator =>
         {
             int numBins = 4;
-            var data = new int[] { 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3 };
-            int len = data.Length;
+            int numItems = 64;
+            var data = new int[numItems];
+            for (int i = 0; i < numItems; i++) data[i] = i % numBins;
             using var bufData = accelerator.Allocate1D(data);
             using var bufBins = accelerator.Allocate1D<int>(numBins);
             var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<int>, ArrayView<int>>(HistogramKernel);
-            kernel((Index1D)len, bufData.View, bufBins.View);
+            kernel((Index1D)numItems, bufData.View, bufBins.View);
             await accelerator.SynchronizeAsync();
             var result = await bufBins.CopyToHostAsync<int>();
+            int expectedCount = numItems / numBins; // 64/4 = 16
             for (int i = 0; i < numBins; i++)
-                if (result[i] != 4) throw new Exception($"Histogram bin {i} failed. Expected 4, got {result[i]}");
+                if (result[i] != expectedCount) throw new Exception($"Histogram bin {i} failed. Expected {expectedCount}, got {result[i]}");
         });
 
         [TestMethod]

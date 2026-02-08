@@ -1856,6 +1856,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 }
                 else if (terminator is global::ILGPU.IR.Values.UnconditionalBranch uBranch)
                 {
+                    // Push phi values for the target block before transitioning
+                    PushPhiValues(uBranch.Target, block);
                     block = uBranch.Target;
                 }
                 else if (terminator is global::ILGPU.IR.Values.ReturnTerminator)

@@ -98,6 +98,14 @@ namespace SpawnDev.ILGPU.Workers.Backend
         /// </summary>
         protected readonly Dictionary<string, (Variable Array, Variable Index)> _elementAddresses = new();
 
+        /// <summary>
+        /// Tracks struct element addresses. When an ArrayView has struct elements,
+        /// the typed array stores fields flat: [f0_0, f1_0, f0_1, f1_1, ...].
+        /// Maps variable name to (arrayVar, baseOffset, numFields) so Load/Store
+        /// can correctly read/write N consecutive elements for each struct.
+        /// </summary>
+        protected readonly Dictionary<string, (Variable Array, Variable BaseOffset, int NumFields)> _structElementAddresses = new();
+
         // Flag to track if we are generating code within the state machine loop
         protected bool IsStateMachineActive { get; set; } = false;
 
@@ -718,9 +726,10 @@ namespace SpawnDev.ILGPU.Workers.Backend
             var left = Load(value.Left);
             var right = Load(value.Right);
 
-            // Determine if this is an integer operation
+            // Determine if this is an integer operation, and specifically a BigInt (Int64) op
             bool isIntegerOp = value.BasicValueType is BasicValueType.Int8 or BasicValueType.Int16
                 or BasicValueType.Int32 or BasicValueType.Int64;
+            bool isBigIntOp = value.BasicValueType == BasicValueType.Int64;
 
             Declare(target);
 
@@ -728,10 +737,16 @@ namespace SpawnDev.ILGPU.Workers.Backend
             switch (value.Kind)
             {
                 case BinaryArithmeticKind.Min:
-                    AppendLine($"{target} = Math.min({left}, {right});");
+                    if (isBigIntOp)
+                        AppendLine($"{target} = ({left} < {right}) ? {left} : {right};");
+                    else
+                        AppendLine($"{target} = Math.min({left}, {right});");
                     return;
                 case BinaryArithmeticKind.Max:
-                    AppendLine($"{target} = Math.max({left}, {right});");
+                    if (isBigIntOp)
+                        AppendLine($"{target} = ({left} > {right}) ? {left} : {right};");
+                    else
+                        AppendLine($"{target} = Math.max({left}, {right});");
                     return;
                 case BinaryArithmeticKind.Atan2F:
                     AppendLine($"{target} = Math.atan2({left}, {right});");
@@ -758,8 +773,21 @@ namespace SpawnDev.ILGPU.Workers.Backend
 
             if (op == "/" && isIntegerOp)
             {
-                // JS division always produces float; truncate for integer semantics
-                AppendLine($"{target} = Math.trunc({left} / {right});");
+                if (isBigIntOp)
+                {
+                    // BigInt division already truncates in JS — no Math.trunc needed
+                    AppendLine($"{target} = ({left} / {right});");
+                }
+                else
+                {
+                    // JS division always produces float; truncate for integer semantics
+                    AppendLine($"{target} = Math.trunc({left} / {right});");
+                }
+            }
+            else if ((op == "<<" || op == ">>") && isBigIntOp)
+            {
+                // BigInt shift requires both operands to be BigInt
+                AppendLine($"{target} = ({left} {op} BigInt({right}));");
             }
             else
             {
@@ -779,6 +807,8 @@ namespace SpawnDev.ILGPU.Workers.Backend
             var operand = Load(value.Value);
             Declare(target);
 
+            bool isBigIntOp = value.BasicValueType == BasicValueType.Int64;
+
             string result = value.Kind switch
             {
                 UnaryArithmeticKind.Neg => $"-{operand}",
@@ -787,7 +817,9 @@ namespace SpawnDev.ILGPU.Workers.Backend
                     : $"~{operand}",
 
                 // Math Intrinsics
-                UnaryArithmeticKind.Abs => $"Math.abs({operand})",
+                UnaryArithmeticKind.Abs => isBigIntOp
+                    ? $"(({operand} < 0n) ? -{operand} : {operand})"
+                    : $"Math.abs({operand})",
                 UnaryArithmeticKind.SinF => $"Math.sin({operand})",
                 UnaryArithmeticKind.CosF => $"Math.cos({operand})",
                 UnaryArithmeticKind.TanF => $"Math.tan({operand})",
@@ -871,8 +903,24 @@ namespace SpawnDev.ILGPU.Workers.Backend
             // Check if the source is an element address (array[index] reference)
             if (_elementAddresses.TryGetValue(source.Name, out var elemAddr))
             {
-                // Read from array: target = array[index]
-                AppendLine($"{target} = {elemAddr.Array}[{elemAddr.Index}];");
+                // Emit diagnostic comment showing the type check
+                AppendLine($"// LOAD from elemAddr: loadVal.Type={loadVal.Type?.GetType().Name} ({loadVal.Type}), isStruct={loadVal.Type is StructureType}");
+                // If the result type is a struct, we need to unpack N consecutive
+                // elements from the flat typed array into a JS object
+                if (loadVal.Type is StructureType structType)
+                {
+                    int numFields = structType.NumFields;
+                    AppendLine($"{target} = {{}};");
+                    for (int f = 0; f < numFields; f++)
+                    {
+                        AppendLine($"{target}.f{f} = {elemAddr.Array}[({elemAddr.Index}) * {numFields} + {f}];");
+                    }
+                }
+                else
+                {
+                    // Read from array: target = array[index]
+                    AppendLine($"{target} = {elemAddr.Array}[{elemAddr.Index}];");
+                }
             }
             // Check if the source is a field address (struct.field reference)
             else if (_fieldAddresses.TryGetValue(source.Name, out var fieldAddr))
@@ -895,8 +943,21 @@ namespace SpawnDev.ILGPU.Workers.Backend
             // Check if the target is an element address (array[index] reference)
             if (_elementAddresses.TryGetValue(address.Name, out var elemAddr))
             {
-                // Write to array: array[index] = value
-                AppendLine($"{elemAddr.Array}[{elemAddr.Index}] = {val};");
+                // If the value type is a struct, we need to write N consecutive
+                // elements from a JS object into the flat typed array
+                if (storeVal.Value.Type is StructureType structType)
+                {
+                    int numFields = structType.NumFields;
+                    for (int f = 0; f < numFields; f++)
+                    {
+                        AppendLine($"{elemAddr.Array}[({elemAddr.Index}) * {numFields} + {f}] = {val}.f{f};");
+                    }
+                }
+                else
+                {
+                    // Write to array: array[index] = value
+                    AppendLine($"{elemAddr.Array}[{elemAddr.Index}] = {val};");
+                }
             }
             // Check if the target is a field address (struct.field reference)
             else if (_fieldAddresses.TryGetValue(address.Name, out var fieldAddr))
@@ -919,9 +980,8 @@ namespace SpawnDev.ILGPU.Workers.Backend
 
             // JS has no pointer semantics — we track the array+index pair
             // so that subsequent Load/Store can resolve to array[index]
+            // Struct element detection is handled in Load/Store based on result type
             _elementAddresses[target.Name] = (source, offset);
-
-            // Don't emit any code — the actual read/write happens in Load/Store
             WorkersBackend.Log($"[JS] LoadElementAddress: {target.Name} => {source}[{offset}]");
         }
 
@@ -970,7 +1030,7 @@ namespace SpawnDev.ILGPU.Workers.Backend
                 BasicValueType.Int8 => value.Int8Value.ToString(),
                 BasicValueType.Int16 => value.Int16Value.ToString(),
                 BasicValueType.Int32 => value.Int32Value.ToString(),
-                BasicValueType.Int64 => $"BigInt({value.Int64Value})",
+                BasicValueType.Int64 => $"BigInt(\"{value.Int64Value}\")",
                 BasicValueType.Float16 => ((float)value.Float16Value).ToString("G9"),
                 BasicValueType.Float32 => value.Float32Value.ToString("G9"),
                 BasicValueType.Float64 => value.Float64Value.ToString("G17"),
@@ -1291,6 +1351,131 @@ namespace SpawnDev.ILGPU.Workers.Backend
             Declare(target);
 
             var method = value.Target;
+
+            // Check if this is an intrinsic/external method that needs inline code generation.
+            // ILGPU compiles math intrinsics (FMA, Sin, etc.) as separate functions with stub
+            // bodies (return 0). The method is marked either Intrinsic or External depending on
+            // the source. Each backend must intercept these and emit the correct implementation.
+            if (method.HasSource && (method.HasFlags(global::ILGPU.IR.MethodFlags.Intrinsic) ||
+                                     method.HasFlags(global::ILGPU.IR.MethodFlags.External)))
+            {
+                var sourceName = method.Source.Name;
+                var declaringType = method.Source.DeclaringType?.Name ?? "";
+
+                // Load arguments
+                var argVars = new List<Variable>();
+                for (int i = 0; i < value.Nodes.Length; i++)
+                    argVars.Add(Load(value.Nodes[i]));
+
+                // Match known intrinsics by method name
+                bool handled = true;
+                switch (sourceName)
+                {
+                    // Ternary
+                    case "FusedMultiplyAdd":
+                        AppendLine($"{target} = ({argVars[0]} * {argVars[1]} + {argVars[2]});");
+                        break;
+
+                    // Unary math
+                    case "Sin":
+                        AppendLine($"{target} = Math.sin({argVars[0]});");
+                        break;
+                    case "Cos":
+                        AppendLine($"{target} = Math.cos({argVars[0]});");
+                        break;
+                    case "Tan":
+                        AppendLine($"{target} = Math.tan({argVars[0]});");
+                        break;
+                    case "Asin":
+                        AppendLine($"{target} = Math.asin({argVars[0]});");
+                        break;
+                    case "Acos":
+                        AppendLine($"{target} = Math.acos({argVars[0]});");
+                        break;
+                    case "Atan":
+                        AppendLine($"{target} = Math.atan({argVars[0]});");
+                        break;
+                    case "Sinh":
+                        AppendLine($"{target} = Math.sinh({argVars[0]});");
+                        break;
+                    case "Cosh":
+                        AppendLine($"{target} = Math.cosh({argVars[0]});");
+                        break;
+                    case "Tanh":
+                        AppendLine($"{target} = Math.tanh({argVars[0]});");
+                        break;
+                    case "Sqrt":
+                        AppendLine($"{target} = Math.sqrt({argVars[0]});");
+                        break;
+                    case "Abs":
+                        AppendLine($"{target} = Math.abs({argVars[0]});");
+                        break;
+                    case "Floor":
+                        AppendLine($"{target} = Math.floor({argVars[0]});");
+                        break;
+                    case "Ceiling":
+                    case "Ceil":
+                        AppendLine($"{target} = Math.ceil({argVars[0]});");
+                        break;
+                    case "Log":
+                        AppendLine($"{target} = Math.log({argVars[0]});");
+                        break;
+                    case "Log2":
+                        AppendLine($"{target} = Math.log2({argVars[0]});");
+                        break;
+                    case "Log10":
+                        AppendLine($"{target} = Math.log10({argVars[0]});");
+                        break;
+                    case "Exp":
+                        AppendLine($"{target} = Math.exp({argVars[0]});");
+                        break;
+                    case "Round":
+                        AppendLine($"{target} = Math.round({argVars[0]});");
+                        break;
+                    case "Truncate":
+                        AppendLine($"{target} = Math.trunc({argVars[0]});");
+                        break;
+                    case "Sign":
+                        AppendLine($"{target} = Math.sign({argVars[0]});");
+                        break;
+
+                    // Binary math
+                    case "Pow":
+                        AppendLine($"{target} = Math.pow({argVars[0]}, {argVars[1]});");
+                        break;
+                    case "Atan2":
+                        AppendLine($"{target} = Math.atan2({argVars[0]}, {argVars[1]});");
+                        break;
+                    case "Min":
+                        AppendLine($"{target} = Math.min({argVars[0]}, {argVars[1]});");
+                        break;
+                    case "Max":
+                        AppendLine($"{target} = Math.max({argVars[0]}, {argVars[1]});");
+                        break;
+                    case "IEEERemainder":
+                        // IEEE remainder: a - round(a/b) * b
+                        AppendLine($"{target} = ({argVars[0]} - Math.round({argVars[0]} / {argVars[1]}) * {argVars[1]});");
+                        break;
+
+                    // Reciprocal operations
+                    case "ReciprocalSqrt":
+                    case "Rsqrt":
+                        AppendLine($"{target} = (1.0 / Math.sqrt({argVars[0]}));");
+                        break;
+                    case "Rcp":
+                        AppendLine($"{target} = (1.0 / {argVars[0]});");
+                        break;
+
+                    default:
+                        handled = false;
+                        WorkersBackend.Log($"[JS] WARNING: Unhandled intrinsic method: {declaringType}.{sourceName} with {argVars.Count} args");
+                        break;
+                }
+
+                if (handled) return;
+            }
+
+            // Non-intrinsic: generate a regular function call
             var functionName = $"fn_{method.Id}";
 
             var args = new StringBuilder();

@@ -16,6 +16,11 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
 
         protected override async Task<(Context context, Accelerator accelerator)> CreateAcceleratorAsync()
         {
+            return await CreateAcceleratorAsync(enableEmulation: false);
+        }
+
+        private async Task<(Context context, Accelerator accelerator)> CreateAcceleratorAsync(bool enableEmulation)
+        {
             var builder = Context.Create();
             await builder.WebGPUAsync();
             var context = builder.ToContext();
@@ -23,8 +28,18 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
             if (devices.Count == 0)
                 throw new UnsupportedTestException("No WebGPU devices found");
             var device = devices[0];
-            var accelerator = await device.CreateAcceleratorAsync(context);
+            var options = new WebGPUBackendOptions
+            {
+                EnableF64Emulation = enableEmulation,
+                EnableI64Emulation = enableEmulation
+            };
+            var accelerator = await device.CreateAcceleratorAsync(context, options);
             return (context, accelerator);
+        }
+
+        protected override async Task<(Context context, Accelerator accelerator)> CreateEmulatedAcceleratorAsync()
+        {
+            return await CreateAcceleratorAsync(enableEmulation: true);
         }
 
         #region WebGPU-Specific Tests

@@ -13,6 +13,10 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
         /// <summary>Creates the backend-specific accelerator. Caller is responsible for disposing both.</summary>
         protected abstract Task<(Context context, Accelerator accelerator)> CreateAcceleratorAsync();
 
+        /// <summary>Creates accelerator with 64-bit emulation enabled (for Long/Double tests). Default falls back to standard.</summary>
+        protected virtual Task<(Context context, Accelerator accelerator)> CreateEmulatedAcceleratorAsync()
+            => CreateAcceleratorAsync();
+
         /// <summary>Backend display name for error messages.</summary>
         protected abstract string BackendName { get; }
 
@@ -20,6 +24,14 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
         protected async Task RunTest(Func<Accelerator, Task> testBody)
         {
             var (context, accelerator) = await CreateAcceleratorAsync();
+            try { await testBody(accelerator); }
+            finally { accelerator.Dispose(); context.Dispose(); }
+        }
+
+        // Helper to run a test body that requires 64-bit emulation
+        protected async Task RunEmulatedTest(Func<Accelerator, Task> testBody)
+        {
+            var (context, accelerator) = await CreateEmulatedAcceleratorAsync();
             try { await testBody(accelerator); }
             finally { accelerator.Dispose(); context.Dispose(); }
         }

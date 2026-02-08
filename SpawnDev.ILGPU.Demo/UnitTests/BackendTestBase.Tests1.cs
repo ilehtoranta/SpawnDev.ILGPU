@@ -53,7 +53,7 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
         [TestMethod]
         public async Task Kernel2DTest() => await RunTest(async accelerator =>
         {
-            int width = 8, height = 4;
+            int width = 8, height = 8;
             using var buf = accelerator.Allocate2DDenseX<float>(new Index2D(width, height));
             var kernel = accelerator.LoadAutoGroupedStreamKernel<Index2D, ArrayView2D<float, Stride2D.DenseX>>(Kernel2D);
             kernel(buf.IntExtent, buf.View);
@@ -72,7 +72,7 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
         [TestMethod]
         public async Task Kernel3DTest() => await RunTest(async accelerator =>
         {
-            int w = 4, h = 3, d = 2;
+            int w = 4, h = 4, d = 4;
             using var buf = accelerator.Allocate3DDenseXY<float>(new Index3D(w, h, d));
             var kernel = accelerator.LoadAutoGroupedStreamKernel<Index3D, ArrayView3D<float, Stride3D.DenseXY>>(Kernel3D);
             kernel(buf.IntExtent, buf.View);

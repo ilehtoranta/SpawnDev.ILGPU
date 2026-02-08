@@ -177,17 +177,18 @@ namespace SpawnDev.ILGPU.Workers
             WorkersBackend.Log(compiledKernel.JSSource);
             WorkersBackend.Log("[Workers-Debug] -------------------------\n");
 
-            // Determine total work items
-            int totalItems = GetTotalWorkItems(dimension);
-            WorkersBackend.Log($"[Workers-Debug] Total work items: {totalItems}");
+            // Extract grid dimensions for multi-D index decomposition
+            var (dimX, dimY, dimZ) = GetGridDimensions(dimension);
+            int totalItems = dimX * dimY * dimZ;
+            var (groupDimX, groupDimY, groupDimZ) = GetGroupDimensions(dimension);
+            WorkersBackend.Log($"[Workers-Debug] Grid dimensions: ({dimX}, {dimY}, {dimZ}), Total: {totalItems}, GroupDim: ({groupDimX}, {groupDimY}, {groupDimZ})");
 
             // Marshal arguments for JS execution
             var jsArgs = MarshalArguments(compiledKernel, args);
 
             // Dispatch to workers — fire and forget
-            // Task is accumulated in PendingWorkTasks, awaited by SynchronizeAsync
             workersAccel.PendingWorkTasks.Add(DispatchToWorkers(
-                compiledKernel.JSSource, totalItems, jsArgs, workersAccel));
+                compiledKernel.JSSource, totalItems, dimX, dimY, dimZ, groupDimX, groupDimY, groupDimZ, jsArgs, workersAccel));
         }
 
         /// <summary>
@@ -198,12 +199,11 @@ namespace SpawnDev.ILGPU.Workers
         private static Task DispatchToWorkers(
             string jsSource,
             int totalItems,
+            int dimX, int dimY, int dimZ,
+            int groupDimX, int groupDimY, int groupDimZ,
             List<object?> jsArgs,
             WorkersAccelerator accelerator)
         {
-            // Use SharedArrayBuffer only when: cross-origin isolated AND workerCount > 1
-            // When WorkerCount == 1 (explicitly set via options), use ArrayBuffer even if SAB
-            // is available — this enables testing the ArrayBuffer fallback path.
             int workerCount = accelerator.WorkerCount;
             bool canUseShared = WorkersMemoryBuffer.IsCrossOriginIsolated;
             bool isShared = canUseShared && workerCount > 1;
@@ -212,7 +212,7 @@ namespace SpawnDev.ILGPU.Workers
             WorkersBackend.Log($"[Workers] Dispatching kernel: {totalItems} items across {workerCount} worker(s), SharedArrayBuffer={isShared}");
 
             // Build the worker script
-            var workerScript = BuildWorkerScript(jsSource, jsArgs, isShared);
+            var workerScript = BuildWorkerScript(jsSource, jsArgs, isShared, dimX, dimY, dimZ, groupDimX, groupDimY, groupDimZ);
 
             // Create workers
             var workers = QuickWorker.CreateWorkersFromJS(workerScript, workerCount);
@@ -239,10 +239,17 @@ namespace SpawnDev.ILGPU.Workers
                     worker.Terminate();
                     worker.Dispose();
 
+                    // Check if the worker reported an error via try/catch
+                    var done = msg.JSRef!.Get<bool>("data.done");
+                    if (!done)
+                    {
+                        var errorMsg = msg.JSRef!.Get<string?>("data.error") ?? "Unknown worker script error";
+                        tcs.TrySetException(new Exception($"[Workers] Worker {w} JS error: {errorMsg}"));
+                        return;
+                    }
+
                     if (!isShared)
                     {
-                        // Non-shared mode: worker transfers ArrayBuffers back (zero-copy)
-                        // Replace the underlying buffers in WorkersMemoryBuffer
                         ReceiveTransferredBuffers(msg, jsArgs);
                     }
 
@@ -265,7 +272,6 @@ namespace SpawnDev.ILGPU.Workers
                 var (messageArgs, transferList) = BuildWorkerMessage(jsArgs, startIdx, endIdx, isShared);
                 if (transferList != null)
                 {
-                    // Transfer ArrayBuffers to worker (zero-copy, ownership moves)
                     worker.PostMessage(messageArgs, transferList);
                 }
                 else
@@ -285,7 +291,7 @@ namespace SpawnDev.ILGPU.Workers
         /// where each arg is either { sab, arrayType, byteOffset, elementCount } for buffers
         /// or { value } for scalars.
         /// </summary>
-        private static string BuildWorkerScript(string jsSource, List<object?> jsArgs, bool isShared)
+        private static string BuildWorkerScript(string jsSource, List<object?> jsArgs, bool isShared, int dimX, int dimY, int dimZ, int groupDimX, int groupDimY, int groupDimZ)
         {
             var sb = new System.Text.StringBuilder();
             sb.AppendLine("self.onmessage = function(e) {");
@@ -322,38 +328,41 @@ namespace SpawnDev.ILGPU.Workers
 
             sb.AppendLine();
             sb.AppendLine("  // Execute kernel for assigned range");
-            sb.Append("  for (var _i = startIdx; _i < endIdx; _i++) { kernel(_i");
+            sb.AppendLine("  try {");
+            // Pass dimension info as extra args after _globalIndex
+            sb.Append($"    for (var _i = startIdx; _i < endIdx; _i++) {{ kernel(_i, {dimX}, {dimY}, {dimZ}, {groupDimX}, {groupDimY}, {groupDimZ}");
             foreach (var name in callArgs)
             {
                 sb.Append(", ");
                 sb.Append(name);
             }
             sb.AppendLine("); }");
-            sb.AppendLine();
 
             if (!isShared)
             {
-                // Non-shared mode: transfer ArrayBuffers back to main thread (zero-copy)
-                sb.AppendLine("  // Transfer modified buffers back (zero-copy)");
-                sb.AppendLine("  var resultBuffers = [];");
-                sb.AppendLine("  var transferList = [];");
+                sb.AppendLine("    // Transfer modified buffers back (zero-copy)");
+                sb.AppendLine("    var resultBuffers = [];");
+                sb.AppendLine("    var transferList = [];");
                 argIdx = 0;
                 for (int a = 0; a < jsArgs.Count; a++)
                 {
                     if (jsArgs[a] is BufferArg)
                     {
-                        sb.AppendLine($"  resultBuffers.push({{ index: {argIdx}, buffer: _p{argIdx}.buffer }});");
-                        sb.AppendLine($"  transferList.push(_p{argIdx}.buffer);");
+                        sb.AppendLine($"    resultBuffers.push({{ index: {argIdx}, buffer: _p{argIdx}.buffer }});");
+                        sb.AppendLine($"    transferList.push(_p{argIdx}.buffer);");
                     }
                     argIdx++;
                 }
-                sb.AppendLine("  self.postMessage({ done: true, buffers: resultBuffers }, transferList);");
+                sb.AppendLine("    self.postMessage({ done: true, buffers: resultBuffers }, transferList);");
             }
             else
             {
-                // Shared mode: buffers are already updated in place
-                sb.AppendLine("  self.postMessage({ done: true });");
+                sb.AppendLine("    self.postMessage({ done: true });");
             }
+
+            sb.AppendLine("  } catch(ex) {");
+            sb.AppendLine("    self.postMessage({ done: false, error: (ex && ex.message) ? ex.message : String(ex) });");
+            sb.AppendLine("  }");
 
             sb.AppendLine("};");
             return sb.ToString();
@@ -429,22 +438,39 @@ namespace SpawnDev.ILGPU.Workers
         }
 
         /// <summary>
-        /// Extracts the total number of work items from the dimension object.
+        /// Extracts grid dimensions from the dimension object.
+        /// Returns (dimX, dimY, dimZ) - for 1D, dimY=dimZ=1.
         /// </summary>
-        private static int GetTotalWorkItems(object dimension)
+        private static (int dimX, int dimY, int dimZ) GetGridDimensions(object dimension)
         {
             return dimension switch
             {
-                Index1D i1 => i1.X,
-                Index2D i2 => i2.X * i2.Y,
-                Index3D i3 => i3.X * i3.Y * i3.Z,
-                LongIndex1D l1 => (int)l1.X,
-                LongIndex2D l2 => (int)(l2.X * l2.Y),
-                LongIndex3D l3 => (int)(l3.X * l3.Y * l3.Z),
-                KernelConfig config => config.GridDim.X * config.GridDim.Y * config.GridDim.Z *
-                                       config.GroupDim.X * config.GroupDim.Y * config.GroupDim.Z,
+                Index1D i1 => (i1.X, 1, 1),
+                Index2D i2 => (i2.X, i2.Y, 1),
+                Index3D i3 => (i3.X, i3.Y, i3.Z),
+                LongIndex1D l1 => ((int)l1.X, 1, 1),
+                LongIndex2D l2 => ((int)l2.X, (int)l2.Y, 1),
+                LongIndex3D l3 => ((int)l3.X, (int)l3.Y, (int)l3.Z),
+                KernelConfig config => (
+                    config.GridDim.X * config.GroupDim.X,
+                    config.GridDim.Y * config.GroupDim.Y,
+                    config.GridDim.Z * config.GroupDim.Z),
                 _ => throw new NotSupportedException($"Unsupported dimension type: {dimension.GetType()}")
             };
+        }
+
+        /// <summary>
+        /// Extracts group dimensions from a dimension/KernelConfig.
+        /// For auto-grouped kernels (Index types), group dim defaults to the total dim (single group).
+        /// For stream kernels (KernelConfig), returns the explicit group dimensions.
+        /// </summary>
+        private static (int groupDimX, int groupDimY, int groupDimZ) GetGroupDimensions(object dimension)
+        {
+            if (dimension is KernelConfig config)
+                return (config.GroupDim.X, config.GroupDim.Y, config.GroupDim.Z);
+            // Auto-grouped kernels: each work item is its own "group" — group dim = total dim
+            var (dimX, dimY, dimZ) = GetGridDimensions(dimension);
+            return (dimX, dimY, dimZ);
         }
 
         /// <summary>
@@ -496,10 +522,28 @@ namespace SpawnDev.ILGPU.Workers
 
                     // Determine the element type from the view's generic arguments
                     Type elementType = typeof(int); // default
+                    int elementSize = contiguous.ElementSize;
                     var viewType = arrayView.GetType();
                     if (viewType.IsGenericType)
                     {
                         elementType = viewType.GetGenericArguments()[0];
+
+                        // For struct element types (non-primitive), we need to treat the buffer
+                        // as a flat array of the underlying primitive type. The JS kernel codegen
+                        // uses strided access to read/write struct fields from the flat array.
+                        if (!elementType.IsPrimitive && elementType.IsValueType)
+                        {
+                            // Determine the primitive type used in the struct fields
+                            var fields = elementType.GetFields(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+                            if (fields.Length > 0)
+                            {
+                                // Use the first field's type as the primitive element type
+                                // (assumes homogeneous struct or at least same-size fields)
+                                var primitiveFieldType = GetLeafFieldType(fields[0].FieldType);
+                                elementType = primitiveFieldType;
+                                elementSize = System.Runtime.InteropServices.Marshal.SizeOf(primitiveFieldType);
+                            }
+                        }
                     }
 
                     // Pass the shared buffer info for worker access
@@ -508,11 +552,77 @@ namespace SpawnDev.ILGPU.Workers
                         MemoryBuffer = memBuffer,
                         ByteOffset = (int)contiguous.IndexInBytes,
                         LengthInBytes = (int)contiguous.LengthInBytes,
-                        ElementSize = contiguous.ElementSize,
+                        ElementSize = elementSize,
                         ElementType = elementType
                     });
 
                     WorkersBackend.Log($"[Workers-Debug] Arg {i}: Buffer<{elementType.Name}>, Offset={contiguous.IndexInBytes}, Size={contiguous.LengthInBytes}");
+
+                    // For multi-D views (ArrayView2D/3D), ILGPU IR decomposes the view
+                    // into a flat ArrayView + stride struct. We need to add the stride as
+                    // additional scalar argument(s) to match the IR parameter count.
+                    if (arg != null)
+                    {
+                        var argType = arg.GetType();
+                        var argTypeName = argType.Name;
+
+                        // ArrayView2D: add YStride (= width for DenseX)
+                        if (argTypeName.StartsWith("ArrayView2D"))
+                        {
+                            // Try to get the stride from the view's Stride property
+                            var strideProp = argType.GetProperty("Stride");
+                            if (strideProp != null)
+                            {
+                                var strideObj = strideProp.GetValue(arg);
+                                if (strideObj != null)
+                                {
+                                    // Stride2D.DenseX has a YStride field
+                                    var yStrideProp = strideObj.GetType().GetProperty("YStride");
+                                    if (yStrideProp != null)
+                                    {
+                                        var yStride = (int)yStrideProp.GetValue(strideObj)!;
+                                        jsArgs.Add(yStride);
+                                        WorkersBackend.Log($"[Workers-Debug] Arg {i}: ArrayView2D stride YStride={yStride}");
+                                    }
+                                    else
+                                    {
+                                        // Fallback: try XStride for other stride types
+                                        var xStrideProp = strideObj.GetType().GetProperty("XStride");
+                                        if (xStrideProp != null)
+                                        {
+                                            var xStride = (int)xStrideProp.GetValue(strideObj)!;
+                                            jsArgs.Add(xStride);
+                                            WorkersBackend.Log($"[Workers-Debug] Arg {i}: ArrayView2D stride XStride={xStride}");
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        // ArrayView3D: add YStride and ZStride
+                        else if (argTypeName.StartsWith("ArrayView3D"))
+                        {
+                            var strideProp = argType.GetProperty("Stride");
+                            if (strideProp != null)
+                            {
+                                var strideObj = strideProp.GetValue(arg);
+                                if (strideObj != null)
+                                {
+                                    var yStrideProp = strideObj.GetType().GetProperty("YStride");
+                                    var zStrideProp = strideObj.GetType().GetProperty("ZStride");
+                                    if (yStrideProp != null)
+                                    {
+                                        jsArgs.Add((int)yStrideProp.GetValue(strideObj)!);
+                                        WorkersBackend.Log($"[Workers-Debug] Arg {i}: ArrayView3D stride YStride={yStrideProp.GetValue(strideObj)}");
+                                    }
+                                    if (zStrideProp != null)
+                                    {
+                                        jsArgs.Add((int)zStrideProp.GetValue(strideObj)!);
+                                        WorkersBackend.Log($"[Workers-Debug] Arg {i}: ArrayView3D stride ZStride={zStrideProp.GetValue(strideObj)}");
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
                 else
                 {
@@ -621,6 +731,23 @@ namespace SpawnDev.ILGPU.Workers
         }
 
         /// <summary>
+        /// Recursively gets the leaf (primitive) field type from a struct type.
+        /// For MyPoint { float X, float Y }, returns typeof(float).
+        /// For nested structs, drills into the first field.
+        /// </summary>
+        private static Type GetLeafFieldType(Type type)
+        {
+            if (type.IsPrimitive) return type;
+            if (type.IsValueType && !type.IsEnum)
+            {
+                var fields = type.GetFields(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+                if (fields.Length > 0)
+                    return GetLeafFieldType(fields[0].FieldType);
+            }
+            return type;
+        }
+
+        /// <summary>
         /// Gets the JS TypedArray constructor name for a given element type.
         /// Uses the actual C# type to distinguish int vs float at the same byte size.
         /// </summary>
@@ -631,7 +758,8 @@ namespace SpawnDev.ILGPU.Workers
             if (elementType == typeof(int) || elementType == typeof(uint)) return "Int32Array";
             if (elementType == typeof(short) || elementType == typeof(ushort)) return "Int16Array";
             if (elementType == typeof(byte) || elementType == typeof(sbyte)) return "Uint8Array";
-            if (elementType == typeof(long) || elementType == typeof(ulong)) return "Float64Array"; // BigInt64Array not universally available
+            if (elementType == typeof(long)) return "BigInt64Array";
+            if (elementType == typeof(ulong)) return "BigUint64Array";
 
             // Fallback by size
             return fallbackElementSize switch
