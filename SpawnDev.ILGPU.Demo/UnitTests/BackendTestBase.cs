@@ -517,7 +517,7 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
             float x = data[index]; data[index] = ((x * 2 + 3) / 4 - 1) * 5 + x;
         }
 
-        static void BroadcastKernel(Index1D index, ArrayView<int> data)
+        protected static void BroadcastKernel(Index1D index, ArrayView<int> data)
         {
             int val = data[index];
             int broadcasted = Group.Broadcast(val, 0);

@@ -76,6 +76,11 @@ namespace SpawnDev.ILGPU.Workers.Backend
         private readonly HashSet<int> _atomicBufferParams = new();
 
         /// <summary>
+        /// Counter for generating unique shared broadcast variable names.
+        /// </summary>
+        private int _broadcastCounter = 0;
+
+        /// <summary>
         /// Represents a bound parameter for the kernel.
         /// </summary>
         public record ParameterBinding
@@ -1048,6 +1053,31 @@ namespace SpawnDev.ILGPU.Workers.Backend
             // loop advances all generators past the barrier
             AppendLine("yield; // Group.Barrier()");
             // Also set HasBarriers in case it wasn't detected from allocations alone
+            HasBarriers = true;
+        }
+
+        /// <summary>
+        /// Override for Broadcast: emulates Group.Broadcast using shared memory + yield barriers.
+        /// The source thread (at origin index) writes its value to a shared variable,
+        /// all threads synchronize via yield, then all threads read the broadcasted value.
+        /// A second yield ensures all threads have read before the shared var could be reused.
+        /// </summary>
+        public override void GenerateCode(Broadcast value)
+        {
+            var target = Load(value);
+            var source = Load(value.Variable.Resolve());
+            var origin = Load(value.Origin.Resolve());
+            Declare(target);
+
+            // Allocate a unique shared variable for this broadcast operation
+            string sharedVar = $"_broadcast_{_broadcastCounter++}";
+            _sharedMemoryPreamble.AppendLine($"var {sharedVar} = 0;");
+
+            // Source thread writes, barrier, all threads read, barrier
+            AppendLine($"if (_groupIndexX === {origin}) {{ {sharedVar} = {source}; }}");
+            AppendLine("yield; // broadcast sync");
+            AppendLine($"{target} = {sharedVar};");
+            AppendLine("yield; // post-broadcast sync");
             HasBarriers = true;
         }
 
