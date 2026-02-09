@@ -1,6 +1,6 @@
 # SpawnDev.ILGPU
 
-[![NuGet](https://img.shields.io/nuget/v/SpawnDev.ILGPU.svg)](https://www.nuget.org/packages/SpawnDev.ILGPU)
+[![NuGet](https://img.shields.io/nuget/v/SpawnDev.ILGPU.svg?)](https://www.nuget.org/packages/SpawnDev.ILGPU)
 
 **Run [ILGPU](https://github.com/m4rs-mt/ILGPU) kernels in the browser — on the GPU via WebGPU, natively via WebAssembly, across threads via Web Workers, or on the CPU.**  
 Write parallel compute code in C# and let the library pick the best available backend automatically.
