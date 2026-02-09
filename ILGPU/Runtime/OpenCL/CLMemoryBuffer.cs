@@ -12,6 +12,7 @@
 using ILGPU.Resources;
 using ILGPU.Util;
 using System;
+using static ILGPU.Runtime.OpenCL.CLAPI;
 
 namespace ILGPU.Runtime.OpenCL
 {

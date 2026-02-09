@@ -12,6 +12,7 @@
 using ILGPU.Resources;
 using ILGPU.Runtime.Cuda;
 using System;
+using static ILGPU.Runtime.Cuda.CudaAPI;
 
 namespace ILGPU.Runtime
 {

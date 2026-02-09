@@ -11,6 +11,7 @@
 
 using ILGPU.Backends.IL;
 using ILGPU.IR.Values;
+using ILGPU.Runtime.Velocity;
 using System;
 using System.Reflection.Emit;
 

@@ -14,6 +14,7 @@ using System;
 using System.Collections.Immutable;
 using System.Diagnostics.CodeAnalysis;
 using System.IO;
+using static ILGPU.Runtime.Cuda.CudaAPI;
 using static ILGPU.Runtime.Cuda.CudaException;
 
 namespace ILGPU.Runtime.Cuda

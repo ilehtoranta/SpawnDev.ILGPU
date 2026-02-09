@@ -10,6 +10,7 @@
 // ---------------------------------------------------------------------------------------
 
 using ILGPU.Backends.IL;
+using ILGPU.Runtime.Velocity;
 using System;
 
 namespace ILGPU.Backends.Velocity.Scalar

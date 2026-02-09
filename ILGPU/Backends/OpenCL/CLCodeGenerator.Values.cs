@@ -12,6 +12,7 @@
 using ILGPU.IR;
 using ILGPU.IR.Types;
 using ILGPU.IR.Values;
+using ILGPU.Runtime.OpenCL;
 using ILGPU.Util;
 using System.Runtime.CompilerServices;
 

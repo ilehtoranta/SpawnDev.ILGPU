@@ -13,6 +13,7 @@ using ILGPU.Backends.PTX;
 using System;
 using System.Diagnostics;
 using System.Reflection;
+using static ILGPU.Runtime.Cuda.CudaAPI;
 
 namespace ILGPU.Runtime.Cuda
 {

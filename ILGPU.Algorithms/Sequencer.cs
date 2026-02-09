@@ -9,6 +9,8 @@
 // Source License. See LICENSE.txt for details.
 // ---------------------------------------------------------------------------------------
 
+using ILGPU.Runtime;
+
 namespace ILGPU.Algorithms.Sequencers
 {
     /// <summary>

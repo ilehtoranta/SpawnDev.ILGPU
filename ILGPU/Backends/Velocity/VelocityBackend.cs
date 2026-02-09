@@ -17,6 +17,7 @@ using ILGPU.IR;
 using ILGPU.IR.Analyses;
 using ILGPU.IR.Transformations;
 using ILGPU.Runtime;
+using ILGPU.Runtime.Velocity;
 using ILGPU.Util;
 using System.Diagnostics.CodeAnalysis;
 

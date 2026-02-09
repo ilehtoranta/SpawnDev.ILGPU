@@ -13,6 +13,7 @@ using ILGPU.Backends.IL;
 using ILGPU.IR;
 using ILGPU.IR.Types;
 using ILGPU.IR.Values;
+using ILGPU.Runtime.Velocity;
 using ILGPU.Util;
 using System;
 using System.Reflection.Emit;

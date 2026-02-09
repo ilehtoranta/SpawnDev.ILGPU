@@ -9,6 +9,7 @@
 // Source License. See LICENSE.txt for details.
 // ---------------------------------------------------------------------------------------
 
+using ILGPU.Algorithms.ScanReduceOperations;
 using ILGPU.Algorithms.Vectors;
 using ILGPU.Runtime;
 using ILGPU.Util;

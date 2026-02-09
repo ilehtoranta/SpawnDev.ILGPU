@@ -10,6 +10,7 @@
 // ---------------------------------------------------------------------------------------
 
 using ILGPU.Backends.EntryPoints;
+using ILGPU.Runtime.CPU;
 using ILGPU.Util;
 using System.Collections.Immutable;
 using System.Reflection.Emit;
