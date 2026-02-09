@@ -28,6 +28,11 @@ if (typeof window !== 'undefined') {
 
     // First check if service workers are supported before trying to register one.
     if ("serviceWorker" in navigator) {
+        if (window.crossOriginIsolated) {
+            // Already cross-origin isolated — nothing to do
+            console.log("[COI] Cross-origin isolated ✓");
+            loadBlazor();
+        }
         // Register the service worker, which will add the necessary headers to enable
         // cross-origin isolation. The SW will reload the page once activated to apply the headers.
         console.log("[COI] Registering service worker...");
@@ -36,16 +41,12 @@ if (typeof window !== 'undefined') {
             .then(function (reg) {
                 console.log("[COI] Service worker registered:", reg.scope);
 
-                if (window.crossOriginIsolated) {
-                    // Already cross-origin isolated — nothing to do
-                    console.log("[COI] Cross-origin isolated ✓");
-                    loadBlazor();
-                } else if (navigator.serviceWorker.controller) {
+                if (navigator.serviceWorker.controller) {
                     // SW is controlling the page but we're not isolated.
                     // This can happen if the SW was just updated or headers aren't applied yet.
                     // Reload to pick up the headers from the active SW.
                     console.warn("[COI] Controlled by SW but not isolated. Reloading...");
-                    window.location.reload();
+                    reloadIfBlazorNotLoaded();
                 } else {
                     // SW registered but not controlling the page yet. Wait for it to activate and take control, then reload.
                     function waitForActivation(worker) {
