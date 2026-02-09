@@ -26,49 +26,8 @@
         <a href="." class="reload">Reload</a>
         <span class="dismiss">🗙</span>
     </div>
-    <script src="coi-serviceworker.js"></script>
-    <script>
-        // Load Blazor after cross-origin isolation is confirmed.
-        // The coi-serviceworker.js handles SW registration and initial reload.
-        // This script adds a polling fallback for hard-refresh (Ctrl+F5) scenarios
-        // where the SW is active but the controllerchange event doesn't fire.
-        (function () {
-            function loadBlazor() {
-                if (document.querySelector('script[src*="blazor.webassembly.js"]')) return;
-                var s = document.createElement("script");
-                s.src = "_framework/blazor.webassembly.js";
-                document.body.appendChild(s);
-            }
-
-            if (window.crossOriginIsolated || !("serviceWorker" in navigator)) {
-                loadBlazor();
-                return;
-            }
-
-            var el = document.querySelector(".loading-progress-text");
-            if (el) el.textContent = "Enabling cross-origin isolation...";
-
-            // Poll for isolation to become available (handles hard-refresh race)
-            var attempts = 0;
-            var maxAttempts = 10; // 10 x 500ms = 5 seconds max
-            var timer = setInterval(function () {
-                attempts++;
-                if (window.crossOriginIsolated) {
-                    clearInterval(timer);
-                    loadBlazor();
-                } else if (navigator.serviceWorker.controller) {
-                    // SW is controlling but we're not isolated yet — reload
-                    clearInterval(timer);
-                    window.location.reload();
-                } else if (attempts >= maxAttempts) {
-                    // Timeout: load Blazor anyway (single-worker fallback)
-                    clearInterval(timer);
-                    console.warn("[COI] Timed out waiting for cross-origin isolation. Loading without SharedArrayBuffer.");
-                    loadBlazor();
-                }
-            }, 500);
-        })();
-    </script>
+    <!-- Load Blazor after cross-origin isolation is confirmed. -->
+    <script src="blazor-coi-serviceworker.js"></script>
 </body>
 
 </html>

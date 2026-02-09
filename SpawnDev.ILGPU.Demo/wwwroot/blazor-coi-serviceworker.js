@@ -10,12 +10,22 @@
  * Registration: Add <script src="coi-serviceworker.js"></script> to index.html
  */
 
+
 if (typeof window !== 'undefined') {
     // --- Running as a regular script in the page context ---
+
+    // Helper to load Blazor after we ensure the page is cross-origin isolated.
+    function loadBlazor() {
+        if (document.querySelector('script[src*="blazor.webassembly.js"]')) return;
+        var s = document.createElement("script");
+        s.src = "_framework/blazor.webassembly.js";
+        document.body.appendChild(s);
+    }
 
     if (window.crossOriginIsolated) {
         // Already cross-origin isolated — nothing to do
         console.log("[COI] Cross-origin isolated ✓");
+        loadBlazor();
     } else if ("serviceWorker" in navigator) {
         if (navigator.serviceWorker.controller) {
             // SW is controlling the page but we're not isolated.
@@ -55,6 +65,11 @@ if (typeof window !== 'undefined') {
                             window.location.reload();
                         });
                     }
+
+                    // Fallback reload in case something goes wrong with the activation flow
+                    setTimeout(function () {
+                        window.location.reload()
+                    }, 2000); 
                 })
                 .catch(function (err) {
                     console.error("[COI] Service worker registration failed:", err);
