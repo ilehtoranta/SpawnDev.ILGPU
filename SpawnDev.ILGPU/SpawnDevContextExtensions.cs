@@ -44,7 +44,7 @@ namespace SpawnDev.ILGPU
             // WebGPU requires async probing — may not be available
             try
             {
-                await builder.WebGPUAsync();
+                await builder.WebGPU();
             }
             catch
             {
@@ -53,6 +53,8 @@ namespace SpawnDev.ILGPU
 
             return builder;
         }
+
+
 
         #endregion
 

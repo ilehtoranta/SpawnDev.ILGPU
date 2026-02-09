@@ -7,6 +7,8 @@
 
 using global::ILGPU;
 using global::ILGPU.Runtime;
+using SpawnDev.BlazorJS;
+using SpawnDev.BlazorJS.JSObjects;
 using SpawnDev.ILGPU.Wasm.Backend;
 
 namespace SpawnDev.ILGPU.Wasm
@@ -37,13 +39,32 @@ namespace SpawnDev.ILGPU.Wasm
 
         #region Instance
 
+        /// <summary>
+        /// The number of hardware threads reported by the browser.
+        /// </summary>
+        public int HardwareConcurrency { get; }
+
+        public static int GetHardwareConcurrency()
+        {
+            try
+            {
+                using var navigator = BlazorJSRuntime.JS.Get<Navigator>("navigator");
+                return navigator.HardwareConcurrency ?? 4;
+            }
+            catch
+            {
+                return 4;
+            }
+        }
+
         public WasmILGPUDevice()
         {
-            Name = "WebAssembly Compute";
+            HardwareConcurrency = GetHardwareConcurrency();
+            Name = $"WebAssembly Compute ({HardwareConcurrency} cores)";
             WarpSize = 1;
             MaxGroupSize = new Index3D(1024, 1024, 1024);
             MaxNumThreadsPerGroup = 1024;
-            NumMultiprocessors = 1;
+            NumMultiprocessors = HardwareConcurrency;
             MaxNumThreadsPerMultiprocessor = 1;
             MaxGridSize = new Index3D(int.MaxValue, 1, 1);
             MemorySize = 2L * 1024 * 1024 * 1024;

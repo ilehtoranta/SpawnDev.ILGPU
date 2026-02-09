@@ -326,8 +326,9 @@ namespace SpawnDev.ILGPU.Wasm.Backend
     {
         /// <summary>
         /// Number of Web Workers to use for parallel dispatch.
+        /// Defaults to navigator.hardwareConcurrency.
         /// </summary>
-        public int WorkerCount { get; set; } = 4;
+        public int WorkerCount { get; set; } = WasmILGPUDevice.GetHardwareConcurrency();
     }
 
     /// <summary>

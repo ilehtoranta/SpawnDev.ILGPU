@@ -2,6 +2,8 @@
 @implements IAsyncDisposable
 @using SpawnDev.ILGPU.WebGPU
 @using SpawnDev.ILGPU.WebGPU.Backend
+@using SpawnDev.ILGPU.Workers
+@using SpawnDev.ILGPU.Wasm
 @using SpawnDev.BlazorJS
 @using SpawnDev.BlazorJS.JSObjects
 @using ILGPU
@@ -19,6 +21,26 @@
         <div class="card mb-3">
             <div class="card-header">Controls</div>
             <div class="card-body">
+                <div class="mb-3">
+                    <label class="form-label fw-bold">Backend Engine</label>
+                    <select class="form-select" value="@_selectedBackend" @onchange="OnBackendChanged" disabled="@(_isInitializing)">
+                        <option value="WebGPU">WebGPU (GPU)</option>
+                        <option value="Workers">Workers (Multi-core CPU)</option>
+                        <option value="Wasm">Wasm (Multi-core Wasm)</option>
+                    </select>
+                    @if (_isInitializing)
+                    {
+                        <small class="text-muted mt-1 d-block">
+                            <span class="spinner-border spinner-border-sm" role="status"></span>
+                            Initializing @_selectedBackend...
+                        </small>
+                    }
+                    else if (!string.IsNullOrEmpty(_backendStatus))
+                    {
+                        <small class="text-success mt-1 d-block">✓ @_backendStatus</small>
+                    }
+                </div>
+
                 <div class="mb-3">
                     <label class="form-label fw-bold">Fractal Type</label>
                     <select class="form-select" @bind="_fractalType">
@@ -80,11 +102,13 @@
                 <canvas @ref="_fpsCanvas" width="220" height="80" style="width:100%; border:1px solid #444; border-radius:4px; background:#1a1a2e;"></canvas>
                 <div class="mt-2">
                     <small>
+                        <div><strong>Backend:</strong> @_selectedBackend</div>
                         <div><strong>FPS:</strong> @_currentFps.ToString("F1")</div>
-                        <div><strong>Render:</strong> @_lastRenderMs.ToString("F1") ms</div>
+                        <div><strong>Total:</strong> @_lastRenderMs.ToString("F1") ms</div>
+                        <div><strong>Kernel:</strong> @_lastKernelMs.ToString("F1") ms</div>
+                        <div><strong>Readback:</strong> @_lastReadbackMs.ToString("F1") ms</div>
                         <div><strong>Zoom:</strong> @FormatZoom()</div>
                         <div><strong>Center:</strong> @FormatCoord(_centerX), @FormatCoord(_centerY)</div>
-                        <div><strong>Precision:</strong> 64-bit (f64 emulation)</div>
                     </small>
                 </div>
             </div>
@@ -131,6 +155,12 @@
     private int _width = 900;
     private int _height = 700;
 
+    // Backend selection
+    private string _selectedBackend = "WebGPU";
+    private string _backendStatus = "";
+    private bool _isInitializing = false;
+    private bool _pendingBackendSwitch = false;
+
     // Fractal parameters
     private int _fractalType = 0;
     private int _colorScheme = 0;
@@ -151,6 +181,8 @@
     private bool _isRunning = false;
     private bool _disposed = false;
     private double _lastRenderMs = 0;
+    private double _lastKernelMs = 0;
+    private double _lastReadbackMs = 0;
     private double _currentFps = 0;
 
     // FPS tracking
@@ -170,10 +202,6 @@
     // Cached ILGPU resources
     private Context? _ilgpuContext;
     private Accelerator? _ilgpuAccelerator;
-    // Reduced to 8 scalar params to stay within WebGPU's maxStorageBuffersPerShaderStage (10)
-    // Total bindings: 2 (ArrayView2D) + 3 (ints) + 5 (doubles) = 10
-    // packedConfig = fractalType * 256 + colorScheme
-    // packedSize   = width * 65536 + height
     private Action<Index2D, ArrayView2D<uint, Stride2D.DenseX>,
         int, int, int,
         double, double, double, double, double>? _kernel;
@@ -187,15 +215,136 @@
         }
     }
 
+    // ========== Backend Switching ==========
+
+    private async Task OnBackendChanged(ChangeEventArgs e)
+    {
+        var newBackend = e.Value?.ToString() ?? "WebGPU";
+        if (newBackend == _selectedBackend) return;
+
+        _selectedBackend = newBackend;
+        _pendingBackendSwitch = true;
+        StateHasChanged();
+    }
+
+    private async Task SwitchBackend()
+    {
+        _isInitializing = true;
+        _backendStatus = "";
+        StateHasChanged();
+        await Task.Yield();
+
+        try
+        {
+            // Dispose old resources
+            DisposeAcceleratorResources();
+
+            // Create new accelerator for the selected backend
+            await InitializeBackend(_selectedBackend);
+            _backendStatus = $"{_ilgpuAccelerator!.Name}";
+
+            // Reset FPS history for clean comparison
+            _fpsHistory = new double[120];
+            _fpsIndex = 0;
+            _lastKernelMs = 0;
+            _lastReadbackMs = 0;
+            _lastRenderMs = 0;
+            _currentFps = 0;
+        }
+        catch (Exception ex)
+        {
+            _backendStatus = $"Error: {ex.Message}";
+            Console.WriteLine($"Backend switch error: {ex}");
+        }
+        finally
+        {
+            _isInitializing = false;
+            _pendingBackendSwitch = false;
+            StateHasChanged();
+        }
+    }
+
+    private void DisposeAcceleratorResources()
+    {
+        _kernel = null;
+        _outputBuffer?.Dispose();
+        _outputBuffer = null;
+        _ilgpuAccelerator?.Dispose();
+        _ilgpuAccelerator = null;
+        _ilgpuContext?.Dispose();
+        _ilgpuContext = null;
+    }
+
+    // ========== Initialization ==========
+
+    private async Task InitializeBackend(string backendName)
+    {
+        switch (backendName)
+        {
+            case "WebGPU":
+                await InitializeWebGPU();
+                break;
+            case "Workers":
+                await InitializeWorkers();
+                break;
+            case "Wasm":
+                await InitializeWasm();
+                break;
+            default:
+                throw new ArgumentException($"Unknown backend: {backendName}");
+        }
+
+        // Load kernel and allocate buffer (same for all backends)
+        _kernel = _ilgpuAccelerator!.LoadAutoGroupedStreamKernel<
+            Index2D, ArrayView2D<uint, Stride2D.DenseX>,
+            int, int, int,
+            double, double, double, double, double>(FractalKernel);
+        _outputBuffer = _ilgpuAccelerator.Allocate2DDenseX<uint>(new Index2D(_width, _height));
+    }
+
+    private async Task InitializeWebGPU()
+    {
+        _ilgpuContext = await Context.CreateAsync(builder => builder.WebGPU());
+        var devices = _ilgpuContext.GetWebGPUDevices();
+        if (devices.Count == 0) throw new Exception("No WebGPU device found");
+        _ilgpuAccelerator = await devices[0].CreateAcceleratorAsync(_ilgpuContext);
+    }
+
+    private async Task InitializeWorkers()
+    {
+        _ilgpuContext = await Context.CreateAsync(builder => builder.Workers());
+        var devices = _ilgpuContext.GetDevices<WorkersILGPUDevice>();
+        if (devices.Count == 0) throw new Exception("No Workers device found");
+        _ilgpuAccelerator = await devices[0].CreateAcceleratorAsync(_ilgpuContext);
+    }
+
+    private async Task InitializeWasm()
+    {
+        _ilgpuContext = await Context.CreateAsync(builder => builder.Wasm());
+        var devices = _ilgpuContext.GetDevices<WasmILGPUDevice>();
+        if (devices.Count == 0) throw new Exception("No Wasm device found");
+        _ilgpuAccelerator = await devices[0].CreateAcceleratorAsync(_ilgpuContext);
+    }
+
+    // ========== Render Loop ==========
+
     private async Task RenderLoop()
     {
         try
         {
-            await InitializeILGPU();
+            await InitializeBackend(_selectedBackend);
+            _backendStatus = $"{_ilgpuAccelerator!.Name}";
+            StateHasChanged();
 
             while (!_disposed)
             {
-                if (_isRunning)
+                if (_pendingBackendSwitch)
+                {
+                    await SwitchBackend();
+                    continue;
+                }
+
+                if (_isRunning || _isInitializing)
                 {
                     await Task.Delay(10);
                     continue;
@@ -209,6 +358,8 @@
         catch (Exception ex)
         {
             Console.WriteLine($"Render loop error: {ex}");
+            _backendStatus = $"Error: {ex.Message}";
+            StateHasChanged();
         }
     }
 
@@ -286,32 +437,12 @@
         }
     }
 
-    // ========== ILGPU Initialization ==========
-
-    private async Task InitializeILGPU()
-    {
-        if (_ilgpuContext != null) return;
-
-        var webGpuDevice = await WebGPUDevice.GetDefaultDeviceAsync();
-        if (webGpuDevice == null) throw new Exception("No WebGPU device found");
-
-        _ilgpuContext = Context.Create(builder => builder.Default());
-        var ilgpuDevice = new WebGPUILGPUDevice(webGpuDevice, 0);
-
-        // F64 emulation is enabled by default for full precision
-        _ilgpuAccelerator = await ilgpuDevice.CreateAcceleratorAsync(_ilgpuContext);
-
-        _kernel = _ilgpuAccelerator.LoadAutoGroupedStreamKernel<
-            Index2D, ArrayView2D<uint, Stride2D.DenseX>,
-            int, int, int,
-            double, double, double, double, double>(FractalKernel);
-        _outputBuffer = _ilgpuAccelerator.Allocate2DDenseX<uint>(new Index2D(_width, _height));
-    }
-
     // ========== Rendering ==========
 
     private async Task RenderFrame()
     {
+        if (_kernel == null || _outputBuffer == null || _ilgpuAccelerator == null) return;
+
         _isRunning = true;
         try
         {
@@ -320,22 +451,51 @@
             // Pack: fractalType*256 + colorScheme, width*65536 + height
             int packedSize = _width * 65536 + _height;
             int packedConfig = _fractalType * 256 + _colorScheme;
-            // Reuse extra1/extra2 for Julia or Phoenix params
             double extra1 = _fractalType == 1 ? _juliaReal : _phoenixP;
             double extra2 = _fractalType == 1 ? _juliaImag : _phoenixQ;
 
-            _kernel!(
-                _outputBuffer!.IntExtent, _outputBuffer.View,
+            // Dispatch kernel
+            _kernel(
+                _outputBuffer.IntExtent, _outputBuffer.View,
                 packedSize, _maxIterations, packedConfig,
                 _centerX, _centerY, _zoom, extra1, extra2);
 
-            await _ilgpuAccelerator!.SynchronizeAsync();
+            // Sync (unified — works for all backends)
+            await _ilgpuAccelerator.SynchronizeAsync();
 
-            var webGpuMemBuffer = (WebGPUMemoryBuffer)((IArrayView)_outputBuffer).Buffer;
-            var bytes = await webGpuMemBuffer.NativeBuffer.CopyToHostAsync();
+            var kernelTime = sw.Elapsed.TotalMilliseconds;
+            _lastKernelMs = kernelTime;
 
-            var result = new uint[_width * _height];
-            Buffer.BlockCopy(bytes, 0, result, 0, bytes.Length);
+            // Readback (unified — works for all backends)
+            var swReadback = Stopwatch.StartNew();
+            var internalBuffer = ((IArrayView)_outputBuffer).Buffer;
+            uint[] result;
+            if (internalBuffer is WebGPUMemoryBuffer webGpuBuf)
+            {
+                var byteData = await webGpuBuf.NativeBuffer.CopyToHostAsync();
+                result = new uint[_width * _height];
+                Buffer.BlockCopy(byteData, 0, result, 0, byteData.Length);
+            }
+            else if (internalBuffer is WorkersMemoryBuffer workersBuf)
+            {
+                var byteData = workersBuf.Uint8View!.ReadBytes();
+                result = new uint[_width * _height];
+                Buffer.BlockCopy(byteData, 0, result, 0, byteData.Length);
+            }
+            else if (internalBuffer is WasmMemoryBuffer wasmBuf)
+            {
+                var byteData = wasmBuf.TypedArrayView.ReadBytes();
+                result = new uint[_width * _height];
+                Buffer.BlockCopy(byteData, 0, result, 0, byteData.Length);
+            }
+            else
+            {
+                // CPU fallback — use standard ILGPU copy
+                result = new uint[_width * _height];
+                _outputBuffer.View.BaseView.CopyToCPU(result);
+            }
+            swReadback.Stop();
+            _lastReadbackMs = swReadback.Elapsed.TotalMilliseconds;
 
             sw.Stop();
             _lastRenderMs = sw.Elapsed.TotalMilliseconds;
@@ -408,8 +568,7 @@
     }
 
     // ========== Fractal Kernel ==========
-    // Uses scalar parameters (same pattern as proven Mandelbrot demo kernel)
-    // All doubles use f64 emulation for maximum precision
+    // Pure ILGPU — works on any backend (WebGPU, Workers, Wasm)
 
     static void FractalKernel(
         Index2D index,
@@ -417,12 +576,10 @@
         int packedSize, int maxIter, int packedConfig,
         double centerX, double centerY, double zoom, double extra1, double extra2)
     {
-        // Unpack integer parameters
         int width = packedSize / 65536;
         int height = packedSize - width * 65536;
         int fractalType = packedConfig / 256;
         int colorScheme = packedConfig - fractalType * 256;
-        // extra1/extra2 = juliaReal/juliaImag for Julia, paramP/paramQ for Phoenix
         double juliaReal = extra1;
         double juliaImag = extra2;
         double paramP = extra1;
@@ -434,12 +591,10 @@
         if (x >= width || y >= height)
             return;
 
-        // Map pixel to complex plane
         double scale = 4.0 / zoom;
         double real = centerX + (x - width * 0.5) * scale / width;
         double imag = centerY + (y - height * 0.5) * scale / height;
 
-        // Iteration variables
         double zr = 0.0;
         double zi = 0.0;
         double cr = real;
@@ -448,7 +603,6 @@
         double prevZi = 0.0;
         int iterations = 0;
 
-        // Julia: z starts at pixel, c is the fixed constant
         if (fractalType == 1)
         {
             zr = real;
@@ -456,14 +610,12 @@
             cr = juliaReal;
             ci = juliaImag;
         }
-        // Phoenix: z starts at pixel
         else if (fractalType == 4)
         {
             zr = real;
             zi = imag;
         }
 
-        // Main iteration loop (unified for all types)
         while (iterations < maxIter)
         {
             double zr2 = zr * zr;
@@ -476,7 +628,6 @@
 
             if (fractalType == 2)
             {
-                // Burning Ship - absolute values
                 double azr = zr;
                 double azi = zi;
                 if (azr < 0.0) azr = -azr;
@@ -486,13 +637,11 @@
             }
             else if (fractalType == 3)
             {
-                // Tricorn - conjugated imaginary
                 newZr = zr2 - zi2 + cr;
                 newZi = -2.0 * zr * zi + ci;
             }
             else if (fractalType == 4)
             {
-                // Phoenix
                 newZr = zr2 - zi2 + paramP + paramQ * prevZr;
                 newZi = 2.0 * zr * zi + paramQ * prevZi;
                 prevZr = zr;
@@ -500,7 +649,6 @@
             }
             else
             {
-                // Mandelbrot (0) and Julia (1) - same formula z² + c
                 newZr = zr2 - zi2 + cr;
                 newZi = 2.0 * zr * zi + ci;
             }
@@ -510,7 +658,7 @@
             iterations++;
         }
 
-        // ========== Coloring ==========
+        // Coloring
         uint color;
         if (iterations >= maxIter)
         {
@@ -525,41 +673,35 @@
 
             if (colorScheme == 1)
             {
-                // Smooth polynomial
                 rv = (uint)(9.0 * (1.0 - t) * t * t * t * 255.0);
                 gv = (uint)(15.0 * (1.0 - t) * (1.0 - t) * t * t * 255.0);
                 bv = (uint)(8.5 * (1.0 - t) * (1.0 - t) * (1.0 - t) * t * 255.0);
             }
             else if (colorScheme == 2)
             {
-                // Fire
                 rv = (uint)(t * 255.0);
                 gv = (uint)(t * t * 200.0);
                 bv = (uint)(t * t * t * 100.0);
             }
             else if (colorScheme == 3)
             {
-                // Ocean
                 rv = (uint)(t * t * 100.0);
                 gv = (uint)(t * 200.0);
                 bv = (uint)((0.5 + 0.5 * t) * 255.0);
             }
             else if (colorScheme == 4)
             {
-                // Neon
                 rv = (uint)((0.5 + 0.5 * t) * 255.0);
                 gv = (uint)(t * t * 255.0);
                 bv = (uint)((1.0 - t) * 255.0);
             }
             else
             {
-                // Classic (0)
                 rv = (uint)(iterations * 10) % 255u;
                 gv = (uint)(iterations * 5) % 255u;
                 bv = (uint)(iterations * 20) % 255u;
             }
 
-            // Clamp
             if (rv > 255u) rv = 255u;
             if (gv > 255u) gv = 255u;
             if (bv > 255u) bv = 255u;
@@ -576,9 +718,6 @@
     {
         _disposed = true;
         await Task.Delay(100);
-
-        _outputBuffer?.Dispose();
-        _ilgpuAccelerator?.Dispose();
-        _ilgpuContext?.Dispose();
+        DisposeAcceleratorResources();
     }
 }

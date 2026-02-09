@@ -22,7 +22,7 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
         private async Task<(Context context, Accelerator accelerator)> CreateAcceleratorAsync(bool enableEmulation)
         {
             var builder = Context.Create();
-            await builder.WebGPUAsync();
+            await builder.WebGPU();
             var context = builder.ToContext();
             var devices = context.GetWebGPUDevices();
             if (devices.Count == 0)
@@ -92,7 +92,7 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
             // F64 emulation is now enabled by default, so this test validates
             // that explicitly passing the default options still works
             var builder = Context.Create();
-            await builder.WebGPUAsync();
+            await builder.WebGPU();
             using var context = builder.ToContext();
             var device = context.GetWebGPUDevices()[0];
             using var accelerator = await device.CreateAcceleratorAsync(context);
@@ -124,7 +124,7 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
         {
             // F64 emulation is enabled by default
             var builder = Context.Create();
-            await builder.WebGPUAsync();
+            await builder.WebGPU();
             using var context = builder.ToContext();
             var device = context.GetWebGPUDevices()[0];
             using var accelerator = await device.CreateAcceleratorAsync(context);

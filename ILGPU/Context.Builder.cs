@@ -23,6 +23,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
+using System.Threading.Tasks;
 
 namespace ILGPU
 {
@@ -441,10 +442,37 @@ namespace ILGPU
         /// <returns>The created context.</returns>
         public static Context Create(Action<Builder> buildingCallback)
         {
-            if (buildingCallback is null)
-                throw new ArgumentNullException(nameof(buildingCallback));
+            ArgumentNullException.ThrowIfNull(buildingCallback);
 
             var builder = Create();
+            buildingCallback(builder);
+            return builder.ToContext();
+        }
+
+        /// <summary>
+        /// Async version of <see cref="Context.Create(Action{Context.Builder})"/>.
+        /// Creates a context using an async builder callback.
+        /// This allows async device registration (e.g., WebGPU probing) inside the builder.
+        /// </summary>
+        /// <param name="buildingCallback">An async callback that configures the builder.</param>
+        /// <returns>The built ILGPU context.</returns>
+        public static async Task<Context> CreateAsync(Func<Context.Builder, Task> buildingCallback)
+        {
+            var builder = Context.Create();
+            await buildingCallback(builder).ConfigureAwait(true);
+            return builder.ToContext();
+        }
+
+        /// <summary>
+        /// Async version of <see cref="Context.Create(Action{Context.Builder})"/>.
+        /// Creates a context using an async builder callback.
+        /// This allows async device registration (e.g., WebGPU probing) inside the builder.
+        /// </summary>
+        /// <param name="buildingCallback">An async callback that configures the builder.</param>
+        /// <returns>The built ILGPU context.</returns>
+        public static async Task<Context> CreateAsync(Action<Context.Builder> buildingCallback)
+        {
+            var builder = Context.Create();
             buildingCallback(builder);
             return builder.ToContext();
         }

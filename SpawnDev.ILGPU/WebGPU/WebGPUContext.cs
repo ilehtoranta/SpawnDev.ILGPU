@@ -15,8 +15,7 @@ namespace SpawnDev.ILGPU.WebGPU
         /// </summary>
         /// <param name="builder">The builder instance.</param>
         /// <returns>A task that represents the async operation.</returns>
-        public static async System.Threading.Tasks.Task WebGPUAsync(
-            this Context.Builder builder)
+        public static async System.Threading.Tasks.Task WebGPU(this Context.Builder builder)
         {
             await WebGPUILGPUDevice.GetDevicesAsync(
                 device => true,
@@ -29,7 +28,7 @@ namespace SpawnDev.ILGPU.WebGPU
         /// <param name="builder">The builder instance.</param>
         /// <param name="predicate">The predicate to include a given device.</param>
         /// <returns>A task that represents the async operation.</returns>
-        public static async System.Threading.Tasks.Task WebGPUAsync(
+        public static async System.Threading.Tasks.Task WebGPU(
             this Context.Builder builder,
             System.Predicate<WebGPUILGPUDevice> predicate)
         {
