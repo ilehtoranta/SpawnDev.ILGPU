@@ -12,7 +12,7 @@ Write parallel compute code in C# and let the library pick the best available ba
 │                    Your C# ILGPU Kernel                      │
 ├──────────────┬──────────────┬──────────────┬─────────────────┤
 │   WebGPU     │     Wasm     │   Workers    │      CPU        │
-│   Backend    │   Backend    │   Backend    │    Backend       │
+│   Backend    │   Backend    │   Backend    │    Backend      │
 ├──────────────┼──────────────┼──────────────┼─────────────────┤
 │ WGSL         │ WebAssembly  │ JavaScript   │ .NET runtime    │
 │ transpile    │ binary       │ transpile +  │ (main thread,   │
