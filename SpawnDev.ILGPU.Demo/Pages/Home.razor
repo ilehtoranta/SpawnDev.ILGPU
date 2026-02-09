@@ -111,6 +111,18 @@
         <div class="step">
             <div class="step-number">4</div>
             <div class="step-content">
+                <h3>Allocate &amp; Transfer</h3>
+                <p>Allocate a buffer on the device and copy your data to it.</p>
+                <div class="code-block">
+                    <pre><code><span class="keyword">float</span>[] data = <span class="keyword">new float</span>[length];
+<span class="keyword">using var</span> buffer = accelerator.<span class="method">Allocate1D</span>(data);</code></pre>
+                </div>
+            </div>
+        </div>
+
+        <div class="step">
+            <div class="step-number">5</div>
+            <div class="step-content">
                 <h3>Execute &amp; Retrieve</h3>
                 <p>Load, run, and read back — same API for all backends.</p>
                 <div class="code-block">
