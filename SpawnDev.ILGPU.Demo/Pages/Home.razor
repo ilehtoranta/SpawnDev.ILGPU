@@ -7,10 +7,10 @@
         <h1 class="hero-title">
             <span class="gradient-text">ILGPU for the Browser</span>
         </h1>
-        <p class="hero-subtitle">GPU compute, multi-threaded workers, and CPU — all in C#</p>
+        <p class="hero-subtitle">GPU compute, native Wasm, multi-threaded workers, and CPU — all in C#</p>
         <p class="hero-description">
-            Run ILGPU kernels in Blazor WebAssembly across three backends. 
-            WebGPU for GPU compute, Web Workers for multi-threaded parallelism, or CPU as a universal fallback — 
+            Run ILGPU kernels in Blazor WebAssembly across four backends. 
+            WebGPU for GPU compute, WebAssembly for near-native speed, Web Workers for multi-threaded parallelism, or CPU as a universal fallback — 
             the library picks the best available automatically.
         </p>
         <div class="hero-buttons">
@@ -25,12 +25,17 @@
 </div>
 
 <div class="features-section">
-    <h2 class="section-title">Three Backends, One API</h2>
+    <h2 class="section-title">Four Backends, One API</h2>
     <div class="features-grid">
         <div class="feature-card feature-highlight">
             <div class="feature-icon">🎮</div>
             <h3>WebGPU Backend</h3>
             <p>C# kernels transpiled to WGSL and dispatched to the GPU for maximum throughput. Supports shared memory, atomics, and 64-bit emulation.</p>
+        </div>
+        <div class="feature-card feature-highlight">
+            <div class="feature-icon">🧊</div>
+            <h3>Wasm Backend</h3>
+            <p>Kernels compiled to native WebAssembly binary and dispatched to Web Workers for near-native parallel execution.</p>
         </div>
         <div class="feature-card feature-highlight">
             <div class="feature-icon">🧵</div>
@@ -40,7 +45,7 @@
         <div class="feature-card feature-highlight">
             <div class="feature-icon">💻</div>
             <h3>CPU Backend</h3>
-            <p>Standard ILGPU CPU accelerator — works everywhere as a universal fallback, no browser features required.</p>
+            <p>Standard ILGPU CPU accelerator — works everywhere as a universal fallback. Runs on the main thread (blocking).</p>
         </div>
         <div class="feature-card">
             <div class="feature-icon">⚡</div>
@@ -50,7 +55,7 @@
         <div class="feature-card">
             <div class="feature-icon">🔀</div>
             <h3>Auto Backend Selection</h3>
-            <p>CreatePreferredAcceleratorAsync() picks the best backend: WebGPU → Workers → CPU.</p>
+            <p>CreatePreferredAcceleratorAsync() picks the best backend: WebGPU → Wasm → Workers → CPU.</p>
         </div>
         <div class="feature-card">
             <div class="feature-icon">🌐</div>
@@ -82,7 +87,7 @@
             <div class="step-number">2</div>
             <div class="step-content">
                 <h3>Initialize All Backends</h3>
-                <p>Register WebGPU, Workers, and CPU in one call.</p>
+                <p>Register WebGPU, Wasm, Workers, and CPU in one call.</p>
                 <div class="code-block">
                     <pre><code><span class="keyword">var</span> builder = Context.<span class="method">Create</span>();
 <span class="keyword">await</span> builder.<span class="method">AllAcceleratorsAsync</span>();
@@ -97,7 +102,7 @@
                 <h3>Create Best Accelerator</h3>
                 <p>Automatically selects the best available backend.</p>
                 <div class="code-block">
-                    <pre><code><span class="comment">// Priority: WebGPU → Workers → CPU</span>
+                    <pre><code><span class="comment">// Priority: WebGPU → Wasm → Workers → CPU</span>
 <span class="keyword">using var</span> accelerator = <span class="keyword">await</span> context.<span class="method">CreatePreferredAcceleratorAsync</span>();</code></pre>
                 </div>
             </div>

@@ -2,32 +2,51 @@
 
 [![NuGet](https://img.shields.io/nuget/v/SpawnDev.ILGPU.svg)](https://www.nuget.org/packages/SpawnDev.ILGPU)
 
-**Run [ILGPU](https://github.com/m4rs-mt/ILGPU) kernels in the browser — on the GPU via WebGPU, across threads via Web Workers, or on the CPU.**  
+**Run [ILGPU](https://github.com/m4rs-mt/ILGPU) kernels in the browser — on the GPU via WebGPU, natively via WebAssembly, across threads via Web Workers, or on the CPU.**  
 Write parallel compute code in C# and let the library pick the best available backend automatically.
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────┐
-│              Your C# ILGPU Kernel           │
-├──────────┬──────────────┬───────────────────┤
-│  WebGPU  │   Workers    │       CPU         │
-│  Backend │   Backend    │     Backend       │
-├──────────┼──────────────┼───────────────────┤
-│ WGSL     │ JavaScript   │ .NET interpreter  │
-│ transpile│ transpile +  │ (single-thread)   │
-│ → GPU    │ Web Workers  │                   │
-└──────────┴──────────────┴───────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│                    Your C# ILGPU Kernel                      │
+├──────────────┬──────────────┬──────────────┬─────────────────┤
+│   WebGPU     │     Wasm     │   Workers    │      CPU        │
+│   Backend    │   Backend    │   Backend    │    Backend       │
+├──────────────┼──────────────┼──────────────┼─────────────────┤
+│ WGSL         │ WebAssembly  │ JavaScript   │ .NET runtime    │
+│ transpile    │ binary       │ transpile +  │ (main thread,   │
+│ → GPU        │ → Workers    │ Web Workers  │  blocking)      │
+└──────────────┴──────────────┴──────────────┴─────────────────┘
 ```
+
+## Backends at a Glance
+
+| | 🎮 **WebGPU** | 🧊 **Wasm** | 🧵 **Workers** | 💻 **CPU** |
+|---|---|---|---|---|
+| **Executes on** | GPU | Web Workers | Web Workers | Main (UI) thread |
+| **Transpiles to** | WGSL | WebAssembly binary | JavaScript | — (interpreted) |
+| **Threading** | GPU parallelism | Multi-worker | Multi-worker | Single-threaded |
+| **Blocking** | Non-blocking | Non-blocking | Non-blocking | ⚠️ Blocks UI thread |
+| **SharedArrayBuffer** | Not required | Required for multi-worker | Required for multi-worker | Not required |
+| **Performance** | ⚡⚡⚡ Fastest | ⚡⚡ Fast | ⚡ Moderate | 🐢 Slowest |
+| **Shared Memory** | ✅ | ✅ | ✅ | ⚠️ Barriers broken in WASM |
+| **Atomics** | ✅ | ✅ | ✅ | ⚠️ Crashes in WASM |
+| **64-bit (f64/i64)** | ✅ Emulated | ✅ Native | ✅ Native | ✅ Native |
+| **Browser support** | Chrome/Edge 113+ | All modern browsers | All modern browsers | All modern browsers |
+| **Best for** | GPU compute, rendering | General compute | CPU-bound parallel work | Fallback / debugging |
+
+**Auto-selection priority:** WebGPU → Wasm → Workers → CPU
 
 ## Features
 
-- **Three backends** — WebGPU (GPU compute), Workers (multi-threaded JS), and CPU (fallback)
-- **Automatic backend selection** — `CreatePreferredAcceleratorAsync()` picks the best available: WebGPU → Workers → CPU
+- **Four backends** — WebGPU (GPU compute), Wasm (native WebAssembly), Workers (multi-threaded JS), and CPU (fallback)
+- **Automatic backend selection** — `CreatePreferredAcceleratorAsync()` picks the best available
 - **ILGPU-compatible** — Use familiar APIs (`ArrayView`, `Index1D/2D/3D`, math intrinsics, etc.)
 - **WGSL transpilation** — C# kernels automatically compiled to WebGPU Shading Language
+- **Wasm compilation** — C# kernels compiled to native WebAssembly binary modules
 - **64-bit emulation** — Support for `double` (f64) and `long` (i64) via emulated WGSL logic
-- **Multi-worker dispatch** — Workers backend distributes work across all available CPU cores via SharedArrayBuffer
+- **Multi-worker dispatch** — Wasm and Workers backends distribute work across all available CPU cores via SharedArrayBuffer
 - **Blazor WebAssembly** — Seamless integration via [SpawnDev.BlazorJS](https://github.com/LostBeard/SpawnDev.BlazorJS)
 - **Shared memory & atomics** — Supports workgroup memory, barriers, and atomic operations
 - **No native dependencies** — Entirely written in C#
@@ -64,12 +83,12 @@ using ILGPU;
 using ILGPU.Runtime;
 using SpawnDev.ILGPU;
 
-// Initialize context with all available backends (WebGPU, Workers, CPU)
+// Initialize context with all available backends (WebGPU, Wasm, Workers, CPU)
 var contextBuilder = Context.Create();
 await contextBuilder.AllAcceleratorsAsync();
 using var context = contextBuilder.ToContext();
 
-// Create the best available accelerator (WebGPU > Workers > CPU)
+// Create the best available accelerator (WebGPU > Wasm > Workers > CPU)
 using var accelerator = await context.CreatePreferredAcceleratorAsync();
 
 // Allocate buffers and run a kernel — same API regardless of backend
@@ -117,8 +136,8 @@ using var accelerator = await device.CreateWorkersAcceleratorAsync();
 
 The demo application is located in [SpawnDev.ILGPU.Demo](SpawnDev.ILGPU.Demo) and showcases:
 - Automatic device detection across all backends
-- Interactive Mandelbrot / Fractal Explorer (WebGPU)
-- Comprehensive unit test suites for WebGPU, Workers, and default backend selection
+- Interactive Mandelbrot / Fractal Explorer (WebGPU, Wasm, Workers)
+- Comprehensive unit test suites for WebGPU, Workers, Wasm, and CPU backends
 - View the [Live Demo](https://lostbeard.github.io/SpawnDev.ILGPU/)
 
 ### Running the Demo
@@ -146,15 +165,17 @@ _test.bat
 
 ## Test Coverage
 
-**145 tests** across three test suites covering all core features.
+**240+ tests** across four test suites covering all core features.
 
 ### Test Suites
 
-| Suite | Tests | Backend | What's Tested |
-|-------|-------|---------|---------------|
-| **WebGPUTests** | 95 | WebGPU | Full ILGPU feature set on GPU via WGSL |
-| **WorkerTests** | 46 | Workers | Multi-threaded JS dispatch, parity with WebGPU |
-| **DefaultTests** | 3 | Auto | Device enumeration, preferred backend, kernel execution |
+| Suite | Backend | What's Tested |
+|-------|---------|---------------|
+| **WebGPUTests** | WebGPU | Full ILGPU feature set on GPU via WGSL |
+| **WasmTests** | Wasm | Native WebAssembly binary dispatch to workers |
+| **WorkerTests** | Workers | Multi-threaded JS dispatch, parity with WebGPU |
+| **CPUTests** | CPU | ILGPU CPU accelerator as reference (barriers/atomics excluded) |
+| **DefaultTests** | Auto | Device enumeration, preferred backend, kernel execution |
 
 ### Coverage by Area
 
@@ -171,17 +192,17 @@ _test.bat
 | **Type Casting** | float↔int, uint, mixed precision | ✅ |
 | **64-bit Emulation** | `double` and `long` via software emulation (WebGPU) | ✅ |
 | **GPU Patterns** | Stencil, reduction, matrix multiply, lerp, smoothstep | ✅ |
-| **Shared Memory** | Static and dynamic workgroup memory (WebGPU) | ✅ |
+| **Shared Memory** | Static and dynamic workgroup memory | ✅ |
 | **Special Values** | NaN, Infinity detection | ✅ |
 | **Backend Selection** | Auto-discovery, priority, cross-backend kernel execution | ✅ |
 
 ## Browser Requirements
 
-- Chrome 113+ (WebGPU + Workers)
-- Edge 113+ (WebGPU + Workers)
-- Firefox Nightly with `dom.webgpu.enabled` (WebGPU); stable Firefox (Workers + CPU only)
+- Chrome 113+ (WebGPU + all backends)
+- Edge 113+ (WebGPU + all backends)
+- Firefox Nightly with `dom.webgpu.enabled` (WebGPU); stable Firefox (Wasm + Workers + CPU)
 
-> **Note:** For multi-worker SharedArrayBuffer support, the page must be cross-origin isolated (COOP/COEP headers). The demo includes a service worker (`coi-serviceworker.js`) that handles this automatically.
+> **Note:** For multi-worker SharedArrayBuffer support (used by Wasm and Workers backends), the page must be cross-origin isolated (COOP/COEP headers). The demo includes a service worker (`coi-serviceworker.js`) that handles this automatically. Without SharedArrayBuffer, both backends fall back to single-worker mode.
 
 ## WebGPU Backend Configuration
 
@@ -224,6 +245,14 @@ var device = context.GetWorkersDevices()[0];
 using var accelerator = await device.CreateWorkersAcceleratorAsync(workerCount: 4);
 ```
 
+## Wasm Backend
+
+The Wasm backend compiles ILGPU kernels to native WebAssembly binary modules and dispatches them to Web Workers for parallel execution. This provides near-native performance for compute-intensive workloads.
+
+- Kernels are compiled to `.wasm` binary format (not text)
+- Compiled modules are cached and reused across dispatches
+- Shared memory uses `SharedArrayBuffer` for zero-copy data sharing
+
 ## Async Synchronization
 
 In Blazor WebAssembly, the main thread cannot block. Use `SynchronizeAsync()` instead of `Synchronize()`:
@@ -234,6 +263,20 @@ accelerator.Synchronize();
 
 // ✅ Use async version — works with all backends
 await accelerator.SynchronizeAsync();
+```
+
+## Verbose Logging
+
+All backends include verbose debug logging, disabled by default. Enable per-backend when needed:
+
+```csharp
+using SpawnDev.ILGPU.WebGPU.Backend;
+using SpawnDev.ILGPU.Workers.Backend;
+using SpawnDev.ILGPU.Wasm.Backend;
+
+WebGPUBackend.VerboseLogging = true;   // WebGPU backend
+WasmBackend.VerboseLogging = true;     // Wasm backend
+WorkersBackend.VerboseLogging = true;  // Workers backend
 ```
 
 ## Blazor WebAssembly Configuration
