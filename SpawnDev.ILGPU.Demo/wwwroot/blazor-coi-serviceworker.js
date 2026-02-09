@@ -13,6 +13,13 @@
 if (typeof window !== 'undefined') {
     // --- Running as a regular script in the page context ---
 
+    // Set to true to enable verbose logging of service worker registration and activation flow. Useful for debugging but can be noisy in normal use.
+    var verbose = false;
+    function consoleLog(...args) {
+        if (!verbose) return;
+        console.log("[COI]", ...args);
+    }
+    
     // Helper to check if Blazor script is loaded
     function isBlazorRunning() {
         return !!document.querySelector('script[src*="blazor.webassembly.js"]');
@@ -21,7 +28,7 @@ if (typeof window !== 'undefined') {
     // Start Blazor immediately if we're already cross-origin isolated.
     if (window.crossOriginIsolated && !isBlazorRunning()) {
         // Already cross-origin isolated — nothing to do
-        console.log("[COI] Cross-origin isolated ✓");
+        consoleLog("[COI] Cross-origin isolated ✓");
         var s = document.createElement("script");
         s.src = "_framework/blazor.webassembly.js";
         document.body.appendChild(s);
@@ -31,25 +38,25 @@ if (typeof window !== 'undefined') {
     if ("serviceWorker" in navigator) {
         // Register the service worker, which will add the necessary headers to enable
         // cross-origin isolation. The SW will reload the page once activated to apply the headers.
-        console.log("[COI] Registering service worker...");
+        consoleLog("[COI] Registering service worker...");
         navigator.serviceWorker
             .register(window.document.currentScript.src)
             .then(function (reg) {
-                console.log("[COI] Service worker registered:", reg.scope);
+                consoleLog("[COI] Service worker registered:", reg.scope);
                 if (!isBlazorRunning()) {
                     if (navigator.serviceWorker.controller) {
                         // SW is controlling the page but we're not isolated.
                         // This can happen if the SW was just updated or headers aren't applied yet.
                         // Reload to pick up the headers from the active SW.
-                        console.warn("[COI] Controlled by SW but not isolated. Reloading...");
+                        consoleLog("[COI] Controlled by SW but not isolated. Reloading...");
                         window.location.reload();
                     } else {
                         // SW registered but not controlling the page yet. Wait for it to activate and take control, then reload.
                         function waitForActivation(worker) {
                             worker.addEventListener("statechange", function () {
-                                console.log("[COI] Worker statechange — .", worker.state);
+                                consoleLog("[COI] Worker statechange — .", worker.state);
                                 if (worker.state === "activated") {
-                                    console.log("[COI] Worker activated — reloading.");
+                                    consoleLog("[COI] Worker activated — reloading.");
                                     window.location.reload();
                                 }
                             });
@@ -65,7 +72,7 @@ if (typeof window !== 'undefined') {
                             // SW is active but not controlling this page yet.
                             // clients.claim() in the SW will trigger "controllerchange".
                             navigator.serviceWorker.addEventListener("controllerchange", function () {
-                                console.log("[COI] Controller changed — reloading.");
+                                consoleLog("[COI] Controller changed — reloading.");
                                 window.location.reload();
                             });
                         }
@@ -73,7 +80,7 @@ if (typeof window !== 'undefined') {
                         // Fallback reload in case something goes wrong with the activation flow
                         setTimeout(function () {
                             if (document.querySelector('script[src*="blazor.webassembly.js"]')) return;
-                            console.warn("[COI] Reloading as fallback in case activation flow fails.");
+                            consoleLog("[COI] Reloading as fallback in case activation flow fails.");
                             window.location.reload();
                         }, 1000);
                     }
@@ -115,7 +122,7 @@ if (typeof window !== 'undefined') {
                     });
                 })
                 .catch(function (e) {
-                    console.warn("[COI] Fetch failed for:", event.request.url, e.message);
+                    consoleLog("[COI] Fetch failed for:", event.request.url, e.message);
                     return new Response("Service Worker fetch failed", {
                         status: 502,
                         statusText: "Service Worker Fetch Failed",
