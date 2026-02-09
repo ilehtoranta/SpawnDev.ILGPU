@@ -86,9 +86,13 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         public const byte I64Eq = 0x51;
         public const byte I64Ne = 0x52;
         public const byte I64LtS = 0x53;
+        public const byte I64LtU = 0x54;
         public const byte I64GtS = 0x55;
+        public const byte I64GtU = 0x56;
         public const byte I64LeS = 0x57;
+        public const byte I64LeU = 0x58;
         public const byte I64GeS = 0x59;
+        public const byte I64GeU = 0x5A;
 
         // === f32 Comparison ===
         public const byte F32Eq = 0x5B;
@@ -127,16 +131,24 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         public const byte I32Rotr = 0x78;
 
         // === i64 Arithmetic ===
+        public const byte I64Clz = 0x79;
+        public const byte I64Ctz = 0x7A;
+        public const byte I64Popcnt = 0x7B;
         public const byte I64Add = 0x7C;
         public const byte I64Sub = 0x7D;
         public const byte I64Mul = 0x7E;
         public const byte I64DivS = 0x7F;
+        public const byte I64DivU = 0x80;
+        public const byte I64RemS = 0x81;
+        public const byte I64RemU = 0x82;
         public const byte I64And = 0x83;
         public const byte I64Or = 0x84;
         public const byte I64Xor = 0x85;
         public const byte I64Shl = 0x86;
         public const byte I64ShrS = 0x87;
         public const byte I64ShrU = 0x88;
+        public const byte I64Rotl = 0x89;
+        public const byte I64Rotr = 0x8A;
 
         // === f32 Arithmetic ===
         public const byte F32Abs = 0x8B;

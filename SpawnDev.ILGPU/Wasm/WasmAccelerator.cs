@@ -173,7 +173,7 @@ namespace SpawnDev.ILGPU.Wasm
 
                 // Collect all SharedArrayBuffers from buffer arguments
                 var bufferInfos = new List<(WasmMemoryBuffer buffer, int byteOffset)>();
-                var wasmArgs = new List<(bool isBuffer, WasmMemoryBuffer? buffer, int length, object? value)>();
+                var wasmArgs = new List<(bool isBuffer, WasmMemoryBuffer? buffer, int length, int stride, int stride2, object? value)>();
 
                 for (int i = 0; i < args.Length; i++)
                 {
@@ -187,22 +187,56 @@ namespace SpawnDev.ILGPU.Wasm
                         if (wasmBuf != null)
                         {
                             bufferInfos.Add((wasmBuf, wasmBuf.ByteOffset));
-                            wasmArgs.Add((true, wasmBuf, (int)iav.Length, null));
+
+                            // Extract stride via reflection for multi-dimensional views
+                            int stride = 1;
+                            int stride2 = 0;
+                            var argType = args[i].GetType();
+                            var strideProp = argType.GetProperty("Stride");
+                            if (strideProp != null)
+                            {
+                                var strideObj = strideProp.GetValue(args[i]);
+                                if (strideObj != null)
+                                {
+                                    // Try YStride (for Stride2D.DenseX, Stride3D.DenseXY)
+                                    var yStrideProp = strideObj.GetType().GetProperty("YStride");
+                                    if (yStrideProp != null)
+                                    {
+                                        stride = (int)yStrideProp.GetValue(strideObj)!;
+                                    }
+                                    else
+                                    {
+                                        // Try XStride (for Stride2D.DenseY)
+                                        var xStrideProp = strideObj.GetType().GetProperty("XStride");
+                                        if (xStrideProp != null)
+                                            stride = (int)xStrideProp.GetValue(strideObj)!;
+                                    }
+
+                                    // Try ZStride (for Stride3D.DenseXY)
+                                    var zStrideProp = strideObj.GetType().GetProperty("ZStride");
+                                    if (zStrideProp != null)
+                                    {
+                                        stride2 = (int)zStrideProp.GetValue(strideObj)!;
+                                    }
+                                }
+                            }
+                            WasmBackend.Log($"[Wasm] View arg[{i}]: length={iav.Length}, stride={stride}, stride2={stride2}");
+                            wasmArgs.Add((true, wasmBuf, (int)iav.Length, stride, stride2, null));
                         }
                         else
                         {
-                            wasmArgs.Add((false, null, 0, 0));
+                            wasmArgs.Add((false, null, 0, 0, 0, 0));
                         }
                     }
                     else
                     {
-                        wasmArgs.Add((false, null, 0, args[i]));
+                        wasmArgs.Add((false, null, 0, 0, 0, args[i]));
                     }
                 }
 
                 // Build and execute
                 var wasmBase64 = Convert.ToBase64String(compiledKernel.WasmBinary);
-                await DispatchToMainThread(wasmBase64, totalItems, wasmArgs, bufferInfos);
+                await DispatchToMainThread(wasmBase64, totalItems, gridDimX, gridDimY, wasmArgs, bufferInfos);
             }
             catch (Exception ex)
             {
@@ -217,7 +251,9 @@ namespace SpawnDev.ILGPU.Wasm
         private async Task DispatchToMainThread(
             string wasmBase64,
             int totalItems,
-            List<(bool isBuffer, WasmMemoryBuffer? buffer, int length, object? value)> wasmArgs,
+            int gridDimX,
+            int gridDimY,
+            List<(bool isBuffer, WasmMemoryBuffer? buffer, int length, int stride, int stride2, object? value)> wasmArgs,
             List<(WasmMemoryBuffer buffer, int byteOffset)> bufferInfos)
         {
             var js = BlazorJSRuntime.JS;
@@ -232,9 +268,13 @@ namespace SpawnDev.ILGPU.Wasm
                 bufferOffsets.Add(totalMemoryBytes);
                 totalMemoryBytes += (int)buf.LengthInBytes;
             }
+            // Scratch memory for struct construction (after all buffers)
+            int scratchBase = (totalMemoryBytes + 7) & ~7; // 8-byte align
+            int scratchSize = 4096; // 4KB for temporary structs
+            int totalWithScratch = scratchBase + scratchSize;
 
             // Round up to Wasm page size (64KB)
-            int wasmPages = Math.Max(1, (totalMemoryBytes + 65535) / 65536);
+            int wasmPages = Math.Max(1, (totalWithScratch + 65535) / 65536);
 
             // Create Wasm memory
             using var wasmMemory = js.Call<JSObject>(
@@ -255,15 +295,17 @@ namespace SpawnDev.ILGPU.Wasm
                 dstView.JSRef!.CallVoid("set", srcView);
             }
 
-            // Build worker args: [bufferOffset, bufferLen] or [scalarValue]
+            // Build worker args: [bufferOffset, bufferLen, stride] or [scalarValue]
             var flatArgs = new List<string>();
             int bufferIndex = 0;
-            foreach (var (isBuffer, buffer, length, value) in wasmArgs)
+            foreach (var (isBuffer, buffer, length, stride, stride2, value) in wasmArgs)
             {
                 if (isBuffer)
                 {
                     flatArgs.Add(bufferOffsets[bufferIndex].ToString());
                     flatArgs.Add(length.ToString());
+                    flatArgs.Add(stride.ToString());
+                    flatArgs.Add(stride2.ToString());
                     bufferIndex++;
                 }
                 else
@@ -293,15 +335,34 @@ namespace SpawnDev.ILGPU.Wasm
         const module = await WebAssembly.compile(wasmBuf);
         console.log('[Wasm-JS] Module compiled. Exports:', WebAssembly.Module.exports(module));
         console.log('[Wasm-JS] Imports:', WebAssembly.Module.imports(module));
-        const instance = await WebAssembly.instantiate(module, {{ env: {{ memory: memory }} }});
+        const instance = await WebAssembly.instantiate(module, {{
+            env: {{ memory: memory }},
+            Math: {{
+                sin: Math.sin, cos: Math.cos, tan: Math.tan,
+                asin: Math.asin, acos: Math.acos, atan: Math.atan,
+                sinh: Math.sinh, cosh: Math.cosh, tanh: Math.tanh,
+                exp: Math.exp, log: Math.log, log2: Math.log2,
+                log10: Math.log10, round: Math.round,
+                truncate: Math.trunc, sign: Math.sign,
+                exp2: (x) => Math.pow(2, x),
+                sqrt: Math.sqrt, abs: Math.abs,
+                ceil: Math.ceil, floor: Math.floor,
+                pow: Math.pow, atan2: Math.atan2
+            }}
+        }});
         const kernel = instance.exports.kernel;
         console.log('[Wasm-JS] Kernel function:', kernel, 'length:', kernel.length);
         const totalItems = {totalItems};
         const view32 = new Int32Array(memory.buffer);
         console.log('[Wasm-JS] First 8 i32s before exec:', Array.from(view32.slice(0, 8)));
-        console.log('[Wasm-JS] Calling kernel with totalItems=', totalItems, 'args: [{argStr}]');
+        console.log('[Wasm-JS] Calling kernel with totalItems=', totalItems, 'dimX=', {gridDimX}, 'dimY=', {gridDimY}, 'args: [{argStr}]');
         for (let i = 0; i < totalItems; i++) {{
-            kernel(i, totalItems{(argStr.Length > 0 ? ", " + argStr : "")});
+            try {{
+                kernel(i, {gridDimX}, {gridDimY}, {scratchBase}{(argStr.Length > 0 ? ", " + argStr : "")});
+                console.log('[Wasm-JS] kernel(' + i + ') completed. First 8 i32s:', Array.from(new Int32Array(memory.buffer, 0, 8)));
+            }} catch(kerr) {{
+                console.error('[Wasm-JS] kernel(' + i + ') TRAPPED:', kerr.message);
+            }}
         }}
         console.log('[Wasm-JS] First 8 i32s after exec:', Array.from(view32.slice(0, 8)));
         console.log('[Wasm-JS] Kernel execution complete');

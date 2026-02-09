@@ -74,6 +74,19 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         }
 
         /// <summary>
+        /// Imports a function and returns its function index.
+        /// Imported functions come before defined functions in the index space.
+        /// </summary>
+        public int ImportFunction(string module, string name, int typeIndex)
+        {
+            int funcIdx = _importFuncCount;
+            _importFuncCount++;
+            _imports.Add((module, name, WasmOpCodes.ExternalFunc,
+                new FuncImportDetails { TypeIndex = typeIndex }));
+            return funcIdx;
+        }
+
+        /// <summary>
         /// Adds a function with the given type index and returns its function index
         /// (accounting for imported functions).
         /// </summary>
@@ -160,7 +173,11 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 WriteString(s, name);
                 s.WriteByte(kind);
 
-                if (kind == WasmOpCodes.ExternalMemory && details is MemoryImportDetails mem)
+                if (kind == WasmOpCodes.ExternalFunc && details is FuncImportDetails funcImport)
+                {
+                    WriteU32Leb128(s, (uint)funcImport.TypeIndex);
+                }
+                else if (kind == WasmOpCodes.ExternalMemory && details is MemoryImportDetails mem)
                 {
                     // Shared memory with max: flags=0x03, min, max
                     if (mem.Shared)
@@ -393,6 +410,15 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         }
 
         /// <summary>
+        /// Writes a call instruction to a byte list.
+        /// </summary>
+        public static void EmitCall(List<byte> code, uint funcIndex)
+        {
+            code.Add(WasmOpCodes.Call);
+            EmitU32Leb128(code, funcIndex);
+        }
+
+        /// <summary>
         /// Writes an unsigned LEB128 to a byte list (for instruction operands).
         /// </summary>
         public static void EmitU32Leb128(List<byte> code, uint value)
@@ -477,6 +503,11 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             public uint MinPages { get; set; }
             public uint MaxPages { get; set; }
             public bool Shared { get; set; }
+        }
+
+        private class FuncImportDetails
+        {
+            public int TypeIndex { get; set; }
         }
 
         #endregion

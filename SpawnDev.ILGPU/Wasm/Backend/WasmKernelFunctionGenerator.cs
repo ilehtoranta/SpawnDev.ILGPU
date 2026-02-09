@@ -13,6 +13,8 @@ using global::ILGPU;
 using global::ILGPU.Backends;
 using global::ILGPU.IR;
 using global::ILGPU.IR.Analyses;
+using global::ILGPU.IR.Analyses.ControlFlowDirection;
+using global::ILGPU.IR.Analyses.TraversalOrders;
 using global::ILGPU.IR.Types;
 using global::ILGPU.IR.Values;
 using System.Text;
@@ -46,6 +48,12 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         private readonly Dictionary<int, uint[]> _paramLocals = new();
 
         /// <summary>
+        /// For view parameters, maps ILGPU param index to the first stride field index in the IR struct.
+        /// Strides are always the trailing Int32 fields after the pointer + Int64 extent fields.
+        /// </summary>
+        private readonly Dictionary<int, int> _viewStrideStartField = new();
+
+        /// <summary>
         /// The parameter info for marshaling (written to GeneratorArgs).
         /// </summary>
         private readonly List<WasmParamInfo> _paramInfos = new();
@@ -61,9 +69,61 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         private uint _dimXLocal;
 
         /// <summary>
+        /// Wasm local index for dimension Y (used for 2D/3D kernels).
+        /// </summary>
+        private uint _dimYLocal;
+
+        /// <summary>
+        /// Wasm local index for scratch memory base address.
+        /// Used by StructureValue for temporary struct construction in linear memory.
+        /// </summary>
+        private uint _scratchBaseLocal;
+
+        /// <summary>
+        /// Tracks the next available byte offset within the scratch memory area.
+        /// Reset for each kernel compilation.
+        /// </summary>
+        private int _scratchNextOffset = 0;
+
+        /// <summary>
+        /// The index type of the kernel (Index1D, Index2D, Index3D).
+        /// </summary>
+        private IndexType _indexType = IndexType.Index1D;
+
+        /// <summary>
+        /// The IR parameter that represents the implicit index (for 2D/3D decomposition).
+        /// </summary>
+        private global::ILGPU.IR.Values.Parameter? _indexParam;
+
+        /// <summary>
         /// Whether this kernel uses views (ArrayView).
         /// </summary>
         private bool _hasViews = false;
+
+        /// <summary>
+        /// Maps BasicBlock to its index in the state machine.
+        /// </summary>
+        private readonly Dictionary<BasicBlock, int> _blockMap = new();
+
+        /// <summary>
+        /// State local for the state machine (_block variable).
+        /// </summary>
+        private uint _stateLocal;
+
+        /// <summary>
+        /// Whether the state machine is active (multi-block kernel).
+        /// </summary>
+        private bool _isStateMachine = false;
+
+        /// <summary>
+        /// Number of blocks in the state machine (used for br_table nesting depth).
+        /// </summary>
+        private int _blockCount = 0;
+
+        /// <summary>
+        /// Index of the block currently being emitted (0-indexed). Used for br depth calculation.
+        /// </summary>
+        private int _currentBlockEmitIndex = 0;
 
         public WasmKernelFunctionGenerator(
             in GeneratorArgs args,
@@ -95,17 +155,29 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             _nextLocalIndex = 0;
             _paramCount = 0;
 
-            // Fixed params: globalIdx (i32), dimX (i32)
+            // Store the index type for decomposition in GetField
+            _indexType = entryPoint.IndexType;
+
+            // Fixed params: globalIdx (i32), dimX (i32), dimY (i32), scratchBase (i32)
             _globalIdxLocal = _nextLocalIndex++;
             _paramCount++;
 
             _dimXLocal = _nextLocalIndex++;
             _paramCount++;
 
+            _dimYLocal = _nextLocalIndex++;
+            _paramCount++;
+
+            _scratchBaseLocal = _nextLocalIndex++;
+            _paramCount++;
+            _scratchNextOffset = 0;
+
             // FuncParamTypes tracks Wasm type signatures for the module builder
             FuncParamTypes.Clear();
             FuncParamTypes.Add(WasmOpCodes.I32); // param 0: globalIdx
             FuncParamTypes.Add(WasmOpCodes.I32); // param 1: dimX
+            FuncParamTypes.Add(WasmOpCodes.I32); // param 2: dimY
+            FuncParamTypes.Add(WasmOpCodes.I32); // param 3: scratchBase
 
             // Iterate IR kernel parameters (skip implicit index at position 0 for grouped kernels)
             int startIdx = entryPoint.IsExplicitlyGrouped ? 0 : 1;
@@ -113,9 +185,9 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             // Map the implicit index param to globalIdx
             if (!entryPoint.IsExplicitlyGrouped && parameters.Count > 0)
             {
-                var indexParam = parameters[0];
-                _localMap[GetValueKey(indexParam)] = _globalIdxLocal;
-                WasmBackend.Log($"[Wasm-Setup] Index param {GetValueKey(indexParam)} -> local_{_globalIdxLocal}");
+                _indexParam = parameters[0];
+                _localMap[GetValueKey(_indexParam)] = _globalIdxLocal;
+                WasmBackend.Log($"[Wasm-Setup] Index param {GetValueKey(_indexParam)} -> local_{_globalIdxLocal}, IndexType={_indexType}");
             }
 
             for (int i = startIdx; i < parameters.Count; i++)
@@ -138,10 +210,39 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                     uint lengthLocal = _nextLocalIndex++;
                     _paramCount++;
 
-                    _paramLocals[i] = new[] { offsetLocal, lengthLocal };
+                    FuncParamTypes.Add(WasmOpCodes.I32); // stride (YStride for 2D, YStride for 3D)
+                    uint strideLocal = _nextLocalIndex++;
+                    _paramCount++;
+
+                    FuncParamTypes.Add(WasmOpCodes.I32); // stride2 (ZStride for 3D, 0 for 1D/2D)
+                    uint stride2Local = _nextLocalIndex++;
+                    _paramCount++;
+
+                    _paramLocals[i] = new[] { offsetLocal, lengthLocal, strideLocal, stride2Local };
                     _localMap[GetValueKey(param)] = offsetLocal;
 
-                    WasmBackend.Log($"[Wasm-Setup]   View: {GetValueKey(param)}=local_{offsetLocal} (length=local_{lengthLocal})");
+                    WasmBackend.Log($"[Wasm-Setup]   View: {GetValueKey(param)}=local_{offsetLocal} (length=local_{lengthLocal}, stride=local_{strideLocal}, stride2=local_{stride2Local})");
+
+                    // Determine stride field start index from the IR struct type
+                    // The struct layout is: [View, Int64..., Int32...] where Int32 fields are strides
+                    int strideStart = 1; // default: right after field 0
+                    if (paramType is StructureType structType)
+                    {
+                        int fieldCount = structType.NumFields;
+                        // Find first Int32 field after field 0 - these are stride fields
+                        strideStart = fieldCount; // default to end (no strides)
+                        for (int fi = 1; fi < fieldCount; fi++)
+                        {
+                            var fieldType = structType.Fields[fi];
+                            if (fieldType is PrimitiveType pft && pft.BasicValueType == BasicValueType.Int32)
+                            {
+                                strideStart = fi;
+                                break;
+                            }
+                        }
+                    }
+                    _viewStrideStartField[i] = strideStart;
+                    WasmBackend.Log($"[Wasm-Setup]   View strideStartField={strideStart}");
 
                     var elemType = GetViewElementType(paramType);
                     int elemSize = 4;
@@ -200,7 +301,73 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         }
 
         /// <summary>
+        /// Gets the block index for a basic block in the state machine.
+        /// </summary>
+        private int GetBlockIndex(BasicBlock block)
+        {
+            if (_blockMap.TryGetValue(block, out var idx))
+                return idx;
+            return 0;
+        }
+
+        /// <summary>
+        /// Pushes phi values before a branch.
+        /// For each target block, find any phi values that source from the current block
+        /// and assign them before transitioning.
+        /// </summary>
+        private void PushPhiValues(Branch branch)
+        {
+            for (int i = 0; i < branch.NumTargets; i++)
+            {
+                var target = branch.Targets[i];
+                foreach (var valueEntry in target)
+                {
+                    if (valueEntry.Value is PhiValue phi)
+                    {
+                        // Find the value from the current block for this phi
+                        for (int j = 0; j < phi.Count; j++)
+                        {
+                            if (phi.Sources[j] == branch.BasicBlock)
+                            {
+                                var phiLocal = GetLocal(phi);
+                                EmitGetLocal(phi[j].Resolve());
+                                WasmModuleBuilder.EmitLocalSet(Code, phiLocal);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        /// <summary>
+        /// Computes the br depth to reach $loop from the code section of the current block.
+        /// After block K's End has been emitted, remaining nesting above is:
+        ///   (N-K-1) remaining blocks + $loop + $exit
+        /// The label stack at Block K's code position:
+        ///   depth 0: B[K+1], depth 1: B[K+2], ..., depth (N-K-2): B[N-1],
+        ///   depth (N-K-1): $loop, depth (N-K): $exit
+        /// So depth to $loop = N - K - 1 = _blockCount - _currentBlockEmitIndex - 1.
+        /// </summary>
+        private uint GetBrDepthToLoop(int extraNesting = 0)
+        {
+            return (uint)(_blockCount - _currentBlockEmitIndex - 1 + extraNesting);
+        }
+
+        /// <summary>
+        /// Emits state transition: set _state = blockIndex, then br $loop.
+        /// extraNesting accounts for additional nesting from if/else blocks.
+        /// </summary>
+        private void EmitBranchToBlock(int targetBlockIndex, int extraNesting = 0)
+        {
+            WasmModuleBuilder.EmitI32Const(Code, targetBlockIndex);
+            WasmModuleBuilder.EmitLocalSet(Code, _stateLocal);
+            Code.Add(WasmOpCodes.Br);
+            WasmModuleBuilder.EmitU32Leb128(Code, GetBrDepthToLoop(extraNesting));
+        }
+
+        /// <summary>
         /// Generates the function body by visiting all blocks.
+        /// For multi-block kernels, uses a state machine with loop/block/br_table.
         /// </summary>
         public override void GenerateCode()
         {
@@ -208,20 +375,194 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             // ILGPU calls GenerateCode() BEFORE GenerateHeader().
             SetupParameters();
 
-            // Visit all basic blocks
-            foreach (var block in Method.Blocks)
-            {
-                foreach (var value in block)
-                {
-                    GenerateCodeFor(value);
-                }
+            var blocks = Method.Blocks;
+            _blockCount = blocks.Count;
 
-                // Handle terminator
-                if (block.Terminator != null)
-                {
-                    GenerateCodeFor(block.Terminator);
-                }
+            if (_blockCount == 1)
+            {
+                // Single block: no state machine needed
+                _isStateMachine = false;
+                var singleBlock = blocks.First();
+                foreach (var value in singleBlock)
+                    GenerateCodeFor(value);
+                if (singleBlock.Terminator != null)
+                    GenerateCodeFor(singleBlock.Terminator);
             }
+            else
+            {
+                // Multi-block: state machine
+                GenerateStateMachineCode(blocks);
+            }
+        }
+
+        /// <summary>
+        /// Generates state machine code for multi-block kernels.
+        /// 
+        /// Wasm structured control flow pattern:
+        ///   block $exit
+        ///     loop $loop
+        ///       block $blockN
+        ///         block $blockN-1
+        ///           ...
+        ///           block $block0
+        ///             local.get $state
+        ///             br_table $block0 $block1 ... $blockN $exit
+        ///           end ;; $block0
+        ///           [code for block 0]
+        ///           br $loop
+        ///         end ;; $block1
+        ///         [code for block 1]
+        ///         br $loop
+        ///       end ;; $blockN
+        ///       [code for block N]
+        ///       br $loop
+        ///     end ;; $loop
+        ///   end ;; $exit
+        /// </summary>
+        private void GenerateStateMachineCode(BasicBlockCollection<ReversePostOrder, Forwards> blocks)
+        {
+            _isStateMachine = true;
+
+            // Allocate state local
+            _stateLocal = AllocateNewLocal(WasmOpCodes.I32);
+
+            // Build block map
+            int blockIndex = 0;
+            foreach (var block in blocks)
+            {
+                _blockMap[block] = blockIndex;
+                blockIndex++;
+            }
+
+            WasmBackend.Log($"[Wasm-SM] State machine with {_blockCount} blocks, _stateLocal=local_{_stateLocal}");
+
+            // Initialize state to 0 (first block)
+            WasmModuleBuilder.EmitI32Const(Code, 0);
+            WasmModuleBuilder.EmitLocalSet(Code, _stateLocal);
+
+            // block $exit
+            Code.Add(WasmOpCodes.Block);
+            Code.Add(WasmOpCodes.Void);
+
+            // loop $loop
+            Code.Add(WasmOpCodes.Loop);
+            Code.Add(WasmOpCodes.Void);
+
+            // Nested blocks for dispatch: block $blockN { block $blockN-1 { ... block $block0 { ... } } }
+            for (int i = 0; i < _blockCount; i++)
+            {
+                Code.Add(WasmOpCodes.Block);
+                Code.Add(WasmOpCodes.Void);
+            }
+
+            // br_table dispatch: local.get $state; br_table 0 1 2 ... N-1 N
+            WasmModuleBuilder.EmitLocalGet(Code, _stateLocal);
+            Code.Add(WasmOpCodes.BrTable);
+            WasmModuleBuilder.EmitU32Leb128(Code, (uint)_blockCount); // number of targets (not counting default)
+            for (int i = 0; i < _blockCount; i++)
+                WasmModuleBuilder.EmitU32Leb128(Code, (uint)i); // target labels (0..N-1 break out of corresponding block)
+            WasmModuleBuilder.EmitU32Leb128(Code, (uint)(_blockCount + 1)); // default: br to $exit
+
+            // Now emit code for each block
+            blockIndex = 0;
+            foreach (var block in blocks)
+            {
+                // End the innermost remaining block — this is where br_table lands for this index
+                Code.Add(WasmOpCodes.End);
+
+                _currentBlockEmitIndex = blockIndex;
+
+                WasmBackend.Log($"[Wasm-SM] Block {blockIndex}: {block}");
+
+                // Generate code for all values in this block
+                foreach (var value in block)
+                    GenerateCodeFor(value);
+
+                // Handle terminator (branches/return)
+                if (block.Terminator != null)
+                    GenerateCodeFor(block.Terminator);
+
+                blockIndex++;
+            }
+
+            // end $loop
+            Code.Add(WasmOpCodes.End);
+
+            // end $exit
+            Code.Add(WasmOpCodes.End);
+        }
+
+        // === Control Flow Overrides ===
+
+        public override void GenerateCode(ReturnTerminator returnTerminator)
+        {
+            if (_isStateMachine)
+            {
+                // Set state to an invalid value and br to $loop.
+                // $loop will re-dispatch via br_table which hits the default target → $exit.
+                WasmModuleBuilder.EmitI32Const(Code, _blockCount); // out-of-range state
+                WasmModuleBuilder.EmitLocalSet(Code, _stateLocal);
+                Code.Add(WasmOpCodes.Br);
+                WasmModuleBuilder.EmitU32Leb128(Code, GetBrDepthToLoop());
+            }
+            else
+            {
+                Code.Add(WasmOpCodes.Return);
+            }
+        }
+
+        public override void GenerateCode(UnconditionalBranch branch)
+        {
+            if (!_isStateMachine) return;
+
+            PushPhiValues(branch);
+            int targetBlock = GetBlockIndex(branch.Target);
+            EmitBranchToBlock(targetBlock);
+        }
+
+        public override void GenerateCode(IfBranch branch)
+        {
+            if (!_isStateMachine) return;
+
+            PushPhiValues(branch);
+
+            int trueBlock = GetBlockIndex(branch.TrueTarget);
+            int falseBlock = GetBlockIndex(branch.FalseTarget);
+
+            EmitGetLocal(branch.Condition.Resolve());
+            Code.Add(WasmOpCodes.If);
+            Code.Add(WasmOpCodes.Void);
+            // True branch — inside if{}, adds 1 nesting level
+            EmitBranchToBlock(trueBlock, 1);
+            Code.Add(WasmOpCodes.Else);
+            // False branch — still inside if/else{}, same extra nesting
+            EmitBranchToBlock(falseBlock, 1);
+            Code.Add(WasmOpCodes.End);
+        }
+
+        public override void GenerateCode(SwitchBranch branch)
+        {
+            if (!_isStateMachine) return;
+
+            PushPhiValues(branch);
+
+            int defaultBlock = GetBlockIndex(branch.DefaultBlock);
+
+            // For each case, use if chain — each if adds +1 nesting
+            for (int i = 0; i < branch.NumCasesWithoutDefault; i++)
+            {
+                EmitGetLocal(branch.Condition.Resolve());
+                WasmModuleBuilder.EmitI32Const(Code, i);
+                Code.Add(WasmOpCodes.I32Eq);
+                Code.Add(WasmOpCodes.If);
+                Code.Add(WasmOpCodes.Void);
+                int caseBlock = GetBlockIndex(branch.GetCaseTarget(i));
+                EmitBranchToBlock(caseBlock, 1);
+                Code.Add(WasmOpCodes.End);
+            }
+
+            // Default — no extra nesting
+            EmitBranchToBlock(defaultBlock);
         }
 
         /// <summary>
@@ -257,12 +598,24 @@ namespace SpawnDev.ILGPU.Wasm.Backend
 
         public override void GenerateCode(Load value)
         {
-            var target = AllocateLocal(value, GetWasmType(value));
-            var source = value.Source.Resolve();
+            // For struct types, the "value" is a memory address (i32 byte offset).
+            // Don't actually load from memory — just pass through the address.
+            // GetField will do the actual typed loads from memory at the correct offsets.
+            if (value.Type is StructureType)
+            {
+                var target = AllocateLocal(value, WasmOpCodes.I32);
+                var source = value.Source.Resolve();
+                EmitGetLocal(source);
+                WasmModuleBuilder.EmitLocalSet(Code, target);
+                return;
+            }
+
+            var target2 = AllocateLocal(value, GetWasmType(value));
+            var source2 = value.Source.Resolve();
             var wasmType = GetWasmType(value);
 
             // Push the address (byte offset in linear memory)
-            EmitGetLocal(source);
+            EmitGetLocal(source2);
 
             // Emit the appropriate load instruction
             byte loadOp;
@@ -288,43 +641,9 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             }
 
             WasmModuleBuilder.EmitLoad(Code, loadOp, align, 0);
-            WasmModuleBuilder.EmitLocalSet(Code, target);
+            WasmModuleBuilder.EmitLocalSet(Code, target2);
         }
 
-        public override void GenerateCode(Store value)
-        {
-            var target = value.Target.Resolve();
-            var storeValue = value.Value.Resolve();
-            var wasmType = GetWasmTypeFromIR(storeValue.Type);
-
-            // Push address, then value
-            EmitGetLocal(target);
-            EmitGetLocal(storeValue);
-
-            byte storeOp;
-            uint align;
-            switch (wasmType)
-            {
-                case WasmOpCodes.I64:
-                    storeOp = WasmOpCodes.I64Store;
-                    align = 3;
-                    break;
-                case WasmOpCodes.F32:
-                    storeOp = WasmOpCodes.F32Store;
-                    align = 2;
-                    break;
-                case WasmOpCodes.F64:
-                    storeOp = WasmOpCodes.F64Store;
-                    align = 3;
-                    break;
-                default:
-                    storeOp = WasmOpCodes.I32Store;
-                    align = 2;
-                    break;
-            }
-
-            WasmModuleBuilder.EmitStore(Code, storeOp, align, 0);
-        }
 
         public override void GenerateCode(LoadElementAddress value)
         {
@@ -339,12 +658,26 @@ namespace SpawnDev.ILGPU.Wasm.Backend
 
             // Determine element size
             int elemSize = 4;
-            if (value.Type is AddressSpaceType addrType && addrType.ElementType is PrimitiveType pt)
-                elemSize = GetElementSize(pt.BasicValueType);
+            if (value.Type is AddressSpaceType addrType)
+            {
+                if (addrType.ElementType is PrimitiveType pt)
+                    elemSize = GetElementSize(pt.BasicValueType);
+                else if (addrType.ElementType is StructureType st)
+                    elemSize = st.Size;
+            }
 
             // addr = source + index * elemSize
+            // Source is an i32 memory address
             EmitGetLocal(source);
+            // Wrap i64 source to i32 if needed (pointers are i32 in Wasm)
+            if (GetWasmTypeFromIR(source.Type) == WasmOpCodes.I64)
+                Code.Add(WasmOpCodes.I32WrapI64);
+
+            // Index may be i64 (ILGPU uses Int64 for linearized 2D/3D array indices)
             EmitGetLocal(index);
+            if (GetWasmTypeFromIR(index.Type) == WasmOpCodes.I64)
+                Code.Add(WasmOpCodes.I32WrapI64);
+
             WasmModuleBuilder.EmitI32Const(Code, elemSize);
             Code.Add(WasmOpCodes.I32Mul);
             Code.Add(WasmOpCodes.I32Add);
@@ -362,6 +695,60 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             var source = value.ObjectValue.Resolve();
             var fieldIndex = (int)value.FieldSpan.Index;
 
+            // Check if source is the implicit index parameter for 2D/3D decomposition
+            if (source is global::ILGPU.IR.Values.Parameter indexParam && indexParam == _indexParam)
+            {
+                switch (_indexType)
+                {
+                    case IndexType.Index2D:
+                        if (fieldIndex == 0) // X = globalIdx % dimX
+                        {
+                            WasmModuleBuilder.EmitLocalGet(Code, _globalIdxLocal);
+                            WasmModuleBuilder.EmitLocalGet(Code, _dimXLocal);
+                            Code.Add(WasmOpCodes.I32RemS);
+                        }
+                        else // Y = globalIdx / dimX
+                        {
+                            WasmModuleBuilder.EmitLocalGet(Code, _globalIdxLocal);
+                            WasmModuleBuilder.EmitLocalGet(Code, _dimXLocal);
+                            Code.Add(WasmOpCodes.I32DivS);
+                        }
+                        WasmModuleBuilder.EmitLocalSet(Code, target);
+                        return;
+
+                    case IndexType.Index3D:
+                        if (fieldIndex == 0) // X = globalIdx % dimX
+                        {
+                            WasmModuleBuilder.EmitLocalGet(Code, _globalIdxLocal);
+                            WasmModuleBuilder.EmitLocalGet(Code, _dimXLocal);
+                            Code.Add(WasmOpCodes.I32RemS);
+                        }
+                        else if (fieldIndex == 1) // Y = (globalIdx / dimX) % dimY
+                        {
+                            WasmModuleBuilder.EmitLocalGet(Code, _globalIdxLocal);
+                            WasmModuleBuilder.EmitLocalGet(Code, _dimXLocal);
+                            Code.Add(WasmOpCodes.I32DivS);
+                            WasmModuleBuilder.EmitLocalGet(Code, _dimYLocal);
+                            Code.Add(WasmOpCodes.I32RemS);
+                        }
+                        else // Z = globalIdx / (dimX * dimY)
+                        {
+                            WasmModuleBuilder.EmitLocalGet(Code, _globalIdxLocal);
+                            WasmModuleBuilder.EmitLocalGet(Code, _dimXLocal);
+                            WasmModuleBuilder.EmitLocalGet(Code, _dimYLocal);
+                            Code.Add(WasmOpCodes.I32Mul);
+                            Code.Add(WasmOpCodes.I32DivS);
+                        }
+                        WasmModuleBuilder.EmitLocalSet(Code, target);
+                        return;
+
+                    default: // Index1D - just use globalIdx directly
+                        WasmModuleBuilder.EmitLocalGet(Code, _globalIdxLocal);
+                        WasmModuleBuilder.EmitLocalSet(Code, target);
+                        return;
+                }
+            }
+
             // Check if source is a Parameter that maps to an ArrayView
             if (source is global::ILGPU.IR.Values.Parameter param && IsViewType(param.Type))
             {
@@ -372,30 +759,370 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 }
                 if (_paramLocals.TryGetValue(paramIdx, out var locals))
                 {
-                    switch (fieldIndex)
+                    var targetWasmType = GetWasmType(value);
+                    WasmBackend.Log($"[Wasm-GetField] View param[{paramIdx}] field={fieldIndex} targetType={targetWasmType:X} localsCount={locals.Length} sourceType={param.Type}");
+
+                    // Determine stride start field for this view parameter
+                    int strideStartField = _viewStrideStartField.GetValueOrDefault(paramIdx, 3);
+                    int strideFieldOffset = fieldIndex - strideStartField; // 0=stride1, 1=stride2, etc.
+
+                    if (fieldIndex == 0)
                     {
-                        case 0: // Ptr (byte offset)
-                            WasmModuleBuilder.EmitLocalGet(Code, locals[0]);
-                            break;
-                        case 1: // Index/Offset
-                            WasmModuleBuilder.EmitI32Const(Code, 0);
-                            break;
-                        case 2: // Length
-                        case 3:
+                        // Ptr (byte offset)
+                        WasmModuleBuilder.EmitLocalGet(Code, locals[0]);
+                    }
+                    else if (fieldIndex < strideStartField)
+                    {
+                        // Extent/index/length fields — these are i64 fields
+                        // Field 1 = offset (always 0 for views)
+                        // Field 2+ = extent dimensions or length
+                        if (fieldIndex == 1)
+                        {
+                            // Index/Offset - always zero
+                            if (targetWasmType == WasmOpCodes.I64)
+                                WasmModuleBuilder.EmitI64Const(Code, 0);
+                            else
+                                WasmModuleBuilder.EmitI32Const(Code, 0);
+                        }
+                        else
+                        {
+                            // Length/extent fields - return length from locals[1]
                             WasmModuleBuilder.EmitLocalGet(Code, locals[1]);
-                            break;
-                        default:
+                            if (targetWasmType == WasmOpCodes.I64)
+                                Code.Add(WasmOpCodes.I64ExtendI32S);
+                        }
+                    }
+                    else if (strideFieldOffset == 0)
+                    {
+                        // Stride1 (YStride)
+                        if (locals.Length > 2)
+                        {
+                            WasmModuleBuilder.EmitLocalGet(Code, locals[2]);
+                            if (targetWasmType == WasmOpCodes.I64)
+                                Code.Add(WasmOpCodes.I64ExtendI32S);
+                        }
+                        else
+                        {
+                            if (targetWasmType == WasmOpCodes.I64)
+                                WasmModuleBuilder.EmitI64Const(Code, 1);
+                            else
+                                WasmModuleBuilder.EmitI32Const(Code, 1);
+                        }
+                    }
+                    else if (strideFieldOffset == 1)
+                    {
+                        // Stride2 (ZStride)
+                        if (locals.Length > 3)
+                        {
+                            WasmModuleBuilder.EmitLocalGet(Code, locals[3]);
+                            if (targetWasmType == WasmOpCodes.I64)
+                                Code.Add(WasmOpCodes.I64ExtendI32S);
+                        }
+                        else
+                        {
+                            if (targetWasmType == WasmOpCodes.I64)
+                                WasmModuleBuilder.EmitI64Const(Code, 0);
+                            else
+                                WasmModuleBuilder.EmitI32Const(Code, 0);
+                        }
+                    }
+                    else
+                    {
+                        // Unknown/higher stride field
+                        if (targetWasmType == WasmOpCodes.I64)
+                            WasmModuleBuilder.EmitI64Const(Code, 0);
+                        else
                             WasmModuleBuilder.EmitI32Const(Code, 0);
-                            break;
                     }
                     WasmModuleBuilder.EmitLocalSet(Code, target);
                     return;
                 }
             }
 
+            // Handle struct field access from memory
+            // Source is a memory address (i32), and we need to load the specific field
+            if (source.Type is StructureType structType)
+            {
+                var fieldAccess = new FieldAccess(fieldIndex);
+                int byteOffset = structType.GetOffset(fieldAccess);
+                var fieldType = structType.Fields[fieldIndex];
+                byte fieldWasmType = GetWasmTypeFromIR(fieldType);
+
+                // Push address: source + byteOffset
+                EmitGetLocal(source);
+                if (byteOffset > 0)
+                {
+                    WasmModuleBuilder.EmitI32Const(Code, byteOffset);
+                    Code.Add(WasmOpCodes.I32Add);
+                }
+
+                // Emit typed load for the field
+                byte loadOp;
+                uint align;
+                switch (fieldWasmType)
+                {
+                    case WasmOpCodes.I64:
+                        loadOp = WasmOpCodes.I64Load;
+                        align = 3;
+                        break;
+                    case WasmOpCodes.F32:
+                        loadOp = WasmOpCodes.F32Load;
+                        align = 2;
+                        break;
+                    case WasmOpCodes.F64:
+                        loadOp = WasmOpCodes.F64Load;
+                        align = 3;
+                        break;
+                    default:
+                        loadOp = WasmOpCodes.I32Load;
+                        align = 2;
+                        break;
+                }
+                WasmModuleBuilder.EmitLoad(Code, loadOp, align, 0);
+                WasmModuleBuilder.EmitLocalSet(Code, target);
+                return;
+            }
+
             // Fallback: pass through
             EmitGetLocal(source);
             WasmModuleBuilder.EmitLocalSet(Code, target);
+        }
+
+        public override void GenerateCode(SetField value)
+        {
+            // SetField modifies a field of a struct and returns the modified struct.
+            // In our Wasm model, structs are memory addresses, so we write the field
+            // value to memory at base + offset and return the base address.
+            var objectValue = value.ObjectValue.Resolve();
+
+            if (objectValue.Type is StructureType structType)
+            {
+                var target = AllocateLocal(value, WasmOpCodes.I32);
+                int fieldIdx = (int)value.FieldSpan.Index;
+                var fieldAccess = new FieldAccess(fieldIdx);
+                int byteOffset = structType.GetOffset(fieldAccess);
+                var fieldType = structType.Fields[fieldIdx];
+                byte fieldWasmType = GetWasmTypeFromIR(fieldType);
+
+                // Store the new field value to memory: mem[base + offset] = newValue
+                EmitGetLocal(objectValue); // push base address
+                if (byteOffset > 0)
+                {
+                    WasmModuleBuilder.EmitI32Const(Code, byteOffset);
+                    Code.Add(WasmOpCodes.I32Add);
+                }
+                EmitGetLocal(value.Value.Resolve()); // push new value
+
+                // Emit typed store
+                byte storeOp;
+                uint align;
+                switch (fieldWasmType)
+                {
+                    case WasmOpCodes.I64:
+                        storeOp = WasmOpCodes.I64Store;
+                        align = 3;
+                        break;
+                    case WasmOpCodes.F32:
+                        storeOp = WasmOpCodes.F32Store;
+                        align = 2;
+                        break;
+                    case WasmOpCodes.F64:
+                        storeOp = WasmOpCodes.F64Store;
+                        align = 3;
+                        break;
+                    default:
+                        storeOp = WasmOpCodes.I32Store;
+                        align = 2;
+                        break;
+                }
+                WasmModuleBuilder.EmitStore(Code, storeOp, align, 0);
+
+                // Return the base address (unchanged — struct was modified in-place)
+                EmitGetLocal(objectValue);
+                WasmModuleBuilder.EmitLocalSet(Code, target);
+                return;
+            }
+
+            // Non-struct fallback: pass through the value
+            var fallbackTarget = AllocateLocal(value, GetWasmType(value));
+            EmitGetLocal(value.Value.Resolve());
+            WasmModuleBuilder.EmitLocalSet(Code, fallbackTarget);
+        }
+
+        public override void GenerateCode(Store value)
+        {
+            var target = value.Target.Resolve();
+            var storeValue = value.Value.Resolve();
+
+            // For struct types, we need to copy each field from source to destination
+            if (storeValue.Type is StructureType structType)
+            {
+                int structSize = structType.Size;
+                // Copy field by field
+                for (int i = 0; i < structType.NumFields; i++)
+                {
+                    var fieldAccess = new FieldAccess(i);
+                    int byteOffset = structType.GetOffset(fieldAccess);
+                    var fieldType = structType.Fields[i];
+                    byte fieldWasmType = GetWasmTypeFromIR(fieldType);
+
+                    byte loadOp, storeOp;
+                    uint align;
+                    switch (fieldWasmType)
+                    {
+                        case WasmOpCodes.I64:
+                            loadOp = WasmOpCodes.I64Load;
+                            storeOp = WasmOpCodes.I64Store;
+                            align = 3;
+                            break;
+                        case WasmOpCodes.F32:
+                            loadOp = WasmOpCodes.F32Load;
+                            storeOp = WasmOpCodes.F32Store;
+                            align = 2;
+                            break;
+                        case WasmOpCodes.F64:
+                            loadOp = WasmOpCodes.F64Load;
+                            storeOp = WasmOpCodes.F64Store;
+                            align = 3;
+                            break;
+                        default:
+                            loadOp = WasmOpCodes.I32Load;
+                            storeOp = WasmOpCodes.I32Store;
+                            align = 2;
+                            break;
+                    }
+
+                    // Push destination address + offset
+                    EmitGetLocal(target);
+                    if (byteOffset > 0)
+                    {
+                        WasmModuleBuilder.EmitI32Const(Code, byteOffset);
+                        Code.Add(WasmOpCodes.I32Add);
+                    }
+
+                    // Load field value from source address + offset
+                    EmitGetLocal(storeValue);
+                    if (byteOffset > 0)
+                    {
+                        WasmModuleBuilder.EmitI32Const(Code, byteOffset);
+                        Code.Add(WasmOpCodes.I32Add);
+                    }
+                    WasmModuleBuilder.EmitLoad(Code, loadOp, align, 0);
+
+                    // Store to destination
+                    WasmModuleBuilder.EmitStore(Code, storeOp, align, 0);
+                }
+                return;
+            }
+
+            // Non-struct types: standard typed store
+            var wasmType = GetWasmTypeFromIR(storeValue.Type);
+
+            // Push address, then value
+            EmitGetLocal(target);
+            EmitGetLocal(storeValue);
+
+            byte sOp;
+            uint sAlign;
+            switch (wasmType)
+            {
+                case WasmOpCodes.I64:
+                    sOp = WasmOpCodes.I64Store;
+                    sAlign = 3;
+                    break;
+                case WasmOpCodes.F32:
+                    sOp = WasmOpCodes.F32Store;
+                    sAlign = 2;
+                    break;
+                case WasmOpCodes.F64:
+                    sOp = WasmOpCodes.F64Store;
+                    sAlign = 3;
+                    break;
+                default:
+                    sOp = WasmOpCodes.I32Store;
+                    sAlign = 2;
+                    break;
+            }
+
+            WasmModuleBuilder.EmitStore(Code, sOp, sAlign, 0);
+        }
+
+        public override void GenerateCode(StructureValue value)
+        {
+            // StructureValue constructs a struct from field values.
+            // Allocate space in scratch memory, store each field, return the base address.
+            var target = AllocateLocal(value, WasmOpCodes.I32);
+
+            if (value.Type is StructureType structType && value.Count > 0)
+            {
+                // Compute this struct's base address in scratch memory
+                int baseOffset = _scratchNextOffset;
+                _scratchNextOffset += structType.Size;
+                // Align to 8 bytes for next allocation
+                _scratchNextOffset = (_scratchNextOffset + 7) & ~7;
+
+                // Compute base address = scratchBaseLocal + baseOffset
+                WasmModuleBuilder.EmitLocalGet(Code, _scratchBaseLocal);
+                if (baseOffset > 0)
+                {
+                    WasmModuleBuilder.EmitI32Const(Code, baseOffset);
+                    Code.Add(WasmOpCodes.I32Add);
+                }
+                WasmModuleBuilder.EmitLocalSet(Code, target);
+
+                // Store each field to memory at the correct offset
+                for (int i = 0; i < value.Count && i < structType.NumFields; i++)
+                {
+                    var fieldAccess = new FieldAccess(i);
+                    int fieldOffset = structType.GetOffset(fieldAccess);
+                    var fieldType = structType.Fields[i];
+                    byte fieldWasmType = GetWasmTypeFromIR(fieldType);
+
+                    // Push destination address: target + fieldOffset
+                    WasmModuleBuilder.EmitLocalGet(Code, target);
+                    if (fieldOffset > 0)
+                    {
+                        WasmModuleBuilder.EmitI32Const(Code, fieldOffset);
+                        Code.Add(WasmOpCodes.I32Add);
+                    }
+
+                    // Push field value
+                    EmitGetLocal(value[i].Resolve());
+
+                    // Emit typed store
+                    byte storeOp;
+                    uint align;
+                    switch (fieldWasmType)
+                    {
+                        case WasmOpCodes.I64:
+                            storeOp = WasmOpCodes.I64Store;
+                            align = 3;
+                            break;
+                        case WasmOpCodes.F32:
+                            storeOp = WasmOpCodes.F32Store;
+                            align = 2;
+                            break;
+                        case WasmOpCodes.F64:
+                            storeOp = WasmOpCodes.F64Store;
+                            align = 3;
+                            break;
+                        default:
+                            storeOp = WasmOpCodes.I32Store;
+                            align = 2;
+                            break;
+                    }
+                    WasmModuleBuilder.EmitStore(Code, storeOp, align, 0);
+                }
+            }
+            else
+            {
+                // Non-struct or empty: pass through first field or zero
+                if (value.Count > 0)
+                    EmitGetLocal(value[0].Resolve());
+                else
+                    WasmModuleBuilder.EmitI32Const(Code, 0);
+                WasmModuleBuilder.EmitLocalSet(Code, target);
+            }
         }
 
         #endregion

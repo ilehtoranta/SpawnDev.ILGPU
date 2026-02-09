@@ -200,6 +200,17 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             WasmCodeGenerator.GeneratorArgs data) =>
             new WasmFunctionGenerator(data, method, allocas);
 
+        /// <summary>
+        /// Math function names that will be imported into every Wasm module.
+        /// Order matters — the function index assignment must match CreateKernel.
+        /// </summary>
+        internal static readonly string[] UnaryMathFuncs = { "sin", "cos", "tan", "asin", "acos", "atan",
+                                         "sinh", "cosh", "tanh", "exp", "log", "log2",
+                                         "log10", "round", "truncate", "sign", "exp2",
+                                         "sqrt", "abs", "ceil", "floor" };
+
+        internal static readonly string[] BinaryMathFuncs = { "pow", "atan2" };
+
         protected override WasmCodeGenerator CreateKernelCodeGenerator(
             in AllocaKindInformation sharedAllocations,
             Method method,
@@ -207,6 +218,18 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             WasmCodeGenerator.GeneratorArgs data)
         {
             var gen = new WasmKernelFunctionGenerator(data, method, allocas);
+
+            // Pre-populate math imports with deterministic indices.
+            // These MUST match the import order in CreateKernel exactly.
+            // Import function indices start at 0.
+            var mathImports = new Dictionary<string, uint>();
+            uint funcIdx = 0;
+            foreach (var name in UnaryMathFuncs)
+                mathImports[name] = funcIdx++;
+            foreach (var name in BinaryMathFuncs)
+                mathImports[name] = funcIdx++;
+            gen.MathImports = mathImports;
+
             KernelGenerator = gen;
             return gen;
         }
@@ -225,11 +248,39 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             // Import shared memory
             moduleBuilder.ImportSharedMemory("env", "memory", 1, 65536);
 
-            // Add function type
+            // Import math functions from JavaScript Math object
+            var mathImports = new Dictionary<string, uint>();
+
+            // Add unary math type: (f64) -> f64
+            int unaryTypeIdx = moduleBuilder.AddFuncType(
+                new byte[] { WasmOpCodes.F64 },
+                new byte[] { WasmOpCodes.F64 });
+
+            // Add binary math type: (f64, f64) -> f64
+            int binaryTypeIdx = moduleBuilder.AddFuncType(
+                new byte[] { WasmOpCodes.F64, WasmOpCodes.F64 },
+                new byte[] { WasmOpCodes.F64 });
+
+            foreach (var name in UnaryMathFuncs)
+            {
+                int idx = moduleBuilder.ImportFunction("Math", name, unaryTypeIdx);
+                mathImports[name] = (uint)idx;
+            }
+
+            foreach (var name in BinaryMathFuncs)
+            {
+                int idx = moduleBuilder.ImportFunction("Math", name, binaryTypeIdx);
+                mathImports[name] = (uint)idx;
+            }
+
+            // Pass math imports to the code generator
+            kernelGen.MathImports = mathImports;
+
+            // Add function type for the kernel
             var paramTypes = kernelGen.GetParamTypes();
             int typeIdx = moduleBuilder.AddFuncType(paramTypes, Array.Empty<byte>());
 
-            // Add function
+            // Add function (index = importFuncCount + 0)
             int funcIdx = moduleBuilder.AddFunction(typeIdx);
 
             // Export as "kernel"
