@@ -49,7 +49,7 @@ namespace SpawnDev.ILGPU.WebGPU
         }
 
         /// <summary>
-        /// Initializes the accelerator by requesting the GPU device.
+        /// Initializes the accelerator by requesting the GPU device with detected features.
         /// </summary>
         private async Task InitializeAsync()
         {
@@ -57,29 +57,51 @@ namespace SpawnDev.ILGPU.WebGPU
                 return;
 
             var adapter = Device.Adapter;
+            var requestedFeatures = Device.SupportedFeatures.ToList();
 
-            // Request device with higher storage buffer limits.
+            // Request device with detected features and higher storage buffer limits.
             // WebGPU defaults to 8 maxStorageBuffersPerShaderStage, but complex kernels
             // with many parameters may need more. Most adapters support at least 10.
             try
             {
-                // Use JS interop to call requestDevice with requiredLimits directly,
-                // since the C# GPUDeviceDescriptor doesn't expose requiredLimits property.
-                _gpuDevice = await adapter.JSRef!.CallAsync<GPUDevice>("requestDevice", new
+                var descriptor = new GPUDeviceDescriptor
                 {
-                    requiredLimits = new
+                    RequiredFeatures = requestedFeatures.Count > 0 ? requestedFeatures : null,
+                    RequiredLimits = new
                     {
                         maxStorageBuffersPerShaderStage = 10
                     }
-                });
+                };
+                _gpuDevice = await adapter.RequestDevice(descriptor);
             }
             catch
             {
-                // Fall back to default limits if higher limits aren't supported
-                _gpuDevice = await adapter.RequestDevice();
+                // Fall back: try without features but with limits
+                try
+                {
+                    var descriptor = new GPUDeviceDescriptor
+                    {
+                        RequiredLimits = new
+                        {
+                            maxStorageBuffersPerShaderStage = 10
+                        }
+                    };
+                    _gpuDevice = await adapter.RequestDevice(descriptor);
+                    // Clear features since we couldn't request them
+                    requestedFeatures.Clear();
+                }
+                catch
+                {
+                    // Fall back to fully default device
+                    _gpuDevice = await adapter.RequestDevice();
+                    requestedFeatures.Clear();
+                }
             }
             if (_gpuDevice == null)
                 throw new InvalidOperationException("Failed to request WebGPU device");
+
+            // Store actually enabled features
+            EnabledFeatures = new HashSet<string>(requestedFeatures, StringComparer.OrdinalIgnoreCase);
 
             // Listen for uncaptured GPU errors (e.g., Invalid ComputePipeline, validation errors)
             _gpuDevice.OnUncapturedError += OnGPUUncapturedError;
@@ -132,6 +154,20 @@ namespace SpawnDev.ILGPU.WebGPU
         /// Returns whether the accelerator is initialized.
         /// </summary>
         public bool IsInitialized => _isInitialized;
+
+        /// <summary>
+        /// Gets the set of WebGPU features that were successfully enabled on this device.
+        /// </summary>
+        public HashSet<string> EnabledFeatures { get; private set; } = new(StringComparer.OrdinalIgnoreCase);
+
+        /// <summary>Returns true if shader-f16 is enabled on this device.</summary>
+        public bool HasShaderF16 => EnabledFeatures.Contains("shader-f16");
+
+        /// <summary>Returns true if subgroups are enabled on this device.</summary>
+        public bool HasSubgroups => EnabledFeatures.Contains("subgroups");
+
+        /// <summary>Returns true if timestamp queries are enabled on this device.</summary>
+        public bool HasTimestampQuery => EnabledFeatures.Contains("timestamp-query");
 
         #endregion
 

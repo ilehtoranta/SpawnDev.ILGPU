@@ -106,6 +106,28 @@ namespace SpawnDev.ILGPU.WebGPU
         /// <summary>
         /// Constructs a new WebGPU device.
         /// </summary>
+        /// <summary>
+        /// WebGPU feature names that we recognize and will request if available.
+        /// </summary>
+        private static readonly string[] KnownFeatures = new[]
+        {
+            "shader-f16",
+            "subgroups",
+            "timestamp-query",
+            "float32-filterable",
+            "float32-blendable",
+            "bgra8unorm-storage",
+            "rg11b10ufloat-renderable",
+            "texture-compression-bc",
+            "texture-compression-etc2",
+            "texture-compression-astc",
+            "indirect-first-instance",
+            "depth-clip-control",
+            "depth32float-stencil8",
+            "clip-distances",
+            "dual-source-blending",
+        };
+
         internal WebGPUDevice(GPUAdapter adapter, int deviceIndex)
         {
             _adapter = adapter ?? throw new ArgumentNullException(nameof(adapter));
@@ -133,6 +155,24 @@ namespace SpawnDev.ILGPU.WebGPU
             catch
             {
                 IsFallbackAdapter = false;
+            }
+
+            // Detect supported features from the adapter
+            SupportedFeatures = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            try
+            {
+                using var features = adapter.Features;
+                foreach (var featureName in KnownFeatures)
+                {
+                    if (features.Has(featureName))
+                    {
+                        SupportedFeatures.Add(featureName);
+                    }
+                }
+            }
+            catch
+            {
+                // Features detection failed — leave empty set
             }
 
             // Get limits safely
@@ -224,6 +264,20 @@ namespace SpawnDev.ILGPU.WebGPU
         /// </summary>
         public long MaxBufferSize { get; }
 
+        /// <summary>
+        /// Gets the set of WebGPU features supported by this adapter.
+        /// </summary>
+        public HashSet<string> SupportedFeatures { get; }
+
+        /// <summary>Returns true if the adapter supports the shader-f16 feature (native f16 in WGSL).</summary>
+        public bool SupportsShaderF16 => SupportedFeatures.Contains("shader-f16");
+
+        /// <summary>Returns true if the adapter supports subgroups (subgroupBroadcast, subgroupShuffle, etc.).</summary>
+        public bool SupportsSubgroups => SupportedFeatures.Contains("subgroups");
+
+        /// <summary>Returns true if the adapter supports timestamp queries for GPU profiling.</summary>
+        public bool SupportsTimestampQuery => SupportedFeatures.Contains("timestamp-query");
+
         #endregion
 
         #region Methods
@@ -250,6 +304,7 @@ namespace SpawnDev.ILGPU.WebGPU
             writer.WriteLine($"  Max Workgroups:     {MaxComputeWorkgroupsPerDimension}");
             writer.WriteLine($"  Max Shared Memory:  {MaxComputeWorkgroupStorageSize} bytes");
             writer.WriteLine($"  Max Buffer Size:    {MaxBufferSize / (1024 * 1024)} MB");
+            writer.WriteLine($"  Features ({SupportedFeatures.Count}): {(SupportedFeatures.Count > 0 ? string.Join(", ", SupportedFeatures) : "none")}");
         }
 
         /// <inheritdoc/>

@@ -27,6 +27,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         private HashSet<int> _emulatedF64Params = new HashSet<int>();
         private HashSet<int> _emulatedI64Params = new HashSet<int>();
         private List<DynamicSharedOverrideInfo> _dynamicSharedOverrides = new List<DynamicSharedOverrideInfo>();
+        private bool _usesBroadcast = false;
+        private bool _usesSubgroups = false;
         // Maps variable names to their emulation info (param index, is emu_f64)
         private Dictionary<string, (int ParamIndex, bool IsF64)> _emulatedVarMappings = new Dictionary<string, (int, bool)>();
         // Maps cross-block pointer variable names to inline expressions (e.g. "param1[v_3_idx]")
@@ -145,6 +147,20 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
         public override void GenerateHeader(StringBuilder builder)
         {
+            // Pre-scan for Broadcast and subgroup usage
+            ScanForSubgroupAndBroadcastUsage();
+
+            // Emit WGSL enable directives at the very top of the module
+            // These must appear before any other declarations
+            // Only enable subgroups if the shader actually uses subgroup operations
+            bool emitSubgroups = Backend.HasSubgroups && _usesSubgroups;
+            if (emitSubgroups)
+                builder.AppendLine("enable subgroups;");
+            if (Backend.HasShaderF16)
+                builder.AppendLine("enable f16;");
+            if (emitSubgroups || Backend.HasShaderF16)
+                builder.AppendLine();
+
             // Emit emulation library FIRST (type aliases + helper functions must precede struct definitions
             // that reference emu_i64/emu_f64 types — WGSL requires types be defined before use)
             if (Backend.Options.EnableF64Emulation || Backend.Options.EnableI64Emulation)
@@ -255,7 +271,46 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 }
             }
 
+            // Emit workgroup-level broadcast temp variable if needed
+            if (_usesBroadcast)
+            {
+                builder.AppendLine();
+                builder.AppendLine("// Workgroup broadcast shared memory");
+                builder.AppendLine("var<workgroup> _broadcast_temp : i32;");
+            }
+
             builder.AppendLine();
+        }
+
+        /// <summary>
+        /// Scans the method for Broadcast and subgroup IR nodes to determine what features are needed.
+        /// Sets _usesBroadcast (for shared memory temp) and _usesSubgroups (for enable subgroups directive).
+        /// </summary>
+        private void ScanForSubgroupAndBroadcastUsage()
+        {
+            _usesBroadcast = false;
+            _usesSubgroups = false;
+
+            foreach (var block in Method.Blocks)
+            {
+                foreach (var entry in block)
+                {
+                    switch (entry.Value)
+                    {
+                        case global::ILGPU.IR.Values.Broadcast broadcast:
+                            if (broadcast.Kind == global::ILGPU.IR.Values.BroadcastKind.GroupLevel)
+                                _usesBroadcast = true;
+                            else
+                                _usesSubgroups = true; // warp-level broadcast uses subgroupBroadcastFirst
+                            break;
+                        case global::ILGPU.IR.Values.WarpShuffle:
+                        case global::ILGPU.IR.Values.SubWarpShuffle:
+                        case global::ILGPU.IR.Values.LaneIdxValue:
+                            _usesSubgroups = true;
+                            break;
+                    }
+                }
+            }
         }
 
         public override void GenerateCode()
@@ -263,6 +318,9 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             string workgroupSize = GetWorkgroupSize();
             Builder.AppendLine($"@compute @workgroup_size({workgroupSize})");
             Builder.Append("fn main(@builtin(global_invocation_id) global_id : vec3<u32>, @builtin(local_invocation_id) local_id : vec3<u32>, @builtin(workgroup_id) group_id : vec3<u32>, @builtin(num_workgroups) num_workgroups : vec3<u32>, @builtin(local_invocation_index) local_index : u32");
+            // Add subgroup builtins only when the shader actually uses subgroup operations
+            if (Backend.HasSubgroups && _usesSubgroups)
+                Builder.Append(", @builtin(subgroup_invocation_id) subgroup_invocation_id : u32, @builtin(subgroup_size) subgroup_size : u32");
             Builder.AppendLine(") {");
             PushIndent();
 

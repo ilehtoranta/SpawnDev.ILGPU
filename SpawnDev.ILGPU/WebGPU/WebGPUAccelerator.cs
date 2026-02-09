@@ -27,6 +27,11 @@ namespace SpawnDev.ILGPU.WebGPU
         public WebGPUBackend Backend { get; private set; } = null!;
 
         /// <summary>
+        /// Gets the set of WebGPU features enabled on this device.
+        /// </summary>
+        public HashSet<string> EnabledFeatures => NativeAccelerator?.EnabledFeatures ?? new HashSet<string>();
+
+        /// <summary>
         /// Method info for the static RunKernel method used by kernel launchers.
         /// </summary>
         public static readonly MethodInfo RunKernelMethod = typeof(WebGPUAccelerator).GetMethod(
@@ -157,9 +162,17 @@ namespace SpawnDev.ILGPU.WebGPU
         {
             var accelerator = new WebGPUAccelerator(context, device);
             accelerator.NativeAccelerator = await device.NativeDevice.CreateAcceleratorAsync();
-            accelerator.Backend = new WebGPUBackend(context, options ?? WebGPUBackendOptions.Default);
+            accelerator.Backend = new WebGPUBackend(context, options ?? WebGPUBackendOptions.Default, accelerator.NativeAccelerator.EnabledFeatures);
             accelerator.Init(accelerator.Backend);
             accelerator.DefaultStream = accelerator.CreateStreamInternal();
+
+            // Always log detected features (important for diagnostics)
+            var features = accelerator.NativeAccelerator.EnabledFeatures;
+            if (features.Count > 0)
+                Console.WriteLine($"[WebGPU] Enabled features ({features.Count}): {string.Join(", ", features)}");
+            else
+                Console.WriteLine("[WebGPU] No optional features detected");
+
             return accelerator;
         }
 

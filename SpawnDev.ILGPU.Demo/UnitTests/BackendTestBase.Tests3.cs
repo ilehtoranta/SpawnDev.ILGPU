@@ -722,11 +722,30 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
         });
 
         [TestMethod]
-        public async Task SubgroupShuffleTest()
+        public async Task SubgroupShuffleTest() => await RunTest(async accelerator =>
         {
-            // if any backends support subgroup/wavefront shuffle operations, we would test them here. However, as of now, browser WebGPU does not support these operations, so we will skip this test.
-            throw new UnsupportedTestException("Subgroup/Warp operations not supported in browser WebGPU");
-        }
+            // Dynamically check if subgroups are available
+            RequireFeature(accelerator, "subgroups", "Subgroup/Warp shuffle operations require 'subgroups' feature");
+
+            // Use 32 threads — small enough to fit in a single subgroup on all GPUs
+            int len = 32;
+            var data = new int[len];
+            for (int i = 0; i < len; i++) data[i] = i + 10; // [10, 11, 12, ..., 41]
+            using var buf = accelerator.Allocate1D(data);
+
+            // Warp.Shuffle(val, 0) should make every thread read lane 0's value
+            var kernel = accelerator.LoadStreamKernel<Index1D, ArrayView<int>>(SubgroupShuffleKernel);
+            kernel(new KernelConfig(1, len), (Index1D)len, buf.View);
+            await accelerator.SynchronizeAsync();
+
+            var result = await buf.CopyToHostAsync<int>();
+            // All threads should have lane 0's value (10)
+            for (int i = 0; i < len; i++)
+            {
+                if (result[i] != 10)
+                    throw new Exception($"SubgroupShuffleTest failed at [{i}]: Expected 10, got {result[i]}");
+            }
+        });
 
         #endregion
     }

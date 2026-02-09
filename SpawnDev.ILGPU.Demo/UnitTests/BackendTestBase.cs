@@ -1,6 +1,7 @@
 using ILGPU;
 using ILGPU.Runtime;
 using SpawnDev.Blazor.UnitTesting;
+using SpawnDev.ILGPU.WebGPU;
 
 namespace SpawnDev.ILGPU.Demo.UnitTests
 {
@@ -34,6 +35,19 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
             var (context, accelerator) = await CreateEmulatedAcceleratorAsync();
             try { await testBody(accelerator); }
             finally { accelerator.Dispose(); context.Dispose(); }
+        }
+
+        /// <summary>
+        /// Checks that the accelerator supports the specified WebGPU feature.
+        /// Throws UnsupportedTestException if the feature is not available.
+        /// </summary>
+        protected static void RequireFeature(Accelerator accelerator, string featureName, string? reason = null)
+        {
+            if (accelerator is WebGPUAccelerator webGpuAccelerator)
+            {
+                if (!webGpuAccelerator.EnabledFeatures.Contains(featureName))
+                    throw new UnsupportedTestException(reason ?? $"WebGPU feature '{featureName}' not supported");
+            }
         }
 
         #region Structs
@@ -522,6 +536,14 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
             int val = data[index];
             int broadcasted = Group.Broadcast(val, 0);
             data[index] = broadcasted;
+        }
+
+        protected static void SubgroupShuffleKernel(Index1D index, ArrayView<int> data)
+        {
+            int val = data[index];
+            // Each thread reads from lane 0 of its subgroup via warp shuffle
+            int shuffled = Warp.Shuffle(val, 0);
+            data[index] = shuffled;
         }
 
         #endregion

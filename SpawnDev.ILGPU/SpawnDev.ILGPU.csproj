@@ -4,21 +4,21 @@
 		<TargetFramework>net10.0</TargetFramework>
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>enable</Nullable>
-		<Version>1.0.0-preview.1</Version>
+		<Version>2.0.0-preview.1</Version>
 		<GeneratePackageOnBuild>True</GeneratePackageOnBuild>
 		<GenerateDocumentationFile>true</GenerateDocumentationFile>
 		<EmbedAllSources>true</EmbedAllSources>
 		<DebugType>Embedded</DebugType>
 		<Title>SpawnDev.ILGPU</Title>
 		<Authors>LostBeard</Authors>
-		<Description>Run ILGPU kernels in Blazor WebAssembly via WebGPU, Web Workers, or CPU — with automatic backend selection.</Description>
+		<Description>Run ILGPU kernels in Blazor WebAssembly with four supported backends; WebGPU ⚡⚡⚡, Wasm Workers  ⚡⚡, Javascript Workers ⚡, and CPU 🐢</Description>
 		<PackageProjectUrl>https://github.com/LostBeard/SpawnDev.ILGPU</PackageProjectUrl>
 		<PackageReadmeFile>README.md</PackageReadmeFile>
 		<PackageLicenseFile>LICENSE.txt</PackageLicenseFile>
 		<PackageIcon>icon-128.png</PackageIcon>
 		<RepositoryUrl>https://github.com/LostBeard/SpawnDev.ILGPU.git</RepositoryUrl>
 		<RepositoryType>git</RepositoryType>
-		<PackageTags>Blazor;BlazorWebAssembly;WebGPU;WebWorkers;ParallelProcessing;ILGPU;GPGPU</PackageTags>
+		<PackageTags>Blazor;BlazorWebAssembly;WebGPU;WebWorkers;ParallelProcessing;ILGPU;GPGPU;WebAssembly</PackageTags>
 		<NoPackageAnalysis>true</NoPackageAnalysis>
 		<EnableDefaultCompileItems>true</EnableDefaultCompileItems>
 		<IsPackable>true</IsPackable>

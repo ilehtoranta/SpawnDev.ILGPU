@@ -150,8 +150,5 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
 
         #endregion
 
-        [TestMethod]
-        public new async Task BroadcastTest() =>
-            throw new UnsupportedTestException("WebGPU: broadcast not yet implemented");
     }
 }

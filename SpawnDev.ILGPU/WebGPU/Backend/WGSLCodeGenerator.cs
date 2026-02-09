@@ -1622,8 +1622,29 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         {
             var target = Load(value);
             var source = Load(value.Variable);
+            var origin = Load(value.Origin);
             Declare(target);
-            AppendLine($"{target} = subgroupBroadcastFirst({source});");
+
+            if (value.Kind == global::ILGPU.IR.Values.BroadcastKind.GroupLevel)
+            {
+                // Workgroup-level broadcast: use shared memory + barrier
+                // 1. Origin thread writes value to shared memory
+                // 2. All threads synchronize
+                // 3. All threads read from shared memory
+                AppendLine($"if (i32(local_index) == {origin}) {{");
+                PushIndent();
+                AppendLine($"_broadcast_temp = {source};");
+                PopIndent();
+                AppendLine("}");
+                AppendLine("workgroupBarrier();");
+                AppendLine($"{target} = _broadcast_temp;");
+                AppendLine("workgroupBarrier();");
+            }
+            else
+            {
+                // WarpLevel broadcast — use subgroup intrinsic if available, else fallback
+                AppendLine($"{target} = subgroupBroadcastFirst({source});");
+            }
         }
 
         public virtual void GenerateCode(WarpShuffle value)

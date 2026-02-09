@@ -46,6 +46,8 @@ Write parallel compute code in C# and let the library pick the best available ba
 - **WGSL transpilation** — C# kernels automatically compiled to WebGPU Shading Language
 - **Wasm compilation** — C# kernels compiled to native WebAssembly binary modules
 - **64-bit emulation** — Support for `double` (f64) and `long` (i64) via emulated WGSL logic
+- **WebGPU extension auto-detection** — Probes adapter for `shader-f16`, `subgroups`, `timestamp-query`, and other features; conditionally enables them on the device
+- **Subgroup operations** — `Group.Broadcast` and `Warp.Shuffle` are supported on the WebGPU backend when the browser supports the `subgroups` extension
 - **Multi-worker dispatch** — Wasm and Workers backends distribute work across all available CPU cores via SharedArrayBuffer
 - **Blazor WebAssembly** — Seamless integration via [SpawnDev.BlazorJS](https://github.com/LostBeard/SpawnDev.BlazorJS)
 - **Shared memory & atomics** — Supports workgroup memory, barriers, and atomic operations
@@ -172,7 +174,7 @@ _test.bat
 
 ## Test Coverage
 
-**240+ tests** across four test suites covering all core features.
+**360+ tests** across four test suites covering all core features.
 
 ### Test Suites
 
@@ -200,6 +202,7 @@ _test.bat
 | **64-bit Emulation** | `double` and `long` via software emulation (WebGPU) | ✅ |
 | **GPU Patterns** | Stencil, reduction, matrix multiply, lerp, smoothstep | ✅ |
 | **Shared Memory** | Static and dynamic workgroup memory | ✅ |
+| **Broadcast & Subgroups** | `Group.Broadcast`, `Warp.Shuffle` (WebGPU with subgroups extension) | ✅ |
 | **Special Values** | NaN, Infinity detection | ✅ |
 | **Backend Selection** | Auto-discovery, priority, cross-backend kernel execution | ✅ |
 

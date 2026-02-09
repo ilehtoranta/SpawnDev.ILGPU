@@ -78,11 +78,26 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         public WebGPUBackendOptions Options { get; }
 
         /// <summary>
+        /// Gets the set of WebGPU features enabled on the device.
+        /// The WGSL code generator can use this to conditionally emit feature-gated code.
+        /// </summary>
+        public HashSet<string> EnabledFeatures { get; }
+
+        /// <summary>Returns true if shader-f16 is enabled.</summary>
+        public bool HasShaderF16 => EnabledFeatures.Contains("shader-f16");
+
+        /// <summary>Returns true if subgroups are enabled.</summary>
+        public bool HasSubgroups => EnabledFeatures.Contains("subgroups");
+
+        /// <summary>Returns true if timestamp queries are enabled.</summary>
+        public bool HasTimestampQuery => EnabledFeatures.Contains("timestamp-query");
+
+        /// <summary>
         /// Creates a new WebGPU backend with default options.
         /// </summary>
         /// <param name="context">The ILGPU context.</param>
         public WebGPUBackend(Context context)
-            : this(context, WebGPUBackendOptions.Default)
+            : this(context, WebGPUBackendOptions.Default, new HashSet<string>())
         {
         }
 
@@ -92,6 +107,17 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         /// <param name="context">The ILGPU context.</param>
         /// <param name="options">The backend configuration options.</param>
         public WebGPUBackend(Context context, WebGPUBackendOptions options)
+            : this(context, options, new HashSet<string>())
+        {
+        }
+
+        /// <summary>
+        /// Creates a new WebGPU backend with the specified options and enabled device features.
+        /// </summary>
+        /// <param name="context">The ILGPU context.</param>
+        /// <param name="options">The backend configuration options.</param>
+        /// <param name="enabledFeatures">The set of WebGPU features enabled on the device.</param>
+        public WebGPUBackend(Context context, WebGPUBackendOptions options, HashSet<string> enabledFeatures)
             : base(
                   context,
                   new WebGPUCapabilityContext(),
@@ -99,6 +125,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                   new WebGPUArgumentMapper(context))
         {
             Options = options ?? WebGPUBackendOptions.Default;
+            EnabledFeatures = enabledFeatures ?? new HashSet<string>();
 
             InitIntrinsicProvider();
             RegisterMathIntrinsics();
