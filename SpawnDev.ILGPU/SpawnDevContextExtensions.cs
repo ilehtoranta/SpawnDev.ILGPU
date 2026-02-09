@@ -21,7 +21,7 @@ namespace SpawnDev.ILGPU
     /// <summary>
     /// Unified context extensions for Blazor WebAssembly.
     /// Provides async device probing for all WASM-compatible backends
-    /// (WebGPU, Workers, CPU).
+    /// (WebGPU, Wasm, Workers, CPU).
     /// </summary>
     public static class SpawnDevContextExtensions
     {
@@ -40,6 +40,7 @@ namespace SpawnDev.ILGPU
             // Synchronous backends first
             builder.AllAccelerators(); // CPU, OpenCL, Cuda (latter two will fail silently in WASM)
             builder.Workers();         // Always available in WASM
+            builder.Wasm();            // Always available in WASM
 
             // WebGPU requires async probing — may not be available
             try
@@ -62,7 +63,7 @@ namespace SpawnDev.ILGPU
 
         /// <summary>
         /// Creates the preferred accelerator for WASM environments.
-        /// Priority: WebGPU (GPU compute) > Workers (multi-threaded JS) > CPU (fallback).
+        /// Priority: WebGPU (GPU compute) > Wasm (native Wasm) > Workers (multi-threaded JS) > CPU (fallback).
         /// </summary>
         /// <param name="context">The ILGPU context (must have devices registered).</param>
         /// <returns>The best available accelerator.</returns>
@@ -74,6 +75,13 @@ namespace SpawnDev.ILGPU
             if (webGpuDevices.Count > 0)
             {
                 return await webGpuDevices[0].CreateAcceleratorAsync(context, null);
+            }
+
+            // Try Wasm (near-native WebAssembly compute)
+            var wasmDevices = context.GetDevices<WasmILGPUDevice>();
+            if (wasmDevices.Count > 0)
+            {
+                return await WasmAccelerator.Create(context);
             }
 
             // Try Workers (multi-threaded JS)
