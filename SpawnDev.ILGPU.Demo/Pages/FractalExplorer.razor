@@ -11,6 +11,7 @@
 @using System.Runtime.InteropServices
 @using global::ILGPU
 @using global::ILGPU.Runtime
+@using global::ILGPU.Runtime.CPU
 
 <PageTitle>Fractal Explorer</PageTitle>
 
@@ -24,9 +25,10 @@
                 <div class="mb-3">
                     <label class="form-label fw-bold">Backend Engine</label>
                     <select class="form-select" value="@_selectedBackend" @onchange="OnBackendChanged" disabled="@(_isInitializing)">
-                        <option value="WebGPU">WebGPU (GPU)</option>
-                        <option value="Workers">Workers (Multi-core CPU)</option>
-                        <option value="Wasm">Wasm (Multi-core Wasm)</option>
+                        <option value="WebGPU">⚡⚡⚡ WebGPU (GPU)</option>
+                        <option value="Wasm">⚡⚡ Wasm (Multi-core Wasm)</option>
+                        <option value="Workers">⚡ Workers (Multi-core CPU)</option>
+                        <option value="CPU">🐢 CPU (Single-thread)</option>
                     </select>
                     @if (_isInitializing)
                     {
@@ -290,6 +292,9 @@
             case "Wasm":
                 await InitializeWasm();
                 break;
+            case "CPU":
+                await InitializeCPU();
+                break;
             default:
                 throw new ArgumentException($"Unknown backend: {backendName}");
         }
@@ -324,6 +329,17 @@
         var devices = _ilgpuContext.GetDevices<WasmILGPUDevice>();
         if (devices.Count == 0) throw new Exception("No Wasm device found");
         _ilgpuAccelerator = await devices[0].CreateAcceleratorAsync(_ilgpuContext);
+    }
+
+    private Task InitializeCPU()
+    {
+        var device = new CPUDevice(
+            numThreadsPerWarp: 4,
+            numWarpsPerMultiprocessor: 16,
+            numMultiprocessors: 1);
+        _ilgpuContext = Context.Create().CPU(device).ToContext();
+        _ilgpuAccelerator = _ilgpuContext.CreateCPUAccelerator(0);
+        return Task.CompletedTask;
     }
 
     // ========== Render Loop ==========
