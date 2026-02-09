@@ -148,6 +148,11 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         private uint _barrierBaseLocal;
 
         /// <summary>
+        /// Wasm local index for the dynamic shared memory element count (passed at dispatch time).
+        /// </summary>
+        private uint _dynamicSharedLengthLocal;
+
+        /// <summary>
         /// Counter for barrier synchronization points in the kernel.
         /// </summary>
         private int _barrierCounter = 0;
@@ -232,6 +237,9 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             _barrierBaseLocal = _nextLocalIndex++;
             _paramCount++;
 
+            _dynamicSharedLengthLocal = _nextLocalIndex++;
+            _paramCount++;
+
             // FuncParamTypes tracks Wasm type signatures for the module builder
             FuncParamTypes.Clear();
             FuncParamTypes.Add(WasmOpCodes.I32); // param 0: globalIdx
@@ -242,6 +250,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             FuncParamTypes.Add(WasmOpCodes.I32); // param 5: threadIdX
             FuncParamTypes.Add(WasmOpCodes.I32); // param 6: sharedMemBase
             FuncParamTypes.Add(WasmOpCodes.I32); // param 7: barrierBase
+            FuncParamTypes.Add(WasmOpCodes.I32); // param 8: dynamicSharedLength
 
             // CRITICAL: Use IndexType to determine if param 0 is the implicit index.
             // ILGPU sets IsExplicitlyGrouped=true when SharedMemory is used, but the kernel
@@ -1255,16 +1264,11 @@ namespace SpawnDev.ILGPU.Wasm.Backend
 
         public override void GenerateCode(DynamicMemoryLengthValue value)
         {
-            // Dynamic shared memory length = array size (set at dispatch)
-            // For the Wasm backend, this is passed via the sharedMemBase + static offset
-            // The length is embedded in the kernel config's SharedMemoryConfig
+            // Dynamic shared memory length = element count (passed at dispatch time via kernel param 8)
             var target = AllocateLocal(value);
-            // This will be the number of dynamic shared elements
-            // We emit it as sharedMemBase param (which will contain the full region including dynamic)
-            // The actual dynamic length should be passed. For now, we use a fixed approach
-            // where the accelerator computes it from the config.
-            WasmModuleBuilder.EmitI32Const(Code, 0); // Placeholder — actual size is in buffer
+            WasmModuleBuilder.EmitLocalGet(Code, _dynamicSharedLengthLocal);
             WasmModuleBuilder.EmitLocalSet(Code, target);
+            WasmBackend.Log($"[Wasm-DynShared] DynamicMemoryLengthValue -> local_{target} = local_{_dynamicSharedLengthLocal}");
         }
 
         #endregion

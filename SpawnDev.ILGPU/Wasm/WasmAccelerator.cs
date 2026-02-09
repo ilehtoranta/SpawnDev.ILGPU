@@ -173,7 +173,12 @@ namespace SpawnDev.ILGPU.Wasm
                     ? Math.Max(1, (totalItems + groupSize - 1) / groupSize)
                     : totalItems;
 
-                WasmBackend.Log($"[Wasm] Dispatching kernel: {totalItems} items ({gridDimX}x{gridDimY}x{gridDimZ}), groupSize={groupSize}, numGroups={numGroups}, hasBarriers={compiledKernel.HasBarriers}");
+                // Extract dynamic shared memory size from KernelConfig
+                int dynamicSharedElements = 0;
+                if (dimension is KernelConfig kConfig)
+                    dynamicSharedElements = kConfig.SharedMemoryConfig.NumElements;
+
+                WasmBackend.Log($"[Wasm] Dispatching kernel: {totalItems} items ({gridDimX}x{gridDimY}x{gridDimZ}), groupSize={groupSize}, numGroups={numGroups}, hasBarriers={compiledKernel.HasBarriers}, dynamicSharedElements={dynamicSharedElements}");
 
                 // Determine isView flags from compiled kernel metadata
                 var paramInfos = compiledKernel.ParamInfos;
@@ -266,6 +271,13 @@ namespace SpawnDev.ILGPU.Wasm
                 // Shared memory region (for barrier kernels)
                 int sharedMemBase = (afterScratch + 7) & ~7; // 8-byte align
                 int sharedMemSize = compiledKernel.SharedMemorySize;
+                // Add dynamic shared memory bytes (element count * element size)
+                int dynamicSharedBytes = dynamicSharedElements * Math.Max(compiledKernel.DynamicSharedElementSize, 1);
+                if (dynamicSharedElements > 0)
+                {
+                    sharedMemSize += dynamicSharedBytes;
+                    WasmBackend.Log($"[Wasm] Dynamic shared memory: {dynamicSharedElements} elements x {compiledKernel.DynamicSharedElementSize} bytes = {dynamicSharedBytes} bytes, total shared={sharedMemSize}");
+                }
                 int afterShared = sharedMemBase + sharedMemSize;
 
                 // Barrier slots region: each barrier = 8 bytes (arrival counter i32 + sense flag i32)
@@ -324,7 +336,8 @@ namespace SpawnDev.ILGPU.Wasm
                     sharedMemBase, barrierBase, compiledKernel,
                     groupSize, numGroups,
                     flatArgs, compiledKernel.WasmBinary,
-                    wasmMemory, memoryBuffer, bufferOffsets, bufferInfos);
+                    wasmMemory, memoryBuffer, bufferOffsets, bufferInfos,
+                    dynamicSharedElements);
             }
             catch (Exception ex)
             {
@@ -353,7 +366,8 @@ namespace SpawnDev.ILGPU.Wasm
             JSObject wasmMemory,
             SharedArrayBuffer memoryBuffer,
             List<int> bufferOffsets,
-            List<(WasmMemoryBuffer buffer, int byteOffset)> bufferInfos)
+            List<(WasmMemoryBuffer buffer, int byteOffset)> bufferInfos,
+            int dynamicSharedElements = 0)
         {
             bool hasBarriers = compiledKernel.HasBarriers;
 
@@ -378,7 +392,8 @@ namespace SpawnDev.ILGPU.Wasm
             var workerScript = BuildWasmWorkerScript(
                 gridDimX, gridDimY, scratchBase,
                 sharedMemBase, barrierBase,
-                groupSize, numGroups, hasBarriers, argStr);
+                groupSize, numGroups, hasBarriers, argStr,
+                dynamicSharedElements);
 
             // Create workers
             var workers = QuickWorker.CreateWorkersFromJS(workerScript, workerCount);
@@ -522,7 +537,8 @@ namespace SpawnDev.ILGPU.Wasm
             int gridDimX, int gridDimY, int scratchBase,
             int sharedMemBase, int barrierBase,
             int groupSize, int numGroups, bool hasBarriers,
-            string argStr)
+            string argStr,
+            int dynamicSharedLength = 0)
         {
             var sb = new System.Text.StringBuilder();
             sb.AppendLine("self.onmessage = async function(e) {");
@@ -561,7 +577,7 @@ namespace SpawnDev.ILGPU.Wasm
                 sb.AppendLine();
                 sb.AppendLine("    for (let g = 0; g < numGroups; g++) {");
                 sb.AppendLine("      const globalIdx = g * groupSize + threadId;");
-                sb.Append($"      kernel(globalIdx, {gridDimX}, {gridDimY}, {scratchBase}, {groupSize}, threadId, {sharedMemBase}, {barrierBase}");
+                sb.Append($"      kernel(globalIdx, {gridDimX}, {gridDimY}, {scratchBase}, {groupSize}, threadId, {sharedMemBase}, {barrierBase}, {dynamicSharedLength}");
                 if (argStr.Length > 0)
                 {
                     sb.Append(", ");
@@ -578,7 +594,7 @@ namespace SpawnDev.ILGPU.Wasm
                 sb.AppendLine();
                 sb.AppendLine("    for (let i = startIdx; i < endIdx; i++) {");
                 // For non-barrier kernels: groupDimX=gridDimX (one big group), threadIdX=i, sharedMemBase=0, barrierBase=0
-                sb.Append($"      kernel(i, {gridDimX}, {gridDimY}, {scratchBase}, {gridDimX}, i, 0, 0");
+                sb.Append($"      kernel(i, {gridDimX}, {gridDimY}, {scratchBase}, {gridDimX}, i, 0, 0, 0");
                 if (argStr.Length > 0)
                 {
                     sb.Append(", ");

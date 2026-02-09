@@ -95,5 +95,6 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
         [TestMethod]
         public new async Task SubgroupShuffleTest() =>
             throw new UnsupportedTestException("Subgroups not supported on CPU in WASM");
+
     }
 }
