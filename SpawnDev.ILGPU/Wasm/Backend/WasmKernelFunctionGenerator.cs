@@ -125,6 +125,53 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         /// </summary>
         private int _currentBlockEmitIndex = 0;
 
+        // === Group execution params (for shared memory + barrier support) ===
+
+        /// <summary>
+        /// Wasm local index for group dimension X (number of threads in workgroup).
+        /// </summary>
+        private uint _groupDimXLocal;
+
+        /// <summary>
+        /// Wasm local index for thread index within the workgroup.
+        /// </summary>
+        private uint _threadIdXLocal;
+
+        /// <summary>
+        /// Wasm local index for the base address of shared memory region in linear memory.
+        /// </summary>
+        private uint _sharedMemBaseLocal;
+
+        /// <summary>
+        /// Wasm local index for the base address of barrier slots in linear memory.
+        /// </summary>
+        private uint _barrierBaseLocal;
+
+        /// <summary>
+        /// Counter for barrier synchronization points in the kernel.
+        /// </summary>
+        private int _barrierCounter = 0;
+
+        /// <summary>
+        /// Whether this kernel uses shared memory or barriers.
+        /// </summary>
+        private bool _hasBarriers = false;
+
+        /// <summary>
+        /// Total bytes allocated for shared memory in this kernel.
+        /// </summary>
+        private int _sharedMemorySize = 0;
+
+        /// <summary>
+        /// Maps Alloca IR values to their byte offsets within the shared memory region.
+        /// </summary>
+        private readonly Dictionary<string, int> _sharedAllocaOffsets = new();
+
+        /// <summary>
+        /// Element size in bytes for dynamic shared memory allocations.
+        /// </summary>
+        private int _dynamicSharedElementSize = 0;
+
         public WasmKernelFunctionGenerator(
             in GeneratorArgs args,
             Method method,
@@ -158,7 +205,8 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             // Store the index type for decomposition in GetField
             _indexType = entryPoint.IndexType;
 
-            // Fixed params: globalIdx (i32), dimX (i32), dimY (i32), scratchBase (i32)
+            // Fixed params: globalIdx (i32), dimX (i32), dimY (i32), scratchBase (i32),
+            //               groupDimX (i32), threadIdX (i32), sharedMemBase (i32), barrierBase (i32)
             _globalIdxLocal = _nextLocalIndex++;
             _paramCount++;
 
@@ -172,18 +220,37 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             _paramCount++;
             _scratchNextOffset = 0;
 
+            _groupDimXLocal = _nextLocalIndex++;
+            _paramCount++;
+
+            _threadIdXLocal = _nextLocalIndex++;
+            _paramCount++;
+
+            _sharedMemBaseLocal = _nextLocalIndex++;
+            _paramCount++;
+
+            _barrierBaseLocal = _nextLocalIndex++;
+            _paramCount++;
+
             // FuncParamTypes tracks Wasm type signatures for the module builder
             FuncParamTypes.Clear();
             FuncParamTypes.Add(WasmOpCodes.I32); // param 0: globalIdx
             FuncParamTypes.Add(WasmOpCodes.I32); // param 1: dimX
             FuncParamTypes.Add(WasmOpCodes.I32); // param 2: dimY
             FuncParamTypes.Add(WasmOpCodes.I32); // param 3: scratchBase
+            FuncParamTypes.Add(WasmOpCodes.I32); // param 4: groupDimX
+            FuncParamTypes.Add(WasmOpCodes.I32); // param 5: threadIdX
+            FuncParamTypes.Add(WasmOpCodes.I32); // param 6: sharedMemBase
+            FuncParamTypes.Add(WasmOpCodes.I32); // param 7: barrierBase
 
-            // Iterate IR kernel parameters (skip implicit index at position 0 for grouped kernels)
-            int startIdx = entryPoint.IsExplicitlyGrouped ? 0 : 1;
+            // CRITICAL: Use IndexType to determine if param 0 is the implicit index.
+            // ILGPU sets IsExplicitlyGrouped=true when SharedMemory is used, but the kernel
+            // still has an implicit Index1D parameter at position 0 that maps to globalIdx.
+            // Match WebGPU backend: KernelParamOffset = IndexType != None ? 1 : 0
+            int startIdx = entryPoint.IndexType != IndexType.None ? 1 : 0;
 
             // Map the implicit index param to globalIdx
-            if (!entryPoint.IsExplicitlyGrouped && parameters.Count > 0)
+            if (startIdx == 1 && parameters.Count > 0)
             {
                 _indexParam = parameters[0];
                 _localMap[GetValueKey(_indexParam)] = _globalIdxLocal;
@@ -283,8 +350,20 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             // Store param infos for the backend
             _generatorArgs.ParamInfos = _paramInfos;
 
+            // Setup shared memory allocations
+            SetupSharedAllocations(Allocas.SharedAllocations, isDynamic: false);
+            SetupSharedAllocations(Allocas.DynamicSharedAllocations, isDynamic: true);
+
+            // Propagate metadata to GeneratorArgs for WasmCompiledKernel
+            // NOTE: Only set SharedMemorySize and DynamicSharedElementSize here.
+            // BarrierCount and HasBarriers are set AFTER code generation in GenerateCode()
+            // because _barrierCounter is incremented during IR visiting (GenerateCode(Barrier)).
+            _generatorArgs.SharedMemorySize = _sharedMemorySize;
+            _generatorArgs.DynamicSharedElementSize = _dynamicSharedElementSize;
+
             WasmBackend.Log($"[Wasm-Setup] Final: _nextLocalIndex={_nextLocalIndex}, _paramCount={_paramCount}, FuncParamTypes={FuncParamTypes.Count}");
             WasmBackend.Log($"[Wasm-Setup] _localMap: {string.Join(", ", _localMap.Select(kv => $"{kv.Key}={kv.Value}"))}");
+            WasmBackend.Log($"[Wasm-Setup] SharedMemorySize={_sharedMemorySize}, HasBarriers={_hasBarriers}");
         }
 
         private bool _parametersInitialized = false;
@@ -393,6 +472,14 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 // Multi-block: state machine
                 GenerateStateMachineCode(blocks);
             }
+
+            // CRITICAL: Propagate BarrierCount and HasBarriers AFTER code generation.
+            // _barrierCounter is incremented during IR visiting by GenerateCode(Barrier),
+            // so it must be read after all blocks have been visited.
+            _generatorArgs.BarrierCount = _barrierCounter;
+            _generatorArgs.HasBarriers = _hasBarriers;
+
+            WasmBackend.Log($"[Wasm-CodeGen] Final BarrierCount={_barrierCounter}, HasBarriers={_hasBarriers}");
         }
 
         /// <summary>
@@ -678,6 +765,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             if (GetWasmTypeFromIR(index.Type) == WasmOpCodes.I64)
                 Code.Add(WasmOpCodes.I32WrapI64);
 
+            WasmBackend.Log($"[Wasm-LEA] value.Type={value.Type}, elemSize={elemSize}");
             WasmModuleBuilder.EmitI32Const(Code, elemSize);
             Code.Add(WasmOpCodes.I32Mul);
             Code.Add(WasmOpCodes.I32Add);
@@ -1132,33 +1220,289 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         public override void GenerateCode(GroupIndexValue value)
         {
             var target = AllocateLocal(value);
-            // For non-grouped kernels: groupIndex = globalIdx (each thread is its own group)
-            WasmModuleBuilder.EmitLocalGet(Code, _globalIdxLocal);
+            // threadIdX = thread's index within the workgroup
+            WasmModuleBuilder.EmitLocalGet(Code, _threadIdXLocal);
             WasmModuleBuilder.EmitLocalSet(Code, target);
         }
 
         public override void GenerateCode(GridIndexValue value)
         {
             var target = AllocateLocal(value);
-            // For non-grouped kernels: gridIndex = 0 (single group)
-            WasmModuleBuilder.EmitI32Const(Code, 0);
+            // gridIndex = globalIdx / groupDimX (which group this thread belongs to)
+            WasmModuleBuilder.EmitLocalGet(Code, _globalIdxLocal);
+            WasmModuleBuilder.EmitLocalGet(Code, _groupDimXLocal);
+            Code.Add(WasmOpCodes.I32DivU);
             WasmModuleBuilder.EmitLocalSet(Code, target);
         }
 
         public override void GenerateCode(GroupDimensionValue value)
         {
             var target = AllocateLocal(value);
-            // For non-grouped kernels: groupDim = dimX (all threads in one group)
-            WasmModuleBuilder.EmitLocalGet(Code, _dimXLocal);
+            // groupDimX = number of threads per workgroup
+            WasmModuleBuilder.EmitLocalGet(Code, _groupDimXLocal);
             WasmModuleBuilder.EmitLocalSet(Code, target);
         }
 
         public override void GenerateCode(GridDimensionValue value)
         {
             var target = AllocateLocal(value);
-            // For non-grouped kernels: gridDim = 1
-            WasmModuleBuilder.EmitI32Const(Code, 1);
+            // gridDim = dimX / groupDimX (number of workgroups)
+            WasmModuleBuilder.EmitLocalGet(Code, _dimXLocal);
+            WasmModuleBuilder.EmitLocalGet(Code, _groupDimXLocal);
+            Code.Add(WasmOpCodes.I32DivU);
             WasmModuleBuilder.EmitLocalSet(Code, target);
+        }
+
+        public override void GenerateCode(DynamicMemoryLengthValue value)
+        {
+            // Dynamic shared memory length = array size (set at dispatch)
+            // For the Wasm backend, this is passed via the sharedMemBase + static offset
+            // The length is embedded in the kernel config's SharedMemoryConfig
+            var target = AllocateLocal(value);
+            // This will be the number of dynamic shared elements
+            // We emit it as sharedMemBase param (which will contain the full region including dynamic)
+            // The actual dynamic length should be passed. For now, we use a fixed approach
+            // where the accelerator computes it from the config.
+            WasmModuleBuilder.EmitI32Const(Code, 0); // Placeholder — actual size is in buffer
+            WasmModuleBuilder.EmitLocalSet(Code, target);
+        }
+
+        #endregion
+
+        #region Shared Memory
+
+        /// <summary>
+        /// Sets up shared memory allocations by computing byte offsets within the shared memory region.
+        /// Each allocation gets a fixed offset from sharedMemBase that the Alloca handler will use.
+        /// </summary>
+        private void SetupSharedAllocations(AllocaKindInformation allocas, bool isDynamic)
+        {
+            foreach (var allocaInfo in allocas)
+            {
+                var key = GetValueKey(allocaInfo.Alloca);
+                int elemSize = 4; // default i32
+
+                // Determine element size from the alloca type
+                if (allocaInfo.Alloca.Type is AddressSpaceType addrType)
+                {
+                    if (addrType.ElementType is PrimitiveType pt)
+                        elemSize = GetElementSize(pt.BasicValueType);
+                    else if (addrType.ElementType is StructureType st)
+                        elemSize = st.Size;
+                }
+
+                if (isDynamic)
+                {
+                    // Dynamic shared memory: size determined at runtime
+                    // Placed at the end of static shared allocations
+                    _sharedAllocaOffsets[key] = _sharedMemorySize;
+                    _dynamicSharedElementSize = elemSize;
+                    _hasBarriers = true;
+                    WasmBackend.Log($"[Wasm-SharedMem] Dynamic alloca {key}: offset={_sharedMemorySize}, elemSize={elemSize}");
+                    // Don't advance _sharedMemorySize — dynamic size is not known at compile time
+                }
+                else if (allocaInfo.IsArray)
+                {
+                    int arrayBytes = allocaInfo.ArraySize * elemSize;
+                    // Align to 4 bytes
+                    arrayBytes = (arrayBytes + 3) & ~3;
+                    _sharedAllocaOffsets[key] = _sharedMemorySize;
+                    _sharedMemorySize += arrayBytes;
+                    _hasBarriers = true;
+                    WasmBackend.Log($"[Wasm-SharedMem] Static array alloca {key}: offset={_sharedMemorySize - arrayBytes}, size={arrayBytes}, arrayLen={allocaInfo.ArraySize}, elemSize={elemSize}");
+                }
+                else
+                {
+                    // Single scalar shared
+                    int scalarBytes = (elemSize + 3) & ~3; // align to 4
+                    _sharedAllocaOffsets[key] = _sharedMemorySize;
+                    _sharedMemorySize += scalarBytes;
+                    _hasBarriers = true;
+                    WasmBackend.Log($"[Wasm-SharedMem] Scalar alloca {key}: offset={_sharedMemorySize - scalarBytes}, size={scalarBytes}");
+                }
+            }
+        }
+
+        /// <summary>
+        /// Override Alloca for shared memory: emit address = sharedMemBase + offset
+        /// </summary>
+        public override void GenerateCode(Alloca value)
+        {
+            var key = GetValueKey(value);
+            if (_sharedAllocaOffsets.TryGetValue(key, out int offset))
+            {
+                // Shared memory allocation: compute address in linear memory
+                var target = AllocateLocal(value);
+                WasmModuleBuilder.EmitLocalGet(Code, _sharedMemBaseLocal);
+                if (offset > 0)
+                {
+                    WasmModuleBuilder.EmitI32Const(Code, offset);
+                    Code.Add(WasmOpCodes.I32Add);
+                }
+                WasmModuleBuilder.EmitLocalSet(Code, target);
+                WasmBackend.Log($"[Wasm-SharedMem] Alloca {key}: sharedMemBase + {offset}");
+            }
+            else
+            {
+                // Local alloca (not shared memory) — fall through to base
+                base.GenerateCode(value);
+            }
+        }
+
+        #endregion
+
+        #region Barrier Synchronization
+
+        /// <summary>
+        /// Emits a sense-reversing barrier using Wasm atomic instructions.
+        /// Each barrier uses 8 bytes at barrierBase + (barrierIdx * 8):
+        ///   - offset +0: arrival counter (i32)
+        ///   - offset +4: sense flag (i32)
+        /// 
+        /// Algorithm:
+        ///   old = i32.atomic.rmw.add(barrierAddr, 1)
+        ///   if (old + 1 == groupDimX):   // last thread
+        ///     i32.atomic.store(barrierAddr, 0)   // reset counter
+        ///     new_sense = 1 - i32.atomic.load(senseAddr)
+        ///     i32.atomic.store(senseAddr, new_sense)
+        ///     memory.atomic.notify(senseAddr, MAX)
+        ///   else:
+        ///     sense = i32.atomic.load(senseAddr)
+        ///     memory.atomic.wait32(senseAddr, sense, -1)  // wait until sense flips
+        /// </summary>
+        public override void GenerateCode(global::ILGPU.IR.Values.Barrier barrier)
+        {
+            int barrierIdx = _barrierCounter++;
+            _hasBarriers = true;
+            EmitBarrier(barrierIdx);
+        }
+
+        public override void GenerateCode(MemoryBarrier barrier)
+        {
+            // MemoryBarrier (fence) — emit atomic.fence or just a barrier
+            // For Wasm with shared memory, we use the same sense-reversing barrier
+            // since all threads need to synchronize memory visibility
+            // However, MemoryBarrier is typically just a fence, not a full barrier
+            // For now, emit atomic.fence (0x03) 
+            Code.Add(WasmOpCodes.AtomicPrefix);
+            WasmModuleBuilder.EmitU32Leb128(Code, 0x03); // atomic.fence
+            Code.Add(0x00); // memory index 0
+        }
+
+        /// <summary>
+        /// Emits the Wasm instructions for a sense-reversing barrier at the given index.
+        /// </summary>
+        private void EmitBarrier(int barrierIdx)
+        {
+            int byteOffset = barrierIdx * 8;
+
+            // Calculate barrier addresses:
+            // arrivalAddr = barrierBase + byteOffset
+            // senseAddr = barrierBase + byteOffset + 4
+
+            // We need temp locals for addresses and the arrival count
+            var arrivalAddrLocal = AllocateNewLocal(WasmOpCodes.I32);
+            var senseAddrLocal = AllocateNewLocal(WasmOpCodes.I32);
+            var arrivedLocal = AllocateNewLocal(WasmOpCodes.I32);
+
+            // arrivalAddr = barrierBase + byteOffset
+            WasmModuleBuilder.EmitLocalGet(Code, _barrierBaseLocal);
+            WasmModuleBuilder.EmitI32Const(Code, byteOffset);
+            Code.Add(WasmOpCodes.I32Add);
+            WasmModuleBuilder.EmitLocalSet(Code, arrivalAddrLocal);
+
+            // senseAddr = barrierBase + byteOffset + 4
+            WasmModuleBuilder.EmitLocalGet(Code, _barrierBaseLocal);
+            WasmModuleBuilder.EmitI32Const(Code, byteOffset + 4);
+            Code.Add(WasmOpCodes.I32Add);
+            WasmModuleBuilder.EmitLocalSet(Code, senseAddrLocal);
+
+            // arrived = i32.atomic.rmw.add(arrivalAddr, 1) + 1
+            WasmModuleBuilder.EmitLocalGet(Code, arrivalAddrLocal);
+            WasmModuleBuilder.EmitI32Const(Code, 1);
+            Code.Add(WasmOpCodes.AtomicPrefix);
+            WasmModuleBuilder.EmitU32Leb128(Code, WasmOpCodes.I32AtomicRmwAdd);
+            Code.Add(0x02); // alignment = 4 bytes (2^2)
+            Code.Add(0x00); // offset = 0
+            // Stack now has old value; add 1 to get arrived count
+            WasmModuleBuilder.EmitI32Const(Code, 1);
+            Code.Add(WasmOpCodes.I32Add);
+            WasmModuleBuilder.EmitLocalSet(Code, arrivedLocal);
+
+            // if (arrived == groupDimX) — last thread to arrive
+            WasmModuleBuilder.EmitLocalGet(Code, arrivedLocal);
+            WasmModuleBuilder.EmitLocalGet(Code, _groupDimXLocal);
+            Code.Add(WasmOpCodes.I32Eq);
+
+            Code.Add(WasmOpCodes.If);
+            Code.Add(WasmOpCodes.Void);
+
+            // === LAST THREAD: reset counter, flip sense, notify ===
+
+            // i32.atomic.store(arrivalAddr, 0) — reset counter
+            WasmModuleBuilder.EmitLocalGet(Code, arrivalAddrLocal);
+            WasmModuleBuilder.EmitI32Const(Code, 0);
+            Code.Add(WasmOpCodes.AtomicPrefix);
+            WasmModuleBuilder.EmitU32Leb128(Code, WasmOpCodes.I32AtomicStore);
+            Code.Add(0x02); // alignment
+            Code.Add(0x00); // offset
+
+            // new_sense = 1 - i32.atomic.load(senseAddr)
+            WasmModuleBuilder.EmitI32Const(Code, 1);
+            WasmModuleBuilder.EmitLocalGet(Code, senseAddrLocal);
+            Code.Add(WasmOpCodes.AtomicPrefix);
+            WasmModuleBuilder.EmitU32Leb128(Code, WasmOpCodes.I32AtomicLoad);
+            Code.Add(0x02); // alignment
+            Code.Add(0x00); // offset
+            Code.Add(WasmOpCodes.I32Sub); // 1 - old_sense
+
+            // Store into a temp so we can use it for the store
+            var newSenseLocal = AllocateNewLocal(WasmOpCodes.I32);
+            WasmModuleBuilder.EmitLocalSet(Code, newSenseLocal);
+
+            // i32.atomic.store(senseAddr, new_sense)
+            WasmModuleBuilder.EmitLocalGet(Code, senseAddrLocal);
+            WasmModuleBuilder.EmitLocalGet(Code, newSenseLocal);
+            Code.Add(WasmOpCodes.AtomicPrefix);
+            WasmModuleBuilder.EmitU32Leb128(Code, WasmOpCodes.I32AtomicStore);
+            Code.Add(0x02); // alignment
+            Code.Add(0x00); // offset
+
+            // memory.atomic.notify(senseAddr, MAX_WAITERS)
+            WasmModuleBuilder.EmitLocalGet(Code, senseAddrLocal);
+            WasmModuleBuilder.EmitI32Const(Code, int.MaxValue); // wake all
+            Code.Add(WasmOpCodes.AtomicPrefix);
+            WasmModuleBuilder.EmitU32Leb128(Code, WasmOpCodes.MemoryAtomicNotify);
+            Code.Add(0x02); // alignment
+            Code.Add(0x00); // offset
+            Code.Add(WasmOpCodes.Drop); // drop the return value (number of waiters woken)
+
+            Code.Add(WasmOpCodes.Else);
+
+            // === NOT LAST: wait for sense to flip ===
+
+            // sense = i32.atomic.load(senseAddr)
+            var senseLocal = AllocateNewLocal(WasmOpCodes.I32);
+            WasmModuleBuilder.EmitLocalGet(Code, senseAddrLocal);
+            Code.Add(WasmOpCodes.AtomicPrefix);
+            WasmModuleBuilder.EmitU32Leb128(Code, WasmOpCodes.I32AtomicLoad);
+            Code.Add(0x02); // alignment
+            Code.Add(0x00); // offset
+            WasmModuleBuilder.EmitLocalSet(Code, senseLocal);
+
+            // memory.atomic.wait32(senseAddr, sense, -1) — infinite timeout
+            WasmModuleBuilder.EmitLocalGet(Code, senseAddrLocal);
+            WasmModuleBuilder.EmitLocalGet(Code, senseLocal);
+            WasmModuleBuilder.EmitI64Const(Code, -1); // timeout = infinite
+            Code.Add(WasmOpCodes.AtomicPrefix);
+            WasmModuleBuilder.EmitU32Leb128(Code, WasmOpCodes.MemoryAtomicWait32);
+            Code.Add(0x02); // alignment
+            Code.Add(0x00); // offset
+            Code.Add(WasmOpCodes.Drop); // drop result (0=ok, 1=not-equal, 2=timed-out)
+
+            Code.Add(WasmOpCodes.End); // end if/else
+
+            WasmBackend.Log($"[Wasm-Barrier] Emitted barrier #{barrierIdx} at byteOffset={byteOffset}");
         }
 
         #endregion

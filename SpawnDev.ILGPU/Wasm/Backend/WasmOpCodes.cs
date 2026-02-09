@@ -211,6 +211,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         public const byte MemoryAtomicNotify = 0x00;
         public const byte MemoryAtomicWait32 = 0x01;
         public const byte MemoryAtomicWait64 = 0x02;
+        public const byte AtomicFence = 0x03;
         public const byte I32AtomicLoad = 0x10;
         public const byte I64AtomicLoad = 0x11;
         public const byte I32AtomicStore = 0x17;

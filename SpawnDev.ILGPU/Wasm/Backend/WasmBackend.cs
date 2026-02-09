@@ -301,7 +301,11 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 entryPoint,
                 wasmBinary,
                 data.ParamInfos.Count,
-                data.ParamInfos);
+                data.ParamInfos,
+                data.SharedMemorySize,
+                data.BarrierCount,
+                data.HasBarriers,
+                data.DynamicSharedElementSize);
         }
 
         #endregion

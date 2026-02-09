@@ -20,40 +20,16 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
             return (context, accelerator);
         }
 
-        // Override tests that are unsupported in Phase 1
-        // (barriers, atomics, subgroups)
-
-        [TestMethod]
-        public new async Task SharedMemoryTest() =>
-            throw new UnsupportedTestException("Wasm Phase 1: barriers not yet implemented");
-
-        [TestMethod]
-        public new async Task CSharpSharedMemoryTest() =>
-            throw new UnsupportedTestException("Wasm Phase 1: barriers not yet implemented");
-
-        [TestMethod]
-        public new async Task DynamicSharedMemoryTest() =>
-            throw new UnsupportedTestException("Wasm Phase 1: barriers not yet implemented");
-
-        [TestMethod]
-        public new async Task SharedMemoryBarrierTest() =>
-            throw new UnsupportedTestException("Wasm Phase 1: barriers not yet implemented");
-
-        [TestMethod]
-        public new async Task LinearBarrierTest() =>
-            throw new UnsupportedTestException("Wasm Phase 1: barriers not yet implemented");
+        // Override tests that are unsupported
+        // (broadcast, subgroups — browser limitations)
 
         [TestMethod]
         public new async Task BroadcastTest() =>
-            throw new UnsupportedTestException("Wasm Phase 1: broadcast not yet implemented");
+            throw new UnsupportedTestException("Wasm: broadcast not yet implemented");
 
         [TestMethod]
         public new async Task SubgroupShuffleTest() =>
             throw new UnsupportedTestException("Subgroups not supported in browser environment");
-
-        [TestMethod]
-        public new async Task DynamicSharedF64Test() =>
-            throw new UnsupportedTestException("Wasm Phase 1: barriers + dynamic shared memory not yet implemented");
 
     }
 }

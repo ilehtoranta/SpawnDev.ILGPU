@@ -32,6 +32,27 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         public List<WasmParamInfo> ParamInfos { get; }
 
         /// <summary>
+        /// Total bytes needed for shared memory allocations within a workgroup.
+        /// </summary>
+        public int SharedMemorySize { get; }
+
+        /// <summary>
+        /// Number of barrier synchronization points in the kernel.
+        /// Each barrier uses 8 bytes (2 × i32: arrival counter + sense flag).
+        /// </summary>
+        public int BarrierCount { get; }
+
+        /// <summary>
+        /// Whether this kernel uses shared memory or barriers.
+        /// </summary>
+        public bool HasBarriers { get; }
+
+        /// <summary>
+        /// Number of elements requested for dynamic shared memory (0 if none).
+        /// </summary>
+        public int DynamicSharedElementSize { get; }
+
+        /// <summary>
         /// Creates a new compiled Wasm kernel.
         /// </summary>
         public WasmCompiledKernel(
@@ -39,12 +60,20 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             EntryPoint entryPoint,
             byte[] wasmBinary,
             int bindingCount,
-            List<WasmParamInfo> paramInfos)
+            List<WasmParamInfo> paramInfos,
+            int sharedMemorySize = 0,
+            int barrierCount = 0,
+            bool hasBarriers = false,
+            int dynamicSharedElementSize = 0)
             : base(context, entryPoint, null)
         {
             WasmBinary = wasmBinary;
             BindingCount = bindingCount;
             ParamInfos = paramInfos;
+            SharedMemorySize = sharedMemorySize;
+            BarrierCount = barrierCount;
+            HasBarriers = hasBarriers;
+            DynamicSharedElementSize = dynamicSharedElementSize;
         }
     }
 

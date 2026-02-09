@@ -42,6 +42,26 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             /// </summary>
             public List<WasmParamInfo> ParamInfos { get; set; } = new();
 
+            /// <summary>
+            /// Total bytes needed for shared memory allocations (populated by kernel generator).
+            /// </summary>
+            public int SharedMemorySize { get; set; }
+
+            /// <summary>
+            /// Number of barrier synchronization points (populated by kernel generator).
+            /// </summary>
+            public int BarrierCount { get; set; }
+
+            /// <summary>
+            /// Whether this kernel uses shared memory or barriers (populated by kernel generator).
+            /// </summary>
+            public bool HasBarriers { get; set; }
+
+            /// <summary>
+            /// Dynamic shared memory element size in bytes (populated by kernel generator).
+            /// </summary>
+            public int DynamicSharedElementSize { get; set; }
+
             public GeneratorArgs(
                 WasmBackend backend,
                 EntryPoint entryPoint,
@@ -966,6 +986,22 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             WasmModuleBuilder.EmitLocalSet(Code, target);
         }
 
+        // Views
+        /// <summary>
+        /// Generates code for a NewView IR node.
+        /// NewView wraps a pointer + length into an ArrayView.
+        /// In our flat Wasm memory model, the view IS the pointer.
+        /// </summary>
+        public virtual void GenerateCode(NewView value)
+        {
+            var target = AllocateLocal(value);
+            // NewView.Pointer is the source pointer (e.g., from Alloca for shared memory)
+            var pointer = value.Pointer.Resolve();
+            EmitGetLocal(pointer);
+            WasmModuleBuilder.EmitLocalSet(Code, target);
+            WasmBackend.Log($"[Wasm-NewView] target=local_{target} <- pointer=local_{GetLocal(pointer)} (IR={pointer.GetType().Name} id={pointer.Id})");
+        }
+
         // Barriers & Atomics
         public virtual void GenerateCode(PredicateBarrier barrier) { }
         public virtual void GenerateCode(global::ILGPU.IR.Values.Barrier barrier) { }
@@ -1493,6 +1529,9 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                     GenerateCode(v);
                     break;
                 case global::ILGPU.IR.Values.Alloca v:
+                    GenerateCode(v);
+                    break;
+                case global::ILGPU.IR.Values.NewView v:
                     GenerateCode(v);
                     break;
                 case global::ILGPU.IR.Values.MemoryBarrier v:

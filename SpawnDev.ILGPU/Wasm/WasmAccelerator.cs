@@ -167,18 +167,31 @@ namespace SpawnDev.ILGPU.Wasm
                 var (gridDimX, gridDimY, gridDimZ) = GetGridDimensions(dimension);
                 int totalItems = gridDimX * gridDimY * gridDimZ;
 
-                WasmBackend.Log($"[Wasm] Dispatching kernel: {totalItems} items ({gridDimX}x{gridDimY}x{gridDimZ})");
+                // Extract actual group size for barrier kernels
+                int groupSize = GetGroupSize(dimension, compiledKernel);
+                int numGroups = compiledKernel.HasBarriers && groupSize > 1
+                    ? Math.Max(1, (totalItems + groupSize - 1) / groupSize)
+                    : totalItems;
+
+                WasmBackend.Log($"[Wasm] Dispatching kernel: {totalItems} items ({gridDimX}x{gridDimY}x{gridDimZ}), groupSize={groupSize}, numGroups={numGroups}, hasBarriers={compiledKernel.HasBarriers}");
 
                 // Determine isView flags from compiled kernel metadata
                 var paramInfos = compiledKernel.ParamInfos;
+
+                // Skip the implicit extent argument (args[0]) only for LoadStreamKernel launches.
+                // When dimension is KernelConfig (from LoadStreamKernel), args[0] is the extent value
+                // and args[1+] are user params. For LoadAutoGroupedStreamKernel, dimension is the extent 
+                // itself and args[0] is already the first user param.
+                int argOffset = dimension is KernelConfig ? 1 : 0;
 
                 // Collect all SharedArrayBuffers from buffer arguments
                 var bufferInfos = new List<(WasmMemoryBuffer buffer, int byteOffset)>();
                 var wasmArgs = new List<(bool isBuffer, WasmMemoryBuffer? buffer, int length, int stride, int stride2, object? value)>();
 
-                for (int i = 0; i < args.Length; i++)
+                for (int i = argOffset; i < args.Length; i++)
                 {
-                    bool isView = i < paramInfos.Count && paramInfos[i].IsView;
+                    int paramIdx = i - argOffset;
+                    bool isView = paramIdx < paramInfos.Count && paramInfos[paramIdx].IsView;
 
                     if (isView && args[i] is IArrayView iav)
                     {
@@ -248,10 +261,22 @@ namespace SpawnDev.ILGPU.Wasm
                 // Scratch memory for struct construction (after all buffers)
                 int scratchBase = (totalMemoryBytes + 7) & ~7; // 8-byte align
                 int scratchSize = 4096; // 4KB for temporary structs
-                int totalWithScratch = scratchBase + scratchSize;
+                int afterScratch = scratchBase + scratchSize;
+
+                // Shared memory region (for barrier kernels)
+                int sharedMemBase = (afterScratch + 7) & ~7; // 8-byte align
+                int sharedMemSize = compiledKernel.SharedMemorySize;
+                int afterShared = sharedMemBase + sharedMemSize;
+
+                // Barrier slots region: each barrier = 8 bytes (arrival counter i32 + sense flag i32)
+                int barrierBase = (afterShared + 3) & ~3; // 4-byte align
+                int barrierSize = compiledKernel.BarrierCount * 8;
+                int totalWithBarriers = barrierBase + barrierSize;
+
+                WasmBackend.Log($"[Wasm] Memory layout: buffers={totalMemoryBytes}, scratch={scratchBase}, sharedMem={sharedMemBase}({sharedMemSize}), barrier={barrierBase}({barrierSize}), hasBarriers={compiledKernel.HasBarriers}, groupSize={groupSize}");
 
                 // Round up to Wasm page size (64KB)
-                int wasmPages = Math.Max(1, (totalWithScratch + 65535) / 65536);
+                int wasmPages = Math.Max(1, (totalWithBarriers + 65535) / 65536);
 
                 // Create shared Wasm memory
                 using var wasmMemory = js.Call<JSObject>(
@@ -296,6 +321,8 @@ namespace SpawnDev.ILGPU.Wasm
                 // Dispatch to workers
                 await DispatchToWorkers(
                     totalItems, gridDimX, gridDimY, scratchBase,
+                    sharedMemBase, barrierBase, compiledKernel,
+                    groupSize, numGroups,
                     flatArgs, compiledKernel.WasmBinary,
                     wasmMemory, memoryBuffer, bufferOffsets, bufferInfos);
             }
@@ -308,13 +335,19 @@ namespace SpawnDev.ILGPU.Wasm
 
         /// <summary>
         /// Dispatches the Wasm kernel across multiple Web Workers for true Wasm multithreading.
-        /// Each worker instantiates the same Wasm module with shared memory and runs its range.
+        /// For barrier kernels: distributes groups across workers. Each worker runs all threads within its groups.
+        /// For non-barrier kernels: distributes items across workers with flat range dispatch.
         /// </summary>
         private async Task DispatchToWorkers(
             int totalItems,
             int gridDimX,
             int gridDimY,
             int scratchBase,
+            int sharedMemBase,
+            int barrierBase,
+            WasmCompiledKernel compiledKernel,
+            int groupSize,
+            int numGroups,
             List<string> flatArgs,
             byte[] wasmBytes,
             JSObject wasmMemory,
@@ -322,75 +355,145 @@ namespace SpawnDev.ILGPU.Wasm
             List<int> bufferOffsets,
             List<(WasmMemoryBuffer buffer, int byteOffset)> bufferInfos)
         {
-            int workerCount = _workerCount;
-            // Don't spawn more workers than work items
-            if (workerCount > totalItems) workerCount = Math.Max(1, totalItems);
+            bool hasBarriers = compiledKernel.HasBarriers;
 
-            WasmBackend.Log($"[Wasm] Dispatching to {workerCount} worker(s), {totalItems} items");
+            int workerCount;
+            if (hasBarriers)
+            {
+                // For barrier kernels: need exactly groupSize workers
+                // (one per thread in the group), processing groups sequentially
+                workerCount = groupSize;
+            }
+            else
+            {
+                // For non-barrier kernels, don't spawn more workers than items
+                workerCount = _workerCount;
+                if (workerCount > totalItems) workerCount = Math.Max(1, totalItems);
+            }
+
+            WasmBackend.Log($"[Wasm] Dispatching to {workerCount} worker(s), {totalItems} items, hasBarriers={hasBarriers}, groupSize={groupSize}, numGroups={numGroups}");
 
             // Build the worker script
             string argStr = string.Join(", ", flatArgs);
-            var workerScript = BuildWasmWorkerScript(gridDimX, gridDimY, scratchBase, argStr);
+            var workerScript = BuildWasmWorkerScript(
+                gridDimX, gridDimY, scratchBase,
+                sharedMemBase, barrierBase,
+                groupSize, numGroups, hasBarriers, argStr);
 
             // Create workers
             var workers = QuickWorker.CreateWorkersFromJS(workerScript, workerCount);
             var tasks = new List<Task>();
 
-            // Distribute items evenly across workers
-            int itemsPerWorker = totalItems / workerCount;
-            int remainder = totalItems % workerCount;
-
-            for (int w = 0; w < workerCount; w++)
+            if (hasBarriers)
             {
-                var worker = workers[w];
-                int startIdx = w * itemsPerWorker + Math.Min(w, remainder);
-                int endIdx = startIdx + itemsPerWorker + (w < remainder ? 1 : 0);
-
-                var tcs = new TaskCompletionSource();
-                int workerIdx = w;
-
-                Action<MessageEvent>? msgHandler = null;
-                Action<Event>? errHandler = null;
-
-                msgHandler = new Action<MessageEvent>((msg) =>
+                // Barrier dispatch: each worker gets its threadId (0..groupSize-1)
+                // All workers process the same groups sequentially
+                for (int w = 0; w < workerCount; w++)
                 {
-                    worker.OnMessage -= msgHandler!;
-                    worker.OnError -= errHandler!;
-                    worker.Terminate();
-                    worker.Dispose();
+                    var worker = workers[w];
+                    var tcs = new TaskCompletionSource();
+                    int workerIdx = w;
 
-                    var done = msg.JSRef!.Get<bool>("data.done");
-                    if (!done)
+                    Action<MessageEvent>? msgHandler = null;
+                    Action<Event>? errHandler = null;
+
+                    msgHandler = new Action<MessageEvent>((msg) =>
                     {
-                        var errorMsg = msg.JSRef!.Get<string?>("data.error") ?? "Unknown worker error";
-                        tcs.TrySetException(new Exception($"[Wasm] Worker {workerIdx} error: {errorMsg}"));
-                        return;
-                    }
-                    tcs.TrySetResult();
-                });
+                        worker.OnMessage -= msgHandler!;
+                        worker.OnError -= errHandler!;
+                        worker.Terminate();
+                        worker.Dispose();
 
-                errHandler = new Action<Event>((err) =>
+                        var done = msg.JSRef!.Get<bool>("data.done");
+                        if (!done)
+                        {
+                            var errorMsg = msg.JSRef!.Get<string?>("data.error") ?? "Unknown worker error";
+                            tcs.TrySetException(new Exception($"[Wasm] Worker {workerIdx} error: {errorMsg}"));
+                            return;
+                        }
+                        tcs.TrySetResult();
+                    });
+
+                    errHandler = new Action<Event>((err) =>
+                    {
+                        worker.OnMessage -= msgHandler!;
+                        worker.OnError -= errHandler!;
+                        worker.Terminate();
+                        worker.Dispose();
+                        tcs.TrySetException(new Exception($"[Wasm] Worker {workerIdx} error during kernel execution"));
+                    });
+
+                    worker.OnMessage += msgHandler;
+                    worker.OnError += errHandler;
+
+                    // Send thread ID + shared data to worker
+                    worker.PostMessage(new
+                    {
+                        wasmBytes = wasmBytes,
+                        memory = wasmMemory,
+                        threadId = w,
+                    });
+
+                    tasks.Add(tcs.Task);
+                }
+            }
+            else
+            {
+                // Non-barrier: flat item distribution
+                int itemsPerWorker = totalItems / workerCount;
+                int remainder = totalItems % workerCount;
+
+                for (int w = 0; w < workerCount; w++)
                 {
-                    worker.OnMessage -= msgHandler!;
-                    worker.OnError -= errHandler!;
-                    worker.Terminate();
-                    worker.Dispose();
-                    tcs.TrySetException(new Exception($"[Wasm] Worker {workerIdx} error during kernel execution"));
-                });
+                    var worker = workers[w];
+                    int startIdx = w * itemsPerWorker + Math.Min(w, remainder);
+                    int endIdx = startIdx + itemsPerWorker + (w < remainder ? 1 : 0);
 
-                worker.OnMessage += msgHandler;
-                worker.OnError += errHandler;
+                    var tcs = new TaskCompletionSource();
+                    int workerIdx = w;
 
-                // Send the Wasm binary, shared memory, and work range to the worker
-                worker.PostMessage(new
-                {
-                    wasmBytes = wasmBytes,
-                    memory = wasmMemory,
-                    startIdx = startIdx,
-                    endIdx = endIdx,
-                });
+                    Action<MessageEvent>? msgHandler = null;
+                    Action<Event>? errHandler = null;
 
-                tasks.Add(tcs.Task);
+                    msgHandler = new Action<MessageEvent>((msg) =>
+                    {
+                        worker.OnMessage -= msgHandler!;
+                        worker.OnError -= errHandler!;
+                        worker.Terminate();
+                        worker.Dispose();
+
+                        var done = msg.JSRef!.Get<bool>("data.done");
+                        if (!done)
+                        {
+                            var errorMsg = msg.JSRef!.Get<string?>("data.error") ?? "Unknown worker error";
+                            tcs.TrySetException(new Exception($"[Wasm] Worker {workerIdx} error: {errorMsg}"));
+                            return;
+                        }
+                        tcs.TrySetResult();
+                    });
+
+                    errHandler = new Action<Event>((err) =>
+                    {
+                        worker.OnMessage -= msgHandler!;
+                        worker.OnError -= errHandler!;
+                        worker.Terminate();
+                        worker.Dispose();
+                        tcs.TrySetException(new Exception($"[Wasm] Worker {workerIdx} error during kernel execution"));
+                    });
+
+                    worker.OnMessage += msgHandler;
+                    worker.OnError += errHandler;
+
+                    worker.PostMessage(new
+                    {
+                        wasmBytes = wasmBytes,
+                        memory = wasmMemory,
+                        startIdx = startIdx,
+                        endIdx = endIdx,
+                    });
+
+                    tasks.Add(tcs.Task);
+                }
             }
 
             // Wait for all workers to complete
@@ -410,10 +513,16 @@ namespace SpawnDev.ILGPU.Wasm
 
         /// <summary>
         /// Builds the JS script that runs inside each Wasm worker.
-        /// The worker receives: { wasmBytes, memory, startIdx, endIdx }
-        /// It instantiates the Wasm module with the shared memory and runs the kernel loop.
+        /// For barrier kernels: worker receives { wasmBytes, memory, threadId }
+        ///   and iterates over groups, calling kernel(globalIdx, dimX, dimY, scratchBase, groupDimX, threadIdX, sharedMemBase, barrierBase, ...args)
+        /// For non-barrier kernels: worker receives { wasmBytes, memory, startIdx, endIdx }
+        ///   and iterates over its assigned items with the same kernel signature (groupDimX=dimX, threadIdX=globalIdx).
         /// </summary>
-        private static string BuildWasmWorkerScript(int gridDimX, int gridDimY, int scratchBase, string argStr)
+        private static string BuildWasmWorkerScript(
+            int gridDimX, int gridDimY, int scratchBase,
+            int sharedMemBase, int barrierBase,
+            int groupSize, int numGroups, bool hasBarriers,
+            string argStr)
         {
             var sb = new System.Text.StringBuilder();
             sb.AppendLine("self.onmessage = async function(e) {");
@@ -421,8 +530,6 @@ namespace SpawnDev.ILGPU.Wasm
             sb.AppendLine("    const d = e.data;");
             sb.AppendLine("    const wasmBuf = new Uint8Array(d.wasmBytes).buffer;");
             sb.AppendLine("    const memory = d.memory;");
-            sb.AppendLine("    const startIdx = d.startIdx;");
-            sb.AppendLine("    const endIdx = d.endIdx;");
             sb.AppendLine();
             sb.AppendLine("    const module = await WebAssembly.compile(wasmBuf);");
             sb.AppendLine("    const instance = await WebAssembly.instantiate(module, {");
@@ -442,16 +549,45 @@ namespace SpawnDev.ILGPU.Wasm
             sb.AppendLine("    });");
             sb.AppendLine("    const kernel = instance.exports.kernel;");
             sb.AppendLine();
-            sb.AppendLine("    // Run kernel for assigned range");
-            sb.AppendLine("    for (let i = startIdx; i < endIdx; i++) {");
-            sb.Append($"      kernel(i, {gridDimX}, {gridDimY}, {scratchBase}");
-            if (argStr.Length > 0)
+
+            if (hasBarriers)
             {
-                sb.Append(", ");
-                sb.Append(argStr);
+                // Barrier kernel: group-based dispatch
+                // Each worker is one thread within the workgroup.
+                // All workers iterate over all groups, synchronizing at barriers.
+                sb.AppendLine("    const threadId = d.threadId;");
+                sb.AppendLine($"    const groupSize = {groupSize};");
+                sb.AppendLine($"    const numGroups = {numGroups};");
+                sb.AppendLine();
+                sb.AppendLine("    for (let g = 0; g < numGroups; g++) {");
+                sb.AppendLine("      const globalIdx = g * groupSize + threadId;");
+                sb.Append($"      kernel(globalIdx, {gridDimX}, {gridDimY}, {scratchBase}, {groupSize}, threadId, {sharedMemBase}, {barrierBase}");
+                if (argStr.Length > 0)
+                {
+                    sb.Append(", ");
+                    sb.Append(argStr);
+                }
+                sb.AppendLine(");");
+                sb.AppendLine("    }");
             }
-            sb.AppendLine(");");
-            sb.AppendLine("    }");
+            else
+            {
+                // Non-barrier kernel: flat item dispatch
+                sb.AppendLine("    const startIdx = d.startIdx;");
+                sb.AppendLine("    const endIdx = d.endIdx;");
+                sb.AppendLine();
+                sb.AppendLine("    for (let i = startIdx; i < endIdx; i++) {");
+                // For non-barrier kernels: groupDimX=gridDimX (one big group), threadIdX=i, sharedMemBase=0, barrierBase=0
+                sb.Append($"      kernel(i, {gridDimX}, {gridDimY}, {scratchBase}, {gridDimX}, i, 0, 0");
+                if (argStr.Length > 0)
+                {
+                    sb.Append(", ");
+                    sb.Append(argStr);
+                }
+                sb.AppendLine(");");
+                sb.AppendLine("    }");
+            }
+
             sb.AppendLine();
             sb.AppendLine("    self.postMessage({ done: true });");
             sb.AppendLine("  } catch(ex) {");
@@ -514,6 +650,22 @@ namespace SpawnDev.ILGPU.Wasm
         {
             var groupDim = config.GroupDim;
             return (Math.Max(groupDim.X, 1), Math.Max(groupDim.Y, 1), Math.Max(groupDim.Z, 1));
+        }
+
+        /// <summary>
+        /// Extracts the group size from the dimension object.
+        /// For KernelConfig, returns GroupDim product.
+        /// For auto-grouped kernels (Index1D/2D/3D), returns the estimated group size.
+        /// </summary>
+        private int GetGroupSize(object dimension, WasmCompiledKernel compiledKernel)
+        {
+            if (dimension is KernelConfig config)
+            {
+                return config.GroupDim.X * config.GroupDim.Y * config.GroupDim.Z;
+            }
+            // For auto-grouped kernels, the group size is determined by EstimateGroupSizeInternal
+            // which returns 64 for the Wasm backend.
+            return compiledKernel.HasBarriers ? 64 : 1;
         }
 
         #endregion
