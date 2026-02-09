@@ -40,6 +40,34 @@ namespace SpawnDev.ILGPU.Wasm
         /// </summary>
         private WorkerPool? _workerPool;
 
+        /// <summary>
+        /// Tracks which pool workers have already received and cached
+        /// the compiled Wasm module, so we don't re-send wasmBytes.
+        /// </summary>
+        private readonly HashSet<int> _initializedWorkers = new();
+
+        /// <summary>
+        /// Reference to the last wasmBytes sent to workers.
+        /// When a different kernel is dispatched, we clear _initializedWorkers.
+        /// </summary>
+        private byte[]? _lastWasmBytes;
+
+        /// <summary>
+        /// Cached WebAssembly.Memory to avoid per-frame allocation.
+        /// SharedArrayBuffer-backed memories reserve large virtual address space,
+        /// so creating a new one every frame causes OOM.
+        /// </summary>
+        private JSObject? _cachedWasmMemory;
+        private SharedArrayBuffer? _cachedMemoryBuffer;
+        private int _cachedWasmPages;
+
+        /// <summary>
+        /// Counts how many RunKernelAsync dispatches are currently active.
+        /// Incremented BEFORE the async task starts so the count is visible
+        /// during the synchronous phase of each task.
+        /// </summary>
+        internal int _activeDispatchCount;
+
         // Backend instance
         public WasmBackend Backend { get; private set; } = null!;
 
@@ -158,6 +186,9 @@ namespace SpawnDev.ILGPU.Wasm
 
             WasmBackend.Log($"[Wasm-Debug] RunKernel called with {args.Length} args");
 
+            // Increment active dispatch count BEFORE starting the async task,
+            // so the count is visible during the task's synchronous execution phase.
+            wasmAccel._activeDispatchCount++;
             var task = wasmAccel.RunKernelAsync(compiledKernel, dimension, args);
             wasmAccel._pendingWork.Add(task);
         }
@@ -296,13 +327,53 @@ namespace SpawnDev.ILGPU.Wasm
                 // Round up to Wasm page size (64KB)
                 int wasmPages = Math.Max(1, (totalWithBarriers + 65535) / 65536);
 
-                // Create shared Wasm memory
-                using var wasmMemory = js.Call<JSObject>(
-                    "eval",
-                    $"new WebAssembly.Memory({{ initial: {wasmPages}, maximum: 65536, shared: true }})");
+                // Determine whether we can reuse the cached memory.
+                // If there are other pending kernel dispatches running concurrently,
+                // they share the same SharedArrayBuffer and we'd corrupt their data.
+                // In that case, create a dedicated per-dispatch memory.
+                bool hasConcurrentWork = _activeDispatchCount > 1;
+                JSObject wasmMemory;
+                SharedArrayBuffer memoryBuffer;
+                JSObject? disposeWasmMemory = null;   // track per-dispatch memory for cleanup
+                SharedArrayBuffer? disposeBuffer = null;
 
-                // Get the SharedArrayBuffer backing the Wasm memory
-                using var memoryBuffer = wasmMemory.JSRef!.Get<SharedArrayBuffer>("buffer");
+                if (!hasConcurrentWork && _cachedWasmMemory != null && wasmPages <= _cachedWasmPages)
+                {
+                    // Reuse cached memory — fast path for render loops (same kernel, no overlap)
+                    wasmMemory = _cachedWasmMemory;
+                    memoryBuffer = _cachedMemoryBuffer!;
+                }
+                else if (!hasConcurrentWork)
+                {
+                    // No concurrent work, but need bigger memory — update cache
+                    _cachedMemoryBuffer?.Dispose();
+                    _cachedWasmMemory?.Dispose();
+                    _cachedWasmPages = wasmPages;
+                    _cachedWasmMemory = js.Call<JSObject>(
+                        "eval",
+                        $"new WebAssembly.Memory({{ initial: {wasmPages}, maximum: 65536, shared: true }})");
+                    _cachedMemoryBuffer = _cachedWasmMemory.JSRef!.Get<SharedArrayBuffer>("buffer");
+                    _initializedWorkers.Clear();
+                    wasmMemory = _cachedWasmMemory;
+                    memoryBuffer = _cachedMemoryBuffer;
+                }
+                else
+                {
+                    // Concurrent dispatches — create isolated per-dispatch memory
+                    disposeWasmMemory = js.Call<JSObject>(
+                        "eval",
+                        $"new WebAssembly.Memory({{ initial: {wasmPages}, maximum: 65536, shared: true }})");
+                    disposeBuffer = disposeWasmMemory.JSRef!.Get<SharedArrayBuffer>("buffer");
+                    wasmMemory = disposeWasmMemory;
+                    memoryBuffer = disposeBuffer;
+                }
+
+                // Zero out the used portion of linear memory to prevent stale data
+                // from prior dispatches when the memory is cached/reused.
+                {
+                    using var zeroView = new Uint8Array(memoryBuffer, 0, totalWithBarriers);
+                    zeroView.JSRef!.CallVoid("fill", 0);
+                }
 
                 // Copy buffer data into the Wasm linear memory at computed offsets
                 for (int i = 0; i < bufferInfos.Count; i++)
@@ -344,11 +415,20 @@ namespace SpawnDev.ILGPU.Wasm
                     flatArgs, compiledKernel.WasmBinary,
                     wasmMemory, memoryBuffer, bufferOffsets, bufferInfos,
                     dynamicSharedElements);
+
+                // Clean up per-dispatch memory (only created for concurrent dispatches)
+                disposeBuffer?.Dispose();
+                disposeWasmMemory?.Dispose();
             }
             catch (Exception ex)
             {
                 WasmBackend.Log($"[Wasm] Kernel execution error: {ex}");
                 throw;
+            }
+            finally
+            {
+                // Always decrement active dispatch count
+                _activeDispatchCount--;
             }
         }
 
@@ -416,6 +496,13 @@ namespace SpawnDev.ILGPU.Wasm
                 var extra = _workerPool.Acquire(shortfall);
                 workers.AddRange(extra);
             }
+
+            // If the kernel changed since last dispatch, invalidate worker caches
+            if (!ReferenceEquals(wasmBytes, _lastWasmBytes))
+            {
+                _initializedWorkers.Clear();
+                _lastWasmBytes = wasmBytes;
+            }
             var tasks = new List<Task>();
 
             if (hasBarriers)
@@ -458,14 +545,30 @@ namespace SpawnDev.ILGPU.Wasm
                     worker.OnMessage += msgHandler;
                     worker.OnError += errHandler;
 
-                    // Send thread ID + shared data to worker, with script body
-                    worker.PostMessage(new
+                    // Send thread ID + shared data to worker.
+                    // Only include wasmBytes on first dispatch to this worker;
+                    // the bootstrap caches the compiled module.
+                    // Always include memory since each dispatch creates a new WebAssembly.Memory.
+                    var workerId = worker.JSRef!.GetHashCode();
+                    if (_initializedWorkers.Add(workerId))
                     {
-                        script = workerScript,
-                        wasmBytes = wasmBytes,
-                        memory = wasmMemory,
-                        threadId = w,
-                    });
+                        worker.PostMessage(new
+                        {
+                            script = workerScript,
+                            wasmBytes = wasmBytes,
+                            memory = wasmMemory,
+                            threadId = w,
+                        });
+                    }
+                    else
+                    {
+                        worker.PostMessage(new
+                        {
+                            script = workerScript,
+                            memory = wasmMemory,
+                            threadId = w,
+                        });
+                    }
 
                     tasks.Add(tcs.Task);
                 }
@@ -515,14 +618,31 @@ namespace SpawnDev.ILGPU.Wasm
                     worker.OnMessage += msgHandler;
                     worker.OnError += errHandler;
 
-                    worker.PostMessage(new
+                    // Only include wasmBytes on first dispatch to this worker;
+                    // the bootstrap caches the compiled module.
+                    // Always include memory since each dispatch creates a new WebAssembly.Memory.
+                    var workerId = worker.JSRef!.GetHashCode();
+                    if (_initializedWorkers.Add(workerId))
                     {
-                        script = workerScript,
-                        wasmBytes = wasmBytes,
-                        memory = wasmMemory,
-                        startIdx = startIdx,
-                        endIdx = endIdx,
-                    });
+                        worker.PostMessage(new
+                        {
+                            script = workerScript,
+                            wasmBytes = wasmBytes,
+                            memory = wasmMemory,
+                            startIdx = startIdx,
+                            endIdx = endIdx,
+                        });
+                    }
+                    else
+                    {
+                        worker.PostMessage(new
+                        {
+                            script = workerScript,
+                            memory = wasmMemory,
+                            startIdx = startIdx,
+                            endIdx = endIdx,
+                        });
+                    }
 
                     tasks.Add(tcs.Task);
                 }
@@ -559,28 +679,10 @@ namespace SpawnDev.ILGPU.Wasm
         {
             // Produces an async function body string that is sent as the 'script' field
             // in the message to the pool worker's async bootstrap.
-            // The bootstrap calls: new AsyncFunction('d', scriptBody)(data)
+            // The bootstrap caches WebAssembly.compile/instantiate — the script body
+            // just uses the pre-cached instance from d._instance.
             var sb = new System.Text.StringBuilder();
-            sb.AppendLine("    const wasmBuf = new Uint8Array(d.wasmBytes).buffer;");
-            sb.AppendLine("    const memory = d.memory;");
-            sb.AppendLine();
-            sb.AppendLine("    const module = await WebAssembly.compile(wasmBuf);");
-            sb.AppendLine("    const instance = await WebAssembly.instantiate(module, {");
-            sb.AppendLine("      env: { memory: memory },");
-            sb.AppendLine("      Math: {");
-            sb.AppendLine("        sin: Math.sin, cos: Math.cos, tan: Math.tan,");
-            sb.AppendLine("        asin: Math.asin, acos: Math.acos, atan: Math.atan,");
-            sb.AppendLine("        sinh: Math.sinh, cosh: Math.cosh, tanh: Math.tanh,");
-            sb.AppendLine("        exp: Math.exp, log: Math.log, log2: Math.log2,");
-            sb.AppendLine("        log10: Math.log10, round: Math.round,");
-            sb.AppendLine("        truncate: Math.trunc, sign: Math.sign,");
-            sb.AppendLine("        exp2: (x) => Math.pow(2, x),");
-            sb.AppendLine("        sqrt: Math.sqrt, abs: Math.abs,");
-            sb.AppendLine("        ceil: Math.ceil, floor: Math.floor,");
-            sb.AppendLine("        pow: Math.pow, atan2: Math.atan2");
-            sb.AppendLine("      }");
-            sb.AppendLine("    });");
-            sb.AppendLine("    const kernel = instance.exports.kernel;");
+            sb.AppendLine("    const kernel = d._instance.exports.kernel;");
             sb.AppendLine();
 
             if (hasBarriers)
@@ -742,6 +844,13 @@ namespace SpawnDev.ILGPU.Wasm
             if (disposing)
             {
                 _pendingWork.Clear();
+                _initializedWorkers.Clear();
+                _activeDispatchCount = 0;
+                _cachedMemoryBuffer?.Dispose();
+                _cachedMemoryBuffer = null;
+                _cachedWasmMemory?.Dispose();
+                _cachedWasmMemory = null;
+                _cachedWasmPages = 0;
                 _workerPool?.Dispose();
                 _workerPool = null;
             }

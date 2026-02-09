@@ -55,16 +55,47 @@ self.onmessage = function(e) {
         /// The script is an async function body that receives the full message data.
         /// </summary>
         private static readonly string WasmBootstrapScript = @"
+var _cachedModule = null;
+var _cachedInstance = null;
+var _lastMemory = null;
+const AsyncFunction = Object.getPrototypeOf(async function(){}).constructor;
+const _mathImports = {
+  sin: Math.sin, cos: Math.cos, tan: Math.tan,
+  asin: Math.asin, acos: Math.acos, atan: Math.atan,
+  sinh: Math.sinh, cosh: Math.cosh, tanh: Math.tanh,
+  exp: Math.exp, log: Math.log, log2: Math.log2,
+  log10: Math.log10, round: Math.round,
+  truncate: Math.trunc, sign: Math.sign,
+  exp2: (x) => Math.pow(2, x),
+  sqrt: Math.sqrt, abs: Math.abs,
+  ceil: Math.ceil, floor: Math.floor,
+  pow: Math.pow, atan2: Math.atan2
+};
+
 self.onmessage = async function(e) {
   var d = e.data;
   try {
+    // Compile module only when new wasmBytes arrive (first dispatch or kernel change)
+    if (d.wasmBytes) {
+      var wasmBuf = new Uint8Array(d.wasmBytes).buffer;
+      _cachedModule = await WebAssembly.compile(wasmBuf);
+      _cachedInstance = null; // Force re-instantiate with new module
+    }
+    // Only re-instantiate when module or memory changes
+    if (!_cachedInstance || d.memory !== _lastMemory) {
+      _lastMemory = d.memory;
+      _cachedInstance = await WebAssembly.instantiate(_cachedModule, {
+        env: { memory: d.memory },
+        Math: _mathImports
+      });
+    }
+    d._instance = _cachedInstance;
     var fn = new AsyncFunction('d', d.script);
     await fn(d);
   } catch(ex) {
     self.postMessage({ done: false, error: (ex && ex.message) ? ex.message : String(ex) });
   }
 };
-const AsyncFunction = Object.getPrototypeOf(async function(){}).constructor;
 ";
 
         /// <summary>
