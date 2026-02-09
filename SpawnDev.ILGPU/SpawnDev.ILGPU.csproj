@@ -27,29 +27,7 @@
 	</PropertyGroup>
 
 	<ItemGroup>
-	  <Content Remove="wwwroot\icon-128.png" />
-	</ItemGroup>
-
-	<ItemGroup>
-		<SupportedPlatform Include="browser" />
-	</ItemGroup>
-
-	<ItemGroup>
 		<PackageReference Include="Microsoft.AspNetCore.Components.Web" Version="10.0.2" />
-	</ItemGroup>
-
-	<ItemGroup>
-		<None Include="Assets\icon-128.png" Pack="true" PackagePath="\" />
-		<None Include="..\LICENSE.txt" Pack="true" PackagePath="\" />
-		<None Include="..\README.md" Pack="true" PackagePath="\" />
-		<None Include="wwwroot\icon-128.png" />
-	</ItemGroup>
-
-	<PropertyGroup>
-		<TargetsForTfmSpecificContentInPackage>$(TargetsForTfmSpecificContentInPackage);AddProjectReferencesToPackage</TargetsForTfmSpecificContentInPackage>
-	</PropertyGroup>
-
-	<ItemGroup>
 		<PackageReference Include="SpawnDev.BlazorJS" Version="2.65.0" />
 	</ItemGroup>
 
@@ -58,6 +36,10 @@
 		<ProjectReference Include="..\ILGPU.Algorithms\ILGPU.Algorithms.csproj" PrivateAssets="All" />
 	</ItemGroup>
 
+	<PropertyGroup>
+		<TargetsForTfmSpecificContentInPackage>$(TargetsForTfmSpecificContentInPackage);AddProjectReferencesToPackage</TargetsForTfmSpecificContentInPackage>
+	</PropertyGroup>
+
 	<Target Name="AddProjectReferencesToPackage" DependsOnTargets="BuildOnlySettings;ResolveReferences">
 		<ItemGroup>
 			<TfmSpecificPackageFile Include="@(ReferenceCopyLocalPaths)" Condition="'%(ReferenceCopyLocalPaths.Extension)' == '.dll' or '%(ReferenceCopyLocalPaths.Extension)' == '.xml'">
@@ -65,5 +47,20 @@
 			</TfmSpecificPackageFile>
 		</ItemGroup>
 	</Target>
+
+	<ItemGroup>
+		<None Include="Assets\icon-128.png" Pack="true" PackagePath="\" />
+		<None Include="..\LICENSE.txt" Pack="true" PackagePath="\" />
+		<None Include="..\README.md" Pack="true" PackagePath="\" />
+		<None Include="wwwroot\icon-128.png" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<Content Remove="wwwroot\icon-128.png" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<SupportedPlatform Include="browser" />
+	</ItemGroup>
 
 </Project>
