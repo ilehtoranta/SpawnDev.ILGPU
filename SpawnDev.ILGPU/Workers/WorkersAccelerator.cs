@@ -200,7 +200,9 @@ namespace SpawnDev.ILGPU.Workers
         /// Dispatches kernel work to Web Workers.
         /// With SharedArrayBuffer: splits work across N workers (zero-copy parallel).
         /// Without SharedArrayBuffer: sends all work to 1 worker with zero-copy transferred ArrayBuffers.
-        /// For barrier kernels: work is distributed in complete workgroups.
+        /// For barrier kernels: distributes groups across workers. Each worker processes
+        /// all its groups using generators (intra-group sync), then uses Atomics to sync
+        /// across workers at each barrier step.
         /// </summary>
         private static Task DispatchToWorkers(
             string jsSource,
@@ -216,45 +218,55 @@ namespace SpawnDev.ILGPU.Workers
             bool isShared = canUseShared && workerCount > 1;
             if (!canUseShared) workerCount = 1;
 
-            // Detect if this kernel uses barriers (generator-based execution)
+            // Detect if this kernel uses barriers
             bool hasBarriers = jsSource.Contains("// __HAS_BARRIERS__");
 
-            // For barrier kernels: ensure work is distributed in complete workgroups
+            // For barrier kernels: allocate worker-level barrier SAB
+            SharedArrayBuffer? barrierSab = null;
             int groupSize = groupDimX * groupDimY * groupDimZ;
-            if (hasBarriers && groupSize > 0)
+            int numGroups = groupSize > 0 ? totalItems / groupSize : 0;
+
+            if (hasBarriers && isShared && groupSize > 0)
             {
-                int numGroups = totalItems / groupSize;
-                // Limit workers to number of groups (each worker needs at least 1 complete group)
-                if (numGroups < workerCount)
-                    workerCount = Math.Max(1, numGroups);
+                // Parse barrier count from metadata
+                int barrierCount = 1;
+                var barrierCountMatch = System.Text.RegularExpressions.Regex.Match(
+                    jsSource, @"// __BARRIER_COUNT__\s+(\d+)");
+                if (barrierCountMatch.Success)
+                    barrierCount = int.Parse(barrierCountMatch.Groups[1].Value);
+
+                // Worker-level barrier: barrierCount barriers, each needs 2 i32 slots (arrival + sense)
+                int totalSlots = barrierCount * 2;
+                int barrierBytes = totalSlots * 4;
+                barrierSab = new SharedArrayBuffer(barrierBytes);
+
+                // Clamp worker count to numGroups (no point having more workers than groups)
+                workerCount = Math.Min(workerCount, numGroups);
+                if (workerCount < 1) workerCount = 1;
+
+                WorkersBackend.Log($"[Workers] Barrier kernel: {numGroups} groups x {groupSize} threads, {barrierCount} barriers, {workerCount} workers");
             }
 
             WorkersBackend.Log($"[Workers] Dispatching kernel: {totalItems} items across {workerCount} worker(s), SharedArrayBuffer={isShared}, HasBarriers={hasBarriers}");
 
-            // Build the worker script
             var workerScript = BuildWorkerScript(jsSource, jsArgs, isShared, dimX, dimY, dimZ, groupDimX, groupDimY, groupDimZ, hasBarriers, dynamicSharedElements);
-
-            // Create workers
             var workers = QuickWorker.CreateWorkersFromJS(workerScript, workerCount);
             var tasks = new List<Task>();
 
-            // Calculate work distribution
-            if (hasBarriers && groupSize > 0)
+            if (hasBarriers && isShared && groupSize > 0)
             {
-                // Group-aligned distribution: each worker gets complete workgroups
-                int numGroups = totalItems / groupSize;
+                // Group distribution: each worker gets a contiguous range of groups
                 int groupsPerWorker = numGroups / workerCount;
-                int groupRemainder = numGroups % workerCount;
+                int remainder = numGroups % workerCount;
 
                 for (int w = 0; w < workerCount; w++)
                 {
                     var worker = workers[w];
-                    int startGroup = w * groupsPerWorker + Math.Min(w, groupRemainder);
-                    int endGroup = startGroup + groupsPerWorker + (w < groupRemainder ? 1 : 0);
-                    int startIdx = startGroup * groupSize;
-                    int endIdx = endGroup * groupSize;
+                    int startGroup = w * groupsPerWorker + Math.Min(w, remainder);
+                    int endGroup = startGroup + groupsPerWorker + (w < remainder ? 1 : 0);
 
-                    DispatchSingleWorker(worker, w, jsArgs, startIdx, endIdx, isShared, tasks);
+                    DispatchSingleWorker(worker, w, jsArgs, startGroup, endGroup, isShared, tasks,
+                        barrierSab, groupSize, workerCount);
                 }
             }
             else
@@ -273,15 +285,23 @@ namespace SpawnDev.ILGPU.Workers
                 }
             }
 
-            return Task.WhenAll(tasks);
+            var allTask = Task.WhenAll(tasks);
+            if (barrierSab != null)
+            {
+                allTask = allTask.ContinueWith(_ => barrierSab.Dispose(), TaskScheduler.Default);
+            }
+            return allTask;
         }
 
         /// <summary>
-        /// Dispatches a single worker with the given start/end indices.
+        /// Dispatches a single worker with the given start/end range.
+        /// For barrier kernels: startIdx/endIdx are group indices, plus groupSize and workerCount.
+        /// For non-barrier: startIdx/endIdx are flat item indices.
         /// </summary>
         private static void DispatchSingleWorker(
             Worker worker, int workerIndex, List<object?> jsArgs,
-            int startIdx, int endIdx, bool isShared, List<Task> tasks)
+            int startIdx, int endIdx, bool isShared, List<Task> tasks,
+            SharedArrayBuffer? barrierSab = null, int groupSize = 0, int workerCount = 0)
         {
             var tcs = new TaskCompletionSource();
             Action<MessageEvent>? msgHandler = null;
@@ -323,7 +343,8 @@ namespace SpawnDev.ILGPU.Workers
             worker.OnMessage += msgHandler;
             worker.OnError += errHandler;
 
-            var (messageArgs, transferList) = BuildWorkerMessage(jsArgs, startIdx, endIdx, isShared);
+            var (messageArgs, transferList) = BuildWorkerMessage(jsArgs, startIdx, endIdx, isShared,
+                barrierSab, groupSize, workerCount);
             if (transferList != null)
             {
                 worker.PostMessage(messageArgs, transferList);
@@ -341,8 +362,9 @@ namespace SpawnDev.ILGPU.Workers
         /// The worker receives a message with: { startIdx, endIdx, args: [...] }
         /// where each arg is either { sab, arrayType, byteOffset, elementCount } for buffers
         /// or { value } for scalars.
-        /// For barrier kernels: uses a generator-based loop that steps all items
-        /// through yield points in lockstep.
+        /// For barrier kernels: each worker processes a range of groups using
+        /// generator/yield lockstep (intra-group), then uses Atomics for
+        /// worker-level synchronization at each barrier step.
         /// </summary>
         private static string BuildWorkerScript(string jsSource, List<object?> jsArgs, bool isShared, int dimX, int dimY, int dimZ, int groupDimX, int groupDimY, int groupDimZ, bool hasBarriers, int dynamicSharedElements = 0)
         {
@@ -400,12 +422,14 @@ namespace SpawnDev.ILGPU.Workers
 
             if (hasBarriers)
             {
-                // Generator-based barrier execution:
-                // For each workgroup, create generators for all items, step in lockstep
+                // Worker-level barrier execution:
+                // 1. startIdx/endIdx are GROUP indices (not item indices)
+                // 2. For each group, create generators for all threads, step in lockstep
+                // 3. After all groups complete one yield step → Atomics worker-level barrier
+                // 4. Repeat until all generators are done
                 int groupSize = groupDimX * groupDimY * groupDimZ;
 
                 // Extract shared memory declarations from the tagged block
-                // These are emitted inside the group loop so they're shared across generators
                 string sharedDecls = "";
                 var sharedStartMarker = "// __SHARED_DECLS_START__";
                 var sharedEndMarker = "// __SHARED_DECLS_END__";
@@ -417,19 +441,24 @@ namespace SpawnDev.ILGPU.Workers
                         sharedStart + sharedStartMarker.Length,
                         sharedEnd - sharedStart - sharedStartMarker.Length).Trim();
 
-                    // Replace dynamic shared memory size placeholder with actual element count
                     if (dynamicSharedElements > 0)
                         sharedDecls = sharedDecls.Replace("__DYNSHARED_SIZE__", dynamicSharedElements.ToString());
                 }
 
                 sb.AppendLine($"    var _groupSize = {groupSize};");
-                sb.AppendLine($"    for (var _gStart = startIdx; _gStart < endIdx; _gStart += _groupSize) {{");
+                sb.AppendLine($"    var _barrierBuf = d.barrierBuf;");
+                sb.AppendLine($"    var _workerCount = d.workerCount;");
+                sb.AppendLine();
 
-                // Emit shared memory declarations inside group loop (shared across all generators)
+                // Build arrays of generators for all groups assigned to this worker
+                sb.AppendLine($"    // Create generators for all assigned groups");
+                sb.AppendLine($"    var _groupGens = [];");
+                sb.AppendLine($"    for (var _g = startIdx; _g < endIdx; _g++) {{");
+
+                // Emit shared memory declarations inside group loop
                 if (!string.IsNullOrEmpty(sharedDecls))
                 {
                     sb.AppendLine($"      // Shared memory (reset per group)");
-                    // Emit each declaration line
                     foreach (var line in sharedDecls.Split('\n', StringSplitOptions.RemoveEmptyEntries))
                     {
                         sb.AppendLine($"      {line.Trim()}");
@@ -439,8 +468,8 @@ namespace SpawnDev.ILGPU.Workers
                 sb.AppendLine($"      var _gens = [];");
                 sb.AppendLine($"      for (var _li = 0; _li < _groupSize; _li++) {{");
 
-                // Build kernel call with all params
-                sb.Append($"        _gens.push(kernel(_gStart + _li, {dimX}, {dimY}, {dimZ}, {groupDimX}, {groupDimY}, {groupDimZ}");
+                // Build kernel call — globalIndex = group * groupSize + localIndex
+                sb.Append($"        _gens.push(kernel(_g * _groupSize + _li, {dimX}, {dimY}, {dimZ}, {groupDimX}, {groupDimY}, {groupDimZ}");
                 foreach (var name in callArgs)
                 {
                     sb.Append(", ");
@@ -448,14 +477,40 @@ namespace SpawnDev.ILGPU.Workers
                 }
                 sb.AppendLine("));");
                 sb.AppendLine($"      }}");
+                sb.AppendLine($"      _groupGens.push(_gens);");
+                sb.AppendLine($"    }}");
+                sb.AppendLine();
 
-                // Step all generators in lockstep through yield barriers
-                sb.AppendLine($"      var _allDone = false;");
-                sb.AppendLine($"      while (!_allDone) {{");
-                sb.AppendLine($"        _allDone = true;");
-                sb.AppendLine($"        for (var _gi = 0; _gi < _gens.length; _gi++) {{");
-                sb.AppendLine($"          if (!_gens[_gi].next().done) _allDone = false;");
+                // Step all groups' generators in lockstep, with worker-level atomics sync
+                sb.AppendLine($"    // Step generators: intra-group lockstep + inter-worker atomics");
+                sb.AppendLine($"    var _barrierIdx = 0;");
+                sb.AppendLine($"    var _allDone = false;");
+                sb.AppendLine($"    while (!_allDone) {{");
+                sb.AppendLine($"      _allDone = true;");
+                // Step each group's generators one step
+                sb.AppendLine($"      for (var _gi = 0; _gi < _groupGens.length; _gi++) {{");
+                sb.AppendLine($"        var _gens = _groupGens[_gi];");
+                sb.AppendLine($"        for (var _ti = 0; _ti < _gens.length; _ti++) {{");
+                sb.AppendLine($"          if (!_gens[_ti].next().done) _allDone = false;");
                 sb.AppendLine($"        }}");
+                sb.AppendLine($"      }}");
+                sb.AppendLine();
+                // Worker-level atomics barrier (sense-reversing)
+                sb.AppendLine($"      if (!_allDone && _workerCount > 1) {{");
+                sb.AppendLine($"        // Worker-level sync: wait for all workers to reach this barrier step");
+                sb.AppendLine($"        var _bSlot = _barrierIdx * 2;");
+                sb.AppendLine($"        var _arrived = Atomics.add(_barrierBuf, _bSlot, 1) + 1;");
+                sb.AppendLine($"        if (_arrived === _workerCount) {{");
+                sb.AppendLine($"          // Last worker: reset counter and flip sense");
+                sb.AppendLine($"          Atomics.store(_barrierBuf, _bSlot, 0);");
+                sb.AppendLine($"          Atomics.store(_barrierBuf, _bSlot + 1, 1 - Atomics.load(_barrierBuf, _bSlot + 1));");
+                sb.AppendLine($"          Atomics.notify(_barrierBuf, _bSlot + 1);");
+                sb.AppendLine($"        }} else {{");
+                sb.AppendLine($"          // Wait for last worker to flip sense");
+                sb.AppendLine($"          var _sense = Atomics.load(_barrierBuf, _bSlot + 1);");
+                sb.AppendLine($"          Atomics.wait(_barrierBuf, _bSlot + 1, _sense);");
+                sb.AppendLine($"        }}");
+                sb.AppendLine($"        _barrierIdx++;");
                 sb.AppendLine($"      }}");
                 sb.AppendLine($"    }}");
             }
@@ -504,8 +559,11 @@ namespace SpawnDev.ILGPU.Workers
         /// <summary>
         /// Builds the message object sent to each worker via PostMessage.
         /// Returns both the message and a transfer list for non-shared ArrayBuffers.
+        /// For barrier kernels: includes barrierBuf (Int32Array on SAB), groupSize, workerCount.
         /// </summary>
-        private static (object message, object[]? transferList) BuildWorkerMessage(List<object?> jsArgs, int startIdx, int endIdx, bool isShared)
+        private static (object message, object[]? transferList) BuildWorkerMessage(
+            List<object?> jsArgs, int startIdx, int endIdx, bool isShared,
+            SharedArrayBuffer? barrierSab = null, int groupSize = 0, int workerCount = 0)
         {
             var args = new List<object>();
             var transfers = isShared ? null : new List<object>();
@@ -532,8 +590,17 @@ namespace SpawnDev.ILGPU.Workers
                 }
             }
 
-            var message = new { startIdx, endIdx, args = args.ToArray() };
-            return (message, transfers?.ToArray());
+            if (barrierSab != null)
+            {
+                var barrierView = new Int32Array(barrierSab);
+                var message = new { startIdx, endIdx, args = args.ToArray(), barrierBuf = barrierView, workerCount };
+                return (message, transfers?.ToArray());
+            }
+            else
+            {
+                var message = new { startIdx, endIdx, args = args.ToArray() };
+                return (message, transfers?.ToArray());
+            }
         }
 
         /// <summary>

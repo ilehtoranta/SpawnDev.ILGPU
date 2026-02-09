@@ -163,6 +163,7 @@ namespace SpawnDev.ILGPU.Wasm
         {
             try
             {
+                var js = BlazorJSRuntime.JS;
                 var (gridDimX, gridDimY, gridDimZ) = GetGridDimensions(dimension);
                 int totalItems = gridDimX * gridDimY * gridDimZ;
 
@@ -234,9 +235,69 @@ namespace SpawnDev.ILGPU.Wasm
                     }
                 }
 
-                // Build and execute
-                var wasmBase64 = Convert.ToBase64String(compiledKernel.WasmBinary);
-                await DispatchToMainThread(wasmBase64, totalItems, gridDimX, gridDimY, wasmArgs, bufferInfos);
+                // Calculate total memory needed for all buffers
+                int totalMemoryBytes = 0;
+                var bufferOffsets = new List<int>();
+
+                foreach (var (buf, _) in bufferInfos)
+                {
+                    totalMemoryBytes = (totalMemoryBytes + 7) & ~7; // 8-byte align
+                    bufferOffsets.Add(totalMemoryBytes);
+                    totalMemoryBytes += (int)buf.LengthInBytes;
+                }
+                // Scratch memory for struct construction (after all buffers)
+                int scratchBase = (totalMemoryBytes + 7) & ~7; // 8-byte align
+                int scratchSize = 4096; // 4KB for temporary structs
+                int totalWithScratch = scratchBase + scratchSize;
+
+                // Round up to Wasm page size (64KB)
+                int wasmPages = Math.Max(1, (totalWithScratch + 65535) / 65536);
+
+                // Create shared Wasm memory
+                using var wasmMemory = js.Call<JSObject>(
+                    "eval",
+                    $"new WebAssembly.Memory({{ initial: {wasmPages}, maximum: 65536, shared: true }})");
+
+                // Get the SharedArrayBuffer backing the Wasm memory
+                using var memoryBuffer = wasmMemory.JSRef!.Get<SharedArrayBuffer>("buffer");
+
+                // Copy buffer data into the Wasm linear memory at computed offsets
+                for (int i = 0; i < bufferInfos.Count; i++)
+                {
+                    var (buf, _) = bufferInfos[i];
+                    int offset = bufferOffsets[i];
+
+                    using var srcView = new Uint8Array(buf.SharedBuffer);
+                    using var dstView = new Uint8Array(memoryBuffer, offset, (int)buf.LengthInBytes);
+                    dstView.JSRef!.CallVoid("set", srcView);
+                }
+
+                // Build flat argument list
+                var flatArgs = new List<string>();
+                int bufferIndex = 0;
+                foreach (var (isBuffer, buffer, length, stride, stride2, value) in wasmArgs)
+                {
+                    if (isBuffer)
+                    {
+                        flatArgs.Add(bufferOffsets[bufferIndex].ToString());
+                        flatArgs.Add(length.ToString());
+                        flatArgs.Add(stride.ToString());
+                        flatArgs.Add(stride2.ToString());
+                        bufferIndex++;
+                    }
+                    else
+                    {
+                        if (value is float fv) flatArgs.Add(fv.ToString("G9"));
+                        else if (value is double dv) flatArgs.Add(dv.ToString("G17"));
+                        else flatArgs.Add(value?.ToString() ?? "0");
+                    }
+                }
+
+                // Dispatch to workers
+                await DispatchToWorkers(
+                    totalItems, gridDimX, gridDimY, scratchBase,
+                    flatArgs, compiledKernel.WasmBinary,
+                    wasmMemory, memoryBuffer, bufferOffsets, bufferInfos);
             }
             catch (Exception ex)
             {
@@ -246,151 +307,94 @@ namespace SpawnDev.ILGPU.Wasm
         }
 
         /// <summary>
-        /// Dispatches the Wasm kernel on the main thread (Phase 1).
+        /// Dispatches the Wasm kernel across multiple Web Workers for true Wasm multithreading.
+        /// Each worker instantiates the same Wasm module with shared memory and runs its range.
         /// </summary>
-        private async Task DispatchToMainThread(
-            string wasmBase64,
+        private async Task DispatchToWorkers(
             int totalItems,
             int gridDimX,
             int gridDimY,
-            List<(bool isBuffer, WasmMemoryBuffer? buffer, int length, int stride, int stride2, object? value)> wasmArgs,
+            int scratchBase,
+            List<string> flatArgs,
+            byte[] wasmBytes,
+            JSObject wasmMemory,
+            SharedArrayBuffer memoryBuffer,
+            List<int> bufferOffsets,
             List<(WasmMemoryBuffer buffer, int byteOffset)> bufferInfos)
         {
-            var js = BlazorJSRuntime.JS;
+            int workerCount = _workerCount;
+            // Don't spawn more workers than work items
+            if (workerCount > totalItems) workerCount = Math.Max(1, totalItems);
 
-            // Calculate total memory needed
-            int totalMemoryBytes = 0;
-            var bufferOffsets = new List<int>();
+            WasmBackend.Log($"[Wasm] Dispatching to {workerCount} worker(s), {totalItems} items");
 
-            foreach (var (buf, _) in bufferInfos)
-            {
-                totalMemoryBytes = (totalMemoryBytes + 7) & ~7; // 8-byte align
-                bufferOffsets.Add(totalMemoryBytes);
-                totalMemoryBytes += (int)buf.LengthInBytes;
-            }
-            // Scratch memory for struct construction (after all buffers)
-            int scratchBase = (totalMemoryBytes + 7) & ~7; // 8-byte align
-            int scratchSize = 4096; // 4KB for temporary structs
-            int totalWithScratch = scratchBase + scratchSize;
-
-            // Round up to Wasm page size (64KB)
-            int wasmPages = Math.Max(1, (totalWithScratch + 65535) / 65536);
-
-            // Create Wasm memory
-            using var wasmMemory = js.Call<JSObject>(
-                "eval",
-                $"new WebAssembly.Memory({{ initial: {wasmPages}, maximum: 65536, shared: true }})");
-
-            // Get the SharedArrayBuffer backing the Wasm memory
-            using var memoryBuffer = wasmMemory.JSRef!.Get<SharedArrayBuffer>("buffer");
-
-            // Copy buffer data into the Wasm linear memory at computed offsets
-            for (int i = 0; i < bufferInfos.Count; i++)
-            {
-                var (buf, _) = bufferInfos[i];
-                int offset = bufferOffsets[i];
-
-                using var srcView = new Uint8Array(buf.SharedBuffer);
-                using var dstView = new Uint8Array(memoryBuffer, offset, (int)buf.LengthInBytes);
-                dstView.JSRef!.CallVoid("set", srcView);
-            }
-
-            // Build worker args: [bufferOffset, bufferLen, stride] or [scalarValue]
-            var flatArgs = new List<string>();
-            int bufferIndex = 0;
-            foreach (var (isBuffer, buffer, length, stride, stride2, value) in wasmArgs)
-            {
-                if (isBuffer)
-                {
-                    flatArgs.Add(bufferOffsets[bufferIndex].ToString());
-                    flatArgs.Add(length.ToString());
-                    flatArgs.Add(stride.ToString());
-                    flatArgs.Add(stride2.ToString());
-                    bufferIndex++;
-                }
-                else
-                {
-                    if (value is float fv) flatArgs.Add(fv.ToString("G9"));
-                    else if (value is double dv) flatArgs.Add(dv.ToString("G17"));
-                    else flatArgs.Add(value?.ToString() ?? "0");
-                }
-            }
-
-            // Decode wasm binary from base64
-            byte[] wasmBytes = Convert.FromBase64String(wasmBase64);
-
-            // Build the JS execution script
+            // Build the worker script
             string argStr = string.Join(", ", flatArgs);
+            var workerScript = BuildWasmWorkerScript(gridDimX, gridDimY, scratchBase, argStr);
 
-            string script = $@"
-(async function() {{
-    try {{
-        const memory = globalThis.__wasm_memory__;
-        const wasmBytesArr = globalThis.__wasm_bytes__;
-        console.log('[Wasm-JS] Memory:', memory, 'ByteLength:', memory.buffer.byteLength);
-        console.log('[Wasm-JS] WasmBytes length:', wasmBytesArr.length);
-        console.log('[Wasm-JS] Hex:', Array.from(wasmBytesArr).map(b => b.toString(16).padStart(2,'0')).join(' '));
-        const wasmBuf = wasmBytesArr.buffer.slice(wasmBytesArr.byteOffset, wasmBytesArr.byteOffset + wasmBytesArr.byteLength);
-        console.log('[Wasm-JS] Compiling Wasm module from', wasmBuf.byteLength, 'bytes');
-        const module = await WebAssembly.compile(wasmBuf);
-        console.log('[Wasm-JS] Module compiled. Exports:', WebAssembly.Module.exports(module));
-        console.log('[Wasm-JS] Imports:', WebAssembly.Module.imports(module));
-        const instance = await WebAssembly.instantiate(module, {{
-            env: {{ memory: memory }},
-            Math: {{
-                sin: Math.sin, cos: Math.cos, tan: Math.tan,
-                asin: Math.asin, acos: Math.acos, atan: Math.atan,
-                sinh: Math.sinh, cosh: Math.cosh, tanh: Math.tanh,
-                exp: Math.exp, log: Math.log, log2: Math.log2,
-                log10: Math.log10, round: Math.round,
-                truncate: Math.trunc, sign: Math.sign,
-                exp2: (x) => Math.pow(2, x),
-                sqrt: Math.sqrt, abs: Math.abs,
-                ceil: Math.ceil, floor: Math.floor,
-                pow: Math.pow, atan2: Math.atan2
-            }}
-        }});
-        const kernel = instance.exports.kernel;
-        console.log('[Wasm-JS] Kernel function:', kernel, 'length:', kernel.length);
-        const totalItems = {totalItems};
-        const view32 = new Int32Array(memory.buffer);
-        console.log('[Wasm-JS] First 8 i32s before exec:', Array.from(view32.slice(0, 8)));
-        console.log('[Wasm-JS] Calling kernel with totalItems=', totalItems, 'dimX=', {gridDimX}, 'dimY=', {gridDimY}, 'args: [{argStr}]');
-        for (let i = 0; i < totalItems; i++) {{
-            try {{
-                kernel(i, {gridDimX}, {gridDimY}, {scratchBase}{(argStr.Length > 0 ? ", " + argStr : "")});
-                console.log('[Wasm-JS] kernel(' + i + ') completed. First 8 i32s:', Array.from(new Int32Array(memory.buffer, 0, 8)));
-            }} catch(kerr) {{
-                console.error('[Wasm-JS] kernel(' + i + ') TRAPPED:', kerr.message);
-            }}
-        }}
-        console.log('[Wasm-JS] First 8 i32s after exec:', Array.from(view32.slice(0, 8)));
-        console.log('[Wasm-JS] Kernel execution complete');
-    }} catch(e) {{
-        console.error('[Wasm-JS] ERROR:', e.message, e.stack);
-        throw e;
-    }}
-}})()";
+            // Create workers
+            var workers = QuickWorker.CreateWorkersFromJS(workerScript, workerCount);
+            var tasks = new List<Task>();
 
-            WasmBackend.Log($"[Wasm] Executing script:\n{script}");
+            // Distribute items evenly across workers
+            int itemsPerWorker = totalItems / workerCount;
+            int remainder = totalItems % workerCount;
 
-            // Store memory and wasm bytes on globalThis
-            using var wasmArray = new Uint8Array(wasmBytes.Length);
-            wasmArray.JSRef!.CallVoid("set", wasmBytes);
-            js.Set("__wasm_memory__", wasmMemory);
-            js.Set("__wasm_bytes__", wasmArray);
+            for (int w = 0; w < workerCount; w++)
+            {
+                var worker = workers[w];
+                int startIdx = w * itemsPerWorker + Math.Min(w, remainder);
+                int endIdx = startIdx + itemsPerWorker + (w < remainder ? 1 : 0);
 
-            // Execute
-            using var promise = js.Call<JSObject>("eval", script);
-            // Await the promise by creating a Task from it
-            var tcs = new TaskCompletionSource();
-            using var onResolve = Callback.Create(() => tcs.SetResult());
-            using var onReject = Callback.Create((string err) => tcs.SetException(new Exception($"Wasm kernel error: {err}")));
-            promise.JSRef!.CallVoid("then", onResolve, onReject);
-            await tcs.Task;
+                var tcs = new TaskCompletionSource();
+                int workerIdx = w;
 
-            // Cleanup
-            js.CallVoid("eval", "delete globalThis.__wasm_memory__; delete globalThis.__wasm_bytes__;");
+                Action<MessageEvent>? msgHandler = null;
+                Action<Event>? errHandler = null;
+
+                msgHandler = new Action<MessageEvent>((msg) =>
+                {
+                    worker.OnMessage -= msgHandler!;
+                    worker.OnError -= errHandler!;
+                    worker.Terminate();
+                    worker.Dispose();
+
+                    var done = msg.JSRef!.Get<bool>("data.done");
+                    if (!done)
+                    {
+                        var errorMsg = msg.JSRef!.Get<string?>("data.error") ?? "Unknown worker error";
+                        tcs.TrySetException(new Exception($"[Wasm] Worker {workerIdx} error: {errorMsg}"));
+                        return;
+                    }
+                    tcs.TrySetResult();
+                });
+
+                errHandler = new Action<Event>((err) =>
+                {
+                    worker.OnMessage -= msgHandler!;
+                    worker.OnError -= errHandler!;
+                    worker.Terminate();
+                    worker.Dispose();
+                    tcs.TrySetException(new Exception($"[Wasm] Worker {workerIdx} error during kernel execution"));
+                });
+
+                worker.OnMessage += msgHandler;
+                worker.OnError += errHandler;
+
+                // Send the Wasm binary, shared memory, and work range to the worker
+                worker.PostMessage(new
+                {
+                    wasmBytes = wasmBytes,
+                    memory = wasmMemory,
+                    startIdx = startIdx,
+                    endIdx = endIdx,
+                });
+
+                tasks.Add(tcs.Task);
+            }
+
+            // Wait for all workers to complete
+            await Task.WhenAll(tasks);
 
             // Copy results back from Wasm linear memory to individual buffers
             for (int i = 0; i < bufferInfos.Count; i++)
@@ -402,6 +406,59 @@ namespace SpawnDev.ILGPU.Wasm
                 using var dstView = new Uint8Array(buf.SharedBuffer);
                 dstView.JSRef!.CallVoid("set", srcView);
             }
+        }
+
+        /// <summary>
+        /// Builds the JS script that runs inside each Wasm worker.
+        /// The worker receives: { wasmBytes, memory, startIdx, endIdx }
+        /// It instantiates the Wasm module with the shared memory and runs the kernel loop.
+        /// </summary>
+        private static string BuildWasmWorkerScript(int gridDimX, int gridDimY, int scratchBase, string argStr)
+        {
+            var sb = new System.Text.StringBuilder();
+            sb.AppendLine("self.onmessage = async function(e) {");
+            sb.AppendLine("  try {");
+            sb.AppendLine("    const d = e.data;");
+            sb.AppendLine("    const wasmBuf = new Uint8Array(d.wasmBytes).buffer;");
+            sb.AppendLine("    const memory = d.memory;");
+            sb.AppendLine("    const startIdx = d.startIdx;");
+            sb.AppendLine("    const endIdx = d.endIdx;");
+            sb.AppendLine();
+            sb.AppendLine("    const module = await WebAssembly.compile(wasmBuf);");
+            sb.AppendLine("    const instance = await WebAssembly.instantiate(module, {");
+            sb.AppendLine("      env: { memory: memory },");
+            sb.AppendLine("      Math: {");
+            sb.AppendLine("        sin: Math.sin, cos: Math.cos, tan: Math.tan,");
+            sb.AppendLine("        asin: Math.asin, acos: Math.acos, atan: Math.atan,");
+            sb.AppendLine("        sinh: Math.sinh, cosh: Math.cosh, tanh: Math.tanh,");
+            sb.AppendLine("        exp: Math.exp, log: Math.log, log2: Math.log2,");
+            sb.AppendLine("        log10: Math.log10, round: Math.round,");
+            sb.AppendLine("        truncate: Math.trunc, sign: Math.sign,");
+            sb.AppendLine("        exp2: (x) => Math.pow(2, x),");
+            sb.AppendLine("        sqrt: Math.sqrt, abs: Math.abs,");
+            sb.AppendLine("        ceil: Math.ceil, floor: Math.floor,");
+            sb.AppendLine("        pow: Math.pow, atan2: Math.atan2");
+            sb.AppendLine("      }");
+            sb.AppendLine("    });");
+            sb.AppendLine("    const kernel = instance.exports.kernel;");
+            sb.AppendLine();
+            sb.AppendLine("    // Run kernel for assigned range");
+            sb.AppendLine("    for (let i = startIdx; i < endIdx; i++) {");
+            sb.Append($"      kernel(i, {gridDimX}, {gridDimY}, {scratchBase}");
+            if (argStr.Length > 0)
+            {
+                sb.Append(", ");
+                sb.Append(argStr);
+            }
+            sb.AppendLine(");");
+            sb.AppendLine("    }");
+            sb.AppendLine();
+            sb.AppendLine("    self.postMessage({ done: true });");
+            sb.AppendLine("  } catch(ex) {");
+            sb.AppendLine("    self.postMessage({ done: false, error: (ex && ex.message) ? ex.message : String(ex) });");
+            sb.AppendLine("  }");
+            sb.AppendLine("};");
+            return sb.ToString();
         }
 
         #endregion

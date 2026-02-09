@@ -74,5 +74,9 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
         [TestMethod]
         public new async Task AtomicAddLongTest() =>
             throw new UnsupportedTestException("Wasm Phase 1: atomics not yet implemented");
+
+        [TestMethod]
+        public new async Task ParallelSumTest() =>
+            throw new UnsupportedTestException("Wasm Phase 1: atomics not yet implemented (uses Atomic.Add)");
     }
 }

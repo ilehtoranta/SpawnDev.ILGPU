@@ -58,10 +58,16 @@ namespace SpawnDev.ILGPU.Workers.Backend
 
         /// <summary>
         /// Whether this kernel uses shared memory or barriers.
-        /// When true, the kernel is emitted as a JS generator function (function*)
-        /// and barriers emit 'yield;' for lockstep execution.
+        /// When true, the kernel receives barrier synchronization parameters
+        /// and barriers emit Atomics.wait()/Atomics.notify() code.
         /// </summary>
         public bool HasBarriers { get; private set; }
+
+        /// <summary>
+        /// Counter tracking how many barrier calls exist in this kernel.
+        /// Each barrier gets a unique slot in the barrier buffer.
+        /// </summary>
+        private int _barrierCounter = 0;
 
         /// <summary>
         /// Preamble for shared memory declarations.
@@ -129,26 +135,22 @@ namespace SpawnDev.ILGPU.Workers.Backend
             var originalBuilder = Builder;
             Builder = builder;
 
-            // Emit metadata marker for the dispatch layer to detect barrier kernels
             if (HasBarriers)
             {
                 builder.AppendLine("// __HAS_BARRIERS__");
 
-                // Emit shared memory declarations as a tagged block
-                // BuildWorkerScript extracts these and emits them inside the group loop
-                // so they are shared across all generators in a workgroup
                 if (_sharedMemoryPreamble.Length > 0)
                 {
                     builder.AppendLine("// __SHARED_DECLS_START__");
                     builder.Append(_sharedMemoryPreamble);
                     builder.AppendLine("// __SHARED_DECLS_END__");
                 }
+
+                builder.AppendLine($"// __BARRIER_COUNT__ {_barrierCounter}");
             }
 
-            // Generate the JS function signature using already-populated parameter bindings
-            // _dimX/_dimY/_dimZ are total grid dimensions for multi-D index decomposition
-            // _groupDimX/_groupDimY/_groupDimZ are group dimensions from KernelConfig
-            // For barrier kernels: use function* (generator) so barriers can yield
+            // For barrier kernels: emit as generator function (function*) so yield creates barrier sync points.
+            // The worker script handles inter-worker atomics synchronization at yield points.
             var funcKeyword = HasBarriers ? "function*" : "function";
             builder.Append($"{funcKeyword} kernel(_globalIndex, _dimX, _dimY, _dimZ, _groupDimX, _groupDimY, _groupDimZ");
 
@@ -1043,24 +1045,19 @@ namespace SpawnDev.ILGPU.Workers.Backend
         }
 
         /// <summary>
-        /// Override for Barrier: emit 'yield;' to pause the generator function.
-        /// The worker loop steps all generators in lockstep, so all work items
-        /// complete the pre-barrier code before any work item starts post-barrier code.
+        /// Override for Barrier: emit yield; for generator-based barrier synchronization.
+        /// The worker script steps all generators in lockstep (intra-group sync)
+        /// and uses Atomics for inter-worker sync at each yield point.
         /// </summary>
         public override void GenerateCode(global::ILGPU.IR.Values.Barrier value)
         {
-            // For generator-based kernels: yield pauses execution until the worker
-            // loop advances all generators past the barrier
-            AppendLine("yield; // Group.Barrier()");
-            // Also set HasBarriers in case it wasn't detected from allocations alone
+            _barrierCounter++;
+            EmitBarrierCode();
             HasBarriers = true;
         }
 
         /// <summary>
         /// Override for Broadcast: emulates Group.Broadcast using shared memory + yield barriers.
-        /// The source thread (at origin index) writes its value to a shared variable,
-        /// all threads synchronize via yield, then all threads read the broadcasted value.
-        /// A second yield ensures all threads have read before the shared var could be reused.
         /// </summary>
         public override void GenerateCode(Broadcast value)
         {
@@ -1069,16 +1066,26 @@ namespace SpawnDev.ILGPU.Workers.Backend
             var origin = Load(value.Origin.Resolve());
             Declare(target);
 
-            // Allocate a unique shared variable for this broadcast operation
             string sharedVar = $"_broadcast_{_broadcastCounter++}";
             _sharedMemoryPreamble.AppendLine($"var {sharedVar} = 0;");
 
-            // Source thread writes, barrier, all threads read, barrier
             AppendLine($"if (_groupIndexX === {origin}) {{ {sharedVar} = {source}; }}");
-            AppendLine("yield; // broadcast sync");
+            _barrierCounter++;
+            EmitBarrierCode();
             AppendLine($"{target} = {sharedVar};");
-            AppendLine("yield; // post-broadcast sync");
+            _barrierCounter++;
+            EmitBarrierCode();
             HasBarriers = true;
+        }
+
+        /// <summary>
+        /// Emits a yield; statement for generator-based barrier synchronization.
+        /// The worker script handles stepping generators in lockstep (intra-group)
+        /// and Atomics-based sync across workers (inter-worker).
+        /// </summary>
+        private void EmitBarrierCode()
+        {
+            AppendLine("yield; // barrier");
         }
 
         #endregion
