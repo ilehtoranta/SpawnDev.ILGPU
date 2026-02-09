@@ -55,6 +55,12 @@ namespace SpawnDev.ILGPU.Workers
         internal List<Task> PendingWorkTasks { get; } = new List<Task>();
 
         /// <summary>
+        /// Reusable worker pool — lazily initialized on first dispatch.
+        /// Workers are created once and reused across kernel dispatches.
+        /// </summary>
+        private WorkerPool? _workerPool;
+
+        /// <summary>
         /// Method info for the static RunKernel method used by dynamic kernel launchers.
         /// </summary>
         public static readonly MethodInfo RunKernelMethod = typeof(WorkersAccelerator).GetMethod(
@@ -249,8 +255,23 @@ namespace SpawnDev.ILGPU.Workers
 
             WorkersBackend.Log($"[Workers] Dispatching kernel: {totalItems} items across {workerCount} worker(s), SharedArrayBuffer={isShared}, HasBarriers={hasBarriers}");
 
-            var workerScript = BuildWorkerScript(jsSource, jsArgs, isShared, dimX, dimY, dimZ, groupDimX, groupDimY, groupDimZ, hasBarriers, dynamicSharedElements);
-            var workers = QuickWorker.CreateWorkersFromJS(workerScript, workerCount);
+            var scriptBody = BuildWorkerScript(jsSource, jsArgs, isShared, dimX, dimY, dimZ, groupDimX, groupDimY, groupDimZ, hasBarriers, dynamicSharedElements);
+
+            // Lazily initialize the worker pool, or grow it if needed
+            if (accelerator._workerPool == null)
+                accelerator._workerPool = new WorkerPool(workerCount, useAsync: false);
+            else
+                accelerator._workerPool.EnsureSize(workerCount, useAsync: false);
+
+            var workers = accelerator._workerPool.Acquire(workerCount);
+            // If pool didn't have enough idle workers, fall back to creating temporary ones
+            if (workers.Count < workerCount)
+            {
+                var shortfall = workerCount - workers.Count;
+                accelerator._workerPool.EnsureSize(accelerator._workerPool.Size + shortfall, useAsync: false);
+                var extra = accelerator._workerPool.Acquire(shortfall);
+                workers.AddRange(extra);
+            }
             var tasks = new List<Task>();
 
             if (hasBarriers && isShared && groupSize > 0)
@@ -265,8 +286,8 @@ namespace SpawnDev.ILGPU.Workers
                     int startGroup = w * groupsPerWorker + Math.Min(w, remainder);
                     int endGroup = startGroup + groupsPerWorker + (w < remainder ? 1 : 0);
 
-                    DispatchSingleWorker(worker, w, jsArgs, startGroup, endGroup, isShared, tasks,
-                        barrierSab, groupSize, workerCount);
+                    DispatchSingleWorker(worker, w, jsArgs, startGroup, endGroup, isShared, tasks, accelerator._workerPool,
+                        scriptBody, barrierSab, groupSize, workerCount);
                 }
             }
             else
@@ -281,7 +302,8 @@ namespace SpawnDev.ILGPU.Workers
                     int startIdx = w * itemsPerWorker + Math.Min(w, remainder);
                     int endIdx = startIdx + itemsPerWorker + (w < remainder ? 1 : 0);
 
-                    DispatchSingleWorker(worker, w, jsArgs, startIdx, endIdx, isShared, tasks);
+                    DispatchSingleWorker(worker, w, jsArgs, startIdx, endIdx, isShared, tasks, accelerator._workerPool,
+                        scriptBody);
                 }
             }
 
@@ -301,6 +323,7 @@ namespace SpawnDev.ILGPU.Workers
         private static void DispatchSingleWorker(
             Worker worker, int workerIndex, List<object?> jsArgs,
             int startIdx, int endIdx, bool isShared, List<Task> tasks,
+            WorkerPool pool, string scriptBody,
             SharedArrayBuffer? barrierSab = null, int groupSize = 0, int workerCount = 0)
         {
             var tcs = new TaskCompletionSource();
@@ -312,8 +335,7 @@ namespace SpawnDev.ILGPU.Workers
             {
                 worker.OnMessage -= msgHandler!;
                 worker.OnError -= errHandler!;
-                worker.Terminate();
-                worker.Dispose();
+                pool.Return(worker);
 
                 var done = msg.JSRef!.Get<bool>("data.done");
                 if (!done)
@@ -335,8 +357,7 @@ namespace SpawnDev.ILGPU.Workers
             {
                 worker.OnMessage -= msgHandler!;
                 worker.OnError -= errHandler!;
-                worker.Terminate();
-                worker.Dispose();
+                pool.Return(worker);
                 tcs.TrySetException(new Exception($"[Workers] Worker {w} error during kernel execution"));
             });
 
@@ -344,7 +365,7 @@ namespace SpawnDev.ILGPU.Workers
             worker.OnError += errHandler;
 
             var (messageArgs, transferList) = BuildWorkerMessage(jsArgs, startIdx, endIdx, isShared,
-                barrierSab, groupSize, workerCount);
+                scriptBody, barrierSab, groupSize, workerCount);
             if (transferList != null)
             {
                 worker.PostMessage(messageArgs, transferList);
@@ -368,9 +389,10 @@ namespace SpawnDev.ILGPU.Workers
         /// </summary>
         private static string BuildWorkerScript(string jsSource, List<object?> jsArgs, bool isShared, int dimX, int dimY, int dimZ, int groupDimX, int groupDimY, int groupDimZ, bool hasBarriers, int dynamicSharedElements = 0)
         {
+            // Produces a function body string that is sent as the 'script' field
+            // in the message to the pool worker's universal bootstrap.
+            // The bootstrap calls: new Function('d', scriptBody)(data)
             var sb = new System.Text.StringBuilder();
-            sb.AppendLine("self.onmessage = function(e) {");
-            sb.AppendLine("  var d = e.data;");
             sb.AppendLine("  var startIdx = d.startIdx;");
             sb.AppendLine("  var endIdx = d.endIdx;");
             sb.AppendLine();
@@ -551,8 +573,6 @@ namespace SpawnDev.ILGPU.Workers
             sb.AppendLine("  } catch(ex) {");
             sb.AppendLine("    self.postMessage({ done: false, error: (ex && ex.message) ? ex.message : String(ex) });");
             sb.AppendLine("  }");
-
-            sb.AppendLine("};");
             return sb.ToString();
         }
 
@@ -563,6 +583,7 @@ namespace SpawnDev.ILGPU.Workers
         /// </summary>
         private static (object message, object[]? transferList) BuildWorkerMessage(
             List<object?> jsArgs, int startIdx, int endIdx, bool isShared,
+            string scriptBody,
             SharedArrayBuffer? barrierSab = null, int groupSize = 0, int workerCount = 0)
         {
             var args = new List<object>();
@@ -593,12 +614,12 @@ namespace SpawnDev.ILGPU.Workers
             if (barrierSab != null)
             {
                 var barrierView = new Int32Array(barrierSab);
-                var message = new { startIdx, endIdx, args = args.ToArray(), barrierBuf = barrierView, workerCount };
+                var message = new { script = scriptBody, startIdx, endIdx, args = args.ToArray(), barrierBuf = barrierView, workerCount };
                 return (message, transfers?.ToArray());
             }
             else
             {
-                var message = new { startIdx, endIdx, args = args.ToArray() };
+                var message = new { script = scriptBody, startIdx, endIdx, args = args.ToArray() };
                 return (message, transfers?.ToArray());
             }
         }
@@ -1033,6 +1054,8 @@ namespace SpawnDev.ILGPU.Workers
             if (disposing)
             {
                 PendingWorkTasks.Clear();
+                _workerPool?.Dispose();
+                _workerPool = null;
             }
         }
 

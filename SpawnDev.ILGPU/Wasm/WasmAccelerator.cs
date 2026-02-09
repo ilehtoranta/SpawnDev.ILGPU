@@ -34,6 +34,12 @@ namespace SpawnDev.ILGPU.Wasm
         // Worker count for parallel dispatch
         private int _workerCount = 4;
 
+        /// <summary>
+        /// Reusable worker pool — lazily initialized on first dispatch.
+        /// Workers are created once and reused across kernel dispatches.
+        /// </summary>
+        private WorkerPool? _workerPool;
+
         // Backend instance
         public WasmBackend Backend { get; private set; } = null!;
 
@@ -395,8 +401,21 @@ namespace SpawnDev.ILGPU.Wasm
                 groupSize, numGroups, hasBarriers, argStr,
                 dynamicSharedElements);
 
-            // Create workers
-            var workers = QuickWorker.CreateWorkersFromJS(workerScript, workerCount);
+            // Lazily initialize the worker pool, or grow it if needed
+            if (_workerPool == null)
+                _workerPool = new WorkerPool(workerCount, useAsync: true);
+            else
+                _workerPool.EnsureSize(workerCount, useAsync: true);
+
+            var workers = _workerPool.Acquire(workerCount);
+            // If pool didn't have enough idle workers, grow and re-acquire
+            if (workers.Count < workerCount)
+            {
+                var shortfall = workerCount - workers.Count;
+                _workerPool.EnsureSize(_workerPool.Size + shortfall, useAsync: true);
+                var extra = _workerPool.Acquire(shortfall);
+                workers.AddRange(extra);
+            }
             var tasks = new List<Task>();
 
             if (hasBarriers)
@@ -416,8 +435,7 @@ namespace SpawnDev.ILGPU.Wasm
                     {
                         worker.OnMessage -= msgHandler!;
                         worker.OnError -= errHandler!;
-                        worker.Terminate();
-                        worker.Dispose();
+                        _workerPool?.Return(worker);
 
                         var done = msg.JSRef!.Get<bool>("data.done");
                         if (!done)
@@ -433,17 +451,17 @@ namespace SpawnDev.ILGPU.Wasm
                     {
                         worker.OnMessage -= msgHandler!;
                         worker.OnError -= errHandler!;
-                        worker.Terminate();
-                        worker.Dispose();
+                        _workerPool?.Return(worker);
                         tcs.TrySetException(new Exception($"[Wasm] Worker {workerIdx} error during kernel execution"));
                     });
 
                     worker.OnMessage += msgHandler;
                     worker.OnError += errHandler;
 
-                    // Send thread ID + shared data to worker
+                    // Send thread ID + shared data to worker, with script body
                     worker.PostMessage(new
                     {
+                        script = workerScript,
                         wasmBytes = wasmBytes,
                         memory = wasmMemory,
                         threadId = w,
@@ -474,8 +492,7 @@ namespace SpawnDev.ILGPU.Wasm
                     {
                         worker.OnMessage -= msgHandler!;
                         worker.OnError -= errHandler!;
-                        worker.Terminate();
-                        worker.Dispose();
+                        _workerPool?.Return(worker);
 
                         var done = msg.JSRef!.Get<bool>("data.done");
                         if (!done)
@@ -491,8 +508,7 @@ namespace SpawnDev.ILGPU.Wasm
                     {
                         worker.OnMessage -= msgHandler!;
                         worker.OnError -= errHandler!;
-                        worker.Terminate();
-                        worker.Dispose();
+                        _workerPool?.Return(worker);
                         tcs.TrySetException(new Exception($"[Wasm] Worker {workerIdx} error during kernel execution"));
                     });
 
@@ -501,6 +517,7 @@ namespace SpawnDev.ILGPU.Wasm
 
                     worker.PostMessage(new
                     {
+                        script = workerScript,
                         wasmBytes = wasmBytes,
                         memory = wasmMemory,
                         startIdx = startIdx,
@@ -540,10 +557,10 @@ namespace SpawnDev.ILGPU.Wasm
             string argStr,
             int dynamicSharedLength = 0)
         {
+            // Produces an async function body string that is sent as the 'script' field
+            // in the message to the pool worker's async bootstrap.
+            // The bootstrap calls: new AsyncFunction('d', scriptBody)(data)
             var sb = new System.Text.StringBuilder();
-            sb.AppendLine("self.onmessage = async function(e) {");
-            sb.AppendLine("  try {");
-            sb.AppendLine("    const d = e.data;");
             sb.AppendLine("    const wasmBuf = new Uint8Array(d.wasmBytes).buffer;");
             sb.AppendLine("    const memory = d.memory;");
             sb.AppendLine();
@@ -606,10 +623,6 @@ namespace SpawnDev.ILGPU.Wasm
 
             sb.AppendLine();
             sb.AppendLine("    self.postMessage({ done: true });");
-            sb.AppendLine("  } catch(ex) {");
-            sb.AppendLine("    self.postMessage({ done: false, error: (ex && ex.message) ? ex.message : String(ex) });");
-            sb.AppendLine("  }");
-            sb.AppendLine("};");
             return sb.ToString();
         }
 
@@ -729,6 +742,8 @@ namespace SpawnDev.ILGPU.Wasm
             if (disposing)
             {
                 _pendingWork.Clear();
+                _workerPool?.Dispose();
+                _workerPool = null;
             }
         }
 
