@@ -11,7 +11,6 @@
 
 using ILGPU.Algorithms.RadixSortOperations;
 using ILGPU.Algorithms.Resources;
-using ILGPU.Algorithms.ScanReduceOperations;
 using ILGPU.Algorithms.Sequencers;
 using ILGPU.Runtime;
 using ILGPU.Util;

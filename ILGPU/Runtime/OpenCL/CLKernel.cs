@@ -13,7 +13,6 @@ using ILGPU.Backends.OpenCL;
 using System;
 using System.Diagnostics;
 using System.Reflection;
-using static ILGPU.Runtime.OpenCL.CLAPI;
 
 namespace ILGPU.Runtime.OpenCL
 {

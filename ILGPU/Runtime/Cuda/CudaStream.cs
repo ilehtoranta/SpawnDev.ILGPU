@@ -11,7 +11,6 @@
 
 using System;
 using System.Diagnostics.CodeAnalysis;
-using static ILGPU.Runtime.Cuda.CudaAPI;
 
 namespace ILGPU.Runtime.Cuda
 {

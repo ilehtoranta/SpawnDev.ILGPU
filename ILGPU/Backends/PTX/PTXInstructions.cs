@@ -10,7 +10,6 @@
 // ---------------------------------------------------------------------------------------
 
 using ILGPU.IR.Values;
-using ILGPU.Runtime.Cuda;
 using ILGPU.Util;
 
 namespace ILGPU.Backends.PTX

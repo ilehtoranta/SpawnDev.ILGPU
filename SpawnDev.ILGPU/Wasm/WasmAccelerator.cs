@@ -10,12 +10,9 @@
 
 using global::ILGPU;
 using global::ILGPU.Backends;
-using global::ILGPU.Backends.EntryPoints;
-using global::ILGPU.Resources;
 using global::ILGPU.Runtime;
 using SpawnDev.BlazorJS;
 using SpawnDev.BlazorJS.JSObjects;
-using SpawnDev.BlazorJS.Toolbox;
 using SpawnDev.ILGPU.Wasm.Backend;
 using System.Reflection;
 using System.Reflection.Emit;

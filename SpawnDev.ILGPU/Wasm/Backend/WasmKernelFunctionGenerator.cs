@@ -10,7 +10,6 @@
 // ---------------------------------------------------------------------------------------
 
 using global::ILGPU;
-using global::ILGPU.Backends;
 using global::ILGPU.IR;
 using global::ILGPU.IR.Analyses;
 using global::ILGPU.IR.Analyses.ControlFlowDirection;

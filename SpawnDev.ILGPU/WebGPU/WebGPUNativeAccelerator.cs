@@ -5,7 +5,6 @@
 // File: WebGPUNativeAccelerator.cs
 // ---------------------------------------------------------------------------------------
 
-using SpawnDev.BlazorJS;
 using SpawnDev.BlazorJS.JSObjects;
 using SpawnDev.ILGPU.WebGPU.Backend;
 

@@ -424,35 +424,35 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 case UnaryArithmeticKind.Exp2F:
                 case UnaryArithmeticKind.LogF:
                 case UnaryArithmeticKind.Log2F:
-                {
-                    string mathName = value.Kind switch
                     {
-                        UnaryArithmeticKind.SinF => "sin",
-                        UnaryArithmeticKind.CosF => "cos",
-                        UnaryArithmeticKind.TanF => "tan",
-                        UnaryArithmeticKind.AsinF => "asin",
-                        UnaryArithmeticKind.AcosF => "acos",
-                        UnaryArithmeticKind.AtanF => "atan",
-                        UnaryArithmeticKind.SinhF => "sinh",
-                        UnaryArithmeticKind.CoshF => "cosh",
-                        UnaryArithmeticKind.TanhF => "tanh",
-                        UnaryArithmeticKind.ExpF => "exp",
-                        UnaryArithmeticKind.Exp2F => "exp2",
-                        UnaryArithmeticKind.LogF => "log",
-                        UnaryArithmeticKind.Log2F => "log2",
-                        _ => "sin"
-                    };
-                    EmitGetLocal(src);
-                    // Convert f32 to f64 for the import if needed
-                    if (wasmType == WasmOpCodes.F32)
-                        Code.Add(WasmOpCodes.F64PromoteF32);
-                    if (MathImports.TryGetValue(mathName, out var funcIdx))
-                        WasmModuleBuilder.EmitCall(Code, funcIdx);
-                    // Convert result back to f32 if needed
-                    if (wasmType == WasmOpCodes.F32)
-                        Code.Add(WasmOpCodes.F32DemoteF64);
-                    break;
-                }
+                        string mathName = value.Kind switch
+                        {
+                            UnaryArithmeticKind.SinF => "sin",
+                            UnaryArithmeticKind.CosF => "cos",
+                            UnaryArithmeticKind.TanF => "tan",
+                            UnaryArithmeticKind.AsinF => "asin",
+                            UnaryArithmeticKind.AcosF => "acos",
+                            UnaryArithmeticKind.AtanF => "atan",
+                            UnaryArithmeticKind.SinhF => "sinh",
+                            UnaryArithmeticKind.CoshF => "cosh",
+                            UnaryArithmeticKind.TanhF => "tanh",
+                            UnaryArithmeticKind.ExpF => "exp",
+                            UnaryArithmeticKind.Exp2F => "exp2",
+                            UnaryArithmeticKind.LogF => "log",
+                            UnaryArithmeticKind.Log2F => "log2",
+                            _ => "sin"
+                        };
+                        EmitGetLocal(src);
+                        // Convert f32 to f64 for the import if needed
+                        if (wasmType == WasmOpCodes.F32)
+                            Code.Add(WasmOpCodes.F64PromoteF32);
+                        if (MathImports.TryGetValue(mathName, out var funcIdx))
+                            WasmModuleBuilder.EmitCall(Code, funcIdx);
+                        // Convert result back to f32 if needed
+                        if (wasmType == WasmOpCodes.F32)
+                            Code.Add(WasmOpCodes.F32DemoteF64);
+                        break;
+                    }
                 case UnaryArithmeticKind.RcpF:
                     if (wasmType == WasmOpCodes.F64)
                     {
@@ -1400,27 +1400,27 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                         case "Round":
                         case "Truncate":
                         case "Sign":
-                        {
-                            string mathName = sourceName.ToLowerInvariant();
-                            EmitGetLocal(argValues[0]);
-                            if (wasmType == WasmOpCodes.F32)
-                                Code.Add(WasmOpCodes.F64PromoteF32);
-                            if (MathImports.TryGetValue(mathName, out var funcIdx))
-                                WasmModuleBuilder.EmitCall(Code, funcIdx);
-                            if (wasmType == WasmOpCodes.F32)
-                                Code.Add(WasmOpCodes.F32DemoteF64);
-                            break;
-                        }
+                            {
+                                string mathName = sourceName.ToLowerInvariant();
+                                EmitGetLocal(argValues[0]);
+                                if (wasmType == WasmOpCodes.F32)
+                                    Code.Add(WasmOpCodes.F64PromoteF32);
+                                if (MathImports.TryGetValue(mathName, out var funcIdx))
+                                    WasmModuleBuilder.EmitCall(Code, funcIdx);
+                                if (wasmType == WasmOpCodes.F32)
+                                    Code.Add(WasmOpCodes.F32DemoteF64);
+                                break;
+                            }
                         case "Pow":
                         case "Atan2":
-                        {
-                            string mathName = sourceName.ToLowerInvariant();
-                            EmitGetLocal(argValues[0]);
-                            EmitGetLocal(argValues[1]);
-                            if (MathImports.TryGetValue(mathName, out var funcIdx))
-                                WasmModuleBuilder.EmitCall(Code, funcIdx);
-                            break;
-                        }
+                            {
+                                string mathName = sourceName.ToLowerInvariant();
+                                EmitGetLocal(argValues[0]);
+                                EmitGetLocal(argValues[1]);
+                                if (MathImports.TryGetValue(mathName, out var funcIdx))
+                                    WasmModuleBuilder.EmitCall(Code, funcIdx);
+                                break;
+                            }
                         case "IEEERemainder":
                             EmitGetLocal(argValues[0]);
                             EmitGetLocal(argValues[1]);

@@ -9,7 +9,6 @@
 // Source License. See LICENSE.txt for details.
 // ---------------------------------------------------------------------------------------
 
-using ILGPU.Algorithms.Random;
 using ILGPU.Util;
 using System;
 using System.Numerics;

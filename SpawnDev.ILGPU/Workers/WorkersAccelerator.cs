@@ -13,7 +13,6 @@ using global::ILGPU.Backends;
 using global::ILGPU.Runtime;
 using SpawnDev.BlazorJS;
 using SpawnDev.BlazorJS.JSObjects;
-using SpawnDev.BlazorJS.Toolbox;
 using SpawnDev.ILGPU.Workers.Backend;
 using System.Reflection;
 using System.Reflection.Emit;

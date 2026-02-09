@@ -18,7 +18,6 @@ using System.Diagnostics.CodeAnalysis;
 using System.IO;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
-using static ILGPU.Runtime.OpenCL.CLAPI;
 
 namespace ILGPU.Runtime.OpenCL
 {

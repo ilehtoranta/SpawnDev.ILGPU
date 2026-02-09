@@ -9,7 +9,6 @@
 // Source License. See LICENSE.txt for details.
 // ---------------------------------------------------------------------------------------
 
-using ILGPU.Runtime;
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
 

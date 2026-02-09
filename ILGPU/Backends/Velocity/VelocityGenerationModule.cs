@@ -14,7 +14,6 @@ using ILGPU.Backends.IL;
 using ILGPU.IR;
 using ILGPU.IR.Types;
 using ILGPU.Resources;
-using ILGPU.Runtime;
 using ILGPU.Runtime.Velocity;
 using ILGPU.Util;
 using System;

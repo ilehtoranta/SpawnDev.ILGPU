@@ -10,7 +10,6 @@
 // ---------------------------------------------------------------------------------------
 
 using ILGPU.Backends.IL;
-using ILGPU.Runtime.Velocity;
 using System;
 using System.Numerics;
 

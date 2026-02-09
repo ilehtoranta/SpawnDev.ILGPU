@@ -1,5 +1,3 @@
-using ILGPU.Runtime;
-
 namespace SpawnDev.ILGPU.WebGPU
 {
     /// <summary>

@@ -9,7 +9,6 @@
 // Source License. See LICENSE.txt for details.
 // ---------------------------------------------------------------------------------------
 
-using ILGPU.Algorithms.RadixSortOperations;
 using ILGPU.Algorithms.Random;
 using ILGPU.Runtime;
 using ILGPU.Util;

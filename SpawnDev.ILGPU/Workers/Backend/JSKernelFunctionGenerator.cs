@@ -8,7 +8,6 @@
 // ---------------------------------------------------------------------------------------
 
 using global::ILGPU;
-using System.Linq;
 using global::ILGPU.IR;
 using global::ILGPU.IR.Analyses;
 using global::ILGPU.IR.Analyses.ControlFlowDirection;
@@ -330,7 +329,7 @@ namespace SpawnDev.ILGPU.Workers.Backend
                 if (isWrapper && paramType is StructureType wrapperStruct)
                 {
                     WorkersBackend.Log($"[JS]   -> ViewWrapper analysis: NumFields={wrapperStruct.NumFields}");
-                    
+
                     // Find Int32 fields (these are strides). Build field-index → stride-index map.
                     var fieldToStride = new Dictionary<int, int>();
                     int strideIdx = 0;
