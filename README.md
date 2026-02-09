@@ -84,9 +84,7 @@ using ILGPU.Runtime;
 using SpawnDev.ILGPU;
 
 // Initialize context with all available backends (WebGPU, Wasm, Workers, CPU)
-var contextBuilder = Context.Create();
-await contextBuilder.AllAcceleratorsAsync();
-using var context = contextBuilder.ToContext();
+using var context = await Context.CreateAsync(builder => builder.AllAcceleratorsAsync());
 
 // Create the best available accelerator (WebGPU > Wasm > Workers > CPU)
 using var accelerator = await context.CreatePreferredAcceleratorAsync();
@@ -103,7 +101,7 @@ kernel((Index1D)length, bufA.View, bufB.View, bufC.View);
 await accelerator.SynchronizeAsync();
 var results = await bufC.CopyToHostAsync<float>();
 
-// The kernel — runs on GPU, workers, or CPU transparently
+// The kernel — runs on GPU, Wasm, workers, or CPU transparently
 static void VectorAddKernel(Index1D index, ArrayView<float> a, ArrayView<float> b, ArrayView<float> c)
 {
     c[index] = a[index] + b[index];
@@ -112,24 +110,33 @@ static void VectorAddKernel(Index1D index, ArrayView<float> a, ArrayView<float> 
 
 ### 3. Using a Specific Backend
 
-You can also target a specific backend directly:
+You can also target a specific backend directly using `Context.CreateAsync`:
 
 ```csharp
-// WebGPU only
-var builder = Context.Create();
-await builder.WebGPUAsync();
-using var context = builder.ToContext();
+// WebGPU — GPU compute via WGSL
+using var context = await Context.CreateAsync(builder => builder.WebGPU());
 var device = context.GetWebGPUDevices()[0];
-using var accelerator = await device.CreateWebGPUAcceleratorAsync(0);
+using var accelerator = await device.CreateAcceleratorAsync(context);
 ```
 
 ```csharp
-// Workers only
-var builder = Context.Create();
-builder.Workers();
-using var context = builder.ToContext();
-var device = context.GetWorkersDevices()[0];
-using var accelerator = await device.CreateWorkersAcceleratorAsync();
+// Wasm — native WebAssembly binary
+using var context = await Context.CreateAsync(builder => builder.Wasm());
+var device = context.GetDevices<WasmILGPUDevice>()[0];
+using var accelerator = await device.CreateAcceleratorAsync(context);
+```
+
+```csharp
+// Workers — multi-threaded JavaScript
+using var context = await Context.CreateAsync(builder => builder.Workers());
+var device = context.GetDevices<WorkersILGPUDevice>()[0];
+using var accelerator = await device.CreateAcceleratorAsync(context);
+```
+
+```csharp
+// CPU — single-threaded fallback (runs on main thread)
+using var context = Context.Create().CPU().ToContext();
+using var accelerator = context.CreateCPUAccelerator(0);
 ```
 
 ## Demo Application
