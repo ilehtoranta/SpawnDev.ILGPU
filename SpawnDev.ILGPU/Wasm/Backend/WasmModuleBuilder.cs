@@ -410,6 +410,18 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         }
 
         /// <summary>
+        /// Writes an atomic RMW instruction (0xFE prefix + opcode + memarg).
+        /// Atomic instructions use the same alignment/offset format as regular memory ops.
+        /// </summary>
+        public static void EmitAtomicRmw(List<byte> code, byte atomicOpcode, uint align, uint offset)
+        {
+            code.Add(WasmOpCodes.AtomicPrefix);
+            EmitU32Leb128(code, atomicOpcode);
+            EmitU32Leb128(code, align);
+            EmitU32Leb128(code, offset);
+        }
+
+        /// <summary>
         /// Writes a call instruction to a byte list.
         /// </summary>
         public static void EmitCall(List<byte> code, uint funcIndex)

@@ -52,31 +52,8 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
             throw new UnsupportedTestException("Subgroups not supported in browser environment");
 
         [TestMethod]
-        public new async Task AtomicAddTest() =>
-            throw new UnsupportedTestException("Wasm Phase 1: atomics not yet implemented");
+        public new async Task DynamicSharedF64Test() =>
+            throw new UnsupportedTestException("Wasm Phase 1: barriers + dynamic shared memory not yet implemented");
 
-        [TestMethod]
-        public new async Task AtomicMinMaxTest() =>
-            throw new UnsupportedTestException("Wasm Phase 1: atomics not yet implemented");
-
-        [TestMethod]
-        public new async Task AtomicAndOrXorTest() =>
-            throw new UnsupportedTestException("Wasm Phase 1: atomics not yet implemented");
-
-        [TestMethod]
-        public new async Task AtomicCompareExchangeTest() =>
-            throw new UnsupportedTestException("Wasm Phase 1: atomics not yet implemented");
-
-        [TestMethod]
-        public new async Task AtomicAddFloatTest() =>
-            throw new UnsupportedTestException("Wasm Phase 1: atomics not yet implemented");
-
-        [TestMethod]
-        public new async Task AtomicAddLongTest() =>
-            throw new UnsupportedTestException("Wasm Phase 1: atomics not yet implemented");
-
-        [TestMethod]
-        public new async Task ParallelSumTest() =>
-            throw new UnsupportedTestException("Wasm Phase 1: atomics not yet implemented (uses Atomic.Add)");
     }
 }

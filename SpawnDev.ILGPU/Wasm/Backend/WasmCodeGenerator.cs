@@ -989,97 +989,222 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         }
         public virtual void GenerateCode(GenericAtomic atomic)
         {
-            // Single-threaded emulation: load old, compute, store new, return old
+            // Thread-safe atomic RMW using Wasm threads proposal
             var target = AllocateLocal(atomic, GetWasmType(atomic));
             var address = atomic.Target.Resolve();
             var val = atomic.Value.Resolve();
             var wasmType = GetWasmType(atomic);
 
-            // Load old value from memory
+            // Float atomics: use CAS loop with reinterpret
+            if (wasmType == WasmOpCodes.F32 || wasmType == WasmOpCodes.F64)
+            {
+                EmitFloatAtomicViaCAS(atomic, target, address, val, wasmType);
+                return;
+            }
+
+            // For Add/Sub/And/Or/Xor/Exchange: use Wasm atomic RMW instructions
+            // These return the OLD value atomically
+            byte? atomicOpcode = (wasmType, atomic.Kind) switch
+            {
+                (WasmOpCodes.I32, AtomicKind.Add) => WasmOpCodes.I32AtomicRmwAdd,
+                (WasmOpCodes.I32, AtomicKind.And) => WasmOpCodes.I32AtomicRmwAnd,
+                (WasmOpCodes.I32, AtomicKind.Or) => WasmOpCodes.I32AtomicRmwOr,
+                (WasmOpCodes.I32, AtomicKind.Xor) => WasmOpCodes.I32AtomicRmwXor,
+                (WasmOpCodes.I32, AtomicKind.Exchange) => WasmOpCodes.I32AtomicRmwXchg,
+                (WasmOpCodes.I64, AtomicKind.Add) => WasmOpCodes.I64AtomicRmwAdd,
+                (WasmOpCodes.I64, AtomicKind.And) => WasmOpCodes.I64AtomicRmwAnd,
+                (WasmOpCodes.I64, AtomicKind.Or) => WasmOpCodes.I64AtomicRmwOr,
+                (WasmOpCodes.I64, AtomicKind.Xor) => WasmOpCodes.I64AtomicRmwXor,
+                (WasmOpCodes.I64, AtomicKind.Exchange) => WasmOpCodes.I64AtomicRmwXchg,
+                _ => null
+            };
+
+            if (atomicOpcode.HasValue)
+            {
+                // Atomic RMW: stack [addr, val] -> old_value
+                uint align = wasmType == WasmOpCodes.I64 ? 3u : 2u;
+                EmitGetLocal(address);
+                EmitGetLocal(val);
+                WasmModuleBuilder.EmitAtomicRmw(Code, atomicOpcode.Value, align, 0);
+                WasmModuleBuilder.EmitLocalSet(Code, target);
+                return;
+            }
+
+
+            // Min/Max: CAS loop (no native Wasm instruction)
+            if (atomic.Kind == AtomicKind.Min || atomic.Kind == AtomicKind.Max)
+            {
+                EmitIntAtomicMinMax(atomic, target, address, val, wasmType);
+                return;
+            }
+
+            // Fallback: non-atomic (shouldn't reach here)
+            WasmBackend.Log($"[Wasm] WARNING: Unhandled atomic kind: {atomic.Kind} for type {wasmType:X2}");
             EmitGetLocal(address);
             EmitTypedLoad(wasmType);
-            WasmModuleBuilder.EmitLocalTee(Code, target); // save old value to target
+            WasmModuleBuilder.EmitLocalSet(Code, target);
+        }
 
-            // Compute new = old op val
+        /// <summary>
+        /// Emits an atomic Min/Max via CAS loop for integer types.
+        /// Loop: old = atomic.load(addr); new = select(old, val, cmp); if cmpxchg(addr, old, new) == old, break
+        /// </summary>
+        private void EmitIntAtomicMinMax(GenericAtomic atomic, uint target, Value address, Value val, byte wasmType)
+        {
+            uint align = wasmType == WasmOpCodes.I64 ? 3u : 2u;
+            byte loadOp = wasmType == WasmOpCodes.I64 ? WasmOpCodes.I64AtomicLoad : WasmOpCodes.I32AtomicLoad;
+            byte cmpxchgOp = wasmType == WasmOpCodes.I64 ? WasmOpCodes.I64AtomicRmwCmpxchg : WasmOpCodes.I32AtomicRmwCmpxchg;
+            byte eqOp = wasmType == WasmOpCodes.I64 ? WasmOpCodes.I64Eq : WasmOpCodes.I32Eq;
+            byte cmpOp = atomic.Kind == AtomicKind.Min
+                ? (wasmType == WasmOpCodes.I64 ? WasmOpCodes.I64LtS : WasmOpCodes.I32LtS)
+                : (wasmType == WasmOpCodes.I64 ? WasmOpCodes.I64GtS : WasmOpCodes.I32GtS);
+
+            var newVal = AllocateNewLocal(wasmType);
+            var casResult = AllocateNewLocal(wasmType);
+
+            // loop $cas_loop
+            Code.Add(WasmOpCodes.Loop);
+            Code.Add(WasmOpCodes.Void);
+
+            // old = atomic.load(addr)
+            EmitGetLocal(address);
+            WasmModuleBuilder.EmitAtomicRmw(Code, loadOp, align, 0);
+            WasmModuleBuilder.EmitLocalSet(Code, target);
+
+            // new = select(old, val, old < val) for Min / select(old, val, old > val) for Max
+            WasmModuleBuilder.EmitLocalGet(Code, target);
             EmitGetLocal(val);
-            byte opcode = (wasmType, atomic.Kind) switch
+            WasmModuleBuilder.EmitLocalGet(Code, target);
+            EmitGetLocal(val);
+            Code.Add(cmpOp);
+            Code.Add(WasmOpCodes.Select);
+            WasmModuleBuilder.EmitLocalSet(Code, newVal);
+
+            // casResult = cmpxchg(addr, old, new) -> returns old value from memory
+            EmitGetLocal(address);
+            WasmModuleBuilder.EmitLocalGet(Code, target);
+            WasmModuleBuilder.EmitLocalGet(Code, newVal);
+            WasmModuleBuilder.EmitAtomicRmw(Code, cmpxchgOp, align, 0);
+            WasmModuleBuilder.EmitLocalSet(Code, casResult);
+
+            // if casResult != old, retry (br_if 0 to loop)
+            WasmModuleBuilder.EmitLocalGet(Code, casResult);
+            WasmModuleBuilder.EmitLocalGet(Code, target);
+            Code.Add(eqOp);
+            Code.Add(WasmOpCodes.I32Eqz);
+            Code.Add(WasmOpCodes.BrIf);
+            WasmModuleBuilder.EmitU32Leb128(Code, 0); // br_if $loop (depth 0)
+
+            Code.Add(WasmOpCodes.End); // end loop
+        }
+
+        /// <summary>
+        /// Emits float atomic operations via CAS loop with integer reinterpret.
+        /// float atomic: reinterpret to i32, CAS loop, reinterpret result back.
+        /// </summary>
+        private void EmitFloatAtomicViaCAS(GenericAtomic atomic, uint target, Value address, Value val, byte wasmType)
+        {
+            // For float atomics, we use i32 CAS on the bitwise representation
+            byte intType = wasmType == WasmOpCodes.F64 ? WasmOpCodes.I64 : WasmOpCodes.I32;
+            uint align = wasmType == WasmOpCodes.F64 ? 3u : 2u;
+            byte loadOp = intType == WasmOpCodes.I64 ? WasmOpCodes.I64AtomicLoad : WasmOpCodes.I32AtomicLoad;
+            byte cmpxchgOp = intType == WasmOpCodes.I64 ? WasmOpCodes.I64AtomicRmwCmpxchg : WasmOpCodes.I32AtomicRmwCmpxchg;
+            byte eqOp = intType == WasmOpCodes.I64 ? WasmOpCodes.I64Eq : WasmOpCodes.I32Eq;
+            byte reinterpretToInt = wasmType == WasmOpCodes.F64 ? WasmOpCodes.I64ReinterpretF64 : WasmOpCodes.I32ReinterpretF32;
+            byte reinterpretToFloat = wasmType == WasmOpCodes.F64 ? WasmOpCodes.F64ReinterpretI64 : WasmOpCodes.F32ReinterpretI32;
+
+            var oldInt = AllocateNewLocal(intType);
+            var oldFloat = AllocateNewLocal(wasmType);
+            var newFloat = AllocateNewLocal(wasmType);
+            var newInt = AllocateNewLocal(intType);
+            var casResult = AllocateNewLocal(intType);
+
+            // Determine the float arithmetic opcode
+            byte floatOp = (wasmType, atomic.Kind) switch
             {
-                (WasmOpCodes.I32, AtomicKind.Add) => WasmOpCodes.I32Add,
-                (WasmOpCodes.I32, AtomicKind.And) => WasmOpCodes.I32And,
-                (WasmOpCodes.I32, AtomicKind.Or) => WasmOpCodes.I32Or,
-                (WasmOpCodes.I32, AtomicKind.Xor) => WasmOpCodes.I32Xor,
-                (WasmOpCodes.I32, AtomicKind.Min) => 0, // handled below
-                (WasmOpCodes.I32, AtomicKind.Max) => 0,
-                (WasmOpCodes.I32, AtomicKind.Exchange) => 0,
-                (WasmOpCodes.I64, AtomicKind.Add) => WasmOpCodes.I64Add,
-                (WasmOpCodes.I64, AtomicKind.And) => WasmOpCodes.I64And,
-                (WasmOpCodes.I64, AtomicKind.Or) => WasmOpCodes.I64Or,
-                (WasmOpCodes.I64, AtomicKind.Xor) => WasmOpCodes.I64Xor,
-                _ => WasmOpCodes.I32Add
+                (WasmOpCodes.F32, AtomicKind.Add) => WasmOpCodes.F32Add,
+                (WasmOpCodes.F32, AtomicKind.Min) => WasmOpCodes.F32Min,
+                (WasmOpCodes.F32, AtomicKind.Max) => WasmOpCodes.F32Max,
+                (WasmOpCodes.F64, AtomicKind.Add) => WasmOpCodes.F64Add,
+                (WasmOpCodes.F64, AtomicKind.Min) => WasmOpCodes.F64Min,
+                (WasmOpCodes.F64, AtomicKind.Max) => WasmOpCodes.F64Max,
+                _ => WasmOpCodes.F32Add // fallback
             };
+
+            // loop $cas_loop
+            Code.Add(WasmOpCodes.Loop);
+            Code.Add(WasmOpCodes.Void);
+
+            // oldInt = atomic.load(addr)
+            EmitGetLocal(address);
+            WasmModuleBuilder.EmitAtomicRmw(Code, loadOp, align, 0);
+            WasmModuleBuilder.EmitLocalSet(Code, oldInt);
+
+            // oldFloat = reinterpret(oldInt)
+            WasmModuleBuilder.EmitLocalGet(Code, oldInt);
+            Code.Add(reinterpretToFloat);
+            WasmModuleBuilder.EmitLocalSet(Code, oldFloat);
 
             if (atomic.Kind == AtomicKind.Exchange)
             {
-                // Exchange: just store val, return old
-                Code.Add(WasmOpCodes.Drop); // drop val from stack (we'll re-push)
-                Code.Add(WasmOpCodes.Drop); // drop old op result
-                EmitGetLocal(address);
+                // Exchange: newFloat = val
                 EmitGetLocal(val);
-                EmitTypedStore(wasmType);
-            }
-            else if (atomic.Kind == AtomicKind.Min || atomic.Kind == AtomicKind.Max)
-            {
-                // Min/Max: use select
-                var tempNew = AllocateNewLocal(wasmType);
-                Code.Add(WasmOpCodes.Drop); // drop the val
-                Code.Add(WasmOpCodes.Drop); // drop old from compute stack
-                // Compute: select(old, val, old < val) for Min
-                EmitGetLocal(address);
-                WasmModuleBuilder.EmitLocalGet(Code, target); // old
-                EmitGetLocal(val);
-                WasmModuleBuilder.EmitLocalGet(Code, target); // old
-                EmitGetLocal(val);
-                Code.Add(wasmType == WasmOpCodes.I64 
-                    ? (atomic.Kind == AtomicKind.Min ? WasmOpCodes.I64LtS : WasmOpCodes.I64GtS)
-                    : (atomic.Kind == AtomicKind.Min ? WasmOpCodes.I32LtS : WasmOpCodes.I32GtS));
-                Code.Add(WasmOpCodes.Select);
-                EmitTypedStore(wasmType);
+                WasmModuleBuilder.EmitLocalSet(Code, newFloat);
             }
             else
             {
-                // Standard RMW: store (old op val)
-                var tempNew = AllocateNewLocal(wasmType);
-                Code.Add(opcode);
-                WasmModuleBuilder.EmitLocalSet(Code, tempNew);
-                EmitGetLocal(address);
-                WasmModuleBuilder.EmitLocalGet(Code, tempNew);
-                EmitTypedStore(wasmType);
+                // newFloat = oldFloat op val
+                WasmModuleBuilder.EmitLocalGet(Code, oldFloat);
+                EmitGetLocal(val);
+                Code.Add(floatOp);
+                WasmModuleBuilder.EmitLocalSet(Code, newFloat);
             }
+
+            // newInt = reinterpret(newFloat)
+            WasmModuleBuilder.EmitLocalGet(Code, newFloat);
+            Code.Add(reinterpretToInt);
+            WasmModuleBuilder.EmitLocalSet(Code, newInt);
+
+            // casResult = cmpxchg(addr, oldInt, newInt)
+            EmitGetLocal(address);
+            WasmModuleBuilder.EmitLocalGet(Code, oldInt);
+            WasmModuleBuilder.EmitLocalGet(Code, newInt);
+            WasmModuleBuilder.EmitAtomicRmw(Code, cmpxchgOp, align, 0);
+            WasmModuleBuilder.EmitLocalSet(Code, casResult);
+
+            // if casResult != oldInt, retry
+            WasmModuleBuilder.EmitLocalGet(Code, casResult);
+            WasmModuleBuilder.EmitLocalGet(Code, oldInt);
+            Code.Add(eqOp);
+            Code.Add(WasmOpCodes.I32Eqz);
+            Code.Add(WasmOpCodes.BrIf);
+            WasmModuleBuilder.EmitU32Leb128(Code, 0); // br_if $loop
+
+            Code.Add(WasmOpCodes.End); // end loop
+
+            // target = oldFloat (the value before the operation)
+            WasmModuleBuilder.EmitLocalGet(Code, oldFloat);
+            WasmModuleBuilder.EmitLocalSet(Code, target);
         }
+
         public virtual void GenerateCode(AtomicCAS atomicCAS)
         {
-            // Single-threaded CAS: load old, if old==expected then store desired, return old
+            // Thread-safe CAS using Wasm atomic cmpxchg
             var target = AllocateLocal(atomicCAS, GetWasmType(atomicCAS));
             var address = atomicCAS.Target.Resolve();
             var expected = atomicCAS.Value.Resolve();
             var desired = atomicCAS.CompareValue.Resolve();
             var wasmType = GetWasmType(atomicCAS);
 
-            // Load old value
-            EmitGetLocal(address);
-            EmitTypedLoad(wasmType);
-            WasmModuleBuilder.EmitLocalSet(Code, target);
+            uint align = wasmType == WasmOpCodes.I64 ? 3u : 2u;
+            byte cmpxchgOp = wasmType == WasmOpCodes.I64 ? WasmOpCodes.I64AtomicRmwCmpxchg : WasmOpCodes.I32AtomicRmwCmpxchg;
 
-            // if (old == expected) memory[addr] = desired
-            WasmModuleBuilder.EmitLocalGet(Code, target);
-            EmitGetLocal(expected);
-            Code.Add(wasmType == WasmOpCodes.I64 ? WasmOpCodes.I64Eq : WasmOpCodes.I32Eq);
-            Code.Add(WasmOpCodes.If);
-            Code.Add(WasmOpCodes.Void);
+            // atomic.rmw.cmpxchg: stack [addr, expected, replacement] -> old_value
             EmitGetLocal(address);
+            EmitGetLocal(expected);
             EmitGetLocal(desired);
-            EmitTypedStore(wasmType);
-            Code.Add(WasmOpCodes.End);
+            WasmModuleBuilder.EmitAtomicRmw(Code, cmpxchgOp, align, 0);
+            WasmModuleBuilder.EmitLocalSet(Code, target);
         }
 
         // Debug

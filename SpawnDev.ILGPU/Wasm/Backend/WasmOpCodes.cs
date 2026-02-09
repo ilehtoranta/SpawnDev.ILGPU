@@ -216,12 +216,19 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         public const byte I32AtomicStore = 0x17;
         public const byte I64AtomicStore = 0x18;
         public const byte I32AtomicRmwAdd = 0x1E;
-        public const byte I32AtomicRmwSub = 0x1F;
-        public const byte I32AtomicRmwAnd = 0x20;
-        public const byte I32AtomicRmwOr = 0x21;
-        public const byte I32AtomicRmwXor = 0x22;
-        public const byte I32AtomicRmwXchg = 0x23;
-        public const byte I32AtomicRmwCmpxchg = 0x24;
+        public const byte I64AtomicRmwAdd = 0x1F;
+        public const byte I32AtomicRmwSub = 0x20;
+        public const byte I64AtomicRmwSub = 0x21;
+        public const byte I32AtomicRmwAnd = 0x22;
+        public const byte I64AtomicRmwAnd = 0x23;
+        public const byte I32AtomicRmwOr = 0x24;
+        public const byte I64AtomicRmwOr = 0x25;
+        public const byte I32AtomicRmwXor = 0x26;
+        public const byte I64AtomicRmwXor = 0x27;
+        public const byte I32AtomicRmwXchg = 0x28;
+        public const byte I64AtomicRmwXchg = 0x29;
+        public const byte I32AtomicRmwCmpxchg = 0x48;
+        public const byte I64AtomicRmwCmpxchg = 0x49;
 
         // === Section IDs ===
         public const byte SectionCustom = 0;
