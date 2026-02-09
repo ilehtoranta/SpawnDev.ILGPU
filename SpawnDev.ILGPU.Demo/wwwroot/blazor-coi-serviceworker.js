@@ -19,7 +19,7 @@ if (typeof window !== 'undefined') {
         if (!verbose) return;
         console.log("[COI]", ...args);
     }
-    
+
     // Helper to check if Blazor script is loaded
     function isBlazorRunning() {
         return !!document.querySelector('script[src*="blazor.webassembly.js"]');
@@ -32,9 +32,14 @@ if (typeof window !== 'undefined') {
         var s = document.createElement("script");
         s.src = "_framework/blazor.webassembly.js";
         document.body.appendChild(s);
+    } else {
+        navigator.serviceWorker.ready.then((registration) => {
+            consoleLog(`A service worker is active: ${registration.active}`);
+            window.location.reload();
+        });
     }
 
-    // First check if service workers are supported before trying to register one.
+    // Register the service worker if supported. The SW will add the necessary headers to enable
     if ("serviceWorker" in navigator) {
         // Register the service worker, which will add the necessary headers to enable
         // cross-origin isolation. The SW will reload the page once activated to apply the headers.
@@ -43,48 +48,6 @@ if (typeof window !== 'undefined') {
             .register(window.document.currentScript.src)
             .then(function (reg) {
                 consoleLog("[COI] Service worker registered:", reg.scope);
-                if (!isBlazorRunning()) {
-                    if (navigator.serviceWorker.controller) {
-                        // SW is controlling the page but we're not isolated.
-                        // This can happen if the SW was just updated or headers aren't applied yet.
-                        // Reload to pick up the headers from the active SW.
-                        consoleLog("[COI] Controlled by SW but not isolated. Reloading...");
-                        window.location.reload();
-                    } else {
-                        // SW registered but not controlling the page yet. Wait for it to activate and take control, then reload.
-                        function waitForActivation(worker) {
-                            worker.addEventListener("statechange", function () {
-                                consoleLog("[COI] Worker statechange — .", worker.state);
-                                if (worker.state === "activated") {
-                                    consoleLog("[COI] Worker activated — reloading.");
-                                    window.location.reload();
-                                }
-                            });
-                        }
-
-                        if (reg.installing) {
-                            // SW is installing — wait for it to activate
-                            waitForActivation(reg.installing);
-                        } else if (reg.waiting) {
-                            // SW installed but waiting — wait for activation
-                            waitForActivation(reg.waiting);
-                        } else if (reg.active) {
-                            // SW is active but not controlling this page yet.
-                            // clients.claim() in the SW will trigger "controllerchange".
-                            navigator.serviceWorker.addEventListener("controllerchange", function () {
-                                consoleLog("[COI] Controller changed — reloading.");
-                                window.location.reload();
-                            });
-                        }
-
-                        // Fallback reload in case something goes wrong with the activation flow
-                        setTimeout(function () {
-                            if (document.querySelector('script[src*="blazor.webassembly.js"]')) return;
-                            consoleLog("[COI] Reloading as fallback in case activation flow fails.");
-                            window.location.reload();
-                        }, 1000);
-                    }
-                }
             })
             .catch(function (err) {
                 console.error("[COI] Service worker registration failed:", err);
