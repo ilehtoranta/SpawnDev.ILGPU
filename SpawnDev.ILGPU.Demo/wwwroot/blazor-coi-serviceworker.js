@@ -7,7 +7,7 @@
  * Works locally and on static hosts like GitHub Pages where you
  * cannot set server response headers.
  *
- * Registration: Add <script src="coi-serviceworker.js"></script> to index.html
+ * Registration: Add <script src="blazor-coi-serviceworker.js"></script> to index.html
  */
 
 
@@ -21,29 +21,36 @@ if (typeof window !== 'undefined') {
         s.src = "_framework/blazor.webassembly.js";
         document.body.appendChild(s);
     }
+    function reloadIfBlazorNotLoaded() {
+        if (document.querySelector('script[src*="blazor.webassembly.js"]')) return;
+        window.location.reload();
+    }
 
-    if (window.crossOriginIsolated) {
-        // Already cross-origin isolated — nothing to do
-        console.log("[COI] Cross-origin isolated ✓");
-        loadBlazor();
-    } else if ("serviceWorker" in navigator) {
-        if (navigator.serviceWorker.controller) {
-            // SW is controlling the page but we're not isolated.
-            // This can happen if the SW was just updated or headers aren't applied yet.
-            // Reload to pick up the headers from the active SW.
-            console.warn("[COI] Controlled by SW but not isolated. Reloading...");
-            window.location.reload();
-        } else {
-            // No controller — register (or re-register) the SW, then reload
-            // once it's active and claiming clients.
-            console.log("[COI] Registering service worker...");
-            navigator.serviceWorker
-                .register(window.document.currentScript.src)
-                .then(function (reg) {
-                    console.log("[COI] Service worker registered:", reg.scope);
+    // First check if service workers are supported before trying to register one.
+    if ("serviceWorker" in navigator) {
+        // Register the service worker, which will add the necessary headers to enable
+        // cross-origin isolation. The SW will reload the page once activated to apply the headers.
+        console.log("[COI] Registering service worker...");
+        navigator.serviceWorker
+            .register(window.document.currentScript.src)
+            .then(function (reg) {
+                console.log("[COI] Service worker registered:", reg.scope);
 
+                if (window.crossOriginIsolated) {
+                    // Already cross-origin isolated — nothing to do
+                    console.log("[COI] Cross-origin isolated ✓");
+                    loadBlazor();
+                } else if (navigator.serviceWorker.controller) {
+                    // SW is controlling the page but we're not isolated.
+                    // This can happen if the SW was just updated or headers aren't applied yet.
+                    // Reload to pick up the headers from the active SW.
+                    console.warn("[COI] Controlled by SW but not isolated. Reloading...");
+                    window.location.reload();
+                } else {
+                    // SW registered but not controlling the page yet. Wait for it to activate and take control, then reload.
                     function waitForActivation(worker) {
                         worker.addEventListener("statechange", function () {
+                            console.log("[COI] Worker statechange — .", worker.state);
                             if (worker.state === "activated") {
                                 console.log("[COI] Worker activated — reloading.");
                                 window.location.reload();
@@ -65,18 +72,20 @@ if (typeof window !== 'undefined') {
                             window.location.reload();
                         });
                     }
-
                     // Fallback reload in case something goes wrong with the activation flow
                     setTimeout(function () {
-                        window.location.reload()
-                    }, 2000); 
-                })
-                .catch(function (err) {
-                    console.error("[COI] Service worker registration failed:", err);
-                });
-        }
-    } else {
-        console.warn("[COI] Service workers are not supported.");
+                        if (document.querySelector('script[src*="blazor.webassembly.js"]')) return;
+                        console.warn("[COI] Reloading as fallback in case activation flow fails.");
+                        window.location.reload();
+                    }, 1000);
+                }
+            })
+            .catch(function (err) {
+                console.error("[COI] Service worker registration failed:", err);
+            });
+    }
+    else {
+        console.warn("[COI] Service workers not supported in this browser. Cross-origin isolation unavailable.");
     }
 } else {
     // --- Running as a Service Worker ---
