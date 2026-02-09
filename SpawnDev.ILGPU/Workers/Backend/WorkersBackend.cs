@@ -38,7 +38,7 @@ namespace SpawnDev.ILGPU.Workers.Backend
         /// <summary>
         /// Controls whether verbose logging is enabled.
         /// </summary>
-        public static bool VerboseLogging { get; set; } = true;
+        public static bool VerboseLogging { get; set; } = false;
 
         /// <summary>
         /// Logs a message to the console if VerboseLogging is enabled.

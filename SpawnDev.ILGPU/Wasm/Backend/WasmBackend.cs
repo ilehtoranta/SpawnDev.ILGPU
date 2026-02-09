@@ -41,7 +41,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         /// <summary>
         /// Controls verbose debug logging.
         /// </summary>
-        public static bool VerboseLogging { get; set; } = true;
+        public static bool VerboseLogging { get; set; } = false;
 
         /// <summary>
         /// Logs a message if VerboseLogging is enabled.
