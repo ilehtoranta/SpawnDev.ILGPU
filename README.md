@@ -20,6 +20,17 @@ Write parallel compute code in C# and let the library pick the best available ba
 └──────────────┴──────────────┴──────────────┴─────────────────┘
 ```
 
+## Demo Application
+
+The demo application is located in [SpawnDev.ILGPU.Demo](SpawnDev.ILGPU.Demo) and showcases:
+- Automatic device detection across all backends
+- Interactive Mandelbrot / Fractal Explorer (WebGPU, Wasm, Workers)
+- Comprehensive unit test suites for WebGPU, Workers, Wasm, and CPU backends
+- [Live Demo](https://lostbeard.github.io/SpawnDev.ILGPU/)
+- [Live Demo - Fractal Explorer](https://lostbeard.github.io/SpawnDev.ILGPU/fractals)
+
+[![Fractal Explorer Screenshot](https://raw.githubusercontent.com/LostBeard/SpawnDev.ILGPU/master/SpawnDev.ILGPU.Demo/wwwroot/screenshots/spawndev-ilgpu-fractal-explorer.jpg)](https://lostbeard.github.io/SpawnDev.ILGPU/fractals)
+
 ## Backends at a Glance
 
 | | 🎮 **WebGPU** | 🧊 **Wasm** | 🧵 **Workers** | 💻 **CPU** |
@@ -140,23 +151,6 @@ using var accelerator = await device.CreateAcceleratorAsync(context);
 using var context = Context.Create().CPU().ToContext();
 using var accelerator = context.CreateCPUAccelerator(0);
 ```
-
-## Demo Application
-
-The demo application is located in [SpawnDev.ILGPU.Demo](SpawnDev.ILGPU.Demo) and showcases:
-- Automatic device detection across all backends
-- Interactive Mandelbrot / Fractal Explorer (WebGPU, Wasm, Workers)
-- Comprehensive unit test suites for WebGPU, Workers, Wasm, and CPU backends
-- View the [Live Demo](https://lostbeard.github.io/SpawnDev.ILGPU/)
-
-### Running the Demo
-
-```bash
-cd SpawnDev.ILGPU.Demo
-dotnet run
-```
-
-Navigate to `https://localhost:5181` in a WebGPU-capable browser (Chrome, Edge, or Firefox Nightly).
 
 ## Testing
 
