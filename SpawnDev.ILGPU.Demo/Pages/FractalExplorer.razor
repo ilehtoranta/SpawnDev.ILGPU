@@ -24,11 +24,11 @@
             <div class="card-body">
                 <div class="mb-3">
                     <label class="form-label fw-bold">Backend Engine</label>
-                    <select class="form-select" value="@_selectedBackend" @onchange="OnBackendChanged" disabled="@(_isInitializing)">
-                        <option value="WebGPU">⚡⚡⚡ WebGPU (GPU)</option>
-                        <option value="Wasm">⚡⚡ Wasm (Multi-core Wasm)</option>
-                        <option value="Workers">⚡ Workers (Multi-core CPU)</option>
-                        <option value="CPU">🐢 CPU (Single-thread)</option>
+                    <select class="form-select" value="@_selectedBackend" @onchange="OnBackendChanged" disabled="@(_isInitializing)">                    
+                        @foreach (var backend in _availableBackends)
+                        {
+                            <option value="@backend.Key">@backend.Value</option>
+                        }
                     </select>
                     @if (_isInitializing)
                     {
@@ -158,10 +158,11 @@
     private int _height = 700;
 
     // Backend selection
-    private string _selectedBackend = "WebGPU";
+    private string _selectedBackend = "";
     private string _backendStatus = "";
     private bool _isInitializing = false;
     private bool _pendingBackendSwitch = false;
+    private List<KeyValuePair<string, string>> _availableBackends = new();
 
     // Fractal parameters
     private int _fractalType = 0;
@@ -213,8 +214,42 @@
     {
         if (firstRender)
         {
+            await DetectAvailableBackends();
             _ = RenderLoop();
         }
+    }
+
+    private async Task DetectAvailableBackends()
+    {
+        var backends = new List<KeyValuePair<string, string>>();
+
+        // WebGPU — requires async GPU probing, may not be available
+        try
+        {
+            using var probeContext = await Context.CreateAsync(builder => builder.WebGPU());
+            var devices = probeContext.GetWebGPUDevices();
+            if (devices.Count > 0)
+            {
+                backends.Add(new("WebGPU", "⚡⚡⚡ WebGPU (GPU)"));
+            }
+        }
+        catch
+        {
+            // WebGPU not available in this browser
+        }
+
+        // Wasm — always available in Blazor WASM
+        backends.Add(new("Wasm", "⚡⚡ Wasm (Multi-core Wasm)"));
+
+        // Workers — always available in Blazor WASM
+        backends.Add(new("Workers", "⚡ Workers (Multi-core CPU)"));
+
+        // CPU — always available
+        backends.Add(new("CPU", "🐢 CPU (Single-thread)"));
+
+        _availableBackends = backends;
+        _selectedBackend = backends[0].Key; // Best available
+        StateHasChanged();
     }
 
     // ========== Backend Switching ==========
