@@ -280,8 +280,26 @@ namespace SpawnDev.ILGPU.WebGL
                                 .FirstOrDefault(b => b.ParamIndex == glslParamIndex && b.Kind == KernelParamKind.Buffer);
                             string bufferGlslType = binding.GlslType ?? "float";
 
-                            var texWidth = (byteLength + 3) / 4; // ceil(bytes / 4)
-                            var paddedData = new byte[texWidth * 4];
+                            var texelCount = (byteLength + 3) / 4; // ceil(bytes / 4)
+
+                            // 2D texture tiling: when texel count exceeds MAX_TEXTURE_SIZE,
+                            // tile data into rows of maxTexSize width
+                            int maxTexSize = gl.GetParameter<int>(GL.MAX_TEXTURE_SIZE);
+                            int tileWidth, tileHeight;
+                            if (texelCount > maxTexSize)
+                            {
+                                tileWidth = maxTexSize;
+                                tileHeight = (texelCount + tileWidth - 1) / tileWidth;
+                            }
+                            else
+                            {
+                                tileWidth = texelCount;
+                                tileHeight = 1;
+                            }
+
+                            // Pad data to fill the full 2D texture (tileWidth * tileHeight texels)
+                            int totalTexels = tileWidth * tileHeight;
+                            var paddedData = new byte[totalTexels * 4];
                             System.Buffer.BlockCopy(byteData, 0, paddedData, 0, byteLength);
 
 
@@ -300,14 +318,13 @@ namespace SpawnDev.ILGPU.WebGL
                             if (bufferGlslType == "int")
                             {
                                 // Integer buffer: use R32I with isampler2D
-                                // Must pass Int32Array to WebGL — byte[] becomes Uint8Array which misaligns
                                 using var int32Array = new Int32Array(arrayBuffer);
 
                                 gl.JSRef!.CallVoid("texImage2D",
-                                    GL.TEXTURE_2D, 0, GL.R32I, texWidth, 1, 0,
+                                    GL.TEXTURE_2D, 0, GL.R32I, tileWidth, tileHeight, 0,
                                     GL.RED_INTEGER, GL.INT, int32Array);
 
-                                Log($"[WebGL-Debug] Arg {pIdx}: Bound as texture unit {texUnit}, {texWidth}x1 R32I (int)");
+                                Log($"[WebGL-Debug] Arg {pIdx}: Bound as texture unit {texUnit}, {tileWidth}x{tileHeight} R32I (int)");
                             }
                             else if (bufferGlslType == "uint")
                             {
@@ -315,27 +332,26 @@ namespace SpawnDev.ILGPU.WebGL
                                 using var uint32Array = new Uint32Array(arrayBuffer);
 
                                 gl.JSRef!.CallVoid("texImage2D",
-                                    GL.TEXTURE_2D, 0, GL.R32UI, texWidth, 1, 0,
+                                    GL.TEXTURE_2D, 0, GL.R32UI, tileWidth, tileHeight, 0,
                                     GL.RED_INTEGER, GL.UNSIGNED_INT, uint32Array);
 
-                                Log($"[WebGL-Debug] Arg {pIdx}: Bound as texture unit {texUnit}, {texWidth}x1 R32UI (uint)");
+                                Log($"[WebGL-Debug] Arg {pIdx}: Bound as texture unit {texUnit}, {tileWidth}x{tileHeight} R32UI (uint)");
                             }
                             else
                             {
                                 // Float buffer: use R32F with sampler2D (default)
                                 using var float32Array = new Float32Array(arrayBuffer);
 
-                                gl.TexImage2D(GL.TEXTURE_2D, 0, GL.R32F, texWidth, 1, 0, GL.RED, GL.FLOAT, float32Array);
+                                gl.TexImage2D(GL.TEXTURE_2D, 0, GL.R32F, tileWidth, tileHeight, 0, GL.RED, GL.FLOAT, float32Array);
 
-                                // Debug: log first few uploaded float values
-                                var uploadedFloats = new float[Math.Min(4, texWidth)];
-                                for (int uf = 0; uf < uploadedFloats.Length; uf++)
-                                    uploadedFloats[uf] = BitConverter.ToSingle(paddedData, uf * 4);
-                                Console.WriteLine($"[WebGL-TEX-DEBUG] param{glslParamIndex}: texUnit={texUnit}, {texWidth}x1 R32F, first values=[{string.Join(", ", uploadedFloats)}], byteLen={byteLength}");
-
-                                Log($"[WebGL-Debug] Arg {pIdx}: Bound as texture unit {texUnit}, {texWidth}x1 R32F (float)");
+                                Log($"[WebGL-Debug] Arg {pIdx}: Bound as texture unit {texUnit}, {tileWidth}x{tileHeight} R32F (float)");
                             }
                             gl.Uniform1i(uniformLoc, texUnit);
+
+                            // Pass tile width uniform for 2D coordinate computation in shader
+                            var tileWLoc = gl.GetUniformLocation(program, $"u_param{glslParamIndex}_tileW");
+                            if (tileWLoc != null)
+                                gl.Uniform1i(tileWLoc, tileWidth);
 
                         }
                         // ---- Stride uniforms for ArrayView2D/3D ----

@@ -101,10 +101,7 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
         public new async Task ZeroIterationLoopTest() =>
             throw new UnsupportedTestException("WebGL: zero-iteration loop produces no TF store, buffer stays zeroed");
 
-        // --- Texture size limit: 1D textures exceed MAX_TEXTURE_SIZE for large buffers ---
-        [TestMethod]
-        public new async Task LargeDispatchTest() =>
-            throw new UnsupportedTestException("WebGL: 65536 elements exceeds MAX_TEXTURE_SIZE for 1D texture input");
+        // LargeDispatchTest: re-enabled — 2D texture tiling now supports buffers > MAX_TEXTURE_SIZE
 
         // ArrayView2D/3D tests: re-enabled — stride uniform passing now implemented in WebGLAccelerator
 
