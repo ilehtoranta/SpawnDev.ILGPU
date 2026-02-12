@@ -57,6 +57,34 @@ namespace SpawnDev.ILGPU.WebGL
             if (VerboseLogging) Console.WriteLine(message);
         }
 
+        // ---- Shader program cache: avoids recompiling the same shader every frame ----
+        private readonly Dictionary<string, CachedGLProgram> _programCache = new();
+
+        // ---- Cached VAO + dummy vertex buffer (reused across dispatches) ----
+        private WebGLVertexArrayObject? _cachedVAO;
+        private SpawnDev.BlazorJS.JSObjects.WebGLBuffer? _cachedDummyVBO;
+        private int _cachedDummyVBOSize;
+
+        /// <summary>
+        /// Record for caching compiled GL programs along with their uniform locations.
+        /// </summary>
+        private sealed class CachedGLProgram : IDisposable
+        {
+            public WebGLProgram Program { get; init; } = null!;
+            public WebGLShader VertShader { get; init; } = null!;
+            public WebGLShader FragShader { get; init; } = null!;
+            public bool IsDisposed { get; private set; }
+
+            public void Dispose()
+            {
+                if (IsDisposed) return;
+                IsDisposed = true;
+                Program?.Dispose();
+                VertShader?.Dispose();
+                FragShader?.Dispose();
+            }
+        }
+
         #region Construction
 
         private WebGLAccelerator(Context context, Device device) : base(context, device) { }
@@ -74,8 +102,8 @@ namespace SpawnDev.ILGPU.WebGL
             accelerator.Init(accelerator.Backend);
             accelerator.DefaultStream = accelerator.CreateStreamInternal();
 
-            Console.WriteLine($"[WebGL] Accelerator created: {device.NativeDevice.Name}");
-            Console.WriteLine($"[WebGL] Max TF Components: {device.NativeDevice.MaxTransformFeedbackInterleavedComponents}");
+            Log($"[WebGL] Accelerator created: {device.NativeDevice.Name}");
+            Log($"[WebGL] Max TF Components: {device.NativeDevice.MaxTransformFeedbackInterleavedComponents}");
 
             return accelerator;
         }
@@ -172,46 +200,51 @@ namespace SpawnDev.ILGPU.WebGL
 
             Log($"[WebGL-Debug] Dispatch: {totalVertices} vertices (dim={dimX}x{dimY}x{dimZ})");
 
-            // ---- Step 1: Compile shader program ----
+            // ---- Step 1: Get or compile shader program (cached) ----
             var vertexShaderSource = compiledKernel.GLSLSource;
-            Console.WriteLine($"[WebGL-SHADER-SRC]\n{vertexShaderSource}");
+            Log($"[WebGL-SHADER-SRC]\n{vertexShaderSource}");
 
-            // Minimal fragment shader (required but output is discarded via RASTERIZER_DISCARD)
-            var fragmentShaderSource = "#version 300 es\nprecision mediump float;\nvoid main() {}\n";
-
-            using var vertShader = CompileShader(gl, GL.VERTEX_SHADER, vertexShaderSource);
-            using var fragShader = CompileShader(gl, GL.FRAGMENT_SHADER, fragmentShaderSource);
-            using var program = gl.CreateProgram();
-            gl.AttachShader(program, vertShader);
-            gl.AttachShader(program, fragShader);
-
-            // ---- Step 2: Set up Transform Feedback varyings ----
-            // The GLSL kernel generator emits `out` varyings (e.g. `tf_output_0`)
-            // Collect the varying names from the compiled kernel's output metadata
             var varyingNames = compiledKernel.OutputVaryings
                 .Select(o => o.VaryingName)
                 .ToArray();
 
-            if (varyingNames.Length > 0)
+            if (!webGlAccel._programCache.TryGetValue(vertexShaderSource, out var cached) || cached.IsDisposed)
             {
-                gl.TransformFeedbackVaryings(program, varyingNames, GL.INTERLEAVED_ATTRIBS);
+                // Compile and cache the shader program
+                var fragmentShaderSource = "#version 300 es\nprecision mediump float;\nvoid main() {}\n";
+                var vertShader = CompileShader(gl, GL.VERTEX_SHADER, vertexShaderSource);
+                var fragShader = CompileShader(gl, GL.FRAGMENT_SHADER, fragmentShaderSource);
+                var program = gl.CreateProgram();
+                gl.AttachShader(program, vertShader);
+                gl.AttachShader(program, fragShader);
+
+                if (varyingNames.Length > 0)
+                    gl.TransformFeedbackVaryings(program, varyingNames, GL.INTERLEAVED_ATTRIBS);
+
+                gl.LinkProgram(program);
+                var linkStatus = gl.GetProgramParameter<bool>(program, GL.LINK_STATUS);
+                if (!linkStatus)
+                {
+                    var log = gl.GetProgramInfoLog(program);
+                    vertShader.Dispose();
+                    fragShader.Dispose();
+                    program.Dispose();
+                    throw new InvalidOperationException($"[WebGL] Program link failed:\n{log}");
+                }
+
+                cached = new CachedGLProgram { Program = program, VertShader = vertShader, FragShader = fragShader };
+                webGlAccel._programCache[vertexShaderSource] = cached;
+                Log($"[WebGL-Debug] Compiled and cached new shader program");
             }
 
-            gl.LinkProgram(program);
-            var linkStatus = gl.GetProgramParameter<bool>(program, GL.LINK_STATUS);
-            if (!linkStatus)
-            {
-                var log = gl.GetProgramInfoLog(program);
-                throw new InvalidOperationException($"[WebGL] Program link failed:\n{log}");
-            }
-
-            gl.UseProgram(program);
+            var glProgram = cached.Program;
+            gl.UseProgram(glProgram);
 
             // ---- Step 3: Upload dimension uniforms ----
-            var dimWidthLoc = gl.GetUniformLocation(program, "u_dimWidth");
+            var dimWidthLoc = gl.GetUniformLocation(glProgram, "u_dimWidth");
             if (dimWidthLoc != null) gl.Uniform1i(dimWidthLoc, dimX);
 
-            var dimHeightLoc = gl.GetUniformLocation(program, "u_dimHeight");
+            var dimHeightLoc = gl.GetUniformLocation(glProgram, "u_dimHeight");
             if (dimHeightLoc != null) gl.Uniform1i(dimHeightLoc, dimY);
 
             // ---- Step 4: Bind input parameters ----
@@ -263,7 +296,7 @@ namespace SpawnDev.ILGPU.WebGL
                         // Create a GL texture from the backing data for TBO access
                         var texUnit = textureUnit++;
                         var uniformName = $"u_param{glslParamIndex}";
-                        var uniformLoc = gl.GetUniformLocation(program, uniformName);
+                        var uniformLoc = gl.GetUniformLocation(glProgram, uniformName);
 
                         if (uniformLoc != null)
                         {
@@ -284,7 +317,7 @@ namespace SpawnDev.ILGPU.WebGL
 
                             // 2D texture tiling: when texel count exceeds MAX_TEXTURE_SIZE,
                             // tile data into rows of maxTexSize width
-                            int maxTexSize = gl.GetParameter<int>(GL.MAX_TEXTURE_SIZE);
+                            int maxTexSize = 16384; // Typical max; avoid per-frame GetParameter call
                             int tileWidth, tileHeight;
                             if (texelCount > maxTexSize)
                             {
@@ -349,7 +382,7 @@ namespace SpawnDev.ILGPU.WebGL
                             gl.Uniform1i(uniformLoc, texUnit);
 
                             // Pass tile width uniform for 2D coordinate computation in shader
-                            var tileWLoc = gl.GetUniformLocation(program, $"u_param{glslParamIndex}_tileW");
+                            var tileWLoc = gl.GetUniformLocation(glProgram, $"u_param{glslParamIndex}_tileW");
                             if (tileWLoc != null)
                                 gl.Uniform1i(tileWLoc, tileWidth);
 
@@ -360,7 +393,7 @@ namespace SpawnDev.ILGPU.WebGL
                         if (arg != null)
                         {
                             var argType = arg.GetType();
-                            var strideLoc = gl.GetUniformLocation(program, $"u_param{glslParamIndex}_stride[0]");
+                            var strideLoc = gl.GetUniformLocation(glProgram, $"u_param{glslParamIndex}_stride[0]");
                             if (strideLoc != null)
                             {
                                 // This is a multi-dim view — extract Extent dimensions
@@ -369,7 +402,7 @@ namespace SpawnDev.ILGPU.WebGL
                                 {
                                     using var strideArray = new Int32Array(dims);
                                     gl.Uniform1iv(strideLoc, strideArray);
-                                    Console.WriteLine($"[WebGL-STRIDE-DEBUG] param{glslParamIndex}: stride=[{string.Join(", ", dims)}]");
+                                    Log($"[WebGL-STRIDE-DEBUG] param{glslParamIndex}: stride=[{string.Join(", ", dims)}]");
                                 }
                             }
                         }
@@ -385,11 +418,11 @@ namespace SpawnDev.ILGPU.WebGL
                             var bits = BitConverter.DoubleToUInt64Bits(dVal);
                             var lo = (uint)(bits & 0xFFFFFFFF);
                             var hi = (uint)(bits >> 32);
-                            var loLoc = gl.GetUniformLocation(program, $"u_param{glslParamIndex}_lo");
-                            var hiLoc = gl.GetUniformLocation(program, $"u_param{glslParamIndex}_hi");
+                            var loLoc = gl.GetUniformLocation(glProgram, $"u_param{glslParamIndex}_lo");
+                            var hiLoc = gl.GetUniformLocation(glProgram, $"u_param{glslParamIndex}_hi");
                             if (loLoc != null) gl.Uniform1ui(loLoc, lo);
                             if (hiLoc != null) gl.Uniform1ui(hiLoc, hi);
-                            Console.WriteLine($"[WebGL-UNI-DEBUG] param{glslParamIndex}: f64 emulated value={dVal}, lo=0x{lo:X8} (loc={loLoc != null}), hi=0x{hi:X8} (loc={hiLoc != null})");
+                            Log($"[WebGL-UNI-DEBUG] param{glslParamIndex}: f64 emulated value={dVal}, lo=0x{lo:X8} (loc={loLoc != null}), hi=0x{hi:X8} (loc={hiLoc != null})");
                         }
                         else if (arg is long lVal && webGlAccel.Backend.Options.EnableI64Emulation)
                         {
@@ -397,17 +430,17 @@ namespace SpawnDev.ILGPU.WebGL
                             var bits = (ulong)lVal;
                             var lo = (uint)(bits & 0xFFFFFFFF);
                             var hi = (uint)(bits >> 32);
-                            var loLoc = gl.GetUniformLocation(program, $"u_param{glslParamIndex}_lo");
-                            var hiLoc = gl.GetUniformLocation(program, $"u_param{glslParamIndex}_hi");
+                            var loLoc = gl.GetUniformLocation(glProgram, $"u_param{glslParamIndex}_lo");
+                            var hiLoc = gl.GetUniformLocation(glProgram, $"u_param{glslParamIndex}_hi");
                             if (loLoc != null) gl.Uniform1ui(loLoc, lo);
                             if (hiLoc != null) gl.Uniform1ui(hiLoc, hi);
-                            Console.WriteLine($"[WebGL-UNI-DEBUG] param{glslParamIndex}: i64 emulated value={lVal}, lo=0x{lo:X8}, hi=0x{hi:X8}");
+                            Log($"[WebGL-UNI-DEBUG] param{glslParamIndex}: i64 emulated value={lVal}, lo=0x{lo:X8}, hi=0x{hi:X8}");
                         }
                         else
                         {
                             // Standard (non-emulated) scalar uniform
                             var uniformName = $"u_param{glslParamIndex}";
-                            var uniformLoc = gl.GetUniformLocation(program, uniformName);
+                            var uniformLoc = gl.GetUniformLocation(glProgram, uniformName);
                             if (uniformLoc != null)
                             {
                                 if (arg is int iVal) gl.Uniform1i(uniformLoc, iVal);
@@ -420,18 +453,18 @@ namespace SpawnDev.ILGPU.WebGL
                                 else if (arg is ulong ulVal) gl.Uniform1ui(uniformLoc, (uint)ulVal);
                                 else throw new NotSupportedException($"Unsupported scalar argument type: {arg?.GetType()}");
 
-                                Console.WriteLine($"[WebGL-UNI-DEBUG] param{glslParamIndex}: scalar value={arg} (type={arg?.GetType().Name})");
-                                Log($"[WebGL-Debug] Arg {pIdx}: Bound as uniform, value={arg}");
+                                Log($"[WebGL-UNI-DEBUG] param{glslParamIndex}: scalar value={arg} (type={arg?.GetType().Name})");
                             }
                         }
                     }
                 }
 
-                // Check for GL errors after parameter binding
+                // Check for GL errors after parameter binding (only in verbose mode to avoid pipeline stalls)
+                if (VerboseLogging)
                 {
                     var bindErr = gl.GetError();
                     if (bindErr != 0)
-                        Console.WriteLine($"[WebGL-GL-ERROR] After param binding: error={bindErr}");
+                        Log($"[WebGL-GL-ERROR] After param binding: error={bindErr}");
                 }
 
                 // ---- Step 5: Set up Transform Feedback output buffer ----
@@ -456,21 +489,28 @@ namespace SpawnDev.ILGPU.WebGL
                 }
 
                 // ---- Step 6: Dispatch via drawArrays with RASTERIZER_DISCARD ----
-                // WebGL2 requires a VAO bound for DrawArrays to produce output
-                var vao = gl.CreateVertexArray();
-                glDisposables.Add(vao);
-                gl.BindVertexArray(vao);
+                // Reuse cached VAO + dummy vertex buffer to avoid per-frame creation
+                if (webGlAccel._cachedVAO == null)
+                {
+                    webGlAccel._cachedVAO = gl.CreateVertexArray();
+                }
+                gl.BindVertexArray(webGlAccel._cachedVAO);
 
-                // ANGLE D3D11 workaround: The D3D11 backend requires at least one
-                // vertex attribute enabled for dynamic vertex executable compilation.
-                // Without this, DrawArrays fails with "Error compiling dynamic vertex
-                // executable" even though we only use gl_VertexID.
-                var dummyVtxBuf = gl.CreateBuffer();
-                glDisposables.Add(dummyVtxBuf);
-                gl.BindBuffer(GL.ARRAY_BUFFER, dummyVtxBuf);
-                gl.BufferData(GL.ARRAY_BUFFER, totalVertices * 4, GL.STATIC_DRAW);
-                gl.EnableVertexAttribArray(0);
-                gl.VertexAttribPointer(0, 1, (int)GL.FLOAT, false, 0, 0);
+                // ANGLE D3D11 workaround: requires at least one vertex attribute enabled.
+                if (webGlAccel._cachedDummyVBO == null || webGlAccel._cachedDummyVBOSize < totalVertices * 4)
+                {
+                    webGlAccel._cachedDummyVBO?.Dispose();
+                    webGlAccel._cachedDummyVBO = gl.CreateBuffer();
+                    webGlAccel._cachedDummyVBOSize = totalVertices * 4;
+                    gl.BindBuffer(GL.ARRAY_BUFFER, webGlAccel._cachedDummyVBO);
+                    gl.BufferData(GL.ARRAY_BUFFER, webGlAccel._cachedDummyVBOSize, GL.STATIC_DRAW);
+                    gl.EnableVertexAttribArray(0);
+                    gl.VertexAttribPointer(0, 1, (int)GL.FLOAT, false, 0, 0);
+                }
+                else
+                {
+                    gl.BindBuffer(GL.ARRAY_BUFFER, webGlAccel._cachedDummyVBO);
+                }
 
                 gl.Enable(GL.RASTERIZER_DISCARD);
 
@@ -481,17 +521,23 @@ namespace SpawnDev.ILGPU.WebGL
 
                 gl.DrawArrays(GL.POINTS, 0, totalVertices);
 
-                // Check for GL errors after draw
-                var glErr = gl.GetError();
-                if (glErr != 0)
-                    Console.WriteLine($"[WebGL-GL-ERROR] After DrawArrays: error={glErr}");
+                // Check for GL errors (only in verbose mode to avoid GPU pipeline stalls)
+                if (VerboseLogging)
+                {
+                    var glErr = gl.GetError();
+                    if (glErr != 0)
+                        Log($"[WebGL-GL-ERROR] After DrawArrays: error={glErr}");
+                }
 
                 if (transformFeedback != null)
                 {
                     gl.EndTransformFeedback();
-                    glErr = gl.GetError();
-                    if (glErr != 0)
-                        Console.WriteLine($"[WebGL-GL-ERROR] After EndTransformFeedback: error={glErr}");
+                    if (VerboseLogging)
+                    {
+                        var glErr2 = gl.GetError();
+                        if (glErr2 != 0)
+                            Log($"[WebGL-GL-ERROR] After EndTransformFeedback: error={glErr2}");
+                    }
                 }
 
                 gl.Disable(GL.RASTERIZER_DISCARD);
@@ -511,15 +557,16 @@ namespace SpawnDev.ILGPU.WebGL
                     var outputVaryings = compiledKernel.OutputVaryings;
                     var readbackBytes = readback.ReadBytes();
 
-                    // Debug: dump first few readback values
+                    // Debug: dump first few readback values (only when verbose logging is on)
+                    if (VerboseLogging)
                     {
                         int numFloats = Math.Min(readbackBytes.Length / 4, 8);
                         var vals = new float[numFloats];
                         for (int f = 0; f < numFloats; f++)
                             vals[f] = BitConverter.ToSingle(readbackBytes, f * 4);
-                        Console.WriteLine($"[WebGL-TF-DEBUG] TF readback: {readbackBytes.Length} bytes ({readbackBytes.Length / 4} floats), varyingCount={varyingNames.Length}, vertices={totalVertices}");
-                        Console.WriteLine($"[WebGL-TF-DEBUG] First {numFloats} float values: [{string.Join(", ", vals)}]");
-                        Console.WriteLine($"[WebGL-TF-DEBUG] OutputVaryings count={outputVaryings.Count}: [{string.Join(", ", outputVaryings.Select(o => $"param[{o.ParamIndex}]→{o.VaryingName}(outputIdx={o.OutputIndex})"))}]");
+                        Log($"[WebGL-TF-DEBUG] TF readback: {readbackBytes.Length} bytes ({readbackBytes.Length / 4} floats), varyingCount={varyingNames.Length}, vertices={totalVertices}");
+                        Log($"[WebGL-TF-DEBUG] First {numFloats} float values: [{string.Join(", ", vals)}]");
+                        Log($"[WebGL-TF-DEBUG] OutputVaryings count={outputVaryings.Count}: [{string.Join(", ", outputVaryings.Select(o => $"param[{o.ParamIndex}]→{o.VaryingName}(outputIdx={o.OutputIndex})"))}]");
                     }
 
                     for (int outIdx = 0; outIdx < outputVaryings.Count; outIdx++)
