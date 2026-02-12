@@ -327,9 +327,35 @@ namespace SpawnDev.ILGPU.WebGL
 
                                 gl.TexImage2D(GL.TEXTURE_2D, 0, GL.R32F, texWidth, 1, 0, GL.RED, GL.FLOAT, float32Array);
 
+                                // Debug: log first few uploaded float values
+                                var uploadedFloats = new float[Math.Min(4, texWidth)];
+                                for (int uf = 0; uf < uploadedFloats.Length; uf++)
+                                    uploadedFloats[uf] = BitConverter.ToSingle(paddedData, uf * 4);
+                                Console.WriteLine($"[WebGL-TEX-DEBUG] param{glslParamIndex}: texUnit={texUnit}, {texWidth}x1 R32F, first values=[{string.Join(", ", uploadedFloats)}], byteLen={byteLength}");
+
                                 Log($"[WebGL-Debug] Arg {pIdx}: Bound as texture unit {texUnit}, {texWidth}x1 R32F (float)");
                             }
                             gl.Uniform1i(uniformLoc, texUnit);
+
+                        }
+                        // ---- Stride uniforms for ArrayView2D/3D ----
+                        // If this buffer arg has stride metadata, pass it as a uniform array.
+                        // Extract dimension info from the argument to compute strides.
+                        if (arg != null)
+                        {
+                            var argType = arg.GetType();
+                            var strideLoc = gl.GetUniformLocation(program, $"u_param{glslParamIndex}_stride[0]");
+                            if (strideLoc != null)
+                            {
+                                // This is a multi-dim view — extract Extent dimensions
+                                int[] dims = ExtractViewDimensions(arg, argType);
+                                if (dims.Length >= 2)
+                                {
+                                    using var strideArray = new Int32Array(dims);
+                                    gl.Uniform1iv(strideLoc, strideArray);
+                                    Console.WriteLine($"[WebGL-STRIDE-DEBUG] param{glslParamIndex}: stride=[{string.Join(", ", dims)}]");
+                                }
+                            }
                         }
                     }
                     else
@@ -371,9 +397,17 @@ namespace SpawnDev.ILGPU.WebGL
                             else if (arg is ulong ulVal) gl.Uniform1ui(uniformLoc, (uint)ulVal);
                             else throw new NotSupportedException($"Unsupported scalar argument type: {arg?.GetType()}");
 
+                            Console.WriteLine($"[WebGL-UNI-DEBUG] param{glslParamIndex}: scalar value={arg} (type={arg?.GetType().Name})");
                             Log($"[WebGL-Debug] Arg {pIdx}: Bound as uniform, value={arg}");
                         }
                     }
+                }
+
+                // Check for GL errors after parameter binding
+                {
+                    var bindErr = gl.GetError();
+                    if (bindErr != 0)
+                        Console.WriteLine($"[WebGL-GL-ERROR] After param binding: error={bindErr}");
                 }
 
                 // ---- Step 5: Set up Transform Feedback output buffer ----
@@ -403,6 +437,17 @@ namespace SpawnDev.ILGPU.WebGL
                 glDisposables.Add(vao);
                 gl.BindVertexArray(vao);
 
+                // ANGLE D3D11 workaround: The D3D11 backend requires at least one
+                // vertex attribute enabled for dynamic vertex executable compilation.
+                // Without this, DrawArrays fails with "Error compiling dynamic vertex
+                // executable" even though we only use gl_VertexID.
+                var dummyVtxBuf = gl.CreateBuffer();
+                glDisposables.Add(dummyVtxBuf);
+                gl.BindBuffer(GL.ARRAY_BUFFER, dummyVtxBuf);
+                gl.BufferData(GL.ARRAY_BUFFER, totalVertices * 4, GL.STATIC_DRAW);
+                gl.EnableVertexAttribArray(0);
+                gl.VertexAttribPointer(0, 1, (int)GL.FLOAT, false, 0, 0);
+
                 gl.Enable(GL.RASTERIZER_DISCARD);
 
                 if (transformFeedback != null)
@@ -412,9 +457,17 @@ namespace SpawnDev.ILGPU.WebGL
 
                 gl.DrawArrays(GL.POINTS, 0, totalVertices);
 
+                // Check for GL errors after draw
+                var glErr = gl.GetError();
+                if (glErr != 0)
+                    Console.WriteLine($"[WebGL-GL-ERROR] After DrawArrays: error={glErr}");
+
                 if (transformFeedback != null)
                 {
                     gl.EndTransformFeedback();
+                    glErr = gl.GetError();
+                    if (glErr != 0)
+                        Console.WriteLine($"[WebGL-GL-ERROR] After EndTransformFeedback: error={glErr}");
                 }
 
                 gl.Disable(GL.RASTERIZER_DISCARD);
@@ -435,18 +488,14 @@ namespace SpawnDev.ILGPU.WebGL
                     var readbackBytes = readback.ReadBytes();
 
                     // Debug: dump first few readback values
-                    if (readbackBytes.Length >= 4)
                     {
-                        var firstInt = BitConverter.ToInt32(readbackBytes, 0);
-                        var firstFloat = BitConverter.ToSingle(readbackBytes, 0);
-                        Log($"[WebGL-Debug] TF readback: {readbackBytes.Length} bytes, first 4 bytes as int={firstInt}, as float={firstFloat}");
-                        if (readbackBytes.Length >= 16)
-                        {
-                            var secondInt = BitConverter.ToInt32(readbackBytes, 4);
-                            var thirdInt = BitConverter.ToInt32(readbackBytes, 8);
-                            var fourthInt = BitConverter.ToInt32(readbackBytes, 12);
-                            Log($"[WebGL-Debug] TF readback values [0..3]: {firstInt}, {secondInt}, {thirdInt}, {fourthInt}");
-                        }
+                        int numFloats = Math.Min(readbackBytes.Length / 4, 8);
+                        var vals = new float[numFloats];
+                        for (int f = 0; f < numFloats; f++)
+                            vals[f] = BitConverter.ToSingle(readbackBytes, f * 4);
+                        Console.WriteLine($"[WebGL-TF-DEBUG] TF readback: {readbackBytes.Length} bytes ({readbackBytes.Length / 4} floats), varyingCount={varyingNames.Length}, vertices={totalVertices}");
+                        Console.WriteLine($"[WebGL-TF-DEBUG] First {numFloats} float values: [{string.Join(", ", vals)}]");
+                        Console.WriteLine($"[WebGL-TF-DEBUG] OutputVaryings count={outputVaryings.Count}: [{string.Join(", ", outputVaryings.Select(o => $"param[{o.ParamIndex}]→{o.VaryingName}(outputIdx={o.OutputIndex})"))}]");
                     }
 
                     for (int outIdx = 0; outIdx < outputVaryings.Count; outIdx++)
@@ -508,6 +557,40 @@ namespace SpawnDev.ILGPU.WebGL
                                                     // Pack lo (4 bytes) + hi (4 bytes) into 8-byte slot
                                                     System.Buffer.BlockCopy(readbackBytes, loByteOffset, slice, v * 8, 4);
                                                     System.Buffer.BlockCopy(readbackBytes, hiByteOffset, slice, v * 8 + 4, 4);
+                                                }
+                                            }
+                                            memBuffer.BackingArray.Write(slice, (int)contiguous.Index);
+                                        }
+                                    }
+                                    else if (outputInfo.FieldIndex >= 0)
+                                    {
+                                        // Struct buffer TF readback: field varyings are interleaved per vertex
+                                        // Skip non-first fields — they are read together with field 0
+                                        if (outputInfo.FieldIndex > 0) continue;
+
+                                        // Find all field varyings for this struct buffer param
+                                        var structFieldVaryings = outputVaryings
+                                            .Where(o => o.ParamIndex == outputInfo.ParamIndex && o.FieldIndex >= 0)
+                                            .OrderBy(o => o.FieldIndex).ToList();
+                                        int fieldCount = structFieldVaryings.Count;
+                                        int structElementSize = fieldCount * 4; // 4 bytes per field
+                                        int elementCount = Math.Min(totalVertices, (int)(contiguous.LengthInBytes / structElementSize));
+                                        if (elementCount > 0)
+                                        {
+                                            var slice = new byte[elementCount * structElementSize];
+                                            for (int v = 0; v < elementCount; v++)
+                                            {
+                                                for (int fi = 0; fi < fieldCount; fi++)
+                                                {
+                                                    // Find the outIdx (position in varyingNames) for this field varying
+                                                    var fieldVarying = structFieldVaryings[fi];
+                                                    int fieldOutIdx = fieldVarying.OutputIndex;
+                                                    int srcByteOffset = v * strideBytes + fieldOutIdx * 4;
+                                                    int dstByteOffset = v * structElementSize + fi * 4;
+                                                    if (srcByteOffset + 4 <= readbackBytes.Length)
+                                                    {
+                                                        System.Buffer.BlockCopy(readbackBytes, srcByteOffset, slice, dstByteOffset, 4);
+                                                    }
                                                 }
                                             }
                                             memBuffer.BackingArray.Write(slice, (int)contiguous.Index);
@@ -615,6 +698,78 @@ namespace SpawnDev.ILGPU.WebGL
         protected override void EnablePeerAccessInternal(Accelerator other) { }
         protected override void DisablePeerAccessInternal(Accelerator other) { }
         protected override bool CanAccessPeerInternal(Accelerator other) => false;
+
+        /// <summary>
+        /// Extracts [width, height] or [width, height, depth] dimensions from an ArrayView2D/3D argument.
+        /// Used for setting stride uniforms in multi-dimensional view parameters.
+        /// </summary>
+        private static int[] ExtractViewDimensions(object arg, Type argType)
+        {
+            var flags = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic;
+
+            // Try Extent property first (gives the logical dimensions)
+            var extentProp = argType.GetProperty("Extent", flags) ?? argType.GetProperty("IntExtent", flags);
+            if (extentProp != null)
+            {
+                try
+                {
+                    var extent = extentProp.GetValue(arg);
+                    if (extent != null)
+                    {
+                        var extType = extent.GetType();
+                        int x = -1, y = -1, z = -1;
+
+                        var fX = extType.GetField("X", flags);
+                        if (fX != null) x = Convert.ToInt32(fX.GetValue(extent));
+                        else { var pX = extType.GetProperty("X", flags); if (pX != null) x = Convert.ToInt32(pX.GetValue(extent)); }
+
+                        var fY = extType.GetField("Y", flags);
+                        if (fY != null) y = Convert.ToInt32(fY.GetValue(extent));
+                        else { var pY = extType.GetProperty("Y", flags); if (pY != null) y = Convert.ToInt32(pY.GetValue(extent)); }
+
+                        var fZ = extType.GetField("Z", flags);
+                        if (fZ != null) z = Convert.ToInt32(fZ.GetValue(extent));
+                        else { var pZ = extType.GetProperty("Z", flags); if (pZ != null) z = Convert.ToInt32(pZ.GetValue(extent)); }
+
+                        if (x > 0 && y > 0 && z > 0) return new[] { x, y, z };
+                        if (x > 0 && y > 0) return new[] { x, y };
+                    }
+                }
+                catch { }
+            }
+
+            // Fallback: scan non-primitive fields/properties looking for struct with X, Y, Z
+            foreach (var field in argType.GetFields(flags))
+            {
+                if (field.FieldType.IsPrimitive || field.FieldType.IsPointer) continue;
+                try
+                {
+                    var val = field.GetValue(arg);
+                    if (val == null) continue;
+                    var t = val.GetType();
+                    var xF = t.GetField("X", flags);
+                    var yF = t.GetField("Y", flags);
+                    if (xF != null && yF != null)
+                    {
+                        int x = Convert.ToInt32(xF.GetValue(val));
+                        int y = Convert.ToInt32(yF.GetValue(val));
+                        if (x > 0 && y > 0)
+                        {
+                            var zF = t.GetField("Z", flags);
+                            if (zF != null)
+                            {
+                                int z = Convert.ToInt32(zF.GetValue(val));
+                                if (z > 0) return new[] { x, y, z };
+                            }
+                            return new[] { x, y };
+                        }
+                    }
+                }
+                catch { }
+            }
+
+            return Array.Empty<int>();
+        }
 
         private class WebGLStream : AcceleratorStream
         {

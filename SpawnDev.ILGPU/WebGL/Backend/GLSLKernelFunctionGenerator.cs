@@ -44,6 +44,12 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         private readonly HashSet<Value> _crossBlockPointers = new();
         private readonly Dictionary<string, string> _crossBlockPointerExprs = new();
 
+        // Output buffer detection: only params with Store targets get TF varyings
+        private readonly HashSet<int> _outputParamIndices = new();
+
+        // Input buffer detection: params with Load sources get sampler uniforms
+        private readonly HashSet<int> _inputParamIndices = new();
+
         // Hoisting
         private readonly HashSet<Value> _hoistedPrimitives = new();
         private readonly HashSet<Value> _hoistedIndexFields = new();
@@ -53,12 +59,18 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         private Dominators<Backwards> _postDominators;
         private Loops<ReversePostOrder, Forwards> _loops;
         private HashSet<BasicBlock> _visitedBlocks = new();
+        private readonly Stack<BasicBlock> _activeLoopHeaders = new();
 
         // Parameter binding info for runtime
         private readonly List<KernelParameterBinding> _parameterBindings = new();
 
         // Output buffer info
         private readonly List<OutputVaryingInfo> _outputVaryings = new();
+
+        // Struct buffer field counts: paramIndex → number of flattened scalar fields
+        private readonly Dictionary<int, int> _structFieldCounts = new();
+        // Struct buffer field GLSL types: paramIndex → [fieldType0, fieldType1, ...]
+        private readonly Dictionary<int, List<string>> _structFieldTypes = new();
 
         /// <summary>Kernel parameter offset: 1 for implicit index parameter.</summary>
         private int KernelParamOffset => 1;
@@ -122,6 +134,78 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             }
         }
 
+        /// <summary>
+        /// Pre-scan all IR blocks to detect which buffer parameters are targets of
+        /// Store instructions. Only those params need TF output varyings. This avoids
+        /// wasting TF slots on read-only input buffers, which causes interleaving
+        /// bugs in multi-buffer kernels.
+        /// </summary>
+        private void AnalyzeOutputBuffers()
+        {
+            int paramOffset = KernelParamOffset;
+            foreach (var block in Method.Blocks)
+            {
+                foreach (var value in block)
+                {
+                    if (value.Value is Store store)
+                    {
+                        // Trace: Store.Target → LEA → ... → Parameter
+                        var param = ResolveToParameterStatic(store.Target.Resolve());
+                        if (param != null && param.Index >= paramOffset)
+                            _outputParamIndices.Add(param.Index);
+                    }
+                }
+            }
+        }
+
+        /// <summary>
+        /// Pre-scan all IR blocks to detect which buffer parameters are sources of
+        /// Load instructions. Only those params need sampler uniform declarations.
+        /// Output-only buffers (in _outputParamIndices but NOT in _inputParamIndices)
+        /// must NOT have sampler uniforms, because WebGL 2 generates GL_INVALID_OPERATION
+        /// when an active sampler has no valid texture bound.
+        /// </summary>
+        private void AnalyzeInputBuffers()
+        {
+            int paramOffset = KernelParamOffset;
+            foreach (var block in Method.Blocks)
+            {
+                foreach (var value in block)
+                {
+                    if (value.Value is global::ILGPU.IR.Values.Load load)
+                    {
+                        // Trace: Load.Source → LEA → ... → Parameter
+                        var param = ResolveToParameterStatic(load.Source.Resolve());
+                        if (param != null && param.Index >= paramOffset)
+                            _inputParamIndices.Add(param.Index);
+                    }
+                }
+            }
+        }
+
+        /// <summary>
+        /// Static version of ResolveToParameter that doesn't depend on code gen state.
+        /// Used during pre-scan analysis before code generation starts.
+        /// </summary>
+        private static global::ILGPU.IR.Values.Parameter? ResolveToParameterStatic(Value value)
+        {
+            if (value is global::ILGPU.IR.Values.Parameter p) return p;
+            if (value is GetField gf) return ResolveToParameterStatic(gf.ObjectValue);
+            if (value is global::ILGPU.IR.Values.Load load) return ResolveToParameterStatic(load.Source);
+            if (value is LoadElementAddress lea) return ResolveToParameterStatic(lea.Source);
+            if (value is LoadFieldAddress lfa) return ResolveToParameterStatic(lfa.Source);
+            if (value is PhiValue phi)
+            {
+                // For phi nodes, check all source values — if any traces to a buffer param, include it
+                for (int i = 0; i < phi.Count; i++)
+                {
+                    var result = ResolveToParameterStatic(phi[i]);
+                    if (result != null) return result;
+                }
+            }
+            return null;
+        }
+
         #endregion
 
         #region Code Generation
@@ -136,19 +220,28 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             // 1. Detect emulated 64-bit parameters
             DetectEmulatedParameters();
 
+            // 1.5. Detect which buffer params are store targets (need TF outputs)
+            AnalyzeOutputBuffers();
+
+            // 1.6. Detect which buffer params are load sources (need sampler uniforms)
+            AnalyzeInputBuffers();
+
             // 2. Analyze hoisting needs
             AnalyzeHoisting();
 
             // 3. Post-dominators and loops already created in constructor
 
-            // 4. Emit emulation library (type aliases + helper functions must precede
-            //    struct definitions that may reference vec2/uvec2 emulated types)
-            if (Backend.Options.EnableF64Emulation || Backend.Options.EnableI64Emulation)
+            // 4. Emit emulation library only if the kernel actually uses f64/i64 types.
+            //    Including the library unconditionally produces a massive vertex shader
+            //    that ANGLE's D3D11 backend cannot compile with Transform Feedback.
+            var (kernelNeedsF64, kernelNeedsI64) = KernelUsesEmulatedTypes();
+            if ((Backend.Options.EnableF64Emulation && kernelNeedsF64) ||
+                (Backend.Options.EnableI64Emulation && kernelNeedsI64))
             {
                 Builder.AppendLine("// ============ 64-bit Emulation Library ============");
                 Builder.AppendLine(GLSLEmulationLibrary.GetEmulationLibrary(
-                    Backend.Options.EnableF64Emulation,
-                    Backend.Options.EnableI64Emulation));
+                    Backend.Options.EnableF64Emulation && kernelNeedsF64,
+                    Backend.Options.EnableI64Emulation && kernelNeedsI64));
             }
 
             // 5. Insert a placeholder for struct type definitions.
@@ -208,10 +301,51 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             }
         }
 
+        /// <summary>
+        /// Scans the kernel's parameters and IR values to determine if f64/i64
+        /// emulation types are actually used. This prevents unconditionally including
+        /// the entire emulation library for simple float32 kernels, which causes
+        /// ANGLE D3D11 to fail compiling the large vertex shader.
+        /// </summary>
+        private (bool needsF64, bool needsI64) KernelUsesEmulatedTypes()
+        {
+            bool needsF64 = _emulatedF64Params.Count > 0;
+            bool needsI64 = _emulatedI64Params.Count > 0;
+
+            // Early exit if both already detected from parameters
+            if (needsF64 && needsI64) return (needsF64, needsI64);
+
+            // Scan all values in the kernel's IR blocks for f64/i64 usage
+            foreach (var block in Method.Blocks)
+            {
+                foreach (Value value in block)
+                {
+                    var bvt = value.BasicValueType;
+                    if (!needsF64 && bvt == BasicValueType.Float64)
+                        needsF64 = true;
+                    if (!needsI64 && bvt == BasicValueType.Int64)
+                        needsI64 = true;
+
+                    if (needsF64 && needsI64) return (needsF64, needsI64);
+                }
+            }
+
+            return (needsF64, needsI64);
+        }
+
         private static TypeNode UnwrapType(TypeNode type)
         {
             while (type is PointerType pt) type = pt.ElementType;
             while (type is ViewType vt) type = vt.ElementType;
+            // For ArrayView2D/3D: the IR type is a StructureType wrapping a ViewType + stride info.
+            // Use structural detection (matching IsMultiDim approach) instead of string check,
+            // because StructureType.ToString() doesn't contain "ArrayView".
+            if (type is StructureType st && st.NumFields > 0 &&
+                (st.Fields[0] is ViewType || st.Fields[0] is PointerType || st.Fields[0].ToString().Contains("View")))
+            {
+                // The first flattened field is the buffer pointer — unwrap it to get element type
+                return UnwrapType(st.Fields[0]);
+            }
             return type;
         }
 
@@ -267,20 +401,58 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 {
                     // Array-like parameter: use a highp sampler or SSBO-like mechanism
                     // In WebGL2, we use a uniform sampler for input and TF varying for output
-                    string glslType = GetBufferElementType(elementType);
-
-                    // Input buffer: use a uniform sampler (TBO emulated as texture)
-                    // Use isampler2D for int buffers, usampler2D for uint, sampler2D for float
-                    string samplerType = glslType switch
+                    // Multi-dim views (ArrayView2D/3D) are NOT struct buffers even though
+                    // their IR param type is StructureType — they're container structs
+                    // holding a ViewType + stride info, not user-defined struct element types
+                    bool isStructBuffer = !isMultiDim
+                        && elementType is StructureType structElType
+                        && !TypeGenerator[elementType].StartsWith("vec")
+                        && !TypeGenerator[elementType].StartsWith("ivec")
+                        && !TypeGenerator[elementType].StartsWith("uvec");
+                    
+                    string glslType;
+                    if (isStructBuffer)
                     {
-                        "int" => "isampler2D",
-                        "uint" => "usampler2D",
-                        _ => "sampler2D"
-                    };
-                    Builder.AppendLine($"uniform highp {samplerType} u_param{param.Index}; // buffer param[{param.Index}]");
-                    _parameterBindings.Add(new KernelParameterBinding(param.Index, bindingIndex++, KernelParamKind.Buffer, glslType));
+                        // Struct element buffer: flatten to per-field layout
+                        // All data stored as R32I texture, reinterpret float fields with intBitsToFloat
+                        var flatFields = FlattenStructFields(elementType);
+                        _structFieldCounts[param.Index] = flatFields.Count;
+                        _structFieldTypes[param.Index] = flatFields;
+                        glslType = "int"; // R32I texture for raw bit access
+                    }
+                    else
+                    {
+                        glslType = GetBufferElementType(elementType);
+                    }
+
+                    // Only declare a sampler uniform for buffers that are actually READ.
+                    // Output-only buffers (only in _outputParamIndices, not in _inputParamIndices)
+                    // must NOT get sampler uniforms — WebGL2 generates GL_INVALID_OPERATION
+                    // when an active sampler has no valid texture bound at draw time.
+                    bool isInputBuffer = _inputParamIndices.Contains(param.Index);
+
+                    if (isInputBuffer)
+                    {
+                        // Input buffer: use a uniform sampler (TBO emulated as texture)
+                        // Use isampler2D for int/struct buffers, usampler2D for uint, sampler2D for float
+                        string samplerType = glslType switch
+                        {
+                            "int" => "isampler2D",
+                            "uint" => "usampler2D",
+                            _ => "sampler2D"
+                        };
+                        Builder.AppendLine($"uniform highp {samplerType} u_param{param.Index}; // buffer param[{param.Index}]{(isStructBuffer ? " (struct, flattened)" : "")}");
+                    }
+                    _parameterBindings.Add(new KernelParameterBinding(param.Index, bindingIndex++, KernelParamKind.Buffer, glslType,
+                        structFieldCount: isStructBuffer ? _structFieldCounts[param.Index] : 0));
                     _generatorArgs.ParameterBindings.Add(_parameterBindings[^1]);
                     _bufferGlslTypes[param.Index] = glslType;
+
+                    if (isStructBuffer)
+                    {
+                        // Emit length uniform for struct buffers (element count, not texel count)
+                        Builder.AppendLine($"uniform highp int u_param{param.Index}_length; // struct element count");
+                    }
 
                     // Multi-dim stride buffer
                     if (isMultiDim && (is2DView || is3DView))
@@ -350,6 +522,59 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             return TypeGenerator[elementType];
         }
 
+        /// <summary>
+        /// Recursively flattens a struct type into its primitive GLSL field types.
+        /// For example, OuterStruct { InnerStruct { float Val }, int ID } → ["float", "int"]
+        /// </summary>
+        private List<string> FlattenStructFields(TypeNode type)
+        {
+            var fields = new List<string>();
+            if (type is StructureType st)
+            {
+                foreach (var fieldType in st.Fields)
+                {
+                    if (fieldType is StructureType nested)
+                        fields.AddRange(FlattenStructFields(nested));
+                    else
+                        fields.Add(GetBufferElementType(fieldType));
+                }
+            }
+            else
+            {
+                fields.Add(GetBufferElementType(type));
+            }
+            return fields;
+        }
+
+        /// <summary>
+        /// Recursively generates (fieldAccessPath, glslType) pairs mapping flat field index
+        /// to the hierarchical GLSL struct field access path.
+        /// For OuterStruct { InnerStruct { float Val }, int ID }:
+        ///   → [(".field_0.field_0", "float"), (".field_1", "int")]
+        /// </summary>
+        private List<(string Path, string GlslType)> GenerateStructFieldPaths(TypeNode type, string prefix = "")
+        {
+            var result = new List<(string, string)>();
+            if (type is StructureType st)
+            {
+                int fieldIdx = 0;
+                foreach (var fieldType in st.Fields)
+                {
+                    string fieldPath = $"{prefix}.field_{fieldIdx}";
+                    if (fieldType is StructureType nested)
+                        result.AddRange(GenerateStructFieldPaths(nested, fieldPath));
+                    else
+                        result.Add((fieldPath, GetBufferElementType(fieldType)));
+                    fieldIdx++;
+                }
+            }
+            else
+            {
+                result.Add((prefix, GetBufferElementType(type)));
+            }
+            return result;
+        }
+
         #endregion
 
         #region Output Varyings (Transform Feedback)
@@ -372,8 +597,11 @@ namespace SpawnDev.ILGPU.WebGL.Backend
 
                 if (isView || type is ViewType || type is PointerType)
                 {
-                    // This could be an output buffer — we mark all view params as potential TF outputs
-                    // The actual write determination is done in the kernel body
+                    // Only emit TF varyings for buffer params that actually have Store targets.
+                    // Read-only input buffers don't need TF outputs, and including them wastes
+                    // TF slots and causes interleaving bugs in multi-buffer readback.
+                    if (!_outputParamIndices.Contains(param.Index))
+                        continue;
                     var elementType = UnwrapType(type);
                     bool isEmulatedF64 = _emulatedF64Params.Contains(param.Index);
                     bool isEmulatedI64 = _emulatedI64Params.Contains(param.Index);
@@ -392,9 +620,30 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                         _generatorArgs.OutputVaryings.Add(loInfo);
                         _generatorArgs.OutputVaryings.Add(hiInfo);
                     }
+                    else if (_structFieldCounts.TryGetValue(param.Index, out var fieldCount) && fieldCount > 0)
+                    {
+                        // Struct element buffer: emit per-field TF varyings
+                        var fieldTypes = _structFieldTypes[param.Index];
+                        for (int fi = 0; fi < fieldCount; fi++)
+                        {
+                            string fieldGlslType = fieldTypes[fi];
+                            bool needsFlat = fieldGlslType != "float";
+                            string flatPrefix = needsFlat ? "flat " : "";
+                            string varyingName = $"tf_out_{param.Index}_f{fi}";
+                            Builder.AppendLine($"{flatPrefix}out highp {fieldGlslType} {varyingName}; // TF output for param[{param.Index}] field {fi}");
+                            var varyingInfo = new OutputVaryingInfo(param.Index, outIndex++, varyingName, fieldGlslType, fieldIndex: fi);
+                            _outputVaryings.Add(varyingInfo);
+                            _generatorArgs.OutputVaryings.Add(varyingInfo);
+                        }
+                    }
                     else
                     {
-                        string glslType = GetBufferElementType(elementType);
+                        // Use the already-computed GLSL type from EmitParameterDeclarations,
+                        // which correctly handles 2D/3D views (StructureType in IR).
+                        // Falling back to GetBufferElementType(UnwrapType) for safety.
+                        string glslType = _bufferGlslTypes.TryGetValue(param.Index, out var cached)
+                            ? cached
+                            : GetBufferElementType(UnwrapType(type));
 
                         // TF varyings must be flat for non-float types AND structs (which may contain int fields)
                         bool needsFlat = glslType != "float";
@@ -553,61 +802,73 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 return;
             }
 
-            // Structured code gen for acyclic graphs
-            if (_loops.Count == 0 && _postDominators != null)
-            {
-                _visitedBlocks.Clear();
-                GenerateStructuredCode(Method.EntryBlock, null);
-                return;
-            }
-
-            // State machine for cyclic graphs
-            int deferredPos = Builder.Length;
-            AppendLine("int current_block = 0;");
-            AppendLine("for (;;) {");
-            PushIndent();
-            AppendLine("switch (current_block) {");
-            PushIndent();
-
-            foreach (var block in Method.Blocks)
-            {
-                AppendLine($"case {GetBlockIndex(block)}: {{");
-                PushIndent();
-                GenerateBlockCode(block);
-                PopIndent();
-                AppendLine("}");
-            }
-
-            AppendLine("default: break;");
-            PopIndent();
-            AppendLine("}"); // switch
-            AppendLine("if (current_block == -1) break;");
-            PopIndent();
-            AppendLine("}"); // for
-
-            // Insert deferred declarations
-            if (VariableBuilder.Length > 0)
-                Builder.Insert(deferredPos, VariableBuilder.ToString());
+            // Always use structured code gen — the state machine (switch/case
+            // inside a loop) triggers ANGLE D3D11 "Error compiling dynamic
+            // vertex executable" when Transform Feedback is active.
+            _visitedBlocks.Clear();
+            _activeLoopHeaders.Clear();
+            GenerateStructuredCode(Method.EntryBlock, null);
         }
 
         private void GenerateBlockCode(BasicBlock block)
         {
+            // Emit all non-terminator values in the block
             foreach (var value in block)
             {
                 if (value.Value is TerminatorValue) continue;
                 GenerateCodeFor(value.Value);
             }
+        }
 
-            // Handle terminator
-            if (!(_loops.Count == 0 && Method.Blocks.Count > 1 && _postDominators != null))
+        /// <summary>
+        /// Finds the innermost loop that has the given block as a header.
+        /// </summary>
+        private Loops<ReversePostOrder, Forwards>.Node? FindLoopForHeader(BasicBlock block)
+        {
+            for (int i = 0; i < _loops.Count; i++)
             {
-                var term = block.Terminator;
-                if (term is UnconditionalBranch ub) GenerateCode(ub);
-                else if (term is IfBranch ib) GenerateCode(ib);
-                else if (term is SwitchBranch sb) GenerateCode(sb);
-                else if (term is ReturnTerminator rt) GenerateCode(rt);
-                else if (term != null) GenerateCodeFor(term);
+                var loop = _loops[i];
+                foreach (var header in loop.Headers)
+                {
+                    if (header == block)
+                        return loop;
+                }
             }
+            return null;
+        }
+
+        /// <summary>
+        /// Checks if target is a back-edge to an active loop header (should emit 'continue').
+        /// </summary>
+        private bool IsBackEdgeToActiveLoop(BasicBlock target)
+        {
+            return _activeLoopHeaders.Contains(target);
+        }
+
+        /// <summary>
+        /// Emit a branch to target, handling loop continue/break/fall-through.
+        /// Returns true if the branch was emitted as continue/break (caller should not recurse).
+        /// </summary>
+        private bool EmitBranchTarget(BasicBlock target, BasicBlock source, BasicBlock? stop)
+        {
+            PushPhiValues(target, source);
+
+            // Back-edge to active loop header → continue
+            if (IsBackEdgeToActiveLoop(target))
+            {
+                AppendLine("continue;");
+                return true;
+            }
+
+            // Target is the stop block → let caller handle it
+            if (target == stop)
+                return true;
+
+            // Already visited → skip
+            if (_visitedBlocks.Contains(target))
+                return true;
+
+            return false;
         }
 
         private void GenerateStructuredCode(BasicBlock current, BasicBlock? stop)
@@ -615,41 +876,261 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             if (current == null || current == stop || _visitedBlocks.Contains(current)) return;
             _visitedBlocks.Add(current);
 
-            GenerateBlockCode(current);
-
-            var terminator = current.Terminator;
-
-            if (terminator is UnconditionalBranch ub)
+            // Check if this block is a loop header
+            var loop = FindLoopForHeader(current);
+            if (loop != null)
             {
-                PushPhiValues(ub.Target, current);
-                GenerateStructuredCode(ub.Target, stop);
-            }
-            else if (terminator is IfBranch ib)
-            {
-                var trueTarget = ib.TrueTarget;
-                var falseTarget = ib.FalseTarget;
-                var merge = _postDominators?.GetImmediateDominator(current);
+                // Emit while(true) for the loop
+                AppendLine("while (true) {");
+                PushIndent();
 
-                PushPhiValues(trueTarget, current);
-                var cond = Load(ib.Condition);
-                AppendLine($"if ({cond}) {{");
-                PushIndent();
-                GenerateStructuredCode(trueTarget, merge);
-                PopIndent();
-                AppendLine("} else {");
-                PushIndent();
-                PushPhiValues(falseTarget, current);
-                GenerateStructuredCode(falseTarget, merge);
+                _activeLoopHeaders.Push(current);
+
+                // Remove current from visited so we can re-enter it for the loop body
+                _visitedBlocks.Remove(current);
+
+                // Generate the loop body starting from the header
+                GenerateLoopBody(current, loop, stop);
+
+                _activeLoopHeaders.Pop();
+
                 PopIndent();
                 AppendLine("}");
 
-                if (merge != null && merge != stop)
-                    GenerateStructuredCode(merge, stop);
+                // Continue with exit blocks after the loop
+                foreach (var exit in loop.Exits)
+                {
+                    if (exit != stop && !_visitedBlocks.Contains(exit))
+                    {
+                        GenerateStructuredCode(exit, stop);
+                        break; // Only one exit continuation in structured flow
+                    }
+                }
+                return;
             }
-            else if (terminator is ReturnTerminator rt)
+
+            // Not a loop header — emit the block's values
+            GenerateBlockCode(current);
+
+            // Handle terminator
+            var terminator = current.Terminator;
+
+            if (terminator is ReturnTerminator rt)
             {
                 GenerateCode(rt);
             }
+            else if (terminator is UnconditionalBranch ub)
+            {
+                if (!EmitBranchTarget(ub.Target, current, stop))
+                    GenerateStructuredCode(ub.Target, stop);
+            }
+            else if (terminator is IfBranch ib)
+            {
+                EmitIfBranch(ib, current, stop);
+            }
+        }
+
+        /// <summary>
+        /// Generates the body of a loop (all blocks inside the loop).
+        /// </summary>
+        private void GenerateLoopBody(BasicBlock current, Loops<ReversePostOrder, Forwards>.Node loop, BasicBlock? outerStop)
+        {
+            if (current == null || _visitedBlocks.Contains(current)) return;
+            _visitedBlocks.Add(current);
+
+            // Emit the block's values
+            GenerateBlockCode(current);
+
+            // Handle terminator with loop-aware logic
+            var terminator = current.Terminator;
+
+            if (terminator is ReturnTerminator rt)
+            {
+                GenerateCode(rt);
+            }
+            else if (terminator is UnconditionalBranch ub)
+            {
+                PushPhiValues(ub.Target, current);
+
+                if (IsBackEdgeToActiveLoop(ub.Target))
+                {
+                    AppendLine("continue;");
+                }
+                else if (!loop.Contains(ub.Target))
+                {
+                    // Exit the loop
+                    AppendLine("break;");
+                }
+                else
+                {
+                    GenerateLoopBody(ub.Target, loop, outerStop);
+                }
+            }
+            else if (terminator is IfBranch ib)
+            {
+                EmitLoopIfBranch(ib, current, loop, outerStop);
+            }
+        }
+
+        /// <summary>
+        /// Emits an if/else branch inside a loop body.
+        /// </summary>
+        private void EmitLoopIfBranch(IfBranch ib, BasicBlock source, Loops<ReversePostOrder, Forwards>.Node loop, BasicBlock? outerStop)
+        {
+            var trueTarget = ib.TrueTarget;
+            var falseTarget = ib.FalseTarget;
+            var cond = Load(ib.Condition);
+
+            bool trueIsBackEdge = IsBackEdgeToActiveLoop(trueTarget);
+            bool falseIsBackEdge = IsBackEdgeToActiveLoop(falseTarget);
+            bool trueIsExit = !loop.Contains(trueTarget);
+            bool falseIsExit = !loop.Contains(falseTarget);
+
+            // Case 1: Loop condition check — one side continues, other exits
+            if (trueIsBackEdge && falseIsExit)
+            {
+                // if (cond) continue; else break;
+                AppendLine($"if (!{cond}) {{");
+                PushIndent();
+                PushPhiValues(falseTarget, source);
+                AppendLine("break;");
+                PopIndent();
+                AppendLine("}");
+                PushPhiValues(trueTarget, source);
+                AppendLine("continue;");
+                return;
+            }
+            if (falseIsBackEdge && trueIsExit)
+            {
+                AppendLine($"if ({cond}) {{");
+                PushIndent();
+                PushPhiValues(trueTarget, source);
+                AppendLine("break;");
+                PopIndent();
+                AppendLine("}");
+                PushPhiValues(falseTarget, source);
+                AppendLine("continue;");
+                return;
+            }
+
+            // Case 2: One side is a back-edge, other continues in-loop
+            if (trueIsBackEdge)
+            {
+                AppendLine($"if ({cond}) {{");
+                PushIndent();
+                PushPhiValues(trueTarget, source);
+                AppendLine("continue;");
+                PopIndent();
+                AppendLine("}");
+                PushPhiValues(falseTarget, source);
+                if (falseIsExit)
+                    AppendLine("break;");
+                else
+                    GenerateLoopBody(falseTarget, loop, outerStop);
+                return;
+            }
+            if (falseIsBackEdge)
+            {
+                AppendLine($"if (!{cond}) {{");
+                PushIndent();
+                PushPhiValues(falseTarget, source);
+                AppendLine("continue;");
+                PopIndent();
+                AppendLine("}");
+                PushPhiValues(trueTarget, source);
+                if (trueIsExit)
+                    AppendLine("break;");
+                else
+                    GenerateLoopBody(trueTarget, loop, outerStop);
+                return;
+            }
+
+            // Case 3: One side exits the loop, other stays
+            if (trueIsExit && !falseIsExit)
+            {
+                AppendLine($"if ({cond}) {{");
+                PushIndent();
+                PushPhiValues(trueTarget, source);
+                AppendLine("break;");
+                PopIndent();
+                AppendLine("}");
+                PushPhiValues(falseTarget, source);
+                GenerateLoopBody(falseTarget, loop, outerStop);
+                return;
+            }
+            if (falseIsExit && !trueIsExit)
+            {
+                AppendLine($"if (!{cond}) {{");
+                PushIndent();
+                PushPhiValues(falseTarget, source);
+                AppendLine("break;");
+                PopIndent();
+                AppendLine("}");
+                PushPhiValues(trueTarget, source);
+                GenerateLoopBody(trueTarget, loop, outerStop);
+                return;
+            }
+
+            // Case 4: Both sides stay in loop — use post-dominator for merge
+            var merge = _postDominators?.GetImmediateDominator(source);
+
+            PushPhiValues(trueTarget, source);
+            AppendLine($"if ({cond}) {{");
+            PushIndent();
+            if (trueTarget == merge)
+            {
+                // True goes directly to merge — nothing to generate
+            }
+            else
+            {
+                GenerateLoopBody(trueTarget, loop, outerStop);
+            }
+            PopIndent();
+            AppendLine("} else {");
+            PushIndent();
+            PushPhiValues(falseTarget, source);
+            if (falseTarget == merge)
+            {
+                // False goes directly to merge — nothing to generate
+            }
+            else
+            {
+                GenerateLoopBody(falseTarget, loop, outerStop);
+            }
+            PopIndent();
+            AppendLine("}");
+
+            // Continue with merge block if it's in the loop
+            if (merge != null && loop.Contains(merge) && !_visitedBlocks.Contains(merge))
+            {
+                GenerateLoopBody(merge, loop, outerStop);
+            }
+        }
+
+        /// <summary>
+        /// Emits an if/else branch outside a loop (acyclic structured flow).
+        /// </summary>
+        private void EmitIfBranch(IfBranch ib, BasicBlock source, BasicBlock? stop)
+        {
+            var trueTarget = ib.TrueTarget;
+            var falseTarget = ib.FalseTarget;
+            var merge = _postDominators?.GetImmediateDominator(source);
+
+            PushPhiValues(trueTarget, source);
+            var cond = Load(ib.Condition);
+            AppendLine($"if ({cond}) {{");
+            PushIndent();
+            GenerateStructuredCode(trueTarget, merge);
+            PopIndent();
+            AppendLine("} else {");
+            PushIndent();
+            PushPhiValues(falseTarget, source);
+            GenerateStructuredCode(falseTarget, merge);
+            PopIndent();
+            AppendLine("}");
+
+            if (merge != null && merge != stop)
+                GenerateStructuredCode(merge, stop);
         }
 
         private void PushPhiValues(BasicBlock targetBlock, BasicBlock sourceBlock)
@@ -757,8 +1238,24 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 }
             }
 
-            Declare(target);
+            // Fallback: check if the source variable is already in _leaParamMap
+            // This happens for 2D/3D views where GetField(viewParam, 0) creates a buffer
+            // alias that is in _leaParamMap, but ResolveToParameter can't trace through
+            // the StructureType → GetField → ViewType chain
             var sourceVal = Load(value.Source);
+            if (_leaParamMap.TryGetValue(sourceVal.ToString(), out var sourceParamIdx))
+            {
+                if (_crossBlockPointers.Contains(value))
+                    _crossBlockPointerExprs[target.Name] = $"texelFetch(u_param{sourceParamIdx}, ivec2({offset}, 0), 0)";
+
+                declaredVariables.Add(target.Name);
+                AppendLine($"int {target.Name} = int({offset}); // LEA into param{sourceParamIdx} (via alias)");
+                Bind(value, new Variable(target.Name, "int"));
+                _leaParamMap[target.Name] = sourceParamIdx;
+                return;
+            }
+
+            Declare(target);
             AppendLine($"{target} = {sourceVal} + {offset}; // generic LEA");
         }
 
@@ -835,7 +1332,33 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             // LEA-based buffer read via texelFetch
             if (_leaParamMap.TryGetValue(source.ToString(), out var leaParamIdx))
             {
-                string fetchExpr = $"texelFetch(u_param{leaParamIdx}, ivec2({source}, 0), 0).r";
+                // Check if this is a struct buffer load
+                if (_structFieldCounts.TryGetValue(leaParamIdx, out var structFieldCount) && structFieldCount > 0)
+                {
+                    // Struct buffer: construct struct from per-field texelFetch
+                    // Find the element type to get field paths
+                    var leaParam = Method.Parameters.FirstOrDefault(p => p.Index == leaParamIdx);
+                    if (leaParam != null)
+                    {
+                        var elemType = UnwrapType(leaParam.ParameterType);
+                        var fieldPaths = GenerateStructFieldPaths(elemType);
+                        string structType = TypeGenerator[elemType];
+                        Declare(target);
+                        // Use intBitsToFloat for float fields since texture is R32I
+                        for (int fi = 0; fi < fieldPaths.Count; fi++)
+                        {
+                            string fetchExpr = $"texelFetch(u_param{leaParamIdx}, ivec2(int({source}) * {structFieldCount} + {fi}, 0), 0).r";
+                            string valExpr = fieldPaths[fi].GlslType == "float"
+                                ? $"intBitsToFloat({fetchExpr})"
+                                : fetchExpr;
+                            AppendLine($"{target}{fieldPaths[fi].Path} = {valExpr};");
+                        }
+                        return;
+                    }
+                }
+
+                // Non-struct: standard single-texel load
+                string fetchExprStd = $"texelFetch(u_param{leaParamIdx}, ivec2({source}, 0), 0).r";
                 // For integer samplers (isampler2D/usampler2D), texelFetch already returns int/uint.
                 // For float samplers, texelFetch returns float; we may need floatBitsToInt/floatBitsToUint.
                 bool samplerIsInt = _bufferGlslTypes.TryGetValue(leaParamIdx, out var samplerGlslType)
@@ -845,18 +1368,18 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 {
                     // Integer sampler: texelFetch returns int (isampler2D) or uint (usampler2D)
                     // Just cast to target type normally (int→int is identity, uint→int is cast)
-                    castExpr = CastIfNeeded(fetchExpr, target.Type);
+                    castExpr = CastIfNeeded(fetchExprStd, target.Type);
                 }
                 else
                 {
                     // Float sampler: texelFetch returns float
                     // For integer targets, we need bit-level reinterpretation
                     if (target.Type == "int")
-                        castExpr = $"floatBitsToInt({fetchExpr})";
+                        castExpr = $"floatBitsToInt({fetchExprStd})";
                     else if (target.Type == "uint")
-                        castExpr = $"floatBitsToUint({fetchExpr})";
+                        castExpr = $"floatBitsToUint({fetchExprStd})";
                     else
-                        castExpr = CastIfNeeded(fetchExpr, target.Type);
+                        castExpr = CastIfNeeded(fetchExprStd, target.Type);
                 }
                 if (_hoistedPrimitives.Contains(loadVal))
                     AppendLine($"{target} = {castExpr};");
@@ -915,6 +1438,26 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             // LEA-based buffer write → TF output
             if (_leaParamMap.TryGetValue(address.ToString(), out var leaParamIdx))
             {
+                // Check if this is a struct buffer store
+                if (_structFieldCounts.TryGetValue(leaParamIdx, out var structFieldCount) && structFieldCount > 0)
+                {
+                    // Struct buffer: decompose struct into per-field TF outputs
+                    var structOutputs = _outputVaryings.Where(o => o.ParamIndex == leaParamIdx && o.FieldIndex >= 0).OrderBy(o => o.FieldIndex).ToList();
+                    var leaParam = Method.Parameters.FirstOrDefault(p => p.Index == leaParamIdx);
+                    if (leaParam != null && structOutputs.Count > 0)
+                    {
+                        var elemType = UnwrapType(leaParam.ParameterType);
+                        var fieldPaths = GenerateStructFieldPaths(elemType);
+                        for (int fi = 0; fi < Math.Min(fieldPaths.Count, structOutputs.Count); fi++)
+                        {
+                            string fieldExpr = $"{val}{fieldPaths[fi].Path}";
+                            // TF varying type matches the field's native type, so direct assignment
+                            AppendLine($"{structOutputs[fi].VaryingName} = {fieldExpr};");
+                        }
+                        return;
+                    }
+                }
+
                 var output = _outputVaryings.FirstOrDefault(o => o.ParamIndex == leaParamIdx);
                 if (output != null)
                 {
@@ -966,7 +1509,19 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             if (_hoistedIndexFields.Contains(value)) return;
 
             // Check if this is a kernel parameter (View) field access
-            if (ResolveToParameter(value.ObjectValue) is global::ILGPU.IR.Values.Parameter param)
+            // Guard: when the object is a struct loaded from a struct buffer, we must use
+            // standard field access. ResolveToParameter would incorrectly traverse through
+            // the struct Load back to the View parameter. We detect this by checking if the
+            // object's Load source traces back to a LEA param that has struct field counts.
+            bool isLoadedStructFromBuffer = false;
+            if (value.ObjectValue.Resolve() is global::ILGPU.IR.Values.Load objLoad
+                && _leaParamMap.TryGetValue(Load(objLoad.Source).Name, out var objLeaParamIdx)
+                && _structFieldCounts.ContainsKey(objLeaParamIdx))
+            {
+                isLoadedStructFromBuffer = true;
+            }
+            if (!isLoadedStructFromBuffer &&
+                ResolveToParameter(value.ObjectValue) is global::ILGPU.IR.Values.Parameter param)
             {
                 int paramOffset = KernelParamOffset;
                 if (param.Index >= paramOffset)
@@ -991,22 +1546,53 @@ namespace SpawnDev.ILGPU.WebGL.Backend
 
                         if (is2DView)
                         {
+                            // Stride fields: some may be Int64 (→ uvec2), some Int32 (→ int).
+                            // Wrap with i64_from_i32() only when the target type is uvec2.
+                            string glslType = TypeGenerator[value.Type];
+                            bool needsI64 = glslType == "uvec2";
                             switch (value.FieldSpan.Index)
                             {
-                                case 1: AppendLine($"{prefix}{target} = u_param{param.Index}_stride[0];"); return;
-                                case 2: AppendLine($"{prefix}{target} = u_param{param.Index}_stride[1];"); return;
-                                case 3: AppendLine($"{prefix}{target} = u_param{param.Index}_stride[0];"); return;
+                                case 1:
+                                    if (needsI64) AppendLine($"{prefix}{target} = i64_from_i32(u_param{param.Index}_stride[0]);");
+                                    else AppendLine($"{prefix}{target} = u_param{param.Index}_stride[0];");
+                                    return;
+                                case 2:
+                                    if (needsI64) AppendLine($"{prefix}{target} = i64_from_i32(u_param{param.Index}_stride[1]);");
+                                    else AppendLine($"{prefix}{target} = u_param{param.Index}_stride[1];");
+                                    return;
+                                case 3:
+                                    if (needsI64) AppendLine($"{prefix}{target} = i64_from_i32(u_param{param.Index}_stride[0]);");
+                                    else AppendLine($"{prefix}{target} = u_param{param.Index}_stride[0];");
+                                    return;
                             }
                         }
                         else if (is3DView)
                         {
+                            // Same type-aware conversion as 2D
+                            string glslType = TypeGenerator[value.Type];
+                            bool needsI64 = glslType == "uvec2";
                             switch (value.FieldSpan.Index)
                             {
-                                case 1: AppendLine($"{prefix}{target} = u_param{param.Index}_stride[0];"); return;
-                                case 2: AppendLine($"{prefix}{target} = u_param{param.Index}_stride[1];"); return;
-                                case 3: AppendLine($"{prefix}{target} = u_param{param.Index}_stride[2];"); return;
-                                case 4: AppendLine($"{prefix}{target} = u_param{param.Index}_stride[0];"); return;
-                                case 5: AppendLine($"{prefix}{target} = u_param{param.Index}_stride[0] * u_param{param.Index}_stride[1];"); return;
+                                case 1:
+                                    if (needsI64) AppendLine($"{prefix}{target} = i64_from_i32(u_param{param.Index}_stride[0]);");
+                                    else AppendLine($"{prefix}{target} = u_param{param.Index}_stride[0];");
+                                    return;
+                                case 2:
+                                    if (needsI64) AppendLine($"{prefix}{target} = i64_from_i32(u_param{param.Index}_stride[1]);");
+                                    else AppendLine($"{prefix}{target} = u_param{param.Index}_stride[1];");
+                                    return;
+                                case 3:
+                                    if (needsI64) AppendLine($"{prefix}{target} = i64_from_i32(u_param{param.Index}_stride[2]);");
+                                    else AppendLine($"{prefix}{target} = u_param{param.Index}_stride[2];");
+                                    return;
+                                case 4:
+                                    if (needsI64) AppendLine($"{prefix}{target} = i64_from_i32(u_param{param.Index}_stride[0]);");
+                                    else AppendLine($"{prefix}{target} = u_param{param.Index}_stride[0];");
+                                    return;
+                                case 5:
+                                    if (needsI64) AppendLine($"{prefix}{target} = i64_from_i32(u_param{param.Index}_stride[0] * u_param{param.Index}_stride[1]);");
+                                    else AppendLine($"{prefix}{target} = u_param{param.Index}_stride[0] * u_param{param.Index}_stride[1];");
+                                    return;
                             }
                         }
                         else if (is1DView)
@@ -1113,6 +1699,18 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             {
                 string func = value.Kind == BinaryArithmeticKind.Min ? "min" : "max";
                 AppendLine($"{prefix}{target} = {func}({left}, {right});");
+                return;
+            }
+
+            if (value.Kind == BinaryArithmeticKind.PowF)
+            {
+                AppendLine($"{prefix}{target} = pow({left}, {right});");
+                return;
+            }
+
+            if (value.Kind == BinaryArithmeticKind.Atan2F)
+            {
+                AppendLine($"{prefix}{target} = atan({left}, {right});");
                 return;
             }
 
@@ -1250,12 +1848,62 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         private static void IsMultiDim(TypeNode type, out bool isMultiDim, out bool isView,
             out bool is1DView, out bool is2DView, out bool is3DView)
         {
+            is1DView = false;
+            is2DView = false;
+            is3DView = false;
+            isMultiDim = false;
+            isView = false;
+
+            // 1. Direct type check: ViewType is a 1D view
+            if (type is ViewType)
+            {
+                isView = true;
+                is1DView = true;
+                return;
+            }
+
             string typeName = type.ToString();
-            isView = type is ViewType || typeName.Contains("ArrayView");
-            is1DView = isView && !typeName.Contains("2D") && !typeName.Contains("3D");
-            is2DView = typeName.Contains("2D");
-            is3DView = typeName.Contains("3D");
-            isMultiDim = is2DView || is3DView;
+
+            // 2. Structural check: ArrayView2D/3D are StructureType wrappers around a ViewType
+            //    Port from the WGSL backend's proven detection logic
+            if (type is StructureType st)
+            {
+                // Check if first flattened field is a ViewType or its string contains "View"
+                if (st.NumFields > 0 && (st.Fields[0] is ViewType || st.Fields[0] is PointerType || st.Fields[0].ToString().Contains("View")))
+                {
+                    isView = true;
+
+                    // Distinguish 1D/2D/3D by flattened field count:
+                    //   1D ArrayView<T> = 3 fields (pointer, index, length) but 1D is ViewType not StructureType
+                    //   2D ArrayView2D<T> = 4 fields (pointer, index, length, stride)
+                    //   3D ArrayView3D<T> = 6 fields (pointer, index, length, strideX, strideY, strideZ)
+                    if (st.NumFields == 6)
+                    {
+                        is3DView = true;
+                        isMultiDim = true;
+                    }
+                    else if (st.NumFields == 4)
+                    {
+                        is2DView = true;
+                        isMultiDim = true;
+                    }
+                    else if (st.NumFields == 3)
+                    {
+                        is1DView = true;
+                        isMultiDim = false;
+                    }
+                }
+            }
+
+            // 3. Fallback: string check (covers any edge cases)
+            if (!isView && typeName.Contains("ArrayView"))
+            {
+                isView = true;
+                if (typeName.Contains("2D") || typeName.Contains("3D")) isMultiDim = true;
+                if (typeName.Contains("3D")) is3DView = true;
+                else if (typeName.Contains("2D")) is2DView = true;
+                else is1DView = true;
+            }
         }
 
         private global::ILGPU.IR.Values.Parameter? ResolveToParameter(Value value)
@@ -1288,13 +1936,16 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         public int BindingIndex { get; }
         public KernelParamKind Kind { get; }
         public string GlslType { get; }
+        /// <summary>For struct element buffers: number of flattened scalar fields per element. 0 for non-struct.</summary>
+        public int StructFieldCount { get; }
 
-        public KernelParameterBinding(int paramIndex, int bindingIndex, KernelParamKind kind, string glslType)
+        public KernelParameterBinding(int paramIndex, int bindingIndex, KernelParamKind kind, string glslType, int structFieldCount = 0)
         {
             ParamIndex = paramIndex;
             BindingIndex = bindingIndex;
             Kind = kind;
             GlslType = glslType;
+            StructFieldCount = structFieldCount;
         }
     }
 
@@ -1308,9 +1959,11 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         public bool IsEmulated { get; }
         /// <summary>For emulated varyings: "lo" or "hi". Null for normal varyings.</summary>
         public string? EmulatedSuffix { get; }
+        /// <summary>For struct field varyings: the field index within the struct. -1 for non-struct.</summary>
+        public int FieldIndex { get; }
 
         public OutputVaryingInfo(int paramIndex, int outputIndex, string varyingName, string glslType,
-            bool isEmulated = false, string? emulatedSuffix = null)
+            bool isEmulated = false, string? emulatedSuffix = null, int fieldIndex = -1)
         {
             ParamIndex = paramIndex;
             OutputIndex = outputIndex;
@@ -1318,6 +1971,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             GlslType = glslType;
             IsEmulated = isEmulated;
             EmulatedSuffix = emulatedSuffix;
+            FieldIndex = fieldIndex;
         }
     }
 

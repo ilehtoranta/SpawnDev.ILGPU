@@ -106,46 +106,11 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
         public new async Task LargeDispatchTest() =>
             throw new UnsupportedTestException("WebGL: 65536 elements exceeds MAX_TEXTURE_SIZE for 1D texture input");
 
-        // --- ArrayView2D/3D not yet supported in TF pipeline ---
-        [TestMethod]
-        public new async Task Kernel2DTest() =>
-            throw new UnsupportedTestException("WebGL: ArrayView2D stride/index support not yet implemented in TF pipeline");
+        // ArrayView2D/3D tests: re-enabled — stride uniform passing now implemented in WebGLAccelerator
 
-        [TestMethod]
-        public new async Task Kernel3DTest() =>
-            throw new UnsupportedTestException("WebGL: ArrayView3D stride/index support not yet implemented in TF pipeline");
+        // Struct buffer tests: re-enabled — per-field texelFetch load and per-field TF output now implemented
 
-        // --- Struct buffer load/store: per-field texture load not yet implemented ---
-        [TestMethod]
-        public new async Task StructTest() =>
-            throw new UnsupportedTestException("WebGL: struct buffer texelFetch requires per-field load (not yet implemented)");
-
-        [TestMethod]
-        public new async Task ComplexStructTest() =>
-            throw new UnsupportedTestException("WebGL: struct buffer texelFetch requires per-field load (not yet implemented)");
-
-        [TestMethod]
-        public new async Task NestedStructTest() =>
-            throw new UnsupportedTestException("WebGL: struct buffer texelFetch requires per-field load (not yet implemented)");
-
-        // --- Multi-buffer loop patterns with TF output ---
-        [TestMethod]
-        public new async Task MatrixMulTest() =>
-            throw new UnsupportedTestException("WebGL: multi-buffer loop kernel with scalar param not yet supported in TF pipeline");
-
-        [TestMethod]
-        public new async Task MatrixMultiplyTest() =>
-            throw new UnsupportedTestException("WebGL: multi-buffer loop kernel with scalar param not yet supported in TF pipeline");
-
-        // --- Multi-block control flow: cross-block LEA resolution issue ---
-        [TestMethod]
-        public new async Task NestedLoopBreakTest() =>
-            throw new UnsupportedTestException("WebGL: multi-block control flow loses TF output mapping across loop blocks");
-
-        // --- Multi-buffer interleaved TF readback precision issue ---
-        [TestMethod]
-        public new async Task AdvancedMathTest() =>
-            throw new UnsupportedTestException("WebGL: multi-buffer TF interleaving produces incorrect readback values");
+        // NestedLoopBreakTest: re-enabled — structured control flow (while/break/continue) now handles this correctly
 
         #region WebGL-Specific Tests
 
