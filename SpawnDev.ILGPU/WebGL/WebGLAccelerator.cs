@@ -377,44 +377,52 @@ namespace SpawnDev.ILGPU.WebGL
                     else
                     {
                         // Scalar argument → uniform
-                        var uniformName = $"u_param{glslParamIndex}";
-                        var uniformLoc = gl.GetUniformLocation(program, uniformName);
-                        if (uniformLoc != null)
+                        // Emulated 64-bit types use separate _lo/_hi uniforms, so handle them
+                        // before the base uniform lookup (which would fail for _lo/_hi names).
+                        if (arg is double dVal && webGlAccel.Backend.Options.EnableF64Emulation)
                         {
-                            if (arg is int iVal) gl.Uniform1i(uniformLoc, iVal);
-                            else if (arg is uint uiVal) gl.Uniform1ui(uniformLoc, uiVal);
-                            else if (arg is float fVal) gl.Uniform1f(uniformLoc, fVal);
-                            else if (arg is double dVal)
+                            // f64 emulation: pass as 2 separate uint uniforms (lo, hi)
+                            var bits = BitConverter.DoubleToUInt64Bits(dVal);
+                            var lo = (uint)(bits & 0xFFFFFFFF);
+                            var hi = (uint)(bits >> 32);
+                            var loLoc = gl.GetUniformLocation(program, $"u_param{glslParamIndex}_lo");
+                            var hiLoc = gl.GetUniformLocation(program, $"u_param{glslParamIndex}_hi");
+                            if (loLoc != null) gl.Uniform1ui(loLoc, lo);
+                            if (hiLoc != null) gl.Uniform1ui(hiLoc, hi);
+                            Console.WriteLine($"[WebGL-UNI-DEBUG] param{glslParamIndex}: f64 emulated value={dVal}, lo=0x{lo:X8} (loc={loLoc != null}), hi=0x{hi:X8} (loc={hiLoc != null})");
+                        }
+                        else if (arg is long lVal && webGlAccel.Backend.Options.EnableI64Emulation)
+                        {
+                            // i64 emulation: pass as 2 separate uint uniforms (lo, hi)
+                            var bits = (ulong)lVal;
+                            var lo = (uint)(bits & 0xFFFFFFFF);
+                            var hi = (uint)(bits >> 32);
+                            var loLoc = gl.GetUniformLocation(program, $"u_param{glslParamIndex}_lo");
+                            var hiLoc = gl.GetUniformLocation(program, $"u_param{glslParamIndex}_hi");
+                            if (loLoc != null) gl.Uniform1ui(loLoc, lo);
+                            if (hiLoc != null) gl.Uniform1ui(hiLoc, hi);
+                            Console.WriteLine($"[WebGL-UNI-DEBUG] param{glslParamIndex}: i64 emulated value={lVal}, lo=0x{lo:X8}, hi=0x{hi:X8}");
+                        }
+                        else
+                        {
+                            // Standard (non-emulated) scalar uniform
+                            var uniformName = $"u_param{glslParamIndex}";
+                            var uniformLoc = gl.GetUniformLocation(program, uniformName);
+                            if (uniformLoc != null)
                             {
-                                if (webGlAccel.Backend.Options.EnableF64Emulation)
-                                {
-                                    // f64 emulation: pass as 2 uints (low, high)
-                                    var bits = BitConverter.DoubleToUInt64Bits(dVal);
-                                    var lo = (uint)(bits & 0xFFFFFFFF);
-                                    var hi = (uint)(bits >> 32);
-                                    var uLoc = gl.GetUniformLocation(program, $"u_param{glslParamIndex}_emu");
-                                    if (uLoc != null)
-                                    {
-                                        gl.Uniform2ui(uLoc, lo, hi);
-                                    }
-                                    else
-                                    {
-                                        gl.Uniform1f(uniformLoc, (float)dVal);
-                                    }
-                                }
-                                else
-                                {
-                                    gl.Uniform1f(uniformLoc, (float)dVal);
-                                }
-                            }
-                            else if (arg is bool blVal) gl.Uniform1i(uniformLoc, blVal ? 1 : 0);
-                            else if (arg is byte bVal) gl.Uniform1i(uniformLoc, bVal);
-                            else if (arg is long lVal) gl.Uniform1i(uniformLoc, (int)lVal);
-                            else if (arg is ulong ulVal) gl.Uniform1ui(uniformLoc, (uint)ulVal);
-                            else throw new NotSupportedException($"Unsupported scalar argument type: {arg?.GetType()}");
+                                if (arg is int iVal) gl.Uniform1i(uniformLoc, iVal);
+                                else if (arg is uint uiVal) gl.Uniform1ui(uniformLoc, uiVal);
+                                else if (arg is float fVal) gl.Uniform1f(uniformLoc, fVal);
+                                else if (arg is double dValFallback) gl.Uniform1f(uniformLoc, (float)dValFallback);
+                                else if (arg is bool blVal) gl.Uniform1i(uniformLoc, blVal ? 1 : 0);
+                                else if (arg is byte bVal) gl.Uniform1i(uniformLoc, bVal);
+                                else if (arg is long lValFallback) gl.Uniform1i(uniformLoc, (int)lValFallback);
+                                else if (arg is ulong ulVal) gl.Uniform1ui(uniformLoc, (uint)ulVal);
+                                else throw new NotSupportedException($"Unsupported scalar argument type: {arg?.GetType()}");
 
-                            Console.WriteLine($"[WebGL-UNI-DEBUG] param{glslParamIndex}: scalar value={arg} (type={arg?.GetType().Name})");
-                            Log($"[WebGL-Debug] Arg {pIdx}: Bound as uniform, value={arg}");
+                                Console.WriteLine($"[WebGL-UNI-DEBUG] param{glslParamIndex}: scalar value={arg} (type={arg?.GetType().Name})");
+                                Log($"[WebGL-Debug] Arg {pIdx}: Bound as uniform, value={arg}");
+                            }
                         }
                     }
                 }
