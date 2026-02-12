@@ -1,0 +1,479 @@
+// ---------------------------------------------------------------------------------------
+//                                 SpawnDev.ILGPU.WebGL
+//                        Copyright (c) 2024 SpawnDev Project
+//
+// File: WebGLBackend.cs
+//
+// WebGL2/GLSL backend for ILGPU.
+// Compiles ILGPU IR to GLSL ES 3.0 vertex shader code using Transform Feedback
+// to emulate compute shaders via the CodeGeneratorBackend pattern.
+// ---------------------------------------------------------------------------------------
+
+using global::ILGPU;
+using global::ILGPU.Backends;
+using global::ILGPU.Backends.EntryPoints;
+using global::ILGPU.IR;
+using global::ILGPU.IR.Analyses;
+using global::ILGPU.IR.Intrinsics;
+using global::ILGPU.IR.Types;
+using global::ILGPU.Runtime;
+using System.Reflection;
+using System.Text;
+
+namespace SpawnDev.ILGPU.WebGL.Backend
+{
+    /// <summary>
+    /// WebGL2/GLSL backend for ILGPU.
+    /// Compiles ILGPU IR to GLSL ES 3.0 vertex shader code using the CodeGeneratorBackend pattern.
+    /// Transform Feedback captures output from vertex shader to emulate compute shader buffers.
+    /// </summary>
+    public class WebGLBackend : CodeGeneratorBackend<
+        GLSLIntrinsic.Handler,
+        GLSLCodeGenerator.GeneratorArgs,
+        GLSLCodeGenerator,
+        StringBuilder>
+    {
+        /// <summary>
+        /// The backend type constant for WebGL.
+        /// </summary>
+        public const BackendType BackendTypeWebGL = BackendType.WebGL;
+
+        /// <summary>
+        /// Controls whether verbose logging is enabled.
+        /// </summary>
+        public static bool VerboseLogging { get; set; } = false;
+
+        /// <summary>
+        /// Enables shader caching.
+        /// </summary>
+        public static bool EnableShaderCaching { get; set; } = true;
+
+        /// <summary>
+        /// Logs a message to the console if VerboseLogging is enabled.
+        /// </summary>
+        public static void Log(string message)
+        {
+            if (VerboseLogging)
+                Console.WriteLine(message);
+        }
+
+        #region Instance
+
+        /// <summary>
+        /// The configuration options for this backend.
+        /// </summary>
+        public WebGLBackendOptions Options { get; }
+
+        /// <summary>
+        /// Creates a new WebGL backend with default options.
+        /// </summary>
+        public WebGLBackend(Context context)
+            : this(context, WebGLBackendOptions.Default)
+        {
+        }
+
+        /// <summary>
+        /// Creates a new WebGL backend with the specified options.
+        /// </summary>
+        public WebGLBackend(Context context, WebGLBackendOptions options)
+            : base(
+                  context,
+                  new WebGLCapabilityContext(),
+                  BackendTypeWebGL,
+                  new WebGLArgumentMapper(context))
+        {
+            Options = options ?? WebGLBackendOptions.Default;
+
+            InitIntrinsicProvider();
+            RegisterMathIntrinsics();
+
+            InitializeKernelTransformers(builder =>
+            {
+                // WebGL-specific transformers (none for now)
+            });
+
+            // XMath hard reference removed — loaded dynamically via reflection
+        }
+
+        #endregion
+
+        #region Properties
+
+        /// <summary>
+        /// Returns the associated argument mapper.
+        /// </summary>
+        public new WebGLArgumentMapper ArgumentMapper =>
+            base.ArgumentMapper as WebGLArgumentMapper;
+
+        #endregion
+
+        #region Methods
+
+        private static IntrinsicImplementationManager GetIntrinsicManager(Context context)
+        {
+            var prop = typeof(Context).GetProperty("IntrinsicManager", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+            if (prop == null) throw new InvalidOperationException("Could not find IntrinsicManager property on Context.");
+            var manager = (IntrinsicImplementationManager)prop.GetValue(context);
+            FixIntrinsicManager(manager);
+            return manager;
+        }
+
+        private static void FixIntrinsicManager(IntrinsicImplementationManager manager)
+        {
+            try
+            {
+                var mgrType = typeof(IntrinsicImplementationManager);
+                var containersField = mgrType.GetField("containers", BindingFlags.Instance | BindingFlags.NonPublic);
+                if (containersField == null) return;
+
+                var containers = (Array)containersField.GetValue(manager);
+                int webGlIndex = (int)BackendTypeWebGL;
+
+                if (webGlIndex >= containers.Length || containers.GetValue(webGlIndex) == null)
+                {
+                    var containerType = mgrType.GetNestedType("BackendContainer", BindingFlags.NonPublic);
+                    var createMethod = containerType.GetMethod("Create", BindingFlags.Static | BindingFlags.Public);
+
+                    if (webGlIndex >= containers.Length)
+                    {
+                        Log($"WebGL: Resizing IntrinsicManager containers from {containers.Length} to {webGlIndex + 1}");
+                        var newContainers = Array.CreateInstance(containerType, webGlIndex + 1);
+                        Array.Copy(containers, newContainers, containers.Length);
+                        containers = newContainers;
+                        containersField.SetValue(manager, containers);
+                    }
+
+                    var newContainer = createMethod.Invoke(null, null);
+                    containers.SetValue(newContainer, webGlIndex);
+                    Log("WebGL: Initialized BackendContainer for WebGL.");
+                }
+                else
+                {
+                    var containerType = mgrType.GetNestedType("BackendContainer", BindingFlags.NonPublic);
+                    var container = containers.GetValue(webGlIndex);
+                    var matchersField = containerType.GetField("matchers", BindingFlags.Instance | BindingFlags.NonPublic);
+                    var matchers = matchersField.GetValue(container);
+                    if (matchers == null)
+                    {
+                        Log("WebGL: BackendContainer found but uninitialized. Re-initializing.");
+                        var createMethod = containerType.GetMethod("Create", BindingFlags.Static | BindingFlags.Public);
+                        var newContainer = createMethod.Invoke(null, null);
+                        containers.SetValue(newContainer, webGlIndex);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Log($"WebGL: Error fixing IntrinsicManager: {ex}");
+            }
+        }
+
+        private void RegisterIntrinsic(MethodInfo method, GLSLIntrinsic.Handler handler)
+        {
+            if (method == null)
+            {
+                Log("WebGL: Skipping invalid intrinsic method (null)");
+                return;
+            }
+            Log($"WebGL: Registering Intrinsic: {method.DeclaringType.Name}.{method.Name}");
+            GetIntrinsicManager(Context).RegisterMethod(
+                method,
+                new WebGLIntrinsic(
+                    handler.Method,
+                    IntrinsicImplementationMode.GenerateCode));
+        }
+
+        private void RegisterIntrinsic(Type type, string methodName, GLSLIntrinsic.Handler handler)
+        {
+            var methods = type.GetMethods(BindingFlags.Public | BindingFlags.Static)
+                .Where(m => m.Name == methodName);
+
+            bool found = false;
+            foreach (var method in methods)
+            {
+                found = true;
+                RegisterIntrinsic(method, handler);
+            }
+            if (!found)
+                Log($"WebGL: Intrinsic not found: {type.Name}.{methodName}");
+        }
+
+        private void RegisterRedirect(MethodInfo original, MethodInfo target)
+        {
+            if (original == null || target == null) return;
+            Log($"WebGL: Redirecting {original.DeclaringType.Name}.{original.Name} -> {target.DeclaringType.Name}.{target.Name}");
+            GetIntrinsicManager(Context).RegisterMethod(
+                original,
+                new WebGLIntrinsic(
+                    target,
+                    IntrinsicImplementationMode.Redirect));
+        }
+
+        private void RegisterMathIntrinsics()
+        {
+            var t = typeof(WebGLIntrinsics);
+
+            void Reg(MethodInfo original, MethodInfo wrapper, GLSLIntrinsic.Handler handler)
+            {
+                if (original == null) return;
+                RegisterRedirect(original, wrapper);
+                RegisterIntrinsic(wrapper, handler);
+            }
+
+            void RegAll(Type type, string name, GLSLIntrinsic.Handler handler)
+            {
+                var methods = type.GetMethods(BindingFlags.Public | BindingFlags.Static)
+                    .Where(m => m.Name == name);
+
+                foreach (var m in methods)
+                {
+                    MethodInfo target = m;
+                    if (m.IsGenericMethod)
+                    {
+                        var gArgs = m.GetGenericArguments();
+                        if (gArgs.Length == 1)
+                        {
+                            try { target = m.MakeGenericMethod(typeof(float)); } catch { continue; }
+                        }
+                        else continue;
+                    }
+
+                    var pTypes = target.GetParameters().Select(p => p.ParameterType).ToArray();
+                    var wrapper = t.GetMethod(
+                        name,
+                        BindingFlags.Public | BindingFlags.Static,
+                        null, pTypes, null);
+
+                    if (wrapper != null)
+                    {
+                        Log($"WebGL: Mapping {type.Name}.{name}({string.Join(",", pTypes.Select(pt => pt.Name))}) to {t.Name}.{name}");
+                        Reg(target, wrapper, handler);
+                    }
+                    else
+                    {
+                        var pTypeNames = string.Join(", ", pTypes.Select(pt => pt.Name));
+                        Log($"WebGL: Missing wrapper for {type.Name}.{name}({pTypeNames})");
+                    }
+                }
+            }
+
+            // Unary
+            RegAll(typeof(Math), "Abs", GLSLCodeGenerator.GenerateAbs);
+            RegAll(typeof(MathF), "Abs", GLSLCodeGenerator.GenerateAbs);
+            RegAll(typeof(Math), "Sign", GLSLCodeGenerator.GenerateSign);
+            RegAll(typeof(MathF), "Sign", GLSLCodeGenerator.GenerateSign);
+            RegAll(typeof(Math), "Round", GLSLCodeGenerator.GenerateRound);
+            RegAll(typeof(MathF), "Round", GLSLCodeGenerator.GenerateRound);
+            RegAll(typeof(Math), "Truncate", GLSLCodeGenerator.GenerateTruncate);
+            RegAll(typeof(MathF), "Truncate", GLSLCodeGenerator.GenerateTruncate);
+
+            // Binary
+            RegAll(typeof(Math), "Atan2", GLSLCodeGenerator.GenerateAtan2);
+            RegAll(typeof(MathF), "Atan2", GLSLCodeGenerator.GenerateAtan2);
+            RegAll(typeof(Math), "Max", GLSLCodeGenerator.GenerateMax);
+            RegAll(typeof(MathF), "Max", GLSLCodeGenerator.GenerateMax);
+            RegAll(typeof(Math), "Min", GLSLCodeGenerator.GenerateMin);
+            RegAll(typeof(MathF), "Min", GLSLCodeGenerator.GenerateMin);
+            RegAll(typeof(Math), "Pow", GLSLCodeGenerator.GeneratePow);
+            RegAll(typeof(MathF), "Pow", GLSLCodeGenerator.GeneratePow);
+
+            // Ternary
+            RegAll(typeof(Math), "Clamp", GLSLCodeGenerator.GenerateClamp);
+            RegAll(typeof(MathF), "Clamp", GLSLCodeGenerator.GenerateClamp);
+            RegAll(typeof(Math), "FusedMultiplyAdd", GLSLCodeGenerator.GenerateFusedMultiplyAdd);
+            RegAll(typeof(MathF), "FusedMultiplyAdd", GLSLCodeGenerator.GenerateFusedMultiplyAdd);
+
+            // IntrinsicMath
+            RegAll(typeof(IntrinsicMath), "Abs", GLSLCodeGenerator.GenerateAbs);
+            RegAll(typeof(IntrinsicMath), "Min", GLSLCodeGenerator.GenerateMin);
+            RegAll(typeof(IntrinsicMath), "Max", GLSLCodeGenerator.GenerateMax);
+
+            // XMath
+            try
+            {
+                var xmathType = Type.GetType("ILGPU.Algorithms.XMath, ILGPU.Algorithms");
+                if (xmathType != null)
+                {
+                    RegAll(xmathType, "Rsqrt", GLSLCodeGenerator.GenerateRsqrt);
+                    RegAll(xmathType, "Rcp", GLSLCodeGenerator.GenerateRcp);
+                    Log("WebGL: Registered XMath intrinsics (Rsqrt, Rcp)");
+                }
+            }
+            catch (Exception ex)
+            {
+                Log($"WebGL: Error registering XMath intrinsics: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Creates a new entry point.
+        /// </summary>
+        protected override EntryPoint CreateEntryPoint(
+            in EntryPointDescription entry,
+            in BackendContext backendContext,
+            in KernelSpecialization specialization) =>
+            new EntryPoint(
+                entry,
+                backendContext.SharedMemorySpecification,
+                specialization);
+
+        /// <summary>
+        /// Creates the main kernel builder and initializes generator args.
+        /// </summary>
+        protected override StringBuilder CreateKernelBuilder(
+            EntryPoint entryPoint,
+            in BackendContext backendContext,
+            in KernelSpecialization specialization,
+            out GLSLCodeGenerator.GeneratorArgs data)
+        {
+            var builder = new StringBuilder();
+
+            builder.AppendLine("#version 300 es");
+            builder.AppendLine("//");
+            builder.Append("// Generated by SpawnDev.ILGPU.WebGL v");
+            builder.AppendLine(Context.Version);
+            builder.AppendLine("//");
+            builder.AppendLine("precision highp float;");
+            builder.AppendLine("precision highp int;");
+            builder.AppendLine();
+
+            // Grid dimension uniforms (needed for 2D/3D index decomposition)
+            if (entryPoint.IndexType == IndexType.Index2D || entryPoint.IndexType == IndexType.Index3D)
+            {
+                builder.AppendLine("uniform int u_grid_width;");
+                if (entryPoint.IndexType == IndexType.Index3D)
+                    builder.AppendLine("uniform int u_grid_height;");
+                builder.AppendLine();
+            }
+
+            var typeGenerator = new GLSLTypeGenerator(this, Context.TypeContext);
+
+            data = new GLSLCodeGenerator.GeneratorArgs(
+                this,
+                typeGenerator,
+                entryPoint,
+                backendContext.SharedAllocations,
+                backendContext.DynamicSharedAllocations);
+
+            return builder;
+        }
+
+        /// <summary>
+        /// Creates a function-code generator for helper methods.
+        /// </summary>
+        protected override GLSLCodeGenerator CreateFunctionCodeGenerator(
+            Method method,
+            Allocas allocas,
+            GLSLCodeGenerator.GeneratorArgs data) =>
+            new GLSLFunctionGenerator(data, method, allocas);
+
+        /// <summary>
+        /// Creates a kernel-code generator for the main entry point.
+        /// </summary>
+        protected override GLSLCodeGenerator CreateKernelCodeGenerator(
+            in AllocaKindInformation sharedAllocations,
+            Method method,
+            Allocas allocas,
+            GLSLCodeGenerator.GeneratorArgs data) =>
+            new GLSLKernelFunctionGenerator(data, method, allocas);
+
+        /// <summary>
+        /// Creates the final compiled kernel.
+        /// </summary>
+        protected override CompiledKernel CreateKernel(
+            EntryPoint entryPoint,
+            CompiledKernel.KernelInfo? kernelInfo,
+            StringBuilder builder,
+            GLSLCodeGenerator.GeneratorArgs data)
+        {
+            // All code generation is complete — now emit struct type definitions.
+            // Types are discovered lazily during code generation, so we collect them
+            // here and replace the placeholder that was inserted by the kernel generator.
+            var structDefs = new StringBuilder();
+            data.TypeGenerator.GenerateTypeDefinitions(structDefs);
+            var glslSource = builder.ToString()
+                .Replace("// __STRUCT_DEFS_PLACEHOLDER__\r\n", structDefs.ToString())
+                .Replace("// __STRUCT_DEFS_PLACEHOLDER__\n", structDefs.ToString());
+            Log("--- GENERATED GLSL ---");
+            Log(glslSource);
+            Log("-----------------------");
+            return new WebGLCompiledKernel(
+                Context,
+                entryPoint,
+                glslSource,
+                outputVaryings: data.OutputVaryings);
+        }
+
+        #endregion
+    }
+
+    /// <summary>
+    /// WebGL capability context — defines the capabilities of the WebGL2 backend.
+    /// </summary>
+    public class WebGLCapabilityContext : CapabilityContext
+    {
+        // WebGL2 has limited capabilities compared to WebGPU
+    }
+
+    /// <summary>
+    /// Represents a compiled WebGL2/GLSL kernel (vertex shader).
+    /// </summary>
+    public class WebGLCompiledKernel : CompiledKernel
+    {
+        /// <summary>
+        /// The generated GLSL ES 3.0 vertex shader source.
+        /// </summary>
+        public string GLSLSource { get; }
+
+        /// <summary>
+        /// Parameter binding metadata for runtime dispatch.
+        /// </summary>
+        public IReadOnlyList<KernelParameterBinding> ParameterBindings { get; }
+
+        /// <summary>
+        /// Output varying metadata for Transform Feedback.
+        /// </summary>
+        public IReadOnlyList<OutputVaryingInfo> OutputVaryings { get; }
+
+        public WebGLCompiledKernel(
+            Context context,
+            EntryPoint entryPoint,
+            string glslSource,
+            IReadOnlyList<KernelParameterBinding>? parameterBindings = null,
+            IReadOnlyList<OutputVaryingInfo>? outputVaryings = null)
+            : base(context, entryPoint, null)
+        {
+            GLSLSource = glslSource;
+            ParameterBindings = parameterBindings ?? Array.Empty<KernelParameterBinding>();
+            OutputVaryings = outputVaryings ?? Array.Empty<OutputVaryingInfo>();
+        }
+    }
+
+    /// <summary>
+    /// Argument mapper for WebGL kernel parameters.
+    /// </summary>
+    public class WebGLArgumentMapper : ArgumentMapper
+    {
+        public WebGLArgumentMapper(Context context) : base(context) { }
+
+        /// <summary>
+        /// Maps a view type to its WebGL equivalent.
+        /// </summary>
+        protected override System.Type MapViewType(System.Type viewType, System.Type elementType)
+        {
+            return viewType;
+        }
+
+        /// <summary>
+        /// Maps a view instance for kernel invocation.
+        /// </summary>
+        protected override void MapViewInstance<TILEmitter, TSource, TTarget>(
+            in TILEmitter emitter,
+            System.Type viewType,
+            in TSource source,
+            in TTarget target)
+        {
+            // View mapping is handled separately for WebGL
+        }
+    }
+}

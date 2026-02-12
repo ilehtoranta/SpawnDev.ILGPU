@@ -54,6 +54,11 @@ namespace ILGPU.Runtime
         /// Represents a Web Workers accelerator (CPU-parallel via Web Workers in browsers/WASM).
         /// </summary>
         Workers,
+
+        /// <summary>
+        /// Represents a WebGL2 accelerator (GPU via WebGL2 Transform Feedback in browsers/WASM).
+        /// </summary>
+        WebGL,
     }
 
 

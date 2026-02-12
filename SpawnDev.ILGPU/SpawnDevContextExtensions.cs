@@ -11,6 +11,8 @@
 using global::ILGPU;
 using global::ILGPU.Runtime;
 using SpawnDev.ILGPU.Wasm;
+using SpawnDev.ILGPU.WebGL;
+using SpawnDev.ILGPU.WebGL.Backend;
 using SpawnDev.ILGPU.WebGPU;
 using SpawnDev.ILGPU.WebGPU.Backend;
 using SpawnDev.ILGPU.Workers;
@@ -52,6 +54,16 @@ namespace SpawnDev.ILGPU
                 // WebGPU not available in this environment
             }
 
+            // WebGL2 requires async probing — may not be available
+            try
+            {
+                await builder.WebGL();
+            }
+            catch
+            {
+                // WebGL2 not available in this environment
+            }
+
             return builder;
         }
 
@@ -75,6 +87,13 @@ namespace SpawnDev.ILGPU
             if (webGpuDevices.Count > 0)
             {
                 return await webGpuDevices[0].CreateAcceleratorAsync(context, null);
+            }
+
+            // Try WebGL2 (GPU compute via Transform Feedback)
+            var webGlDevices = context.GetDevices<WebGLILGPUDevice>();
+            if (webGlDevices.Count > 0)
+            {
+                return webGlDevices[0].CreateAccelerator(context);
             }
 
             // Try Wasm (near-native WebAssembly compute)
@@ -153,6 +172,15 @@ namespace SpawnDev.ILGPU
                 return result;
             }
 
+            // Check for WebGL2 buffer
+            if (iView.Buffer is WebGLMemoryBuffer webGlBuffer)
+            {
+                var byteData = webGlBuffer.BackingArray!.ReadBytes();
+                var result = new T[buffer.Length];
+                MemoryMarshal.Cast<byte, T>(byteData).CopyTo(new Span<T>(result));
+                return result;
+            }
+
             // Check for Workers buffer
             if (iView.Buffer is WorkersMemoryBuffer workersBuffer)
             {
@@ -195,6 +223,11 @@ namespace SpawnDev.ILGPU
             if (accelerator is WebGPUAccelerator webGpuAccelerator)
             {
                 await WebGPUAcceleratorExtensions.SynchronizeAsync(webGpuAccelerator);
+            }
+            else if (accelerator is WebGLAccelerator)
+            {
+                // WebGL2 is synchronous — no async sync needed
+                accelerator.Synchronize();
             }
             else if (accelerator is WorkersAccelerator workersAccelerator)
             {

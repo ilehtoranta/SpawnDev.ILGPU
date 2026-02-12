@@ -95,6 +95,11 @@ namespace ILGPU.Backends
         /// A WebAssembly compute backend.
         /// </summary>
         Wasm,
+
+        /// <summary>
+        /// A WebGL2/GLSL source backend (GPU via Transform Feedback).
+        /// </summary>
+        WebGL,
     }
 
     /// <summary>

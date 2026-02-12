@@ -4,6 +4,8 @@
 @using SpawnDev.ILGPU.WebGPU
 @using SpawnDev.ILGPU.WebGPU.Backend
 @using SpawnDev.ILGPU.Workers
+@using SpawnDev.ILGPU.WebGL
+@using SpawnDev.ILGPU.WebGL.Backend
 @using SpawnDev.ILGPU.Wasm
 @using SpawnDev.BlazorJS
 @using SpawnDev.BlazorJS.JSObjects
@@ -239,6 +241,21 @@
             // WebGPU not available in this browser
         }
 
+        // WebGL2 — requires async probing, may not be available
+        try
+        {
+            using var glProbeContext = await Context.CreateAsync(builder => builder.WebGL());
+            var glDevices = glProbeContext.GetWebGLDevices();
+            if (glDevices.Count > 0)
+            {
+                backends.Add(new("WebGL", "⚡⚡ WebGL2 (GPU Compute)"));
+            }
+        }
+        catch
+        {
+            // WebGL2 not available in this browser
+        }
+
         // Wasm — always available in Blazor WASM
         backends.Add(new("Wasm", "⚡⚡ Wasm (Multi-core Wasm)"));
 
@@ -322,6 +339,9 @@
             case "WebGPU":
                 await InitializeWebGPU();
                 break;
+            case "WebGL":
+                await InitializeWebGL();
+                break;
             case "Workers":
                 await InitializeWorkers();
                 break;
@@ -349,6 +369,18 @@
         var devices = _ilgpuContext.GetWebGPUDevices();
         if (devices.Count == 0) throw new Exception("No WebGPU device found");
         _ilgpuAccelerator = await devices[0].CreateAcceleratorAsync(_ilgpuContext);
+    }
+
+    private async Task InitializeWebGL()
+    {
+        _ilgpuContext = await Context.CreateAsync(builder => builder.WebGL());
+        var devices = _ilgpuContext.GetWebGLDevices();
+        if (devices.Count == 0) throw new Exception("No WebGL2 device found");
+        // Disable f64/i64 emulation to keep shaders compact enough for ANGLE's D3D11 translator.
+        // With emulation enabled, the Mandelbrot shader generates 1000+ lines that exceed ANGLE's
+        // vertex shader compilation limits. Doubles are promoted to float (f32 precision).
+        var options = new WebGLBackendOptions { EnableF64Emulation = false, EnableI64Emulation = false };
+        _ilgpuAccelerator = devices[0].CreateAccelerator(_ilgpuContext, options);
     }
 
     private async Task InitializeWorkers()
@@ -539,6 +571,12 @@
                 var byteData = wasmBuf.TypedArrayView.ReadBytes();
                 result = new uint[_width * _height];
                 Buffer.BlockCopy(byteData, 0, result, 0, byteData.Length);
+            }
+            else if (internalBuffer is WebGLMemoryBuffer webGlBuf)
+            {
+                var byteData = webGlBuf.BackingArray!.ReadBytes();
+                result = new uint[_width * _height];
+                Buffer.BlockCopy(byteData, 0, result, 0, Math.Min(byteData.Length, result.Length * 4));
             }
             else
             {
