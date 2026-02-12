@@ -8,6 +8,7 @@
 using global::ILGPU;
 using global::ILGPU.Backends;
 using global::ILGPU.Runtime;
+using SpawnDev.BlazorJS;
 using SpawnDev.BlazorJS.JSObjects;
 using GL = SpawnDev.BlazorJS.JSObjects.GL;
 using SpawnDev.ILGPU.WebGL.Backend;
@@ -173,6 +174,7 @@ namespace SpawnDev.ILGPU.WebGL
 
             // ---- Step 1: Compile shader program ----
             var vertexShaderSource = compiledKernel.GLSLSource;
+            Console.WriteLine($"[WebGL-SHADER-SRC]\n{vertexShaderSource}");
 
             // Minimal fragment shader (required but output is discarded via RASTERIZER_DISCARD)
             var fragmentShaderSource = "#version 300 es\nprecision mediump float;\nvoid main() {}\n";
@@ -265,7 +267,7 @@ namespace SpawnDev.ILGPU.WebGL
 
                         if (uniformLoc != null)
                         {
-                            // Upload data as R32F texture for texelFetch
+                            // Upload data as a 1D texture for texelFetch access
                             var elementSize = contiguous.ElementSize;
                             var length = (int)contiguous.Length;
                             var byteLength = length * elementSize;
@@ -273,10 +275,15 @@ namespace SpawnDev.ILGPU.WebGL
                             // Read array data
                             var byteData = memBuffer.BackingArray.Read<byte>((int)contiguous.Index, byteLength);
 
-                            // Create float texture (R32F, 1D texture laid out as width x 1)
-                            var texWidth = (byteLength + 3) / 4; // ceil(bytes / 4) for R32F
+                            // Determine texture format from the parameter binding's GLSL type
+                            var binding = compiledKernel.ParameterBindings
+                                .FirstOrDefault(b => b.ParamIndex == glslParamIndex && b.Kind == KernelParamKind.Buffer);
+                            string bufferGlslType = binding.GlslType ?? "float";
+
+                            var texWidth = (byteLength + 3) / 4; // ceil(bytes / 4)
                             var paddedData = new byte[texWidth * 4];
                             System.Buffer.BlockCopy(byteData, 0, paddedData, 0, byteLength);
+
 
                             gl.ActiveTexture(GL.TEXTURE0 + (uint)texUnit);
                             var tex = gl.CreateTexture();
@@ -289,11 +296,40 @@ namespace SpawnDev.ILGPU.WebGL
 
                             using var uint8Array = new Uint8Array(paddedData);
                             using var arrayBuffer = uint8Array.Buffer;
-                            using var float32Array = new Float32Array(arrayBuffer);
-                            gl.TexImage2D(GL.TEXTURE_2D, 0, GL.R32F, texWidth, 1, 0, GL.RED, GL.FLOAT, float32Array);
-                            gl.Uniform1i(uniformLoc, texUnit);
 
-                            Log($"[WebGL-Debug] Arg {pIdx}: Bound as texture unit {texUnit}, {texWidth}x1 R32F");
+                            if (bufferGlslType == "int")
+                            {
+                                // Integer buffer: use R32I with isampler2D
+                                // Must pass Int32Array to WebGL — byte[] becomes Uint8Array which misaligns
+                                using var int32Array = new Int32Array(arrayBuffer);
+
+                                gl.JSRef!.CallVoid("texImage2D",
+                                    GL.TEXTURE_2D, 0, GL.R32I, texWidth, 1, 0,
+                                    GL.RED_INTEGER, GL.INT, int32Array);
+
+                                Log($"[WebGL-Debug] Arg {pIdx}: Bound as texture unit {texUnit}, {texWidth}x1 R32I (int)");
+                            }
+                            else if (bufferGlslType == "uint")
+                            {
+                                // Unsigned integer buffer: use R32UI with usampler2D
+                                using var uint32Array = new Uint32Array(arrayBuffer);
+
+                                gl.JSRef!.CallVoid("texImage2D",
+                                    GL.TEXTURE_2D, 0, GL.R32UI, texWidth, 1, 0,
+                                    GL.RED_INTEGER, GL.UNSIGNED_INT, uint32Array);
+
+                                Log($"[WebGL-Debug] Arg {pIdx}: Bound as texture unit {texUnit}, {texWidth}x1 R32UI (uint)");
+                            }
+                            else
+                            {
+                                // Float buffer: use R32F with sampler2D (default)
+                                using var float32Array = new Float32Array(arrayBuffer);
+
+                                gl.TexImage2D(GL.TEXTURE_2D, 0, GL.R32F, texWidth, 1, 0, GL.RED, GL.FLOAT, float32Array);
+
+                                Log($"[WebGL-Debug] Arg {pIdx}: Bound as texture unit {texUnit}, {texWidth}x1 R32F (float)");
+                            }
+                            gl.Uniform1i(uniformLoc, texUnit);
                         }
                     }
                     else
@@ -416,6 +452,11 @@ namespace SpawnDev.ILGPU.WebGL
                     for (int outIdx = 0; outIdx < outputVaryings.Count; outIdx++)
                     {
                         var outputInfo = outputVaryings[outIdx];
+
+                        // Skip "hi" emulated varyings — they are read together with their "lo" counterpart
+                        if (outputInfo.IsEmulated && outputInfo.EmulatedSuffix == "hi")
+                            continue;
+
                         // ParamIndex stores the Method.Parameters index (1-based);
                         // convert to args[] index (0-based) by subtracting the offset
                         var argsIdx = outputInfo.ParamIndex - glslParamOffset;
@@ -442,16 +483,54 @@ namespace SpawnDev.ILGPU.WebGL
 
                                 if (contiguous?.Buffer is WebGLMemoryBuffer memBuffer && memBuffer.BackingArray != null)
                                 {
-                                    // Calculate the offset in the TF buffer for this output
-                                    int srcOffset = outIdx * totalVertices * 4;
-                                    int copyLen = Math.Min(totalVertices * 4, readbackBytes.Length - srcOffset);
-                                    copyLen = Math.Min(copyLen, (int)contiguous.LengthInBytes);
+                                    // INTERLEAVED_ATTRIBS: data is packed per-vertex as
+                                    // [varying0_v0, varying1_v0, ...varyingN_v0, varying0_v1, varying1_v1, ...]
+                                    // Stride between same-varying values = varyingCount * 4 bytes
+                                    int varyingCount = varyingNames.Length;
+                                    int strideBytes = varyingCount * 4;  // bytes between same varying in adjacent vertices
 
-                                    if (copyLen > 0)
+                                    if (outputInfo.IsEmulated && outputInfo.EmulatedSuffix == "lo")
                                     {
-                                        var slice = new byte[copyLen];
-                                        System.Buffer.BlockCopy(readbackBytes, srcOffset, slice, 0, copyLen);
-                                        memBuffer.BackingArray.Write(slice, (int)contiguous.Index);
+                                        // Emulated 64-bit: read lo and hi varyings, interleave into 8-byte pairs
+                                        int hiOutIdx = outIdx + 1; // hi varying is always right after lo
+                                        int elementCount = Math.Min(totalVertices, (int)(contiguous.LengthInBytes / 8));
+                                        if (elementCount > 0)
+                                        {
+                                            var slice = new byte[elementCount * 8];
+                                            for (int v = 0; v < elementCount; v++)
+                                            {
+                                                // Read lo word from interleaved position
+                                                int loByteOffset = v * strideBytes + outIdx * 4;
+                                                // Read hi word from interleaved position
+                                                int hiByteOffset = v * strideBytes + hiOutIdx * 4;
+                                                if (loByteOffset + 4 <= readbackBytes.Length && hiByteOffset + 4 <= readbackBytes.Length)
+                                                {
+                                                    // Pack lo (4 bytes) + hi (4 bytes) into 8-byte slot
+                                                    System.Buffer.BlockCopy(readbackBytes, loByteOffset, slice, v * 8, 4);
+                                                    System.Buffer.BlockCopy(readbackBytes, hiByteOffset, slice, v * 8 + 4, 4);
+                                                }
+                                            }
+                                            memBuffer.BackingArray.Write(slice, (int)contiguous.Index);
+                                        }
+                                    }
+                                    else
+                                    {
+                                        // Standard single-slot TF readback
+                                        int elementCount = Math.Min(totalVertices, (int)(contiguous.LengthInBytes / 4));
+                                        if (elementCount > 0)
+                                        {
+                                            var slice = new byte[elementCount * 4];
+                                            for (int v = 0; v < elementCount; v++)
+                                            {
+                                                // Source offset in interleaved buffer: vertex v, varying outIdx
+                                                int srcByteOffset = v * strideBytes + outIdx * 4;
+                                                if (srcByteOffset + 4 <= readbackBytes.Length)
+                                                {
+                                                    System.Buffer.BlockCopy(readbackBytes, srcByteOffset, slice, v * 4, 4);
+                                                }
+                                            }
+                                            memBuffer.BackingArray.Write(slice, (int)contiguous.Index);
+                                        }
                                     }
                                 }
                             }

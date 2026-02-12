@@ -247,6 +247,13 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             int paramOffset = KernelParamOffset;
             int bindingIndex = 0;
 
+            // Emit dimension uniforms for multi-dimensional kernels
+            if (EntryPoint.IndexType == IndexType.Index2D || EntryPoint.IndexType == IndexType.Index3D)
+            {
+                Builder.AppendLine("uniform highp int u_dimWidth; // grid X dimension");
+                Builder.AppendLine("uniform highp int u_dimHeight; // grid Y dimension");
+            }
+
             foreach (var param in Method.Parameters)
             {
                 if (param.Index < paramOffset) continue;
@@ -262,9 +269,18 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                     // In WebGL2, we use a uniform sampler for input and TF varying for output
                     string glslType = GetBufferElementType(elementType);
 
-                    // Input buffer: use a uniform sampler2D (TBO emulated as texture)
-                    Builder.AppendLine($"uniform highp sampler2D u_param{param.Index}; // buffer param[{param.Index}]");
+                    // Input buffer: use a uniform sampler (TBO emulated as texture)
+                    // Use isampler2D for int buffers, usampler2D for uint, sampler2D for float
+                    string samplerType = glslType switch
+                    {
+                        "int" => "isampler2D",
+                        "uint" => "usampler2D",
+                        _ => "sampler2D"
+                    };
+                    Builder.AppendLine($"uniform highp {samplerType} u_param{param.Index}; // buffer param[{param.Index}]");
                     _parameterBindings.Add(new KernelParameterBinding(param.Index, bindingIndex++, KernelParamKind.Buffer, glslType));
+                    _generatorArgs.ParameterBindings.Add(_parameterBindings[^1]);
+                    _bufferGlslTypes[param.Index] = glslType;
 
                     // Multi-dim stride buffer
                     if (isMultiDim && (is2DView || is3DView))
@@ -272,6 +288,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                         int strideCount = is3DView ? 3 : 2;
                         Builder.AppendLine($"uniform highp int u_param{param.Index}_stride[{strideCount}]; // stride");
                         _parameterBindings.Add(new KernelParameterBinding(param.Index, bindingIndex++, KernelParamKind.Stride, "int"));
+                        _generatorArgs.ParameterBindings.Add(_parameterBindings[^1]);
                     }
                 }
                 else if (isStruct)
@@ -280,6 +297,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                     string glslType = TypeGenerator[elementType];
                     Builder.AppendLine($"uniform {glslType} u_param{param.Index}; // struct param[{param.Index}]");
                     _parameterBindings.Add(new KernelParameterBinding(param.Index, bindingIndex++, KernelParamKind.Scalar, glslType));
+                    _generatorArgs.ParameterBindings.Add(_parameterBindings[^1]);
                 }
                 else
                 {
@@ -292,6 +310,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                         Builder.AppendLine($"uniform highp uint u_param{param.Index}_lo; // emu_f64 low bits");
                         Builder.AppendLine($"uniform highp uint u_param{param.Index}_hi; // emu_f64 high bits");
                         _parameterBindings.Add(new KernelParameterBinding(param.Index, bindingIndex++, KernelParamKind.EmulatedF64, "uint"));
+                        _generatorArgs.ParameterBindings.Add(_parameterBindings[^1]);
                     }
                     else if (_emulatedI64Params.Contains(param.Index))
                     {
@@ -299,11 +318,13 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                         Builder.AppendLine($"uniform highp uint u_param{param.Index}_lo; // emu_i64 low bits");
                         Builder.AppendLine($"uniform highp uint u_param{param.Index}_hi; // emu_i64 high bits");
                         _parameterBindings.Add(new KernelParameterBinding(param.Index, bindingIndex++, KernelParamKind.EmulatedI64, "uint"));
+                        _generatorArgs.ParameterBindings.Add(_parameterBindings[^1]);
                     }
                     else
                     {
                         Builder.AppendLine($"uniform highp {glslType} u_param{param.Index}; // scalar param[{param.Index}]");
                         _parameterBindings.Add(new KernelParameterBinding(param.Index, bindingIndex++, KernelParamKind.Scalar, glslType));
+                        _generatorArgs.ParameterBindings.Add(_parameterBindings[^1]);
                     }
                 }
             }
@@ -354,14 +375,37 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                     // This could be an output buffer — we mark all view params as potential TF outputs
                     // The actual write determination is done in the kernel body
                     var elementType = UnwrapType(type);
-                    string glslType = GetBufferElementType(elementType);
+                    bool isEmulatedF64 = _emulatedF64Params.Contains(param.Index);
+                    bool isEmulatedI64 = _emulatedI64Params.Contains(param.Index);
 
-                    // TF varyings must be flat for integer types
-                    string flatPrefix = (glslType == "int" || glslType == "uint") ? "flat " : "";
-                    Builder.AppendLine($"{flatPrefix}out highp {glslType} tf_out_{param.Index}; // TF output for param[{param.Index}]");
-                    var varyingInfo = new OutputVaryingInfo(param.Index, outIndex++, $"tf_out_{param.Index}", glslType);
-                    _outputVaryings.Add(varyingInfo);
-                    _generatorArgs.OutputVaryings.Add(varyingInfo);
+                    if (isEmulatedF64 || isEmulatedI64)
+                    {
+                        // Emulated 64-bit types need TWO uint TF outputs (lo and hi words)
+                        Builder.AppendLine($"flat out highp uint tf_out_{param.Index}_lo; // TF output for param[{param.Index}] (emu 64-bit lo)");
+                        Builder.AppendLine($"flat out highp uint tf_out_{param.Index}_hi; // TF output for param[{param.Index}] (emu 64-bit hi)");
+                        var loInfo = new OutputVaryingInfo(param.Index, outIndex++, $"tf_out_{param.Index}_lo", "uint",
+                            isEmulated: true, emulatedSuffix: "lo");
+                        var hiInfo = new OutputVaryingInfo(param.Index, outIndex++, $"tf_out_{param.Index}_hi", "uint",
+                            isEmulated: true, emulatedSuffix: "hi");
+                        _outputVaryings.Add(loInfo);
+                        _outputVaryings.Add(hiInfo);
+                        _generatorArgs.OutputVaryings.Add(loInfo);
+                        _generatorArgs.OutputVaryings.Add(hiInfo);
+                    }
+                    else
+                    {
+                        string glslType = GetBufferElementType(elementType);
+
+                        // TF varyings must be flat for non-float types AND structs (which may contain int fields)
+                        bool needsFlat = glslType != "float";
+                        string flatPrefix = needsFlat ? "flat " : "";
+                        // GLSL ES 3.0: precision qualifiers are illegal on struct types
+                        string precisionPrefix = glslType.StartsWith("struct_") ? "" : "highp ";
+                        Builder.AppendLine($"{flatPrefix}out {precisionPrefix}{glslType} tf_out_{param.Index}; // TF output for param[{param.Index}]");
+                        var varyingInfo = new OutputVaryingInfo(param.Index, outIndex++, $"tf_out_{param.Index}", glslType);
+                        _outputVaryings.Add(varyingInfo);
+                        _generatorArgs.OutputVaryings.Add(varyingInfo);
+                    }
                 }
             }
 
@@ -383,15 +427,15 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 case IndexType.Index2D:
                     AppendLine("int _flat_idx = gl_VertexID;");
                     // Need width from a uniform
-                    AppendLine("int _idx_x = _flat_idx % u_grid_width;");
-                    AppendLine("int _idx_y = _flat_idx / u_grid_width;");
+                    AppendLine("int _idx_x = _flat_idx % u_dimWidth;");
+                    AppendLine("int _idx_y = _flat_idx / u_dimWidth;");
                     AppendLine("ivec2 _idx = ivec2(_idx_x, _idx_y);");
                     break;
                 case IndexType.Index3D:
                     AppendLine("int _flat_idx = gl_VertexID;");
-                    AppendLine("int _idx_x = _flat_idx % u_grid_width;");
-                    AppendLine("int _idx_y = (_flat_idx / u_grid_width) % u_grid_height;");
-                    AppendLine("int _idx_z = _flat_idx / (u_grid_width * u_grid_height);");
+                    AppendLine("int _idx_x = _flat_idx % u_dimWidth;");
+                    AppendLine("int _idx_y = (_flat_idx / u_dimWidth) % u_dimHeight;");
+                    AppendLine("int _idx_z = _flat_idx / (u_dimWidth * u_dimHeight);");
                     AppendLine("ivec3 _idx = ivec3(_idx_x, _idx_y, _idx_z);");
                     break;
             }
@@ -621,7 +665,46 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                         {
                             var sourceVal = Load(phi[i]);
                             AppendLine($"{targetVar} = {sourceVal};");
+
+                            // Propagate buffer pointer mappings through phi nodes.
+                            // If the source is a LEA-derived pointer, the phi target
+                            // must inherit the param mapping so Stores can find TF outputs.
+                            if (_leaParamMap.TryGetValue(sourceVal.Name, out var phiParamIdx))
+                                _leaParamMap[targetVar.Name] = phiParamIdx;
+                            if (_crossBlockPointerExprs.TryGetValue(sourceVal.Name, out var phiExpr))
+                                _crossBlockPointerExprs[targetVar.Name] = phiExpr;
                         }
+                    }
+                }
+            }
+        }
+
+        /// <summary>
+        /// Override EmitPhiAssignments for state machine path to propagate
+        /// _leaParamMap and _crossBlockPointerExprs through phi nodes.
+        /// Without this, multi-block kernels lose their buffer pointer mappings
+        /// after phi resolution, causing Stores to miss TF outputs.
+        /// </summary>
+        protected override void EmitPhiAssignments(BasicBlock sourceBlock, BasicBlock targetBlock)
+        {
+            foreach (var valueEntry in targetBlock)
+            {
+                if (valueEntry.Value is PhiValue phi)
+                {
+                    var phiVar = Load(phi);
+                    var srcValue = phi.GetValue(sourceBlock);
+                    if (srcValue != null)
+                    {
+                        var srcVar = Load(srcValue);
+                        // GLSL ES 3.0: cast to phi variable type if needed
+                        string srcExpr = CastIfNeeded(srcVar, phiVar.Type);
+                        AppendLine($"{phiVar} = {srcExpr};");
+
+                        // Propagate buffer pointer mappings through phi nodes
+                        if (_leaParamMap.TryGetValue(srcVar.Name, out var phiParamIdx))
+                            _leaParamMap[phiVar.Name] = phiParamIdx;
+                        if (_crossBlockPointerExprs.TryGetValue(srcVar.Name, out var phiExpr))
+                            _crossBlockPointerExprs[phiVar.Name] = phiExpr;
                     }
                 }
             }
@@ -665,6 +748,9 @@ namespace SpawnDev.ILGPU.WebGL.Backend
 
                     declaredVariables.Add(target.Name);
                     AppendLine($"int {target.Name} = int({offset}); // LEA into param{param.Index}");
+                    // Re-bind with correct type: the GLSL variable is declared as 'int',
+                    // but the IR type is a pointer whose element type may differ (e.g. float).
+                    Bind(value, new Variable(target.Name, "int"));
                     // Store the param index for Load/Store to use
                     _leaParamMap[target.Name] = param.Index;
                     return;
@@ -677,6 +763,8 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         }
 
         private readonly Dictionary<string, int> _leaParamMap = new();
+        /// <summary>Maps parameter index → GLSL element type ("int", "uint", "float") for buffer params.</summary>
+        private readonly Dictionary<int, string> _bufferGlslTypes = new();
 
         public override void GenerateCode(global::ILGPU.IR.Values.Load loadVal)
         {
@@ -701,20 +789,28 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             {
                 string baseIdxVar = $"{source}_base_idx";
                 Declare(target);
+                // Check if this sampler is already integer-typed
+                bool emuSamplerIsInt = _bufferGlslTypes.TryGetValue(emulInfo.ParamIndex, out var emuSamplerType)
+                    && (emuSamplerType == "int" || emuSamplerType == "uint");
+                string emuFetchLo = $"texelFetch(u_param{emulInfo.ParamIndex}, ivec2({baseIdxVar}, 0), 0).r";
+                string emuFetchHi = $"texelFetch(u_param{emulInfo.ParamIndex}, ivec2({baseIdxVar} + 1, 0), 0).r";
+                // Integer samplers already return int/uint; float samplers need floatBitsToUint
+                string emuValLo = emuSamplerIsInt ? $"uint({emuFetchLo})" : $"floatBitsToUint({emuFetchLo})";
+                string emuValHi = emuSamplerIsInt ? $"uint({emuFetchHi})" : $"floatBitsToUint({emuFetchHi})";
                 if (emulInfo.IsF64)
                 {
                     AppendLine($"{target} = f64_from_ieee754_bits(");
                     PushIndent();
-                    AppendLine($"floatBitsToUint(texelFetch(u_param{emulInfo.ParamIndex}, ivec2({baseIdxVar}, 0), 0).r),");
-                    AppendLine($"floatBitsToUint(texelFetch(u_param{emulInfo.ParamIndex}, ivec2({baseIdxVar} + 1, 0), 0).r));");
+                    AppendLine($"{emuValLo},");
+                    AppendLine($"{emuValHi});");
                     PopIndent();
                 }
                 else
                 {
                     AppendLine($"{target} = uvec2(");
                     PushIndent();
-                    AppendLine($"floatBitsToUint(texelFetch(u_param{emulInfo.ParamIndex}, ivec2({baseIdxVar}, 0), 0).r),");
-                    AppendLine($"floatBitsToUint(texelFetch(u_param{emulInfo.ParamIndex}, ivec2({baseIdxVar} + 1, 0), 0).r));");
+                    AppendLine($"{emuValLo},");
+                    AppendLine($"{emuValHi});");
                     PopIndent();
                 }
                 return;
@@ -723,12 +819,15 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             // Cross-block pointer fix
             if (_crossBlockPointerExprs.TryGetValue(source.ToString(), out var inlineExpr))
             {
+                string crossExpr = $"{inlineExpr}.r";
+                // For integer samplers, texelFetch already returns int/uint; just cast to target type
+                string castExpr = CastIfNeeded(crossExpr, target.Type);
                 if (_hoistedPrimitives.Contains(loadVal))
-                    AppendLine($"{target} = {inlineExpr}.r;");
+                    AppendLine($"{target} = {castExpr};");
                 else
                 {
                     Declare(target);
-                    AppendLine($"{target} = {inlineExpr}.r;");
+                    AppendLine($"{target} = {castExpr};");
                 }
                 return;
             }
@@ -736,12 +835,35 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             // LEA-based buffer read via texelFetch
             if (_leaParamMap.TryGetValue(source.ToString(), out var leaParamIdx))
             {
+                string fetchExpr = $"texelFetch(u_param{leaParamIdx}, ivec2({source}, 0), 0).r";
+                // For integer samplers (isampler2D/usampler2D), texelFetch already returns int/uint.
+                // For float samplers, texelFetch returns float; we may need floatBitsToInt/floatBitsToUint.
+                bool samplerIsInt = _bufferGlslTypes.TryGetValue(leaParamIdx, out var samplerGlslType)
+                    && (samplerGlslType == "int" || samplerGlslType == "uint");
+                string castExpr;
+                if (samplerIsInt)
+                {
+                    // Integer sampler: texelFetch returns int (isampler2D) or uint (usampler2D)
+                    // Just cast to target type normally (int→int is identity, uint→int is cast)
+                    castExpr = CastIfNeeded(fetchExpr, target.Type);
+                }
+                else
+                {
+                    // Float sampler: texelFetch returns float
+                    // For integer targets, we need bit-level reinterpretation
+                    if (target.Type == "int")
+                        castExpr = $"floatBitsToInt({fetchExpr})";
+                    else if (target.Type == "uint")
+                        castExpr = $"floatBitsToUint({fetchExpr})";
+                    else
+                        castExpr = CastIfNeeded(fetchExpr, target.Type);
+                }
                 if (_hoistedPrimitives.Contains(loadVal))
-                    AppendLine($"{target} = texelFetch(u_param{leaParamIdx}, ivec2({source}, 0), 0).r;");
+                    AppendLine($"{target} = {castExpr};");
                 else
                 {
                     Declare(target);
-                    AppendLine($"{target} = texelFetch(u_param{leaParamIdx}, ivec2({source}, 0), 0).r;");
+                    AppendLine($"{target} = {castExpr};");
                 }
                 return;
             }
@@ -761,20 +883,30 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             var address = Load(storeVal.Target);
             var val = Load(storeVal.Value);
 
+
             // Emulated 64-bit buffer store via TF output
             if (_emulatedVarMappings.TryGetValue(address.ToString(), out var emulInfo))
             {
-                // TF output for emulated types
-                var output = _outputVaryings.FirstOrDefault(o => o.ParamIndex == emulInfo.ParamIndex);
-                if (output != null)
+                // Find the lo and hi TF varyings for this param
+                var loOutput = _outputVaryings.FirstOrDefault(o => o.ParamIndex == emulInfo.ParamIndex && o.EmulatedSuffix == "lo");
+                var hiOutput = _outputVaryings.FirstOrDefault(o => o.ParamIndex == emulInfo.ParamIndex && o.EmulatedSuffix == "hi");
+                if (loOutput != null && hiOutput != null)
                 {
                     if (emulInfo.IsF64)
                     {
-                        AppendLine($"// emu_f64 store to TF output (not yet supported for multi-element)");
+                        // f64: vec2(hi_float, lo_float) double-float representation
+                        // Must convert back to IEEE 754 bits via f64_to_ieee754_bits() → uvec2(lo, hi)
+                        AppendLine($"{{");
+                        AppendLine($"  uvec2 _ieee_bits = f64_to_ieee754_bits({val});");
+                        AppendLine($"  {loOutput.VaryingName} = _ieee_bits.x;");
+                        AppendLine($"  {hiOutput.VaryingName} = _ieee_bits.y;");
+                        AppendLine($"}}");
                     }
                     else
                     {
-                        AppendLine($"// emu_i64 store to TF output (not yet supported for multi-element)");
+                        // i64/u64: uvec2(lo, hi) — already uint components
+                        AppendLine($"{loOutput.VaryingName} = {val}.x;");
+                        AppendLine($"{hiOutput.VaryingName} = {val}.y;");
                     }
                 }
                 return;
@@ -794,10 +926,22 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 }
             }
 
-            // Cross-block pointer fix
+            // Cross-block pointer → resolve to TF output if available
             if (_crossBlockPointerExprs.TryGetValue(address.ToString(), out _))
             {
-                AppendLine($"// Store to cross-block pointer (TF limitation)");
+                // Cross-block pointers should also map to TF outputs via _leaParamMap
+                // (propagated through PushPhiValues). Try one more time.
+                if (_leaParamMap.TryGetValue(address.ToString(), out var cbParamIdx))
+                {
+                    var cbOutput = _outputVaryings.FirstOrDefault(o => o.ParamIndex == cbParamIdx);
+                    if (cbOutput != null)
+                    {
+                        string cbValExpr = CastIfNeeded(val, cbOutput.GlslType ?? "float");
+                        AppendLine($"{cbOutput.VaryingName} = {cbValExpr};");
+                        return;
+                    }
+                }
+                AppendLine($"// Store to cross-block pointer (no TF output found)");
                 return;
             }
 
@@ -1160,13 +1304,20 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         public int OutputIndex { get; }
         public string VaryingName { get; }
         public string GlslType { get; }
+        /// <summary>True if this varying is one half of an emulated 64-bit value (lo or hi).</summary>
+        public bool IsEmulated { get; }
+        /// <summary>For emulated varyings: "lo" or "hi". Null for normal varyings.</summary>
+        public string? EmulatedSuffix { get; }
 
-        public OutputVaryingInfo(int paramIndex, int outputIndex, string varyingName, string glslType)
+        public OutputVaryingInfo(int paramIndex, int outputIndex, string varyingName, string glslType,
+            bool isEmulated = false, string? emulatedSuffix = null)
         {
             ParamIndex = paramIndex;
             OutputIndex = outputIndex;
             VaryingName = varyingName;
             GlslType = glslType;
+            IsEmulated = isEmulated;
+            EmulatedSuffix = emulatedSuffix;
         }
     }
 

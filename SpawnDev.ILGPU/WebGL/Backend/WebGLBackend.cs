@@ -401,6 +401,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 Context,
                 entryPoint,
                 glslSource,
+                parameterBindings: data.ParameterBindings,
                 outputVaryings: data.OutputVaryings);
         }
 

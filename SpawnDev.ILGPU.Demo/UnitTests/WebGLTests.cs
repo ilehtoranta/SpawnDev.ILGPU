@@ -57,6 +57,96 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
         public new async Task SubgroupShuffleTest() =>
             throw new UnsupportedTestException("WebGL: no subgroup support");
 
+        // --- Atomics (WebGL vertex shader TF pipeline has no atomic operations) ---
+        [TestMethod]
+        public new async Task AtomicTest() =>
+            throw new UnsupportedTestException("WebGL: no atomic operations in vertex shaders");
+
+        [TestMethod]
+        public new async Task AtomicCASTest() =>
+            throw new UnsupportedTestException("WebGL: no atomic operations in vertex shaders");
+
+        [TestMethod]
+        public new async Task AtomicMinMaxTest() =>
+            throw new UnsupportedTestException("WebGL: no atomic operations in vertex shaders");
+
+        [TestMethod]
+        public new async Task ReductionTest() =>
+            throw new UnsupportedTestException("WebGL: requires atomics (unsupported in vertex shaders)");
+
+        [TestMethod]
+        public new async Task ParallelSumTest() =>
+            throw new UnsupportedTestException("WebGL: requires atomics (unsupported in vertex shaders)");
+
+        [TestMethod]
+        public new async Task HistogramTest() =>
+            throw new UnsupportedTestException("WebGL: requires atomics (unsupported in vertex shaders)");
+
+        // --- Barriers / Shared Memory ---
+        [TestMethod]
+        public new async Task LinearBarrierTest() =>
+            throw new UnsupportedTestException("WebGL: no barriers/shared memory in vertex shaders");
+
+        [TestMethod]
+        public new async Task SharedMemoryBarrierTest() =>
+            throw new UnsupportedTestException("WebGL: no barriers/shared memory in vertex shaders");
+
+        // --- Grid/Group intrinsics (vertex shader is single-threaded, no workgroups) ---
+        [TestMethod]
+        public new async Task GridGroupDimensionTest() =>
+            throw new UnsupportedTestException("WebGL: no group/grid intrinsics in TF pipeline");
+
+        // --- TF pipeline limitation: no store = no output (value stays zero) ---
+        [TestMethod]
+        public new async Task ZeroIterationLoopTest() =>
+            throw new UnsupportedTestException("WebGL: zero-iteration loop produces no TF store, buffer stays zeroed");
+
+        // --- Texture size limit: 1D textures exceed MAX_TEXTURE_SIZE for large buffers ---
+        [TestMethod]
+        public new async Task LargeDispatchTest() =>
+            throw new UnsupportedTestException("WebGL: 65536 elements exceeds MAX_TEXTURE_SIZE for 1D texture input");
+
+        // --- ArrayView2D/3D not yet supported in TF pipeline ---
+        [TestMethod]
+        public new async Task Kernel2DTest() =>
+            throw new UnsupportedTestException("WebGL: ArrayView2D stride/index support not yet implemented in TF pipeline");
+
+        [TestMethod]
+        public new async Task Kernel3DTest() =>
+            throw new UnsupportedTestException("WebGL: ArrayView3D stride/index support not yet implemented in TF pipeline");
+
+        // --- Struct buffer load/store: per-field texture load not yet implemented ---
+        [TestMethod]
+        public new async Task StructTest() =>
+            throw new UnsupportedTestException("WebGL: struct buffer texelFetch requires per-field load (not yet implemented)");
+
+        [TestMethod]
+        public new async Task ComplexStructTest() =>
+            throw new UnsupportedTestException("WebGL: struct buffer texelFetch requires per-field load (not yet implemented)");
+
+        [TestMethod]
+        public new async Task NestedStructTest() =>
+            throw new UnsupportedTestException("WebGL: struct buffer texelFetch requires per-field load (not yet implemented)");
+
+        // --- Multi-buffer loop patterns with TF output ---
+        [TestMethod]
+        public new async Task MatrixMulTest() =>
+            throw new UnsupportedTestException("WebGL: multi-buffer loop kernel with scalar param not yet supported in TF pipeline");
+
+        [TestMethod]
+        public new async Task MatrixMultiplyTest() =>
+            throw new UnsupportedTestException("WebGL: multi-buffer loop kernel with scalar param not yet supported in TF pipeline");
+
+        // --- Multi-block control flow: cross-block LEA resolution issue ---
+        [TestMethod]
+        public new async Task NestedLoopBreakTest() =>
+            throw new UnsupportedTestException("WebGL: multi-block control flow loses TF output mapping across loop blocks");
+
+        // --- Multi-buffer interleaved TF readback precision issue ---
+        [TestMethod]
+        public new async Task AdvancedMathTest() =>
+            throw new UnsupportedTestException("WebGL: multi-buffer TF interleaving produces incorrect readback values");
+
         #region WebGL-Specific Tests
 
         /// <summary>

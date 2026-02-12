@@ -34,6 +34,17 @@ namespace SpawnDev.ILGPU.WebGL.Backend
 
             GenerateCodeInternal();
 
+            // GLSL ES 3.0 requires all code paths to return a value.
+            // Add a fallback return for non-void functions in case the IR
+            // ends with a throw (which we translate to a comment/noop)
+            // or other unreachable terminator.
+            string returnType = TypeGenerator[Method.ReturnType];
+            if (returnType != "void")
+            {
+                Builder.Append("    ");
+                Builder.AppendLine($"return {GetDefaultValue(returnType)};");
+            }
+
             IndentLevel = 0;
             Builder.AppendLine("}");
         }

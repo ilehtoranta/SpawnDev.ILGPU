@@ -18,7 +18,7 @@
 		<PackageIcon>icon-128.png</PackageIcon>
 		<RepositoryUrl>https://github.com/LostBeard/SpawnDev.ILGPU.git</RepositoryUrl>
 		<RepositoryType>git</RepositoryType>
-		<PackageTags>Blazor;BlazorWebAssembly;WebGPU;WebWorkers;ParallelProcessing;ILGPU;GPGPU;WebAssembly</PackageTags>
+		<PackageTags>Blazor;BlazorWebAssembly;WebGPU;WebGL;WebAssembly;WebWorkers;GPGPU;ILGPU;ParallelProcessing</PackageTags>
 		<NoPackageAnalysis>true</NoPackageAnalysis>
 		<EnableDefaultCompileItems>true</EnableDefaultCompileItems>
 		<IsPackable>true</IsPackable>
@@ -28,10 +28,10 @@
 
 	<ItemGroup>
 		<PackageReference Include="Microsoft.AspNetCore.Components.Web" Version="10.0.2" />
-		<PackageReference Include="SpawnDev.BlazorJS" Version="2.65.0" />
 	</ItemGroup>
 
 	<ItemGroup>
+		<ProjectReference Include="..\..\..\SpawnDev.BlazorJS\SpawnDev.BlazorJS\SpawnDev.BlazorJS\SpawnDev.BlazorJS.csproj" />
 		<ProjectReference Include="..\ILGPU\ILGPU.csproj" PrivateAssets="All" />
 		<ProjectReference Include="..\ILGPU.Algorithms\ILGPU.Algorithms.csproj" PrivateAssets="All" />
 	</ItemGroup>

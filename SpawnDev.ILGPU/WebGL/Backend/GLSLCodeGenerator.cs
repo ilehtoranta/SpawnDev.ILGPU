@@ -46,6 +46,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 SharedAllocations = sharedAllocations;
                 DynamicSharedAllocations = dynamicSharedAllocations;
                 OutputVaryings = new List<OutputVaryingInfo>();
+                ParameterBindings = new List<KernelParameterBinding>();
             }
 
             /// <summary>The parent backend.</summary>
@@ -60,6 +61,8 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             public AllocaKindInformation DynamicSharedAllocations { get; }
             /// <summary>Output varying metadata populated by the kernel code generator for TF.</summary>
             public List<OutputVaryingInfo> OutputVaryings { get; }
+            /// <summary>Parameter binding metadata populated by the kernel code generator.</summary>
+            public List<KernelParameterBinding> ParameterBindings { get; }
         }
 
         /// <summary>
@@ -948,7 +951,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             AppendLine("continue;");
         }
 
-        protected void EmitPhiAssignments(BasicBlock sourceBlock, BasicBlock targetBlock)
+        protected virtual void EmitPhiAssignments(BasicBlock sourceBlock, BasicBlock targetBlock)
         {
             foreach (var valueEntry in targetBlock)
             {
