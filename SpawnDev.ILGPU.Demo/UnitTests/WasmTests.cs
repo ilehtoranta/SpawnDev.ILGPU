@@ -21,11 +21,7 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
         }
 
         // Override tests that are unsupported
-        // (broadcast, subgroups — browser limitations)
-
-        [TestMethod]
-        public new async Task BroadcastTest() =>
-            throw new UnsupportedTestException("Wasm: broadcast not yet implemented");
+        // (subgroups — browser limitations)
 
         [TestMethod]
         public new async Task SubgroupShuffleTest() =>

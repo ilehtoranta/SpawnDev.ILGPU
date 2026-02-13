@@ -86,6 +86,11 @@ namespace SpawnDev.ILGPU.Workers.Backend
         private int _broadcastCounter = 0;
 
         /// <summary>
+        /// Counter for generating unique shared shuffle variable names.
+        /// </summary>
+        private int _shuffleCounter = 0;
+
+        /// <summary>
         /// Represents a bound parameter for the kernel.
         /// </summary>
         public record ParameterBinding
@@ -1066,6 +1071,29 @@ namespace SpawnDev.ILGPU.Workers.Backend
             Declare(target);
 
             string sharedVar = $"_broadcast_{_broadcastCounter++}";
+            _sharedMemoryPreamble.AppendLine($"var {sharedVar} = 0;");
+
+            AppendLine($"if (_groupIndexX === {origin}) {{ {sharedVar} = {source}; }}");
+            _barrierCounter++;
+            EmitBarrierCode();
+            AppendLine($"{target} = {sharedVar};");
+            _barrierCounter++;
+            EmitBarrierCode();
+            HasBarriers = true;
+        }
+
+        /// <summary>
+        /// Override for WarpShuffle: emulates Warp.Shuffle using shared memory + yield barriers.
+        /// Semantically identical to Broadcast — reads the value from a specific lane (origin).
+        /// </summary>
+        public override void GenerateCode(WarpShuffle value)
+        {
+            var target = Load(value);
+            var source = Load(value.Variable.Resolve());
+            var origin = Load(value.Origin.Resolve());
+            Declare(target);
+
+            string sharedVar = $"_shuffle_{_shuffleCounter++}";
             _sharedMemoryPreamble.AppendLine($"var {sharedVar} = 0;");
 
             AppendLine($"if (_groupIndexX === {origin}) {{ {sharedVar} = {source}; }}");

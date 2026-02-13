@@ -11,7 +11,7 @@
 		<DebugType>Embedded</DebugType>
 		<Title>SpawnDev.ILGPU</Title>
 		<Authors>LostBeard</Authors>
-		<Description>Run ILGPU kernels in Blazor WebAssembly with four supported backends; WebGPU ⚡⚡⚡, Wasm Workers ⚡⚡, Javascript Workers ⚡, and CPU 🐢</Description>
+		<Description>Run ILGPU kernels in Blazor WebAssembly with five supported backends; WebGPU, WebGL, Wasm Workers, Javascript Workers, and CPU</Description>
 		<PackageProjectUrl>https://github.com/LostBeard/SpawnDev.ILGPU</PackageProjectUrl>
 		<PackageReadmeFile>README.md</PackageReadmeFile>
 		<PackageLicenseFile>LICENSE.txt</PackageLicenseFile>

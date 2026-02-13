@@ -481,13 +481,15 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 GenerateStateMachineCode(blocks);
             }
 
-            // CRITICAL: Propagate BarrierCount and HasBarriers AFTER code generation.
+            // CRITICAL: Propagate BarrierCount, HasBarriers, and SharedMemorySize AFTER code generation.
             // _barrierCounter is incremented during IR visiting by GenerateCode(Barrier),
-            // so it must be read after all blocks have been visited.
+            // and _sharedMemorySize is incremented by GenerateCode(Broadcast) for broadcast slots,
+            // so they must be read after all blocks have been visited.
             _generatorArgs.BarrierCount = _barrierCounter;
             _generatorArgs.HasBarriers = _hasBarriers;
+            _generatorArgs.SharedMemorySize = _sharedMemorySize; // Re-propagate (broadcast may have added slots)
 
-            WasmBackend.Log($"[Wasm-CodeGen] Final BarrierCount={_barrierCounter}, HasBarriers={_hasBarriers}");
+            WasmBackend.Log($"[Wasm-CodeGen] Final BarrierCount={_barrierCounter}, HasBarriers={_hasBarriers}, SharedMemorySize={_sharedMemorySize}");
         }
 
         /// <summary>
@@ -1378,6 +1380,105 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             int barrierIdx = _barrierCounter++;
             _hasBarriers = true;
             EmitBarrier(barrierIdx);
+        }
+
+        /// <summary>
+        /// Counter for broadcast shared memory slots.
+        /// </summary>
+        private int _broadcastCounter = 0;
+
+        /// <summary>
+        /// Override for Broadcast: emulates Group.Broadcast using shared memory + atomic barriers.
+        /// Pattern:
+        ///   1. Origin thread stores its value to a dedicated shared memory slot
+        ///   2. Barrier (all threads sync)
+        ///   3. All threads load from the shared slot
+        ///   4. Barrier (prevent origin from overwriting before others finish reading)
+        /// </summary>
+        public override void GenerateCode(Broadcast broadcast)
+        {
+            var wasmType = GetWasmType(broadcast);
+            var target = AllocateLocal(broadcast, wasmType);
+            var source = broadcast.Variable.Resolve();
+            var origin = broadcast.Origin.Resolve();
+
+            // Allocate a slot in shared memory for this broadcast
+            int broadcastSlotOffset = _sharedMemorySize;
+            int slotSize = wasmType switch
+            {
+                WasmOpCodes.I64 => 8,
+                WasmOpCodes.F64 => 8,
+                _ => 4
+            };
+            _sharedMemorySize += (slotSize + 3) & ~3; // align to 4
+            _hasBarriers = true;
+
+            // Determine store/load ops and alignment for this type
+            byte storeOp, loadOp;
+            uint align;
+            switch (wasmType)
+            {
+                case WasmOpCodes.I64:
+                    storeOp = WasmOpCodes.I64Store;
+                    loadOp = WasmOpCodes.I64Load;
+                    align = 3;
+                    break;
+                case WasmOpCodes.F32:
+                    storeOp = WasmOpCodes.F32Store;
+                    loadOp = WasmOpCodes.F32Load;
+                    align = 2;
+                    break;
+                case WasmOpCodes.F64:
+                    storeOp = WasmOpCodes.F64Store;
+                    loadOp = WasmOpCodes.F64Load;
+                    align = 3;
+                    break;
+                default: // I32
+                    storeOp = WasmOpCodes.I32Store;
+                    loadOp = WasmOpCodes.I32Load;
+                    align = 2;
+                    break;
+            }
+
+            // Step 1: if (threadIdX == origin) { mem[sharedMemBase + offset] = source }
+            WasmModuleBuilder.EmitLocalGet(Code, _threadIdXLocal);
+            EmitGetLocal(origin);
+            Code.Add(WasmOpCodes.I32Eq);
+            Code.Add(WasmOpCodes.If);
+            Code.Add(WasmOpCodes.Void);
+
+            // Store: address = sharedMemBase + broadcastSlotOffset
+            WasmModuleBuilder.EmitLocalGet(Code, _sharedMemBaseLocal);
+            if (broadcastSlotOffset > 0)
+            {
+                WasmModuleBuilder.EmitI32Const(Code, broadcastSlotOffset);
+                Code.Add(WasmOpCodes.I32Add);
+            }
+            EmitGetLocal(source);
+            WasmModuleBuilder.EmitStore(Code, storeOp, align, 0);
+
+            Code.Add(WasmOpCodes.End); // end if
+
+            // Step 2: Barrier — ensure the origin's store is visible to all threads
+            int barrier1 = _barrierCounter++;
+            EmitBarrier(barrier1);
+
+            // Step 3: All threads load from the shared slot
+            WasmModuleBuilder.EmitLocalGet(Code, _sharedMemBaseLocal);
+            if (broadcastSlotOffset > 0)
+            {
+                WasmModuleBuilder.EmitI32Const(Code, broadcastSlotOffset);
+                Code.Add(WasmOpCodes.I32Add);
+            }
+            WasmModuleBuilder.EmitLoad(Code, loadOp, align, 0);
+            WasmModuleBuilder.EmitLocalSet(Code, target);
+
+            // Step 4: Barrier — prevent broadcast slot reuse before all threads have read
+            int barrier2 = _barrierCounter++;
+            EmitBarrier(barrier2);
+
+            _broadcastCounter++;
+            WasmBackend.Log($"[Wasm-Broadcast] Broadcast #{_broadcastCounter - 1}: slot offset={broadcastSlotOffset}, barriers={barrier1},{barrier2}");
         }
 
         public override void GenerateCode(MemoryBarrier barrier)

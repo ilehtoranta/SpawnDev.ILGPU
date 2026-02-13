@@ -20,8 +20,5 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
             return Task.FromResult<(Context, Accelerator)>((context, accelerator));
         }
 
-        [TestMethod]
-        public new async Task SubgroupShuffleTest() =>
-            throw new UnsupportedTestException("Workers: subgroups not supported");
     }
 }
