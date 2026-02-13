@@ -9,7 +9,7 @@ Write parallel compute code in C# and let the library pick the best available ba
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────┐
-│                         Your C# ILGPU Kernel                            │
+│                         Your C# ILGPU Kernel                             │
 ├──────────────┬──────────────┬──────────────┬──────────────┬──────────────┤
 │   WebGPU     │   WebGL      │     Wasm     │   Workers    │     CPU      │
 │   Backend    │   Backend    │   Backend    │   Backend    │   Backend    │
