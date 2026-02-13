@@ -240,10 +240,10 @@
     private record BenchmarkDef(string Id, string Name, string Icon, string Description);
     private readonly BenchmarkDef[] _benchmarkDefs = new[]
     {
+        new BenchmarkDef("mandelbrot", "Mandelbrot", "🎨", "512×512 fractal, 200 iterations — compute-bound"),
         new BenchmarkDef("vecadd", "Vector Add", "➕", "a[i] = b[i] + c[i] — raw memory throughput"),
         new BenchmarkDef("vecscale", "Vector Scale", "✖", "a[i] = a[i] * scalar — scalar argument marshaling"),
         new BenchmarkDef("saxpy", "SAXPY", "📐", "a[i] = alpha * x[i] + y[i] — classic GPU benchmark"),
-        new BenchmarkDef("mandelbrot", "Mandelbrot", "🎨", "512×512 fractal, 200 iterations — compute-bound"),
         new BenchmarkDef("primes", "Prime Count", "🔢", "Count primes up to N using trial division — integer ALU-heavy"),
     };
 

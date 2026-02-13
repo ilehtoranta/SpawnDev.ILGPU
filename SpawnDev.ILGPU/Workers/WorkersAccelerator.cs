@@ -196,9 +196,31 @@ namespace SpawnDev.ILGPU.Workers
             // Marshal arguments for JS execution
             var jsArgs = MarshalArguments(compiledKernel, args);
 
+            // Build or reuse cached script body + hash
+            bool canUseShared = WorkersMemoryBuffer.IsCrossOriginIsolated;
+            bool isShared = canUseShared && workersAccel.WorkerCount > 1;
+            bool hasBarriers = compiledKernel.JSSource.Contains("// __HAS_BARRIERS__");
+            var scriptKey = $"{isShared}|{dimX}|{dimY}|{dimZ}|{groupDimX}|{groupDimY}|{groupDimZ}|{hasBarriers}|{dynamicSharedElements}";
+
+            string scriptBody;
+            string scriptHash;
+            if (workersKernel.CachedScriptKey == scriptKey && workersKernel.CachedScriptBody != null)
+            {
+                scriptBody = workersKernel.CachedScriptBody;
+                scriptHash = workersKernel.CachedScriptHash!;
+            }
+            else
+            {
+                scriptBody = BuildWorkerScript(compiledKernel.JSSource, jsArgs, isShared, dimX, dimY, dimZ, groupDimX, groupDimY, groupDimZ, hasBarriers, dynamicSharedElements);
+                scriptHash = $"wk_{compiledKernel.JSSource.GetHashCode():x8}_{scriptKey.GetHashCode():x8}";
+                workersKernel.CachedScriptBody = scriptBody;
+                workersKernel.CachedScriptHash = scriptHash;
+                workersKernel.CachedScriptKey = scriptKey;
+            }
+
             // Dispatch to workers — fire and forget
             workersAccel.PendingWorkTasks.Add(DispatchToWorkers(
-                compiledKernel.JSSource, totalItems, dimX, dimY, dimZ, groupDimX, groupDimY, groupDimZ, jsArgs, workersAccel, dynamicSharedElements));
+                compiledKernel.JSSource, totalItems, dimX, dimY, dimZ, groupDimX, groupDimY, groupDimZ, jsArgs, workersAccel, dynamicSharedElements, scriptBody, scriptHash));
         }
 
         /// <summary>
@@ -216,7 +238,9 @@ namespace SpawnDev.ILGPU.Workers
             int groupDimX, int groupDimY, int groupDimZ,
             List<object?> jsArgs,
             WorkersAccelerator accelerator,
-            int dynamicSharedElements = 0)
+            int dynamicSharedElements = 0,
+            string? prebuiltScript = null,
+            string? scriptHash = null)
         {
             int workerCount = accelerator.WorkerCount;
             bool canUseShared = WorkersMemoryBuffer.IsCrossOriginIsolated;
@@ -254,7 +278,8 @@ namespace SpawnDev.ILGPU.Workers
 
             WorkersBackend.Log($"[Workers] Dispatching kernel: {totalItems} items across {workerCount} worker(s), SharedArrayBuffer={isShared}, HasBarriers={hasBarriers}");
 
-            var scriptBody = BuildWorkerScript(jsSource, jsArgs, isShared, dimX, dimY, dimZ, groupDimX, groupDimY, groupDimZ, hasBarriers, dynamicSharedElements);
+            // Use pre-built script from cache if available, otherwise build it
+            var scriptBody = prebuiltScript ?? BuildWorkerScript(jsSource, jsArgs, isShared, dimX, dimY, dimZ, groupDimX, groupDimY, groupDimZ, hasBarriers, dynamicSharedElements);
 
             // Lazily initialize the worker pool, or grow it if needed
             if (accelerator._workerPool == null)
@@ -286,7 +311,7 @@ namespace SpawnDev.ILGPU.Workers
                     int endGroup = startGroup + groupsPerWorker + (w < remainder ? 1 : 0);
 
                     DispatchSingleWorker(worker, w, jsArgs, startGroup, endGroup, isShared, tasks, accelerator._workerPool,
-                        scriptBody, barrierSab, groupSize, workerCount);
+                        scriptBody, barrierSab, groupSize, workerCount, scriptHash);
                 }
             }
             else
@@ -302,7 +327,7 @@ namespace SpawnDev.ILGPU.Workers
                     int endIdx = startIdx + itemsPerWorker + (w < remainder ? 1 : 0);
 
                     DispatchSingleWorker(worker, w, jsArgs, startIdx, endIdx, isShared, tasks, accelerator._workerPool,
-                        scriptBody);
+                        scriptBody, scriptHash: scriptHash);
                 }
             }
 
@@ -323,7 +348,8 @@ namespace SpawnDev.ILGPU.Workers
             Worker worker, int workerIndex, List<object?> jsArgs,
             int startIdx, int endIdx, bool isShared, List<Task> tasks,
             WorkerPool pool, string scriptBody,
-            SharedArrayBuffer? barrierSab = null, int groupSize = 0, int workerCount = 0)
+            SharedArrayBuffer? barrierSab = null, int groupSize = 0, int workerCount = 0,
+            string? scriptHash = null)
         {
             var tcs = new TaskCompletionSource();
             Action<MessageEvent>? msgHandler = null;
@@ -364,7 +390,7 @@ namespace SpawnDev.ILGPU.Workers
             worker.OnError += errHandler;
 
             var (messageArgs, transferList) = BuildWorkerMessage(jsArgs, startIdx, endIdx, isShared,
-                scriptBody, barrierSab, groupSize, workerCount);
+                scriptBody, barrierSab, groupSize, workerCount, scriptHash);
             if (transferList != null)
             {
                 worker.PostMessage(messageArgs, transferList);
@@ -583,7 +609,8 @@ namespace SpawnDev.ILGPU.Workers
         private static (object message, object[]? transferList) BuildWorkerMessage(
             List<object?> jsArgs, int startIdx, int endIdx, bool isShared,
             string scriptBody,
-            SharedArrayBuffer? barrierSab = null, int groupSize = 0, int workerCount = 0)
+            SharedArrayBuffer? barrierSab = null, int groupSize = 0, int workerCount = 0,
+            string? scriptHash = null)
         {
             var args = new List<object>();
             var transfers = isShared ? null : new List<object>();
@@ -613,12 +640,12 @@ namespace SpawnDev.ILGPU.Workers
             if (barrierSab != null)
             {
                 var barrierView = new Int32Array(barrierSab);
-                var message = new { script = scriptBody, startIdx, endIdx, args = args.ToArray(), barrierBuf = barrierView, workerCount };
+                var message = new { script = scriptBody, scriptHash, startIdx, endIdx, args = args.ToArray(), barrierBuf = barrierView, workerCount };
                 return (message, transfers?.ToArray());
             }
             else
             {
-                var message = new { script = scriptBody, startIdx, endIdx, args = args.ToArray() };
+                var message = new { script = scriptBody, scriptHash, startIdx, endIdx, args = args.ToArray() };
                 return (message, transfers?.ToArray());
             }
         }
@@ -1026,6 +1053,19 @@ namespace SpawnDev.ILGPU.Workers
             public Type ElementType { get; set; } = typeof(int);
         }
 
+        /// <summary>
+        /// Cached metadata from reflection for a kernel parameter.
+        /// Used to avoid repeated reflection in MarshalArguments.
+        /// </summary>
+        internal class MarshalMetadata
+        {
+            public bool IsBuffer { get; set; }
+            public Type? ElementType { get; set; }
+            public int ElementSize { get; set; }
+            public bool IsMultiDView { get; set; }
+            public string? ViewTypeName { get; set; }
+        }
+
         #endregion
 
         #region Accelerator Infrastructure
@@ -1115,6 +1155,28 @@ namespace SpawnDev.ILGPU.Workers
         /// Gets the Workers-specific compiled kernel.
         /// </summary>
         public new WorkersCompiledKernel CompiledKernel => (WorkersCompiledKernel)base.CompiledKernel;
+
+        /// <summary>
+        /// Cached worker script body, keyed by (isShared, dims, hasBarriers, dynShared).
+        /// Avoids rebuilding the StringBuilder script on every dispatch for the same kernel.
+        /// </summary>
+        internal string? CachedScriptBody { get; set; }
+
+        /// <summary>
+        /// Hash of the cached script body, sent to workers for function cache lookup.
+        /// </summary>
+        internal string? CachedScriptHash { get; set; }
+
+        /// <summary>
+        /// Cache key for the current cached script (encodes dimensions, shared mode, etc.)
+        /// </summary>
+        internal string? CachedScriptKey { get; set; }
+
+        /// <summary>
+        /// Cached argument metadata from reflection (Types, element sizes, stride info).
+        /// Avoids repeating reflection on every dispatch for the same kernel.
+        /// </summary>
+        internal WorkersAccelerator.MarshalMetadata[]? CachedMarshalMeta { get; set; }
 
         /// <inheritdoc/>
         protected override void DisposeAcceleratorObject(bool disposing) { }

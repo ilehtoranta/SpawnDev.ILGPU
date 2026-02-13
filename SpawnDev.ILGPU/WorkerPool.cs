@@ -38,10 +38,17 @@ namespace SpawnDev.ILGPU
         /// then calls it with the message data.
         /// </summary>
         private static readonly string JSBootstrapScript = @"
+var _fnCache = {};
 self.onmessage = function(e) {
   var d = e.data;
   try {
-    var fn = new Function('d', d.script);
+    var fn;
+    if (d.scriptHash && _fnCache[d.scriptHash]) {
+      fn = _fnCache[d.scriptHash];
+    } else {
+      fn = new Function('d', d.script);
+      if (d.scriptHash) _fnCache[d.scriptHash] = fn;
+    }
     fn(d);
   } catch(ex) {
     self.postMessage({ done: false, error: (ex && ex.message) ? ex.message : String(ex) });
