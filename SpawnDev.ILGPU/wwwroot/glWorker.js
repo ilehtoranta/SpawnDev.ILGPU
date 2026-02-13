@@ -50,7 +50,7 @@ self.onmessage = function (e) {
                         }
                     }
                 }
-                self.postMessage({ done: false, error: err.message + '\n' + err.stack, buffers }, transferList);
+                self.postMessage({ done: false, dispatchId: msg.dispatchId, error: err.message + '\n' + err.stack, buffers }, transferList);
             }
             break;
     }
@@ -111,7 +111,7 @@ function getUniformLoc(cached, name) {
 }
 
 function dispatchKernel(msg) {
-    const { programId, source, varyingNames, totalVertices, dimX, dimY, dimZ, strides, outputs } = msg;
+    const { dispatchId, programId, source, varyingNames, totalVertices, dimX, dimY, dimZ, strides, outputs } = msg;
     const kernelParams = msg.params;
     const diag = [];  // Diagnostic log lines
     diag.push('gl=' + (gl ? 'OK' : 'NULL'));
@@ -400,7 +400,7 @@ function dispatchKernel(msg) {
     }
 
     return {
-        message: { done: true, buffers: returnBuffers, diag: diag.join('|') },
+        message: { done: true, dispatchId, buffers: returnBuffers, diag: diag.join('|') },
         transferList
     };
 }

@@ -544,7 +544,7 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
             await accelerator.SynchronizeAsync();
             var lr = await bufL.CopyToHostAsync<int>(); var rr = await bufR.CopyToHostAsync<int>();
             int[] el = { 4, 8, 16, 32, 64, 1020, 4096, -32 }; int[] er = { 0, 1, 2, 4, 8, 127, 512, -4 };
-            for (int i = 0; i < len; i++) { if (lr[i] != el[i]) throw new Exception($"Left shift failed at {i}"); if (rr[i] != er[i]) throw new Exception($"Right shift failed at {i}"); }
+            for (int i = 0; i < len; i++) { if (lr[i] != el[i]) throw new Exception($"Left shift failed at {i}: got {lr[i]}, expected {el[i]}"); if (rr[i] != er[i]) throw new Exception($"Right shift failed at {i}: got {rr[i]}, expected {er[i]}"); }
         });
 
         [TestMethod]
@@ -583,7 +583,7 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
             ik((Index1D)len, bufInt.View); fk((Index1D)len, bufFloat.View);
             await accelerator.SynchronizeAsync();
             var ir = await bufInt.CopyToHostAsync<int>(); var fr = await bufFloat.CopyToHostAsync<float>();
-            for (int i = 0; i < len; i++) { if (ir[i] != ~(-intData[i])) throw new Exception($"Int unary failed at {i}"); if (MathF.Abs(fr[i] - (-floatData[i])) > 0.001f) throw new Exception($"Float unary failed at {i}"); }
+            for (int i = 0; i < len; i++) { if (ir[i] != ~(-intData[i])) throw new Exception($"Int unary failed at {i}: got {ir[i]}, expected {~(-intData[i])}"); if (MathF.Abs(fr[i] - (-floatData[i])) > 0.001f) throw new Exception($"Float unary failed at {i}: got {fr[i]}, expected {-floatData[i]}"); }
         });
 
         [TestMethod]

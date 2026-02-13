@@ -56,6 +56,17 @@ namespace SpawnDev.ILGPU.WebGL
         // ---- Dedicated GL Worker ----
         private Worker? _glWorker;
         private bool _workerInitialized;
+        private bool _workerMessageHandlerAttached;
+
+        /// <summary>
+        /// Monotonically increasing dispatch ID for correlating worker responses.
+        /// </summary>
+        private int _nextDispatchId;
+
+        /// <summary>
+        /// Pending dispatches awaiting worker responses, keyed by dispatch ID.
+        /// </summary>
+        private readonly ConcurrentDictionary<int, PendingDispatch> _pendingDispatches = new();
 
         /// <summary>
         /// Pending work tasks for fire-and-forget dispatch. Awaited by SynchronizeAsync.
@@ -256,10 +267,14 @@ namespace SpawnDev.ILGPU.WebGL
                     transferList.Add(underlying);
             }
 
+            // Assign unique dispatch ID for response correlation
+            var dispatchId = Interlocked.Increment(ref webGlAccel._nextDispatchId);
+
             // Build dispatch message
             var dispatchMsg = new
             {
                 type = "dispatch",
+                dispatchId,
                 programId,
                 source = compiledKernel.GLSLSource,
                 varyingNames,
@@ -272,62 +287,85 @@ namespace SpawnDev.ILGPU.WebGL
                 outputs = outputs.ToArray()
             };
 
-            // Fire-and-forget: post to worker, track via TCS
+            // Track this dispatch via TCS
             var tcs = new TaskCompletionSource();
-            Action<MessageEvent>? msgHandler = null;
-            Action<Event>? errHandler = null;
+            var pending = new PendingDispatch { Tcs = tcs, BufferArgs = bufferArgs };
+            webGlAccel._pendingDispatches[dispatchId] = pending;
 
-            msgHandler = (msg) =>
+            // Ensure the shared message handler is attached (once)
+            if (!webGlAccel._workerMessageHandlerAttached)
             {
-                webGlAccel._glWorker!.OnMessage -= msgHandler!;
-                webGlAccel._glWorker.OnError -= errHandler!;
-
-                try
+                webGlAccel._workerMessageHandlerAttached = true;
+                webGlAccel._glWorker!.OnMessage += (msg) => webGlAccel.HandleWorkerResponse(msg);
+                webGlAccel._glWorker.OnError += (_) =>
                 {
-                    using var data = msg.GetData<JSObject>();
-                    var done = data.JSRef!.Get<bool>("done");
-
-                    // Read diagnostic info from worker (contains ERR@ entries if GL errors occurred)
-                    var diagInfo = data.JSRef!.Get<string?>("diag");
-                    if (diagInfo != null && diagInfo.Contains("ERR@"))
+                    // On error, fail all pending dispatches
+                    foreach (var kvp in webGlAccel._pendingDispatches)
                     {
-                        Console.WriteLine($"[WebGL] GL errors detected: {diagInfo}");
+                        if (webGlAccel._pendingDispatches.TryRemove(kvp.Key, out var p))
+                            p.Tcs.TrySetException(new Exception("[WebGL] GL Worker error during kernel execution"));
                     }
-
-                    // Receive transferred ArrayBuffers back
-                    ReceiveTransferredBuffers(data, bufferArgs);
-
-                    if (!done)
-                    {
-                        var errorMsg = data.JSRef!.Get<string?>("error") ?? "Unknown GL worker error";
-                        tcs.TrySetException(new Exception($"[WebGL] GL Worker error: {errorMsg}"));
-                        return;
-                    }
-
-                    tcs.TrySetResult();
-                }
-                catch (Exception ex)
-                {
-                    tcs.TrySetException(new Exception($"[WebGL] Error processing worker response: {ex.Message}", ex));
-                }
-            };
-
-            errHandler = (err) =>
-            {
-                webGlAccel._glWorker!.OnMessage -= msgHandler!;
-                webGlAccel._glWorker.OnError -= errHandler!;
-                tcs.TrySetException(new Exception("[WebGL] GL Worker error during kernel execution"));
-            };
-
-            webGlAccel._glWorker!.OnMessage += msgHandler;
-            webGlAccel._glWorker.OnError += errHandler;
+                };
+            }
 
             if (transferList.Count > 0)
-                webGlAccel._glWorker.PostMessage(dispatchMsg, transferList.ToArray());
+                webGlAccel._glWorker!.PostMessage(dispatchMsg, transferList.ToArray());
             else
-                webGlAccel._glWorker.PostMessage(dispatchMsg);
+                webGlAccel._glWorker!.PostMessage(dispatchMsg);
 
             webGlAccel.PendingWorkTasks.Add(tcs.Task);
+        }
+
+        /// <summary>
+        /// Handles a worker response message by matching it to the correct pending dispatch via dispatchId.
+        /// </summary>
+        private void HandleWorkerResponse(MessageEvent msg)
+        {
+            try
+            {
+                using var data = msg.GetData<JSObject>();
+                var dispatchId = data.JSRef!.Get<int>("dispatchId");
+
+                if (!_pendingDispatches.TryRemove(dispatchId, out var pending))
+                {
+                    Log($"[WebGL] Warning: received response for unknown dispatchId {dispatchId}");
+                    return;
+                }
+
+                var done = data.JSRef!.Get<bool>("done");
+
+                // Read diagnostic info from worker (contains ERR@ entries if GL errors occurred)
+                var diagInfo = data.JSRef!.Get<string?>("diag");
+                if (diagInfo != null && diagInfo.Contains("ERR@"))
+                {
+                    Console.WriteLine($"[WebGL] GL errors detected (dispatch {dispatchId}): {diagInfo}");
+                }
+
+                // Receive transferred ArrayBuffers back
+                ReceiveTransferredBuffers(data, pending.BufferArgs);
+
+                if (!done)
+                {
+                    var errorMsg = data.JSRef!.Get<string?>("error") ?? "Unknown GL worker error";
+                    pending.Tcs.TrySetException(new Exception($"[WebGL] GL Worker error: {errorMsg}"));
+                    return;
+                }
+
+                pending.Tcs.TrySetResult();
+            }
+            catch (Exception ex)
+            {
+                Log($"[WebGL] Error processing worker response: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Tracks a pending dispatch to the GL worker.
+        /// </summary>
+        private class PendingDispatch
+        {
+            public TaskCompletionSource Tcs { get; set; } = null!;
+            public List<BufferArg> BufferArgs { get; set; } = null!;
         }
 
         /// <summary>
