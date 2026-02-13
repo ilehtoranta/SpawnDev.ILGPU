@@ -51,6 +51,13 @@
                 <div class="progress-bar-fill" style="width: @(_progressPercent)%"></div>
             </div>
             <div class="progress-label">@_progressLabel</div>
+            @if (_currentBackend == "CPU")
+            {
+                <div class="freeze-warning">
+                    <span class="freeze-icon">⚠️</span>
+                    <span>The <strong>CPU backend</strong> runs on the main thread — the UI will freeze during each iteration.</span>
+                </div>
+            }
         </div>
     }
 
@@ -175,6 +182,13 @@
     .progress-bar-track { height: 6px; background: rgba(255,255,255,0.08); border-radius: 3px; overflow: hidden; }
     .progress-bar-fill { height: 100%; background: linear-gradient(90deg, #3b82f6, #a855f7); transition: width 0.3s ease; border-radius: 3px; }
     .progress-label { font-size: 0.8rem; color: #94a3b8; margin-top: 0.3rem; text-align: center; }
+    .freeze-warning {
+        display: flex; align-items: center; gap: 0.5rem; justify-content: center;
+        margin-top: 0.6rem; padding: 0.5rem 1rem; border-radius: 8px;
+        background: rgba(245,158,11,0.12); border: 1px solid rgba(245,158,11,0.3);
+        color: #fbbf24; font-size: 0.82rem;
+    }
+    .freeze-icon { font-size: 1rem; }
 
     /* ── Cards ── */
     .bench-card {
@@ -220,6 +234,7 @@
     private string _statusMessage = "";
     private string _progressLabel = "";
     private int _progressPercent;
+    private string _currentBackend = "";
     private readonly List<BenchmarkResult> _results = new();
 
     // ── Backend colors ──
@@ -260,14 +275,14 @@
     }
 
     // ── Backend descriptors ──
-    private record BackendInfo(string Name, int DefaultN, int MandelbrotSize);
+    private record BackendInfo(string Name, int DefaultN, int MandelbrotSize, int PrimesN);
     private readonly BackendInfo[] _backends = new[]
     {
-        new BackendInfo("WebGPU", 1_000_000, 512),
-        new BackendInfo("WebGL", 1_000_000, 512),
-        new BackendInfo("Wasm", 1_000_000, 512),
-        new BackendInfo("Workers", 1_000_000, 512),
-        new BackendInfo("CPU", 65_536, 256),
+        new BackendInfo("WebGPU", 1_000_000, 512, 1_000_000),
+        new BackendInfo("WebGL", 1_000_000, 512, 1_000_000),
+        new BackendInfo("Wasm", 1_000_000, 512, 1_000_000),
+        new BackendInfo("Workers", 1_000_000, 512, 1_000_000),
+        new BackendInfo("CPU", 1_000_000, 512, 500_000),
     };
 
     // ====================================================================
@@ -403,6 +418,7 @@
                 _progressPercent = (int)(100.0 * step / totalSteps);
                 _progressLabel = $"{bench.Name} → {backend.Name} ({step}/{totalSteps})";
                 _statusMessage = _progressLabel;
+                _currentBackend = backend.Name;
                 StateHasChanged();
                 await Task.Delay(1); // yield to UI
 
@@ -419,6 +435,7 @@
         }
 
         _isRunning = false;
+        _currentBackend = "";
         _statusMessage = $"Done — {_results.Count(r => !r.Failed)} of {_results.Count} benchmarks succeeded";
         _progressPercent = 100;
         StateHasChanged();
@@ -452,9 +469,12 @@
                 _ => throw new ArgumentException($"Unknown benchmark: {bench.Id}")
             };
 
-            int elementCount = bench.Id == "mandelbrot"
-                ? backend.MandelbrotSize * backend.MandelbrotSize
-                : backend.DefaultN;
+            int elementCount = bench.Id switch
+            {
+                "mandelbrot" => backend.MandelbrotSize * backend.MandelbrotSize,
+                "primes" => backend.PrimesN,
+                _ => backend.DefaultN,
+            };
 
             double median = Median(times);
             double throughput = elementCount / (median / 1000.0);
@@ -616,7 +636,7 @@
 
     private async Task<double[]> BenchPrimes(Accelerator acc, BackendInfo backend)
     {
-        int n = backend.DefaultN;
+        int n = backend.PrimesN;
         var results = new int[n];
 
         using var buf = acc.Allocate1D(results);
@@ -656,8 +676,9 @@
         if (benchResults.Count == 0) return;
 
         var labels = benchResults.Select(r => r.BackendName).ToArray();
-        var values = benchResults.Select(r => r.MedianMs!.Value).ToArray();
+        var values = benchResults.Select(r => r.ElementCount / (r.MedianMs!.Value / 1000.0)).ToArray(); // throughput: elements/sec
         var colors = benchResults.Select(r => GetBackendColor(r.BackendName)).ToArray();
+        var unit = benchResults.First().BenchmarkName == "Mandelbrot" ? "px/s" : "elem/s";
 
         try
         {
@@ -678,12 +699,20 @@
                 var values = {System.Text.Json.JsonSerializer.Serialize(values)};
                 var colors = {System.Text.Json.JsonSerializer.Serialize(colors)};
 
-                var padL = 60, padR = 20, padT = 20, padB = 40;
+                var padL = 72, padR = 20, padT = 20, padB = 40;
                 var chartW = w - padL - padR;
                 var chartH = h - padT - padB;
                 var maxVal = Math.max(...values) * 1.15;
                 var barW = Math.min(60, chartW / labels.length * 0.6);
                 var gap = (chartW - barW * labels.length) / (labels.length + 1);
+
+                // format throughput helper
+                function formatTP(v) {{
+                    if (v >= 1e9) return (v/1e9).toFixed(1) + 'G';
+                    if (v >= 1e6) return (v/1e6).toFixed(1) + 'M';
+                    if (v >= 1e3) return (v/1e3).toFixed(1) + 'K';
+                    return v.toFixed(0);
+                }}
 
                 // grid lines
                 ctx.strokeStyle = 'rgba(255,255,255,0.06)';
@@ -692,7 +721,7 @@
                     var gy = padT + chartH - (chartH * g / 4);
                     ctx.beginPath(); ctx.moveTo(padL, gy); ctx.lineTo(w - padR, gy); ctx.stroke();
                     ctx.fillStyle = '#64748b'; ctx.font = '11px sans-serif'; ctx.textAlign = 'right';
-                    ctx.fillText((maxVal * g / 4).toFixed(1), padL - 6, gy + 4);
+                    ctx.fillText(formatTP(maxVal * g / 4), padL - 6, gy + 4);
                 }}
 
                 // bars
@@ -721,7 +750,7 @@
 
                     // value label
                     ctx.fillStyle = '#e2e8f0'; ctx.font = 'bold 11px sans-serif'; ctx.textAlign = 'center';
-                    ctx.fillText(values[i].toFixed(1) + ' ms', x + barW / 2, y - 6);
+                    ctx.fillText(formatTP(values[i]), x + barW / 2, y - 6);
 
                     // axis label
                     ctx.fillStyle = '#94a3b8'; ctx.font = '12px sans-serif';
@@ -731,7 +760,7 @@
                 // y-axis label
                 ctx.save(); ctx.translate(14, padT + chartH / 2); ctx.rotate(-Math.PI / 2);
                 ctx.fillStyle = '#64748b'; ctx.font = '11px sans-serif'; ctx.textAlign = 'center';
-                ctx.fillText('Time (ms)', 0, 0);
+                ctx.fillText('Throughput (elem/s)', 0, 0);
                 ctx.restore();
             }})();
             ");
