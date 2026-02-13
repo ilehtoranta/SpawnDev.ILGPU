@@ -2,30 +2,30 @@
 
 [![NuGet](https://img.shields.io/nuget/v/SpawnDev.ILGPU.svg?)](https://www.nuget.org/packages/SpawnDev.ILGPU)
 
-**Run [ILGPU](https://github.com/m4rs-mt/ILGPU) kernels in the browser — on the GPU via WebGPU, natively via WebAssembly, across threads via Web Workers, or on the CPU.**  
-Write parallel compute code in C# and let the library pick the best available backend automatically.
+**Run [ILGPU](https://github.com/m4rs-mt/ILGPU) kernels in the browser — on the GPU via WebGPU or WebGL, natively via WebAssembly, across threads via Web Workers, or on the CPU.**  
+Write parallel compute code in C# and let the library pick the best available backend automatically. With two GPU backends, SpawnDev.ILGPU brings GPU-accelerated compute to virtually every modern browser and device.
 
 ## Architecture
 
 ```
-┌──────────────────────────────────────────────────────────────┐
-│                    Your C# ILGPU Kernel                      │
-├──────────────┬──────────────┬──────────────┬─────────────────┤
-│   WebGPU     │     Wasm     │   Workers    │      CPU        │
-│   Backend    │   Backend    │   Backend    │    Backend      │
-├──────────────┼──────────────┼──────────────┼─────────────────┤
-│ WGSL         │ WebAssembly  │ JavaScript   │ .NET runtime    │
-│ transpile    │ binary       │ transpile +  │ (main thread,   │
-│ → GPU        │ → Workers    │ Web Workers  │  blocking)      │
-└──────────────┴──────────────┴──────────────┴─────────────────┘
+┌──────────────────────────────────────────────────────────────────────────┐
+│                         Your C# ILGPU Kernel                            │
+├──────────────┬──────────────┬──────────────┬──────────────┬──────────────┤
+│   WebGPU     │   WebGL      │     Wasm     │   Workers    │     CPU      │
+│   Backend    │   Backend    │   Backend    │   Backend    │   Backend    │
+├──────────────┼──────────────┼──────────────┼──────────────┼──────────────┤
+│ WGSL         │ GLSL ES 3.0  │ WebAssembly  │ JavaScript   │ .NET runtime │
+│ transpile    │ transpile    │ binary       │ transpile +  │ (main thread │
+│ → GPU        │ → GPU        │ → Workers    │ Web Workers  │  blocking)   │
+└──────────────┴──────────────┴──────────────┴──────────────┴──────────────┘
 ```
 
 ## Demo Application
 
 The demo application is located in [SpawnDev.ILGPU.Demo](SpawnDev.ILGPU.Demo) and showcases:
 - Automatic device detection across all backends
-- Interactive Mandelbrot / Fractal Explorer (WebGPU, Wasm, Workers)
-- Comprehensive unit test suites for WebGPU, Workers, Wasm, and CPU backends
+- Interactive Mandelbrot / Fractal Explorer (WebGPU, WebGL, Wasm, Workers)
+- Comprehensive unit test suites for WebGPU, WebGL, Workers, Wasm, and CPU backends
 - [Live Demo](https://lostbeard.github.io/SpawnDev.ILGPU/)
 - [Live Demo - Fractal Explorer](https://lostbeard.github.io/SpawnDev.ILGPU/fractals)
 
@@ -33,35 +33,37 @@ The demo application is located in [SpawnDev.ILGPU.Demo](SpawnDev.ILGPU.Demo) an
 
 ## Backends at a Glance
 
-| | 🎮 **WebGPU** | 🧊 **Wasm** | 🧵 **Workers** | 💻 **CPU** |
-|---|---|---|---|---|
-| **Executes on** | GPU | Web Workers | Web Workers | Main (UI) thread |
-| **Transpiles to** | WGSL | WebAssembly binary | JavaScript | — (interpreted) |
-| **Threading** | GPU parallelism | Multi-worker | Multi-worker | Single-threaded |
-| **Blocking** | Non-blocking | Non-blocking | Non-blocking | ⚠️ Blocks UI thread |
-| **SharedArrayBuffer** | Not required | Required for multi-worker | Required for multi-worker | Not required |
-| **Performance** | ⚡⚡⚡ Fastest | ⚡⚡ Fast | ⚡ Moderate | 🐢 Slowest |
-| **Shared Memory** | ✅ | ✅ | ✅ | ⚠️ Barriers broken in WASM |
-| **Atomics** | ✅ | ✅ | ✅ | ⚠️ Crashes in WASM |
-| **64-bit (f64/i64)** | ✅ Emulated | ✅ Native | ✅ Native | ✅ Native |
-| **Browser support** | Chrome/Edge 113+ | All modern browsers | All modern browsers | All modern browsers |
-| **Best for** | GPU compute, rendering | General compute | CPU-bound parallel work | Fallback / debugging |
+| | 🎮 **WebGPU** | 🖼️ **WebGL** | 🧊 **Wasm** | 🧵 **Workers** | 💻 **CPU** |
+|---|---|---|---|---|---|
+| **Executes on** | GPU | GPU | Web Workers | Web Workers | Main (UI) thread |
+| **Transpiles to** | WGSL | GLSL ES 3.0 | WebAssembly binary | JavaScript | — (interpreted) |
+| **Technique** | Compute shader | Transform Feedback | Multi-worker | Multi-worker | Single-threaded |
+| **Blocking** | Non-blocking | Non-blocking | Non-blocking | Non-blocking | ⚠️ Blocks UI thread |
+| **SharedArrayBuffer** | Not required | Not required | Required for multi-worker | Required for multi-worker | Not required |
+| **Performance** | ⚡⚡⚡ Fastest | ⚡⚡⚡ Fast | ⚡⚡ Fast | ⚡ Moderate | 🐢 Slowest |
+| **Shared Memory** | ✅ | ❌ | ✅ | ✅ | ⚠️ Barriers broken in WASM |
+| **Atomics** | ✅ | ❌ | ✅ | ✅ | ⚠️ Crashes in WASM |
+| **64-bit (f64/i64)** | ✅ Emulated | ✅ Emulated | ✅ Native | ✅ Native | ✅ Native |
+| **Browser support** | Chrome/Edge 113+ | All modern browsers | All modern browsers | All modern browsers | All modern browsers |
+| **Best for** | GPU compute (modern) | GPU compute (universal) | General compute | CPU-bound parallel work | Fallback / debugging |
 
-**Auto-selection priority:** WebGPU → Wasm → Workers → CPU
+**Auto-selection priority:** WebGPU → WebGL → Wasm → Workers → CPU
 
 ## Features
 
-- **Four backends** — WebGPU (GPU compute), Wasm (native WebAssembly), Workers (multi-threaded JS), and CPU (fallback)
+- **Five backends** — WebGPU (GPU compute), WebGL (GPU via Transform Feedback), Wasm (native WebAssembly), Workers (multi-threaded JS), and CPU (fallback)
+- **Two GPU backends** — WebGPU for modern browsers, WebGL for universal GPU access on virtually every device
 - **Automatic backend selection** — `CreatePreferredAcceleratorAsync()` picks the best available
 - **ILGPU-compatible** — Use familiar APIs (`ArrayView`, `Index1D/2D/3D`, math intrinsics, etc.)
 - **WGSL transpilation** — C# kernels automatically compiled to WebGPU Shading Language
+- **GLSL transpilation** — C# kernels compiled to GLSL ES 3.0 vertex shaders with Transform Feedback for GPU compute
 - **Wasm compilation** — C# kernels compiled to native WebAssembly binary modules
-- **64-bit emulation** — Support for `double` (f64) and `long` (i64) via emulated WGSL logic
+- **64-bit emulation** — Support for `double` (f64) and `long` (i64) via software emulation on both GPU backends
 - **WebGPU extension auto-detection** — Probes adapter for `shader-f16`, `subgroups`, `timestamp-query`, and other features; conditionally enables them on the device
 - **Subgroup operations** — `Group.Broadcast` and `Warp.Shuffle` are supported on the WebGPU backend when the browser supports the `subgroups` extension
 - **Multi-worker dispatch** — Wasm and Workers backends distribute work across all available CPU cores via SharedArrayBuffer
 - **Blazor WebAssembly** — Seamless integration via [SpawnDev.BlazorJS](https://github.com/LostBeard/SpawnDev.BlazorJS)
-- **Shared memory & atomics** — Supports workgroup memory, barriers, and atomic operations
+- **Shared memory & atomics** — Supports workgroup memory, barriers, and atomic operations (WebGPU, Wasm, Workers)
 - **No native dependencies** — Entirely written in C#
 
 ## Installation
@@ -89,17 +91,17 @@ await builder.Build().BlazorJSRunAsync();
 
 ### 2. Quick Start — Automatic Backend Selection
 
-The simplest way to use SpawnDev.ILGPU is with automatic backend selection. The library discovers all available backends and picks the best one:
+The simplest way to use SpawnDev.ILGPU is with automatic backend selection. The library discovers all available backends and picks the best one (WebGPU → WebGL → Wasm → Workers → CPU):
 
 ```csharp
 using ILGPU;
 using ILGPU.Runtime;
 using SpawnDev.ILGPU;
 
-// Initialize context with all available backends (WebGPU, Wasm, Workers, CPU)
+// Initialize context with all available backends (WebGPU, WebGL, Wasm, Workers, CPU)
 using var context = await Context.CreateAsync(builder => builder.AllAcceleratorsAsync());
 
-// Create the best available accelerator (WebGPU > Wasm > Workers > CPU)
+// Create the best available accelerator (WebGPU > WebGL > Wasm > Workers > CPU)
 using var accelerator = await context.CreatePreferredAcceleratorAsync();
 
 // Allocate buffers and run a kernel — same API regardless of backend
@@ -129,6 +131,13 @@ You can also target a specific backend directly using `Context.CreateAsync`:
 // WebGPU — GPU compute via WGSL
 using var context = await Context.CreateAsync(builder => builder.WebGPU());
 var device = context.GetWebGPUDevices()[0];
+using var accelerator = await device.CreateAcceleratorAsync(context);
+```
+
+```csharp
+// WebGL — GPU compute via GLSL ES 3.0 + Transform Feedback (works on virtually all browsers)
+using var context = await Context.CreateAsync(builder => builder.WebGL());
+var device = context.GetWebGLDevices()[0];
 using var accelerator = await device.CreateAcceleratorAsync(context);
 ```
 
@@ -168,13 +177,14 @@ _test.bat
 
 ## Test Coverage
 
-**360+ tests** across four test suites covering all core features.
+**450+ tests** across five test suites covering all core features.
 
 ### Test Suites
 
 | Suite | Backend | What's Tested |
 |-------|---------|---------------|
 | **WebGPUTests** | WebGPU | Full ILGPU feature set on GPU via WGSL |
+| **WebGLTests** | WebGL | GPU compute via GLSL ES 3.0, f64/i64 emulation |
 | **WasmTests** | Wasm | Native WebAssembly binary dispatch to workers |
 | **WorkerTests** | Workers | Multi-threaded JS dispatch, parity with WebGPU |
 | **CPUTests** | CPU | ILGPU CPU accelerator as reference (barriers/atomics excluded) |
@@ -193,7 +203,7 @@ _test.bat
 | **Control Flow** | if/else, loops, nested, short-circuit | ✅ |
 | **Structs** | Simple, nested, with arrays | ✅ |
 | **Type Casting** | float↔int, uint, mixed precision | ✅ |
-| **64-bit Emulation** | `double` and `long` via software emulation (WebGPU) | ✅ |
+| **64-bit Emulation** | `double` and `long` via software emulation (WebGPU, WebGL) | ✅ |
 | **GPU Patterns** | Stencil, reduction, matrix multiply, lerp, smoothstep | ✅ |
 | **Shared Memory** | Static and dynamic workgroup memory | ✅ |
 | **Broadcast & Subgroups** | `Group.Broadcast`, `Warp.Shuffle` (WebGPU with subgroups extension) | ✅ |
@@ -202,31 +212,42 @@ _test.bat
 
 ## Browser Requirements
 
-- Chrome 113+ (WebGPU + all backends)
-- Edge 113+ (WebGPU + all backends)
-- Firefox Nightly with `dom.webgpu.enabled` (WebGPU); stable Firefox (Wasm + Workers + CPU)
+| Backend | Browser Support |
+|---------|----------------|
+| **WebGPU** | Chrome/Edge 113+, Firefox Nightly (`dom.webgpu.enabled`) |
+| **WebGL** | ✅ All modern browsers (Chrome, Edge, Firefox, Safari, mobile browsers) |
+| **Wasm** | All modern browsers |
+| **Workers** | All modern browsers |
+| **CPU** | All modern browsers |
+
+> **GPU on every device:** WebGL support means GPU-accelerated compute works on virtually every browser and device — including mobile phones, tablets, and older desktops without WebGPU support.
 
 > **Note:** For multi-worker SharedArrayBuffer support (used by Wasm and Workers backends), the page must be cross-origin isolated (COOP/COEP headers). The demo includes a service worker (`coi-serviceworker.js`) that handles this automatically. Without SharedArrayBuffer, both backends fall back to single-worker mode.
 
-## WebGPU Backend Configuration
+## GPU Backend Configuration
 
 ### 64-bit Emulation
 
-WebGPU hardware typically only supports 32-bit operations. SpawnDev.ILGPU provides software emulation for 64-bit types (`double`/f64 and `long`/i64), **enabled by default** for full precision parity with CPU and Workers backends.
+GPU hardware typically only supports 32-bit operations. Both GPU backends (WebGPU and WebGL) provide software emulation for 64-bit types (`double`/f64 and `long`/i64), **enabled by default** for full precision parity with CPU and Workers backends.
 
 To disable emulation for better performance (at the cost of precision):
 
 ```csharp
+// WebGPU
 using SpawnDev.ILGPU.WebGPU.Backend;
-
 var options = new WebGPUBackendOptions { EnableF64Emulation = false, EnableI64Emulation = false };
+using var accelerator = await device.CreateAcceleratorAsync(context, options);
+
+// WebGL
+using SpawnDev.ILGPU.WebGL.Backend;
+var options = new WebGLBackendOptions { EnableF64Emulation = false, EnableI64Emulation = false };
 using var accelerator = await device.CreateAcceleratorAsync(context, options);
 ```
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `EnableF64Emulation` | `true` | 64-bit float (`double`) emulation via `vec2<f32>` |
-| `EnableI64Emulation` | `true` | 64-bit integer (`long`) emulation via `vec2<u32>` |
+| `EnableF64Emulation` | `true` | 64-bit float (`double`) emulation via double-float technique |
+| `EnableI64Emulation` | `true` | 64-bit integer (`long`) emulation via double-word technique |
 
 ## Workers Backend
 
@@ -275,10 +296,12 @@ All backends include verbose debug logging, disabled by default. Enable per-back
 
 ```csharp
 using SpawnDev.ILGPU.WebGPU.Backend;
+using SpawnDev.ILGPU.WebGL.Backend;
 using SpawnDev.ILGPU.Workers.Backend;
 using SpawnDev.ILGPU.Wasm.Backend;
 
 WebGPUBackend.VerboseLogging = true;   // WebGPU backend
+WebGLBackend.VerboseLogging = true;    // WebGL backend
 WasmBackend.VerboseLogging = true;     // Wasm backend
 WorkersBackend.VerboseLogging = true;  // Workers backend
 ```

@@ -7,10 +7,10 @@
         <h1 class="hero-title">
             <span class="gradient-text">ILGPU for the Browser</span>
         </h1>
-        <p class="hero-subtitle">C# Kernels in the Browser: High-Performance GPU Computing with Blazor and WebGPU</p>
+        <p class="hero-subtitle">C# GPU Computing in Every Browser with Blazor WebAssembly</p>
         <p class="hero-description">
-            Run ILGPU kernels in Blazor WebAssembly across four backends. 
-            WebGPU for GPU compute, multi-threaded WebAssembly for near-native speed, Web Workers for multi-threaded parallelism, or CPU as a universal fallback —
+            Run ILGPU kernels in Blazor WebAssembly across five backends.
+            WebGPU and WebGL for GPU compute on virtually every device, multi-threaded WebAssembly for near-native speed, Web Workers for parallel execution, or CPU as a universal fallback —
             the library picks the best available automatically.
         </p>
         <div class="hero-buttons">
@@ -25,12 +25,17 @@
 </div>
 
 <div class="features-section">
-    <h2 class="section-title">Four Backends, One API</h2>
+    <h2 class="section-title">Five Backends, One API</h2>
     <div class="features-grid">
         <div class="feature-card feature-highlight">
             <div class="feature-icon">🎮</div>
             <h3>WebGPU Backend</h3>
             <p>C# kernels transpiled to WGSL and dispatched to the GPU. Supports shared memory, atomics, 64-bit emulation, and auto-detects extensions like <code>shader-f16</code> and <code>subgroups</code> for broadcast &amp; warp shuffle operations.</p>
+        </div>
+        <div class="feature-card feature-highlight">
+            <div class="feature-icon">🖼️</div>
+            <h3>WebGL Backend</h3>
+            <p>C# kernels transpiled to GLSL ES 3.0 and executed on the GPU via Transform Feedback. Works on virtually every browser and device — including mobile, Safari, and older desktops. Full 64-bit emulation support.</p>
         </div>
         <div class="feature-card feature-highlight">
             <div class="feature-icon">🧊</div>
@@ -55,7 +60,7 @@
         <div class="feature-card">
             <div class="feature-icon">🔀</div>
             <h3>Auto Backend Selection</h3>
-            <p>CreatePreferredAcceleratorAsync() picks the best backend: WebGPU → Wasm → Workers → CPU.</p>
+            <p>CreatePreferredAcceleratorAsync() picks the best backend: WebGPU → WebGL → Wasm → Workers → CPU.</p>
         </div>
         <div class="feature-card">
             <div class="feature-icon">🌐</div>
@@ -87,7 +92,7 @@
             <div class="step-number">2</div>
             <div class="step-content">
                 <h3>Initialize All Backends</h3>
-                <p>Register WebGPU, Wasm, Workers, and CPU in one call.</p>
+                <p>Register WebGPU, WebGL, Wasm, Workers, and CPU in one call.</p>
                 <div class="code-block">
                     <pre><code><span class="keyword">var</span> builder = Context.<span class="method">Create</span>();
 <span class="keyword">await</span> builder.<span class="method">AllAcceleratorsAsync</span>();
@@ -102,7 +107,7 @@
                 <h3>Create Best Accelerator</h3>
                 <p>Automatically selects the best available backend.</p>
                 <div class="code-block">
-                    <pre><code><span class="comment">// Priority: WebGPU → Wasm → Workers → CPU</span>
+                    <pre><code><span class="comment">// Priority: WebGPU → WebGL → Wasm → Workers → CPU</span>
 <span class="keyword">using var</span> accelerator = <span class="keyword">await</span> context.<span class="method">CreatePreferredAcceleratorAsync</span>();</code></pre>
                 </div>
             </div>
