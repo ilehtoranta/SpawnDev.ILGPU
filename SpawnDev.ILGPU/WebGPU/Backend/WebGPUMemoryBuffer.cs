@@ -15,6 +15,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             _buffer = accelerator.NativeAccelerator.Allocate<byte>(LengthInBytes);
         }
 
+        public Task<Uint8Array> CopyToHostUint8ArrayAsync(long sourceByteOffset = 0, long? copyBytes = null) => NativeBuffer.CopyToHostUint8ArrayAsync(sourceByteOffset, copyBytes);
+
         public WebGPUBuffer<byte> NativeBuffer => _buffer;
         // Implementation of abstract members
         protected override void CopyFrom(AcceleratorStream stream, in ArrayView<byte> source, in ArrayView<byte> destination)
@@ -67,5 +69,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         {
             if (disposing) _buffer.Dispose();
         }
+
+
+
     }
 }

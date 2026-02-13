@@ -80,6 +80,14 @@ namespace SpawnDev.ILGPU.Wasm
             return Task.FromResult(CopyToHost<T>(length));
         }
 
+        public Task<Uint8Array> CopyToHostUint8ArrayAsync(long sourceByteOffset = 0, long? copyBytes = null)
+        {
+            if (SharedBuffer == null) return Task.FromResult(new Uint8Array());
+            return copyBytes == null ? 
+                Task.FromResult(new Uint8Array(SharedBuffer, sourceByteOffset)) : 
+                Task.FromResult(new Uint8Array(SharedBuffer, sourceByteOffset, copyBytes.Value));
+        }
+
         /// <inheritdoc/>
         protected override void MemSet(
             AcceleratorStream stream,

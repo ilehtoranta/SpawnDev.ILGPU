@@ -101,13 +101,41 @@ namespace SpawnDev.ILGPU.WebGPU
 
         /// <summary>
         /// Copies data from the GPU buffer to a host array asynchronously.
+        /// Allocates and returns a new T[] array.
+        /// For hot-path rendering loops, prefer the overload that accepts a destination array
+        /// to avoid per-call allocations.
         /// </summary>
         public async Task<T[]> CopyToHostAsync(long sourceOffset = 0, long? length = null)
+        {
+            var copyLength = length ?? Length - sourceOffset;
+            var result = new T[copyLength];
+            await CopyToHostAsync(result, sourceOffset, copyLength);
+            return result;
+        }
+
+        // Cached staging buffer for zero-allocation readback
+        private GPUBuffer? _cachedStagingBuffer;
+        private long _cachedStagingSize;
+
+        /// <summary>
+        /// Copies GPU data into a caller-provided array, reusing a cached staging buffer.
+        /// This is the zero-allocation hot path — no GPU buffer or .NET array allocation per call.
+        /// The staging buffer is created once and reused for subsequent calls of the same or smaller size.
+        /// </summary>
+        /// <param name="destination">Pre-allocated array to receive the data. Must have enough space for count elements.</param>
+        /// <param name="sourceOffset">Offset in elements from the start of the GPU buffer.</param>
+        /// <param name="count">Number of elements to copy. If null, copies as many as will fit in destination.</param>
+        /// <returns>Number of elements actually copied.</returns>
+        public async Task<long> CopyToHostAsync(T[] destination, long sourceOffset = 0, long? count = null)
         {
             if (_buffer == null)
                 throw new ObjectDisposedException(nameof(WebGPUBuffer<T>));
 
-            var copyLength = length ?? Length - sourceOffset;
+            var copyLength = count ?? Math.Min(destination.Length, Length - sourceOffset);
+            if (copyLength <= 0) return 0;
+
+            var copyBytes = copyLength * ElementSize;
+            var sourceByteOffset = sourceOffset * ElementSize;
 
             WebGPUBackend.Log($"[WebGPU] CopyToHostAsync: SourceOffset={sourceOffset}, Length={copyLength} elements");
 
@@ -115,49 +143,171 @@ namespace SpawnDev.ILGPU.WebGPU
             if (device == null)
                 throw new InvalidOperationException("GPU device not initialized");
 
-            // Prepare result array
-            T[] result;
-
-            // Create a staging buffer for reading
-            var stagingSize = copyLength * ElementSize;
-            var stagingDescriptor = new GPUBufferDescriptor
+            // Ensure cached staging buffer is large enough (created once, reused)
+            if (_cachedStagingBuffer == null || _cachedStagingSize < copyBytes)
             {
-                Size = (ulong)stagingSize,
-                Usage = GPUBufferUsage.CopyDst | GPUBufferUsage.MapRead,
-                MappedAtCreation = false
-            };
+                _cachedStagingBuffer?.Destroy();
+                _cachedStagingBuffer?.Dispose();
 
-            using var stagingBuffer = device.CreateBuffer(stagingDescriptor);
+                var stagingDescriptor = new GPUBufferDescriptor
+                {
+                    Size = (ulong)copyBytes,
+                    Usage = GPUBufferUsage.CopyDst | GPUBufferUsage.MapRead,
+                    MappedAtCreation = false
+                };
+                _cachedStagingBuffer = device.CreateBuffer(stagingDescriptor);
+                _cachedStagingSize = copyBytes;
+            }
 
-            // Create command encoder to copy
+            // Copy from GPU buffer to cached staging buffer
             using var encoder = device.CreateCommandEncoder();
-            encoder.CopyBufferToBuffer(
-                _buffer,
-                (ulong)(sourceOffset * ElementSize),
-                stagingBuffer,
-                0,
-                (ulong)stagingSize);
-
+            encoder.CopyBufferToBuffer(_buffer, (ulong)sourceByteOffset, _cachedStagingBuffer, 0, (ulong)copyBytes);
             using var commandBuffer = encoder.Finish();
             Accelerator.Queue?.Submit(new[] { commandBuffer });
 
-            // Map and read
-            await stagingBuffer.MapAsync(GPUMapMode.Read);
-            var mappedRange = stagingBuffer.GetMappedRange();
+            // Map, read into caller's destination array, unmap
+            await _cachedStagingBuffer.MapAsync(GPUMapMode.Read);
+            var mappedRange = _cachedStagingBuffer.GetMappedRange();
             if (mappedRange != null)
             {
                 using var uint8Array = new Uint8Array(mappedRange);
-                result = uint8Array.Read<T>();
+                uint8Array.Read(0, destination, 0, copyLength);
             }
-            else
-            {
-                result = [];
-            }
-            stagingBuffer.Unmap();
+            _cachedStagingBuffer.Unmap();
 
             WebGPUBackend.Log($"[WebGPU] CopyToHostAsync: Finished");
 
-            return result;
+            return copyLength;
+        }
+
+        /// <summary>
+        /// Copies GPU data into a caller-provided array, reusing a cached staging buffer.
+        /// This is the zero-allocation hot path — no GPU buffer or .NET array allocation per call.
+        /// The staging buffer is created once and reused for subsequent calls of the same or smaller size.
+        /// </summary>
+        /// <param name="sourceByteOffset">Offset in bytes from the start of the GPU buffer.</param>
+        /// <param name="copyBytes">Number of bytes to copy. If null, copies as many as will fit in destination.</param>
+        /// <returns>Number of elements actually copied.</returns>
+        public async Task<Uint8Array> CopyToHostUint8ArrayAsync(long sourceByteOffset = 0, long? copyBytes = null)
+        {
+            if (_buffer == null)
+                throw new ObjectDisposedException(nameof(Buffer));
+
+            copyBytes ??= Length * ElementSize - sourceByteOffset;
+            if (copyBytes <= 0) return new Uint8Array();
+
+            WebGPUBackend.Log($"[WebGPU] CopyToHostUint8ArrayAsync: SourceByteOffset={sourceByteOffset}, CopyBytes={copyBytes} elements");
+
+            var device = Accelerator.NativeDevice;
+            if (device == null)
+                throw new InvalidOperationException("GPU device not initialized");
+
+            // Ensure cached staging buffer is large enough (created once, reused)
+            if (_cachedStagingBuffer == null || _cachedStagingSize < copyBytes)
+            {
+                _cachedStagingBuffer?.Destroy();
+                _cachedStagingBuffer?.Dispose();
+
+                var stagingDescriptor = new GPUBufferDescriptor
+                {
+                    Size = (ulong)copyBytes,
+                    Usage = GPUBufferUsage.CopyDst | GPUBufferUsage.MapRead,
+                    MappedAtCreation = false
+                };
+                _cachedStagingBuffer = device.CreateBuffer(stagingDescriptor);
+                _cachedStagingSize = copyBytes.Value;
+            }
+
+            // Copy from GPU buffer to cached staging buffer
+            using var encoder = device.CreateCommandEncoder();
+            encoder.CopyBufferToBuffer(_buffer, (ulong)sourceByteOffset, _cachedStagingBuffer, 0, (ulong)copyBytes);
+            using var commandBuffer = encoder.Finish();
+            Accelerator.Queue?.Submit(new[] { commandBuffer });
+
+            // Map, read into caller's destination array, unmap
+            await _cachedStagingBuffer.MapAsync(GPUMapMode.Read);
+            Uint8Array result = default!;
+            try
+            {
+                using var mappedRange = _cachedStagingBuffer.GetMappedRange();
+                if (mappedRange != null)
+                {
+                    result = new Uint8Array(mappedRange.Slice(0));
+                }
+            }
+            finally
+            {
+                _cachedStagingBuffer.Unmap();
+            }
+
+            WebGPUBackend.Log($"[WebGPU] CopyToHostAsync: Finished");
+
+            return result ?? new Uint8Array();
+        }
+
+        /// <summary>
+        /// Copies GPU data into a caller-provided array of a different element type,
+        /// reusing a cached staging buffer. The data is reinterpreted as TDest elements.
+        /// This is used by extension methods where the native buffer is byte-typed
+        /// but the caller wants to read as a different struct type (e.g., uint, float).
+        /// </summary>
+        /// <typeparam name="TDest">The destination element type.</typeparam>
+        /// <param name="destination">Pre-allocated array to receive the data.</param>
+        /// <param name="sourceOffset">Offset in TDest elements from the start of the GPU buffer.</param>
+        /// <param name="count">Number of TDest elements to copy.</param>
+        /// <param name="destElementSize">Size of TDest in bytes (Marshal.SizeOf&lt;TDest&gt;()).</param>
+        /// <returns>Number of TDest elements actually copied.</returns>
+        public async Task<long> CopyToHostAsync<TDest>(TDest[] destination, long sourceOffset, long count, int destElementSize) where TDest : struct
+        {
+            if (_buffer == null)
+                throw new ObjectDisposedException(nameof(WebGPUBuffer<T>));
+
+            if (count <= 0) return 0;
+
+            var copyBytes = count * destElementSize;
+            var sourceByteOffset = sourceOffset * destElementSize;
+
+            WebGPUBackend.Log($"[WebGPU] CopyToHostAsync<{typeof(TDest).Name}>: SourceOffset={sourceOffset}, Length={count} elements, ByteSize={copyBytes}");
+
+            var device = Accelerator.NativeDevice;
+            if (device == null)
+                throw new InvalidOperationException("GPU device not initialized");
+
+            // Ensure cached staging buffer is large enough (created once, reused)
+            if (_cachedStagingBuffer == null || _cachedStagingSize < copyBytes)
+            {
+                _cachedStagingBuffer?.Destroy();
+                _cachedStagingBuffer?.Dispose();
+
+                var stagingDescriptor = new GPUBufferDescriptor
+                {
+                    Size = (ulong)copyBytes,
+                    Usage = GPUBufferUsage.CopyDst | GPUBufferUsage.MapRead,
+                    MappedAtCreation = false
+                };
+                _cachedStagingBuffer = device.CreateBuffer(stagingDescriptor);
+                _cachedStagingSize = copyBytes;
+            }
+
+            // Copy from GPU buffer to cached staging buffer
+            using var encoder = device.CreateCommandEncoder();
+            encoder.CopyBufferToBuffer(_buffer, (ulong)sourceByteOffset, _cachedStagingBuffer, 0, (ulong)copyBytes);
+            using var commandBuffer = encoder.Finish();
+            Accelerator.Queue?.Submit(new[] { commandBuffer });
+
+            // Map, read as TDest into destination array, unmap
+            await _cachedStagingBuffer.MapAsync(GPUMapMode.Read);
+            var mappedRange = _cachedStagingBuffer.GetMappedRange();
+            if (mappedRange != null)
+            {
+                using var uint8Array = new Uint8Array(mappedRange);
+                uint8Array.Read(0, destination, 0, count);
+            }
+            _cachedStagingBuffer.Unmap();
+
+            WebGPUBackend.Log($"[WebGPU] CopyToHostAsync<{typeof(TDest).Name}>: Finished");
+
+            return count;
         }
 
         /// <summary>
@@ -175,6 +325,10 @@ namespace SpawnDev.ILGPU.WebGPU
         {
             if (_disposed) return;
             _disposed = true;
+
+            _cachedStagingBuffer?.Destroy();
+            _cachedStagingBuffer?.Dispose();
+            _cachedStagingBuffer = null;
 
             _buffer?.Destroy();
             _buffer?.Dispose();

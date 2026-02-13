@@ -213,6 +213,15 @@
         double, double, double, double, double>? _kernel;
     private MemoryBuffer2D<uint, Stride2D.DenseX>? _outputBuffer;
 
+    // Cached rendering resources (avoid per-frame allocations)
+    private uint[]? _cachedResult;
+    private CanvasRenderingContext2D? _cachedMainCtx;
+    private CanvasRenderingContext2D? _cachedFpsCtx;
+    private ImageData? _cachedImageData;
+    private Uint8ClampedArray? _cachedDestPixels;
+    private int _cachedResultWidth;
+    private int _cachedResultHeight;
+
     protected override async Task OnAfterRenderAsync(bool firstRender)
     {
         if (firstRender)
@@ -328,6 +337,21 @@
         _ilgpuAccelerator = null;
         _ilgpuContext?.Dispose();
         _ilgpuContext = null;
+    }
+
+    private void DisposeRenderingCaches()
+    {
+        _cachedDestPixels?.Dispose();
+        _cachedDestPixels = null;
+        _cachedImageData?.Dispose();
+        _cachedImageData = null;
+        _cachedMainCtx?.Dispose();
+        _cachedMainCtx = null;
+        _cachedFpsCtx?.Dispose();
+        _cachedFpsCtx = null;
+        _cachedResult = null;
+        _cachedResultWidth = 0;
+        _cachedResultHeight = 0;
     }
 
     // ========== Initialization ==========
@@ -549,40 +573,71 @@
             var kernelTime = sw.Elapsed.TotalMilliseconds;
             _lastKernelMs = kernelTime;
 
-            // Readback (unified — works for all backends)
+            // Canvas blit — uses ctx.CreateImageData for non-shared buffer backing.
+            // In multi-threaded Blazor WASM, the .NET heap is a SharedArrayBuffer,
+            // so ImageData(Uint8ClampedArray) rejects all views from .NET or shared memory.
+            // Solution: CreateImageData creates non-shared backing, then .Data.Set() copies into it.
             var swReadback = Stopwatch.StartNew();
             var internalBuffer = ((IArrayView)_outputBuffer).Buffer;
-            uint[] result;
-            if (internalBuffer is WebGPUMemoryBuffer webGpuBuf)
+            int pixelCount = _width * _height;
+            int byteCount = pixelCount * 4;
+
+            // Cache the canvas 2D context — it never changes between frames
+            if (_cachedMainCtx == null)
             {
-                var byteData = await webGpuBuf.NativeBuffer.CopyToHostAsync();
-                result = new uint[_width * _height];
-                Buffer.BlockCopy(byteData, 0, result, 0, byteData.Length);
+                using var canvas = new HTMLCanvasElement(_mainCanvas);
+                _cachedMainCtx = canvas.GetContext<CanvasRenderingContext2D>("2d");
             }
-            else if (internalBuffer is WorkersMemoryBuffer workersBuf)
+
+            // Cache the ImageData and its Data pixel buffer (non-shared) — rebuild only on dimension change
+            if (_cachedImageData == null || _cachedResultWidth != _width || _cachedResultHeight != _height)
             {
-                var byteData = workersBuf.Uint8View!.ReadBytes();
-                result = new uint[_width * _height];
-                Buffer.BlockCopy(byteData, 0, result, 0, byteData.Length);
+                _cachedDestPixels?.Dispose();
+                _cachedImageData?.Dispose();
+                _cachedImageData = _cachedMainCtx!.CreateImageData(_width, _height);
+                _cachedDestPixels = _cachedImageData.Data;
+                _cachedResultWidth = _width;
+                _cachedResultHeight = _height;
+                // Also resize the cached result array
+                _cachedResult = new uint[pixelCount];
+            }
+
+            var destPixels = _cachedDestPixels!;
+
+            if (internalBuffer is WorkersMemoryBuffer workersBuf)
+            {
+                // JS-side copy: source view from shared buffer → non-shared ImageData
+                using var srcView = await workersBuf.CopyToHostUint8ArrayAsync(0, byteCount);
+                destPixels.Set(srcView);
             }
             else if (internalBuffer is WasmMemoryBuffer wasmBuf)
             {
-                var byteData = wasmBuf.TypedArrayView.ReadBytes();
-                result = new uint[_width * _height];
-                Buffer.BlockCopy(byteData, 0, result, 0, byteData.Length);
+                // JS-side copy: source view from shared buffer → non-shared ImageData
+                using var srcView = await wasmBuf.CopyToHostUint8ArrayAsync(0, byteCount);
+                //using var srcView = new Uint8Array(wasmBuf.SharedBuffer, 0, byteCount);
+                destPixels.Set(srcView);
             }
             else if (internalBuffer is WebGLMemoryBuffer webGlBuf)
             {
-                var byteData = webGlBuf.BackingArray!.ReadBytes();
-                result = new uint[_width * _height];
-                Buffer.BlockCopy(byteData, 0, result, 0, Math.Min(byteData.Length, result.Length * 4));
+                // JS-side copy: source view from regular ArrayBuffer → non-shared ImageData
+                using var srcView = await webGlBuf.CopyToHostUint8ArrayAsync(0, byteCount);
+                destPixels.Set(srcView);
+            }
+            else if (internalBuffer is WebGPUMemoryBuffer webGpuBuf)
+            {
+                // WebGPU: cached staging readback → Write to ImageData (zero-alloc hot path)
+                using var srcView = await webGpuBuf.CopyToHostUint8ArrayAsync(0, byteCount);
+                destPixels.Set(srcView);
             }
             else
             {
-                // CPU fallback — use standard ILGPU copy
-                result = new uint[_width * _height];
-                _outputBuffer.View.BaseView.CopyToCPU(result);
+                // CPU fallback: read to .NET, Write to ImageData
+                _outputBuffer.View.BaseView.CopyToCPU(_cachedResult!);
+                destPixels.Write(_cachedResult!);
             }
+
+            _cachedMainCtx!.PutImageData(_cachedImageData, 0, 0);
+
             swReadback.Stop();
             _lastReadbackMs = swReadback.Elapsed.TotalMilliseconds;
 
@@ -600,7 +655,6 @@
                 _currentFps = 1.0 / dt;
             }
 
-            await DrawToCanvas(result);
             await DrawFpsGraph();
         }
         finally
@@ -609,23 +663,18 @@
         }
     }
 
-    private async Task DrawToCanvas(uint[] pixels)
-    {
-        using var canvas = new HTMLCanvasElement(_mainCanvas);
-        using var context = canvas.GetContext<CanvasRenderingContext2D>("2d");
-        using var uint32Array = new Uint32Array(pixels);
-        using var uint8ClampedArray = new Uint8ClampedArray(uint32Array.Buffer);
-        using var imageData = new ImageData(uint8ClampedArray, (ulong)_width, (ulong)_height);
-        context!.PutImageData(imageData, 0, 0);
-    }
-
     private async Task DrawFpsGraph()
     {
         try
         {
-            using var canvas = new HTMLCanvasElement(_fpsCanvas);
-            using var ctx = canvas.GetContext<CanvasRenderingContext2D>("2d");
-            if (ctx == null) return;
+            // Cache the FPS canvas 2D context
+            if (_cachedFpsCtx == null)
+            {
+                using var canvas = new HTMLCanvasElement(_fpsCanvas);
+                _cachedFpsCtx = canvas.GetContext<CanvasRenderingContext2D>("2d");
+                if (_cachedFpsCtx == null) return;
+            }
+            var ctx = _cachedFpsCtx;
 
             int w = 220, h = 80;
             ctx.ClearRect(0, 0, w, h);
@@ -807,6 +856,7 @@
     {
         _disposed = true;
         await Task.Delay(100);
+        DisposeRenderingCaches();
         DisposeAcceleratorResources();
     }
 }

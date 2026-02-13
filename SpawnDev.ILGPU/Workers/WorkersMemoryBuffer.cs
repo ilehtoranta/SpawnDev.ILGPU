@@ -109,6 +109,14 @@ namespace SpawnDev.ILGPU.Workers
             _uint8View = new Uint8Array(_arrayBuffer);
         }
 
+        public Task<Uint8Array> CopyToHostUint8ArrayAsync(long sourceByteOffset = 0, long? copyBytes = null)
+        {
+            if (Uint8View == null) return Task.FromResult(new Uint8Array());
+            return copyBytes == null ?
+                Task.FromResult(Uint8View.SubArray(sourceByteOffset)) :
+                Task.FromResult(Uint8View.SubArray(sourceByteOffset, copyBytes.Value));
+        }
+
         #endregion
 
         #region MemoryBuffer Implementation

@@ -47,6 +47,12 @@ namespace SpawnDev.ILGPU.WebGPU
         [ThreadStatic]
         private static List<GPUBuffer>? _scalarBufferPool;
 
+        // Reusable lists to avoid per-dispatch allocations
+        [ThreadStatic]
+        private static List<GPUBuffer>? _reusableScalarReturnList;
+        [ThreadStatic]
+        private static List<GPUBindGroupEntry>? _reusableEntryList;
+
         private class ReflectionMetadataCache
         {
             public PropertyInfo? BaseViewProperty { get; set; }
@@ -384,13 +390,17 @@ namespace SpawnDev.ILGPU.WebGPU
             var shader = nativeAccel.GetOrCreateComputeShader(compiledKernel.WGSLSource, "main", overrideConstants);
             var device = nativeAccel.NativeDevice!;
 
-            // Track scalar buffers for pool return
-            var scalarBuffersToReturn = new List<GPUBuffer>();
+            // Track scalar buffers for pool return (reuse list to avoid per-frame allocation)
+            _reusableScalarReturnList ??= new List<GPUBuffer>();
+            _reusableScalarReturnList.Clear();
+            var scalarBuffersToReturn = _reusableScalarReturnList;
 
             try
             {
                 int currentBindingIndex = 0;
-                var entries = new List<GPUBindGroupEntry>();
+                _reusableEntryList ??= new List<GPUBindGroupEntry>();
+                _reusableEntryList.Clear();
+                var entries = _reusableEntryList;
 
                 for (int i = 0; i < args.Length; i++)
                 {
@@ -407,18 +417,15 @@ namespace SpawnDev.ILGPU.WebGPU
                     if (arg != null)
                     {
                         var argType = arg.GetType();
+                        var argCache = GetOrCreateReflectionCache(argType);
                         if (argType.Name.Contains("ArrayView"))
                         {
                             dims = ExtractDimensionsFromView(arg, argType);
                         }
 
-                        if (arrayView == null)
+                        if (arrayView == null && argCache.BaseViewProperty != null)
                         {
-                            var baseViewProp = argType.GetProperty("BaseView");
-                            if (baseViewProp != null)
-                            {
-                                arrayView = baseViewProp.GetValue(arg) as IArrayView;
-                            }
+                            arrayView = argCache.BaseViewProperty.GetValue(arg) as IArrayView;
                         }
                     }
 
@@ -429,8 +436,8 @@ namespace SpawnDev.ILGPU.WebGPU
                         var contiguous = arrayView as IContiguousArrayView;
                         if (contiguous == null)
                         {
-                            var baseViewProp = arrayView.GetType().GetProperty("BaseView");
-                            contiguous = (baseViewProp != null ? baseViewProp.GetValue(arrayView) : arrayView) as IContiguousArrayView;
+                            var viewCache = GetOrCreateReflectionCache(arrayView.GetType());
+                            contiguous = (viewCache.BaseViewProperty != null ? viewCache.BaseViewProperty.GetValue(arrayView) : arrayView) as IContiguousArrayView;
                         }
 
                         if (contiguous == null) throw new Exception($"Argument {i} is not a contiguous WebGPU buffer");

@@ -224,10 +224,10 @@ namespace SpawnDev.ILGPU
             {
                 await WebGPUAcceleratorExtensions.SynchronizeAsync(webGpuAccelerator);
             }
-            else if (accelerator is WebGLAccelerator)
+            else if (accelerator is WebGLAccelerator webGlAccelerator)
             {
-                // WebGL2 is synchronous — no async sync needed
-                accelerator.Synchronize();
+                // WebGL2 now uses async worker dispatch — must await pending tasks
+                await WebGLAcceleratorExtensions.SynchronizeAsync(webGlAccelerator);
             }
             else if (accelerator is WorkersAccelerator workersAccelerator)
             {

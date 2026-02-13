@@ -165,6 +165,16 @@ namespace SpawnDev.ILGPU.WebGL
         }
 
         /// <summary>
+        /// Creates a new OffscreenCanvas without obtaining a WebGL2 context.
+        /// Used for worker offloading — the GL context is created inside the worker
+        /// after the canvas is transferred via postMessage.
+        /// </summary>
+        public OffscreenCanvas CreateOffscreenCanvas()
+        {
+            return new OffscreenCanvas(1, 1);
+        }
+
+        /// <summary>
         /// Returns the device name (GPU renderer string).
         /// </summary>
         public string Name { get; }

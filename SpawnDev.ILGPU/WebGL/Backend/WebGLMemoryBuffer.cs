@@ -26,6 +26,28 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         /// </summary>
         public Uint8Array? BackingArray => _backingArray;
 
+        /// <summary>
+        /// Gets the underlying ArrayBuffer backing this memory buffer.
+        /// Used for zero-copy transfer to/from the GL worker.
+        /// </summary>
+        public ArrayBuffer? UnderlyingBuffer => _backingArray?.Buffer;
+
+        /// <summary>
+        /// Replaces the underlying ArrayBuffer with a new one (used after transfer back from Worker).
+        /// Enables zero-copy ArrayBuffer transfers without requiring SharedArrayBuffer/COI.
+        /// </summary>
+        internal void ReplaceArrayBuffer(ArrayBuffer newBuffer)
+        {
+            _backingArray?.Dispose();
+            _backingArray = new Uint8Array(newBuffer);
+        }
+
+        public Task<Uint8Array> CopyToHostUint8ArrayAsync(long sourceByteOffset = 0, long? copyBytes = null)
+        {
+            if (BackingArray == null) return Task.FromResult(new Uint8Array());
+            return copyBytes == null ? Task.FromResult(BackingArray.SubArray(sourceByteOffset)) : Task.FromResult(BackingArray.SubArray(sourceByteOffset, copyBytes.Value + sourceByteOffset));
+        }
+
         protected override void CopyFrom(
             AcceleratorStream stream,
             in ArrayView<byte> source,

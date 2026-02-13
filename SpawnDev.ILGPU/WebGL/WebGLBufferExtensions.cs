@@ -7,6 +7,7 @@
 
 using global::ILGPU;
 using global::ILGPU.Runtime;
+using SpawnDev.BlazorJS.JSObjects;
 using SpawnDev.ILGPU.WebGL.Backend;
 using System.Runtime.InteropServices;
 
@@ -26,10 +27,7 @@ namespace SpawnDev.ILGPU.WebGL
             where T : unmanaged
         {
             var internalBuffer = GetWebGLBuffer((MemoryBuffer)buffer);
-            var byteData = internalBuffer.BackingArray!.ReadBytes();
-            var result = new T[buffer.Length];
-            MemoryMarshal.Cast<byte, T>(byteData).CopyTo(new Span<T>(result));
-            return Task.FromResult(result);
+            return Task.FromResult(internalBuffer.BackingArray!.Read<T>(0, buffer.Length));
         }
 
         /// <summary>
@@ -39,10 +37,19 @@ namespace SpawnDev.ILGPU.WebGL
         public static Task<T[]> CopyToHostAsync<T>(this MemoryBuffer buffer) where T : unmanaged
         {
             var internalBuffer = GetWebGLBuffer(buffer);
-            var byteData = internalBuffer.BackingArray!.ReadBytes();
-            var result = new T[buffer.Length];
-            MemoryMarshal.Cast<byte, T>(byteData).CopyTo(new Span<T>(result));
-            return Task.FromResult(result);
+            return Task.FromResult(internalBuffer.BackingArray!.Read<T>(0, buffer.Length));
+        }
+
+        /// <summary>
+        /// Copies data from the buffer back to the host as a TypedArray asynchronously.
+        /// </summary>
+        /// <typeparam name="T"></typeparam>
+        /// <param name="buffer"></param>
+        /// <returns></returns>
+        public static Task<T> CopyToHostTypeArrayAsync<T>(this MemoryBuffer buffer) where T : TypedArray
+        {
+            var internalBuffer = GetWebGLBuffer(buffer);
+            return Task.FromResult(internalBuffer.BackingArray!.ReCast<T>());
         }
 
         /// <summary>

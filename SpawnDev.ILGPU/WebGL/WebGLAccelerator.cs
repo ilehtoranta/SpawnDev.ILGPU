@@ -12,6 +12,7 @@ using SpawnDev.BlazorJS;
 using SpawnDev.BlazorJS.JSObjects;
 using GL = SpawnDev.BlazorJS.JSObjects.GL;
 using SpawnDev.ILGPU.WebGL.Backend;
+using System.Collections.Concurrent;
 using System.Reflection;
 using System.Reflection.Emit;
 using System.Runtime.InteropServices;
@@ -21,7 +22,7 @@ namespace SpawnDev.ILGPU.WebGL
 {
     /// <summary>
     /// WebGL2 accelerator implementation for ILGPU.
-    /// Provides kernel compilation and execution capabilities using WebGL2 Transform Feedback.
+    /// All GL calls are offloaded to a dedicated Web Worker for main-thread responsiveness.
     /// </summary>
     public class WebGLAccelerator : KernelAccelerator<WebGLCompiledKernel, WebGLKernel>
     {
@@ -31,12 +32,7 @@ namespace SpawnDev.ILGPU.WebGL
         public WebGLBackend Backend { get; private set; } = null!;
 
         /// <summary>
-        /// Gets the WebGL2 rendering context.
-        /// </summary>
-        public WebGL2RenderingContext GLContext { get; private set; } = null!;
-
-        /// <summary>
-        /// Gets the OffscreenCanvas used for the WebGL2 context.
+        /// Gets the OffscreenCanvas used for the WebGL2 context (transferred to worker).
         /// </summary>
         public OffscreenCanvas Canvas { get; private set; } = null!;
 
@@ -57,32 +53,45 @@ namespace SpawnDev.ILGPU.WebGL
             if (VerboseLogging) Console.WriteLine(message);
         }
 
-        // ---- Shader program cache: avoids recompiling the same shader every frame ----
-        private readonly Dictionary<string, CachedGLProgram> _programCache = new();
-
-        // ---- Cached VAO + dummy vertex buffer (reused across dispatches) ----
-        private WebGLVertexArrayObject? _cachedVAO;
-        private SpawnDev.BlazorJS.JSObjects.WebGLBuffer? _cachedDummyVBO;
-        private int _cachedDummyVBOSize;
+        // ---- Dedicated GL Worker ----
+        private Worker? _glWorker;
+        private bool _workerInitialized;
 
         /// <summary>
-        /// Record for caching compiled GL programs along with their uniform locations.
+        /// Pending work tasks for fire-and-forget dispatch. Awaited by SynchronizeAsync.
         /// </summary>
-        private sealed class CachedGLProgram : IDisposable
-        {
-            public WebGLProgram Program { get; init; } = null!;
-            public WebGLShader VertShader { get; init; } = null!;
-            public WebGLShader FragShader { get; init; } = null!;
-            public bool IsDisposed { get; private set; }
+        internal List<Task> PendingWorkTasks { get; } = new List<Task>();
 
-            public void Dispose()
+        // ---- Reflection cache: avoids per-dispatch GetProperty calls ----
+        private static readonly ConcurrentDictionary<Type, ReflectionMetadataCache> _reflectionCache = new();
+
+        private class ReflectionMetadataCache
+        {
+            public PropertyInfo? BaseViewProperty { get; set; }
+        }
+
+        private static ReflectionMetadataCache GetOrCreateReflectionCache(Type type)
+        {
+            return _reflectionCache.GetOrAdd(type, t =>
             {
-                if (IsDisposed) return;
-                IsDisposed = true;
-                Program?.Dispose();
-                VertShader?.Dispose();
-                FragShader?.Dispose();
-            }
+                var flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+                return new ReflectionMetadataCache
+                {
+                    BaseViewProperty = t.GetProperty("BaseView", flags),
+                };
+            });
+        }
+
+        // ---- Internal data class for marshaled buffer arguments ----
+        private class BufferArg
+        {
+            public WebGLMemoryBuffer MemoryBuffer { get; set; } = null!;
+            public long ByteOffset { get; set; }
+            public long ByteLength { get; set; }
+            public int ElementSize { get; set; }
+            public string GlslType { get; set; } = "float";
+            public int ParamIndex { get; set; }
+            public int ArgIndex { get; set; }
         }
 
         #region Construction
@@ -90,23 +99,50 @@ namespace SpawnDev.ILGPU.WebGL
         private WebGLAccelerator(Context context, Device device) : base(context, device) { }
 
         /// <summary>
-        /// Creates a new WebGL2 accelerator.
+        /// Creates a new WebGL2 accelerator with a dedicated GL worker.
         /// </summary>
         public static WebGLAccelerator Create(Context context, WebGLILGPUDevice device, WebGLBackendOptions? options)
         {
             var accelerator = new WebGLAccelerator(context, device);
-            var (canvas, gl) = device.NativeDevice.CreateContext();
+            var canvas = device.NativeDevice.CreateOffscreenCanvas();
             accelerator.Canvas = canvas;
-            accelerator.GLContext = gl;
             accelerator.Backend = new WebGLBackend(context, options ?? WebGLBackendOptions.Default);
             accelerator.Init(accelerator.Backend);
             accelerator.DefaultStream = accelerator.CreateStreamInternal();
 
-            Log($"[WebGL] Accelerator created: {device.NativeDevice.Name}");
+            // Initialize the dedicated GL worker
+            accelerator.InitializeGLWorker();
+
+            Log($"[WebGL] Accelerator created with dedicated GL worker: {device.NativeDevice.Name}");
             Log($"[WebGL] Max TF Components: {device.NativeDevice.MaxTransformFeedbackInterleavedComponents}");
 
             return accelerator;
         }
+
+        #endregion
+
+        #region GL Worker Initialization
+
+        /// <summary>
+        /// Creates the dedicated GL worker by loading glWorker.js from the library's static assets.
+        /// Transfers the OffscreenCanvas to the worker.
+        /// </summary>
+        private void InitializeGLWorker()
+        {
+            // Load worker from the library's static web assets
+            var workerUrl = "_content/SpawnDev.ILGPU/glWorker.js";
+            _glWorker = new Worker(workerUrl);
+
+            // Transfer OffscreenCanvas to the worker
+            // Canvas must be both a property of the message AND in the transfer list
+            var initMsg = new { type = "init", canvas = Canvas.JSRef! };
+            _glWorker.PostMessage(initMsg, new object[] { Canvas.JSRef! });
+
+            _workerInitialized = true;
+
+            Log("[WebGL] GL Worker initialized and OffscreenCanvas transferred");
+        }
+
 
         #endregion
 
@@ -167,20 +203,21 @@ namespace SpawnDev.ILGPU.WebGL
         #region Kernel Execution
 
         /// <summary>
-        /// Executes a WebGL2 kernel with the specified parameters via Transform Feedback.
+        /// Executes a WebGL2 kernel by dispatching to the dedicated GL worker.
+        /// This is fire-and-forget — actual GL work happens on the worker thread.
+        /// Completion is tracked via PendingWorkTasks, awaited by SynchronizeAsync.
         /// </summary>
         public static void RunKernel(Kernel kernel, AcceleratorStream stream, object dimension, object[] args)
         {
             var webGlAccel = (WebGLAccelerator)kernel.Accelerator;
             var webGlKernel = (WebGLKernel)kernel;
             var compiledKernel = webGlKernel.CompiledKernel;
-            var gl = webGlAccel.GLContext;
 
             Log("\n[WebGL-Debug] ---- GENERATED GLSL ----");
             Log(compiledKernel.GLSLSource);
             Log("[WebGL-Debug] ------------------------\n");
 
-            // Determine dispatch size (total vertices = total work items)
+            // Determine dispatch size
             int totalVertices = 1;
             int dimX = 1, dimY = 1, dimZ = 1;
 
@@ -200,537 +237,329 @@ namespace SpawnDev.ILGPU.WebGL
 
             Log($"[WebGL-Debug] Dispatch: {totalVertices} vertices (dim={dimX}x{dimY}x{dimZ})");
 
-            // ---- Step 1: Get or compile shader program (cached) ----
-            var vertexShaderSource = compiledKernel.GLSLSource;
-            Log($"[WebGL-SHADER-SRC]\n{vertexShaderSource}");
+            // Marshal arguments
+            var (jsParams, bufferArgs, strideMap, outputs) = MarshalArguments(compiledKernel, args, webGlAccel);
+
+            // Build unique program ID from source hash
+            var programId = compiledKernel.GLSLSource.GetHashCode().ToString("X8");
 
             var varyingNames = compiledKernel.OutputVaryings
                 .Select(o => o.VaryingName)
                 .ToArray();
 
-            if (!webGlAccel._programCache.TryGetValue(vertexShaderSource, out var cached) || cached.IsDisposed)
+            // Build transfer list (all ArrayBuffers move to worker)
+            var transferList = new List<object>();
+            foreach (var ba in bufferArgs)
             {
-                // Compile and cache the shader program
-                var fragmentShaderSource = "#version 300 es\nprecision mediump float;\nvoid main() {}\n";
-                var vertShader = CompileShader(gl, GL.VERTEX_SHADER, vertexShaderSource);
-                var fragShader = CompileShader(gl, GL.FRAGMENT_SHADER, fragmentShaderSource);
-                var program = gl.CreateProgram();
-                gl.AttachShader(program, vertShader);
-                gl.AttachShader(program, fragShader);
-
-                if (varyingNames.Length > 0)
-                    gl.TransformFeedbackVaryings(program, varyingNames, GL.INTERLEAVED_ATTRIBS);
-
-                gl.LinkProgram(program);
-                var linkStatus = gl.GetProgramParameter<bool>(program, GL.LINK_STATUS);
-                if (!linkStatus)
-                {
-                    var log = gl.GetProgramInfoLog(program);
-                    vertShader.Dispose();
-                    fragShader.Dispose();
-                    program.Dispose();
-                    throw new InvalidOperationException($"[WebGL] Program link failed:\n{log}");
-                }
-
-                cached = new CachedGLProgram { Program = program, VertShader = vertShader, FragShader = fragShader };
-                webGlAccel._programCache[vertexShaderSource] = cached;
-                Log($"[WebGL-Debug] Compiled and cached new shader program");
+                var underlying = ba.MemoryBuffer.UnderlyingBuffer;
+                if (underlying != null)
+                    transferList.Add(underlying);
             }
 
-            var glProgram = cached.Program;
-            gl.UseProgram(glProgram);
-
-            // ---- Step 3: Upload dimension uniforms ----
-            var dimWidthLoc = gl.GetUniformLocation(glProgram, "u_dimWidth");
-            if (dimWidthLoc != null) gl.Uniform1i(dimWidthLoc, dimX);
-
-            var dimHeightLoc = gl.GetUniformLocation(glProgram, "u_dimHeight");
-            if (dimHeightLoc != null) gl.Uniform1i(dimHeightLoc, dimY);
-
-            // ---- Step 4: Bind input parameters ----
-            var disposables = new List<IDisposable>();
-            int textureUnit = 0;
-
-            // Use fully qualified name to avoid collision with SpawnDev.BlazorJS.JSObjects.WebGLBuffer
-            var glDisposables = new List<IDisposable>();
-
-            try
+            // Build dispatch message
+            var dispatchMsg = new
             {
-                // The GLSL generator uses Method.Parameters indices (0 = implicit index,
-                // 1+ = data params), but args[] and EntryPoint.Parameters use 0-based
-                // indexing without the implicit index. We add an offset of 1 so uniform
-                // names (u_param1, u_param2, ...) match the generated GLSL.
-                const int glslParamOffset = 1; // KernelParamOffset in the GLSL generator
+                type = "dispatch",
+                programId,
+                source = compiledKernel.GLSLSource,
+                varyingNames,
+                totalVertices,
+                dimX,
+                dimY,
+                dimZ,
+                @params = jsParams.ToArray(),
+                strides = strideMap,
+                outputs = outputs.ToArray()
+            };
 
-                for (int pIdx = 0; pIdx < args.Length; pIdx++)
-                {
-                    int glslParamIndex = pIdx + glslParamOffset;
+            // Fire-and-forget: post to worker, track via TCS
+            var tcs = new TaskCompletionSource();
+            Action<MessageEvent>? msgHandler = null;
+            Action<Event>? errHandler = null;
 
-                    var arg = args[pIdx];
-                    IArrayView? arrayView = arg as IArrayView;
-
-                    if (arrayView == null && arg != null)
-                    {
-                        var baseViewProp = arg.GetType().GetProperty("BaseView");
-                        if (baseViewProp != null)
-                            arrayView = baseViewProp.GetValue(arg) as IArrayView;
-                    }
-
-                    if (arrayView != null)
-                    {
-                        // Buffer argument → upload via texture (TBO emulation)
-                        var contiguous = arrayView as IContiguousArrayView;
-                        if (contiguous == null)
-                        {
-                            var baseViewProp = arrayView.GetType().GetProperty("BaseView");
-                            contiguous = (baseViewProp != null ? baseViewProp.GetValue(arrayView) : arrayView) as IContiguousArrayView;
-                        }
-
-                        if (contiguous == null)
-                            throw new Exception($"Argument {pIdx} is not a contiguous buffer");
-
-                        var memBuffer = contiguous.Buffer as WebGLMemoryBuffer;
-                        if (memBuffer?.BackingArray == null)
-                            throw new Exception($"Argument {pIdx} has no backing array");
-
-                        // Create a GL texture from the backing data for TBO access
-                        var texUnit = textureUnit++;
-                        var uniformName = $"u_param{glslParamIndex}";
-                        var uniformLoc = gl.GetUniformLocation(glProgram, uniformName);
-
-                        if (uniformLoc != null)
-                        {
-                            // Upload data as a 1D texture for texelFetch access
-                            var elementSize = contiguous.ElementSize;
-                            var length = (int)contiguous.Length;
-                            var byteLength = length * elementSize;
-
-                            // Read array data
-                            var byteData = memBuffer.BackingArray.Read<byte>((int)contiguous.Index, byteLength);
-
-                            // Determine texture format from the parameter binding's GLSL type
-                            var binding = compiledKernel.ParameterBindings
-                                .FirstOrDefault(b => b.ParamIndex == glslParamIndex && b.Kind == KernelParamKind.Buffer);
-                            string bufferGlslType = binding.GlslType ?? "float";
-
-                            var texelCount = (byteLength + 3) / 4; // ceil(bytes / 4)
-
-                            // 2D texture tiling: when texel count exceeds MAX_TEXTURE_SIZE,
-                            // tile data into rows of maxTexSize width
-                            int maxTexSize = 16384; // Typical max; avoid per-frame GetParameter call
-                            int tileWidth, tileHeight;
-                            if (texelCount > maxTexSize)
-                            {
-                                tileWidth = maxTexSize;
-                                tileHeight = (texelCount + tileWidth - 1) / tileWidth;
-                            }
-                            else
-                            {
-                                tileWidth = texelCount;
-                                tileHeight = 1;
-                            }
-
-                            // Pad data to fill the full 2D texture (tileWidth * tileHeight texels)
-                            int totalTexels = tileWidth * tileHeight;
-                            var paddedData = new byte[totalTexels * 4];
-                            System.Buffer.BlockCopy(byteData, 0, paddedData, 0, byteLength);
-
-
-                            gl.ActiveTexture(GL.TEXTURE0 + (uint)texUnit);
-                            var tex = gl.CreateTexture();
-                            glDisposables.Add(tex);
-                            gl.BindTexture(GL.TEXTURE_2D, tex);
-                            gl.TexParameteri(GL.TEXTURE_2D, GL.TEXTURE_MIN_FILTER, GL.NEAREST);
-                            gl.TexParameteri(GL.TEXTURE_2D, GL.TEXTURE_MAG_FILTER, GL.NEAREST);
-                            gl.TexParameteri(GL.TEXTURE_2D, GL.TEXTURE_WRAP_S, GL.CLAMP_TO_EDGE);
-                            gl.TexParameteri(GL.TEXTURE_2D, GL.TEXTURE_WRAP_T, GL.CLAMP_TO_EDGE);
-
-                            using var uint8Array = new Uint8Array(paddedData);
-                            using var arrayBuffer = uint8Array.Buffer;
-
-                            if (bufferGlslType == "int")
-                            {
-                                // Integer buffer: use R32I with isampler2D
-                                using var int32Array = new Int32Array(arrayBuffer);
-
-                                gl.JSRef!.CallVoid("texImage2D",
-                                    GL.TEXTURE_2D, 0, GL.R32I, tileWidth, tileHeight, 0,
-                                    GL.RED_INTEGER, GL.INT, int32Array);
-
-                                Log($"[WebGL-Debug] Arg {pIdx}: Bound as texture unit {texUnit}, {tileWidth}x{tileHeight} R32I (int)");
-                            }
-                            else if (bufferGlslType == "uint")
-                            {
-                                // Unsigned integer buffer: use R32UI with usampler2D
-                                using var uint32Array = new Uint32Array(arrayBuffer);
-
-                                gl.JSRef!.CallVoid("texImage2D",
-                                    GL.TEXTURE_2D, 0, GL.R32UI, tileWidth, tileHeight, 0,
-                                    GL.RED_INTEGER, GL.UNSIGNED_INT, uint32Array);
-
-                                Log($"[WebGL-Debug] Arg {pIdx}: Bound as texture unit {texUnit}, {tileWidth}x{tileHeight} R32UI (uint)");
-                            }
-                            else
-                            {
-                                // Float buffer: use R32F with sampler2D (default)
-                                using var float32Array = new Float32Array(arrayBuffer);
-
-                                gl.TexImage2D(GL.TEXTURE_2D, 0, GL.R32F, tileWidth, tileHeight, 0, GL.RED, GL.FLOAT, float32Array);
-
-                                Log($"[WebGL-Debug] Arg {pIdx}: Bound as texture unit {texUnit}, {tileWidth}x{tileHeight} R32F (float)");
-                            }
-                            gl.Uniform1i(uniformLoc, texUnit);
-
-                            // Pass tile width uniform for 2D coordinate computation in shader
-                            var tileWLoc = gl.GetUniformLocation(glProgram, $"u_param{glslParamIndex}_tileW");
-                            if (tileWLoc != null)
-                                gl.Uniform1i(tileWLoc, tileWidth);
-
-                        }
-                        // ---- Stride uniforms for ArrayView2D/3D ----
-                        // If this buffer arg has stride metadata, pass it as a uniform array.
-                        // Extract dimension info from the argument to compute strides.
-                        if (arg != null)
-                        {
-                            var argType = arg.GetType();
-                            var strideLoc = gl.GetUniformLocation(glProgram, $"u_param{glslParamIndex}_stride[0]");
-                            if (strideLoc != null)
-                            {
-                                // This is a multi-dim view — extract Extent dimensions
-                                int[] dims = ExtractViewDimensions(arg, argType);
-                                if (dims.Length >= 2)
-                                {
-                                    using var strideArray = new Int32Array(dims);
-                                    gl.Uniform1iv(strideLoc, strideArray);
-                                    Log($"[WebGL-STRIDE-DEBUG] param{glslParamIndex}: stride=[{string.Join(", ", dims)}]");
-                                }
-                            }
-                        }
-                    }
-                    else
-                    {
-                        // Scalar argument → uniform
-                        // Emulated 64-bit types use separate _lo/_hi uniforms, so handle them
-                        // before the base uniform lookup (which would fail for _lo/_hi names).
-                        if (arg is double dVal && webGlAccel.Backend.Options.EnableF64Emulation)
-                        {
-                            // f64 emulation: pass as 2 separate uint uniforms (lo, hi)
-                            var bits = BitConverter.DoubleToUInt64Bits(dVal);
-                            var lo = (uint)(bits & 0xFFFFFFFF);
-                            var hi = (uint)(bits >> 32);
-                            var loLoc = gl.GetUniformLocation(glProgram, $"u_param{glslParamIndex}_lo");
-                            var hiLoc = gl.GetUniformLocation(glProgram, $"u_param{glslParamIndex}_hi");
-                            if (loLoc != null) gl.Uniform1ui(loLoc, lo);
-                            if (hiLoc != null) gl.Uniform1ui(hiLoc, hi);
-                            Log($"[WebGL-UNI-DEBUG] param{glslParamIndex}: f64 emulated value={dVal}, lo=0x{lo:X8} (loc={loLoc != null}), hi=0x{hi:X8} (loc={hiLoc != null})");
-                        }
-                        else if (arg is long lVal && webGlAccel.Backend.Options.EnableI64Emulation)
-                        {
-                            // i64 emulation: pass as 2 separate uint uniforms (lo, hi)
-                            var bits = (ulong)lVal;
-                            var lo = (uint)(bits & 0xFFFFFFFF);
-                            var hi = (uint)(bits >> 32);
-                            var loLoc = gl.GetUniformLocation(glProgram, $"u_param{glslParamIndex}_lo");
-                            var hiLoc = gl.GetUniformLocation(glProgram, $"u_param{glslParamIndex}_hi");
-                            if (loLoc != null) gl.Uniform1ui(loLoc, lo);
-                            if (hiLoc != null) gl.Uniform1ui(hiLoc, hi);
-                            Log($"[WebGL-UNI-DEBUG] param{glslParamIndex}: i64 emulated value={lVal}, lo=0x{lo:X8}, hi=0x{hi:X8}");
-                        }
-                        else
-                        {
-                            // Standard (non-emulated) scalar uniform
-                            var uniformName = $"u_param{glslParamIndex}";
-                            var uniformLoc = gl.GetUniformLocation(glProgram, uniformName);
-                            if (uniformLoc != null)
-                            {
-                                if (arg is int iVal) gl.Uniform1i(uniformLoc, iVal);
-                                else if (arg is uint uiVal) gl.Uniform1ui(uniformLoc, uiVal);
-                                else if (arg is float fVal) gl.Uniform1f(uniformLoc, fVal);
-                                else if (arg is double dValFallback) gl.Uniform1f(uniformLoc, (float)dValFallback);
-                                else if (arg is bool blVal) gl.Uniform1i(uniformLoc, blVal ? 1 : 0);
-                                else if (arg is byte bVal) gl.Uniform1i(uniformLoc, bVal);
-                                else if (arg is long lValFallback) gl.Uniform1i(uniformLoc, (int)lValFallback);
-                                else if (arg is ulong ulVal) gl.Uniform1ui(uniformLoc, (uint)ulVal);
-                                else throw new NotSupportedException($"Unsupported scalar argument type: {arg?.GetType()}");
-
-                                Log($"[WebGL-UNI-DEBUG] param{glslParamIndex}: scalar value={arg} (type={arg?.GetType().Name})");
-                            }
-                        }
-                    }
-                }
-
-                // Check for GL errors after parameter binding (only in verbose mode to avoid pipeline stalls)
-                if (VerboseLogging)
-                {
-                    var bindErr = gl.GetError();
-                    if (bindErr != 0)
-                        Log($"[WebGL-GL-ERROR] After param binding: error={bindErr}");
-                }
-
-                // ---- Step 5: Set up Transform Feedback output buffer ----
-                SpawnDev.BlazorJS.JSObjects.WebGLBuffer? tfBuffer = null;
-                WebGLTransformFeedback? transformFeedback = null;
-
-                if (varyingNames.Length > 0)
-                {
-                    // Calculate TF output size (total floats * 4 bytes)
-                    int tfFloatCount = totalVertices * varyingNames.Length;
-                    int tfByteSize = tfFloatCount * 4;
-
-                    tfBuffer = gl.CreateBuffer();
-                    glDisposables.Add(tfBuffer);
-                    gl.BindBuffer(GL.TRANSFORM_FEEDBACK_BUFFER, tfBuffer);
-                    gl.BufferData(GL.TRANSFORM_FEEDBACK_BUFFER, tfByteSize, GL.DYNAMIC_READ);
-
-                    transformFeedback = gl.CreateTransformFeedback();
-                    glDisposables.Add(transformFeedback);
-                    gl.BindTransformFeedback(GL.TRANSFORM_FEEDBACK, transformFeedback);
-                    gl.BindBufferBase(GL.TRANSFORM_FEEDBACK_BUFFER, 0, tfBuffer);
-                }
-
-                // ---- Step 6: Dispatch via drawArrays with RASTERIZER_DISCARD ----
-                // Reuse cached VAO + dummy vertex buffer to avoid per-frame creation
-                if (webGlAccel._cachedVAO == null)
-                {
-                    webGlAccel._cachedVAO = gl.CreateVertexArray();
-                }
-                gl.BindVertexArray(webGlAccel._cachedVAO);
-
-                // ANGLE D3D11 workaround: requires at least one vertex attribute enabled.
-                if (webGlAccel._cachedDummyVBO == null || webGlAccel._cachedDummyVBOSize < totalVertices * 4)
-                {
-                    webGlAccel._cachedDummyVBO?.Dispose();
-                    webGlAccel._cachedDummyVBO = gl.CreateBuffer();
-                    webGlAccel._cachedDummyVBOSize = totalVertices * 4;
-                    gl.BindBuffer(GL.ARRAY_BUFFER, webGlAccel._cachedDummyVBO);
-                    gl.BufferData(GL.ARRAY_BUFFER, webGlAccel._cachedDummyVBOSize, GL.STATIC_DRAW);
-                    gl.EnableVertexAttribArray(0);
-                    gl.VertexAttribPointer(0, 1, (int)GL.FLOAT, false, 0, 0);
-                }
-                else
-                {
-                    gl.BindBuffer(GL.ARRAY_BUFFER, webGlAccel._cachedDummyVBO);
-                }
-
-                gl.Enable(GL.RASTERIZER_DISCARD);
-
-                if (transformFeedback != null)
-                {
-                    gl.BeginTransformFeedback(GL.POINTS);
-                }
-
-                gl.DrawArrays(GL.POINTS, 0, totalVertices);
-
-                // Check for GL errors (only in verbose mode to avoid GPU pipeline stalls)
-                if (VerboseLogging)
-                {
-                    var glErr = gl.GetError();
-                    if (glErr != 0)
-                        Log($"[WebGL-GL-ERROR] After DrawArrays: error={glErr}");
-                }
-
-                if (transformFeedback != null)
-                {
-                    gl.EndTransformFeedback();
-                    if (VerboseLogging)
-                    {
-                        var glErr2 = gl.GetError();
-                        if (glErr2 != 0)
-                            Log($"[WebGL-GL-ERROR] After EndTransformFeedback: error={glErr2}");
-                    }
-                }
-
-                gl.Disable(GL.RASTERIZER_DISCARD);
-
-                // ---- Step 7: Read back Transform Feedback results ----
-                if (tfBuffer != null && varyingNames.Length > 0)
-                {
-                    // Read TF output and write back to output parameter backing arrays
-                    gl.BindBuffer(GL.TRANSFORM_FEEDBACK_BUFFER, tfBuffer);
-
-                    int tfFloatCount = totalVertices * varyingNames.Length;
-                    int tfByteSize = tfFloatCount * 4;
-                    using var readback = new Float32Array(tfFloatCount);
-                    gl.GetBufferSubData(GL.TRANSFORM_FEEDBACK_BUFFER, 0, readback);
-
-                    // Copy output data back to the appropriate ILGPU buffers
-                    var outputVaryings = compiledKernel.OutputVaryings;
-                    var readbackBytes = readback.ReadBytes();
-
-                    // Debug: dump first few readback values (only when verbose logging is on)
-                    if (VerboseLogging)
-                    {
-                        int numFloats = Math.Min(readbackBytes.Length / 4, 8);
-                        var vals = new float[numFloats];
-                        for (int f = 0; f < numFloats; f++)
-                            vals[f] = BitConverter.ToSingle(readbackBytes, f * 4);
-                        Log($"[WebGL-TF-DEBUG] TF readback: {readbackBytes.Length} bytes ({readbackBytes.Length / 4} floats), varyingCount={varyingNames.Length}, vertices={totalVertices}");
-                        Log($"[WebGL-TF-DEBUG] First {numFloats} float values: [{string.Join(", ", vals)}]");
-                        Log($"[WebGL-TF-DEBUG] OutputVaryings count={outputVaryings.Count}: [{string.Join(", ", outputVaryings.Select(o => $"param[{o.ParamIndex}]→{o.VaryingName}(outputIdx={o.OutputIndex})"))}]");
-                    }
-
-                    for (int outIdx = 0; outIdx < outputVaryings.Count; outIdx++)
-                    {
-                        var outputInfo = outputVaryings[outIdx];
-
-                        // Skip "hi" emulated varyings — they are read together with their "lo" counterpart
-                        if (outputInfo.IsEmulated && outputInfo.EmulatedSuffix == "hi")
-                            continue;
-
-                        // ParamIndex stores the Method.Parameters index (1-based);
-                        // convert to args[] index (0-based) by subtracting the offset
-                        var argsIdx = outputInfo.ParamIndex - glslParamOffset;
-
-                        if (argsIdx >= 0 && argsIdx < args.Length)
-                        {
-                            var arg = args[argsIdx];
-                            IArrayView? arrayView = arg as IArrayView;
-                            if (arrayView == null && arg != null)
-                            {
-                                var baseViewProp = arg.GetType().GetProperty("BaseView");
-                                if (baseViewProp != null)
-                                    arrayView = baseViewProp.GetValue(arg) as IArrayView;
-                            }
-
-                            if (arrayView != null)
-                            {
-                                var contiguous = arrayView as IContiguousArrayView;
-                                if (contiguous == null)
-                                {
-                                    var baseViewProp = arrayView.GetType().GetProperty("BaseView");
-                                    contiguous = (baseViewProp != null ? baseViewProp.GetValue(arrayView) : arrayView) as IContiguousArrayView;
-                                }
-
-                                if (contiguous?.Buffer is WebGLMemoryBuffer memBuffer && memBuffer.BackingArray != null)
-                                {
-                                    // INTERLEAVED_ATTRIBS: data is packed per-vertex as
-                                    // [varying0_v0, varying1_v0, ...varyingN_v0, varying0_v1, varying1_v1, ...]
-                                    // Stride between same-varying values = varyingCount * 4 bytes
-                                    int varyingCount = varyingNames.Length;
-                                    int strideBytes = varyingCount * 4;  // bytes between same varying in adjacent vertices
-
-                                    if (outputInfo.IsEmulated && outputInfo.EmulatedSuffix == "lo")
-                                    {
-                                        // Emulated 64-bit: read lo and hi varyings, interleave into 8-byte pairs
-                                        int hiOutIdx = outIdx + 1; // hi varying is always right after lo
-                                        int elementCount = Math.Min(totalVertices, (int)(contiguous.LengthInBytes / 8));
-                                        if (elementCount > 0)
-                                        {
-                                            var slice = new byte[elementCount * 8];
-                                            for (int v = 0; v < elementCount; v++)
-                                            {
-                                                // Read lo word from interleaved position
-                                                int loByteOffset = v * strideBytes + outIdx * 4;
-                                                // Read hi word from interleaved position
-                                                int hiByteOffset = v * strideBytes + hiOutIdx * 4;
-                                                if (loByteOffset + 4 <= readbackBytes.Length && hiByteOffset + 4 <= readbackBytes.Length)
-                                                {
-                                                    // Pack lo (4 bytes) + hi (4 bytes) into 8-byte slot
-                                                    System.Buffer.BlockCopy(readbackBytes, loByteOffset, slice, v * 8, 4);
-                                                    System.Buffer.BlockCopy(readbackBytes, hiByteOffset, slice, v * 8 + 4, 4);
-                                                }
-                                            }
-                                            memBuffer.BackingArray.Write(slice, (int)contiguous.Index);
-                                        }
-                                    }
-                                    else if (outputInfo.FieldIndex >= 0)
-                                    {
-                                        // Struct buffer TF readback: field varyings are interleaved per vertex
-                                        // Skip non-first fields — they are read together with field 0
-                                        if (outputInfo.FieldIndex > 0) continue;
-
-                                        // Find all field varyings for this struct buffer param
-                                        var structFieldVaryings = outputVaryings
-                                            .Where(o => o.ParamIndex == outputInfo.ParamIndex && o.FieldIndex >= 0)
-                                            .OrderBy(o => o.FieldIndex).ToList();
-                                        int fieldCount = structFieldVaryings.Count;
-                                        int structElementSize = fieldCount * 4; // 4 bytes per field
-                                        int elementCount = Math.Min(totalVertices, (int)(contiguous.LengthInBytes / structElementSize));
-                                        if (elementCount > 0)
-                                        {
-                                            var slice = new byte[elementCount * structElementSize];
-                                            for (int v = 0; v < elementCount; v++)
-                                            {
-                                                for (int fi = 0; fi < fieldCount; fi++)
-                                                {
-                                                    // Find the outIdx (position in varyingNames) for this field varying
-                                                    var fieldVarying = structFieldVaryings[fi];
-                                                    int fieldOutIdx = fieldVarying.OutputIndex;
-                                                    int srcByteOffset = v * strideBytes + fieldOutIdx * 4;
-                                                    int dstByteOffset = v * structElementSize + fi * 4;
-                                                    if (srcByteOffset + 4 <= readbackBytes.Length)
-                                                    {
-                                                        System.Buffer.BlockCopy(readbackBytes, srcByteOffset, slice, dstByteOffset, 4);
-                                                    }
-                                                }
-                                            }
-                                            memBuffer.BackingArray.Write(slice, (int)contiguous.Index);
-                                        }
-                                    }
-                                    else
-                                    {
-                                        // Standard single-slot TF readback
-                                        int elementCount = Math.Min(totalVertices, (int)(contiguous.LengthInBytes / 4));
-                                        if (elementCount > 0)
-                                        {
-                                            var slice = new byte[elementCount * 4];
-                                            for (int v = 0; v < elementCount; v++)
-                                            {
-                                                // Source offset in interleaved buffer: vertex v, varying outIdx
-                                                int srcByteOffset = v * strideBytes + outIdx * 4;
-                                                if (srcByteOffset + 4 <= readbackBytes.Length)
-                                                {
-                                                    System.Buffer.BlockCopy(readbackBytes, srcByteOffset, slice, v * 4, 4);
-                                                }
-                                            }
-                                            memBuffer.BackingArray.Write(slice, (int)contiguous.Index);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // Unbind TF
-                if (transformFeedback != null)
-                {
-                    gl.BindTransformFeedback((uint)GL.TRANSFORM_FEEDBACK, null);
-                }
-
-                Log($"[WebGL-Debug] Kernel dispatch complete");
-            }
-            catch (Exception ex)
+            msgHandler = (msg) =>
             {
-                Log($"[WebGL] Error running kernel: {ex}");
-                throw;
-            }
-            finally
+                webGlAccel._glWorker!.OnMessage -= msgHandler!;
+                webGlAccel._glWorker.OnError -= errHandler!;
+
+                try
+                {
+                    using var data = msg.GetData<JSObject>();
+                    var done = data.JSRef!.Get<bool>("done");
+
+                    // Read diagnostic info from worker (contains ERR@ entries if GL errors occurred)
+                    var diagInfo = data.JSRef!.Get<string?>("diag");
+                    if (diagInfo != null && diagInfo.Contains("ERR@"))
+                    {
+                        Console.WriteLine($"[WebGL] GL errors detected: {diagInfo}");
+                    }
+
+                    // Receive transferred ArrayBuffers back
+                    ReceiveTransferredBuffers(data, bufferArgs);
+
+                    if (!done)
+                    {
+                        var errorMsg = data.JSRef!.Get<string?>("error") ?? "Unknown GL worker error";
+                        tcs.TrySetException(new Exception($"[WebGL] GL Worker error: {errorMsg}"));
+                        return;
+                    }
+
+                    tcs.TrySetResult();
+                }
+                catch (Exception ex)
+                {
+                    tcs.TrySetException(new Exception($"[WebGL] Error processing worker response: {ex.Message}", ex));
+                }
+            };
+
+            errHandler = (err) =>
             {
-                gl.UseProgram(null);
-                foreach (var d in glDisposables)
-                    d.Dispose();
-            }
+                webGlAccel._glWorker!.OnMessage -= msgHandler!;
+                webGlAccel._glWorker.OnError -= errHandler!;
+                tcs.TrySetException(new Exception("[WebGL] GL Worker error during kernel execution"));
+            };
+
+            webGlAccel._glWorker!.OnMessage += msgHandler;
+            webGlAccel._glWorker.OnError += errHandler;
+
+            if (transferList.Count > 0)
+                webGlAccel._glWorker.PostMessage(dispatchMsg, transferList.ToArray());
+            else
+                webGlAccel._glWorker.PostMessage(dispatchMsg);
+
+            webGlAccel.PendingWorkTasks.Add(tcs.Task);
         }
 
         /// <summary>
-        /// Compiles a WebGL shader of the specified type.
+        /// Marshals kernel arguments into JS-compatible parameter descriptors.
+        /// Returns (jsParams, bufferArgs, strideMap, outputDescriptors).
         /// </summary>
-        private static WebGLShader CompileShader(WebGL2RenderingContext gl, uint type, string source)
+        private static (List<object> jsParams, List<BufferArg> bufferArgs, Dictionary<int, int[]> strides, List<object> outputs)
+            MarshalArguments(WebGLCompiledKernel compiledKernel, object[] args, WebGLAccelerator webGlAccel)
         {
-            var shader = gl.CreateShader(type);
-            gl.ShaderSource(shader, source);
-            gl.CompileShader(shader);
+            var jsParams = new List<object>();
+            var bufferArgs = new List<BufferArg>();
+            var strideMap = new Dictionary<int, int[]>();
+            const int glslParamOffset = 1;
 
-            var success = gl.GetShaderParameter<bool>(shader, GL.COMPILE_STATUS);
-            if (!success)
+            for (int pIdx = 0; pIdx < args.Length; pIdx++)
             {
-                var log = gl.GetShaderInfoLog(shader);
-                gl.DeleteShader(shader);
-                throw new InvalidOperationException($"[WebGL] Shader compilation failed:\n{log}\n\nSource:\n{source}");
+                int glslParamIndex = pIdx + glslParamOffset;
+                var arg = args[pIdx];
+                IArrayView? arrayView = arg as IArrayView;
+
+                if (arrayView == null && arg != null)
+                {
+                    var refCache = GetOrCreateReflectionCache(arg.GetType());
+                    if (refCache.BaseViewProperty != null)
+                        arrayView = refCache.BaseViewProperty.GetValue(arg) as IArrayView;
+                }
+
+                if (arrayView != null)
+                {
+                    // Buffer argument
+                    var contiguous = arrayView as IContiguousArrayView;
+                    if (contiguous == null)
+                    {
+                        var viewRefCache = GetOrCreateReflectionCache(arrayView.GetType());
+                        contiguous = (viewRefCache.BaseViewProperty != null ? viewRefCache.BaseViewProperty.GetValue(arrayView) : arrayView) as IContiguousArrayView;
+                    }
+
+                    if (contiguous == null)
+                        throw new Exception($"Argument {pIdx} is not a contiguous buffer");
+
+                    var memBuffer = contiguous.Buffer as WebGLMemoryBuffer;
+                    if (memBuffer?.BackingArray == null)
+                        throw new Exception($"Argument {pIdx} has no backing array");
+
+                    var elementSize = contiguous.ElementSize;
+                    var length = (int)contiguous.Length;
+                    var byteLength = length * elementSize;
+                    var srcByteOffset = (int)contiguous.Index;
+
+                    // Get GLSL type from parameter binding
+                    var binding = compiledKernel.ParameterBindings
+                        .FirstOrDefault(b => b.ParamIndex == glslParamIndex && b.Kind == KernelParamKind.Buffer);
+                    string bufferGlslType = binding.GlslType ?? "float";
+
+                    var bufArg = new BufferArg
+                    {
+                        MemoryBuffer = memBuffer,
+                        ByteOffset = srcByteOffset,
+                        ByteLength = byteLength,
+                        ElementSize = elementSize,
+                        GlslType = bufferGlslType,
+                        ParamIndex = glslParamIndex,
+                        ArgIndex = pIdx
+                    };
+                    bufferArgs.Add(bufArg);
+
+                    // Pass the underlying ArrayBuffer (will be transferred)
+                    jsParams.Add(new
+                    {
+                        kind = "buffer",
+                        buffer = memBuffer.UnderlyingBuffer,
+                        byteOffset = srcByteOffset,
+                        byteLength,
+                        glslType = bufferGlslType,
+                        paramIndex = glslParamIndex,
+                        argIndex = pIdx
+                    });
+
+                    // Extract stride dimensions for multi-dim views
+                    if (arg != null)
+                    {
+                        int[] dims = ExtractViewDimensions(arg, arg.GetType());
+                        if (dims.Length >= 2)
+                        {
+                            strideMap[glslParamIndex] = dims;
+                        }
+                    }
+                }
+                else
+                {
+                    // Scalar argument
+                    if (arg is double dVal && webGlAccel.Backend.Options.EnableF64Emulation)
+                    {
+                        var bits = BitConverter.DoubleToUInt64Bits(dVal);
+                        jsParams.Add(new
+                        {
+                            kind = "scalar_emu64",
+                            paramIndex = glslParamIndex,
+                            lo = (uint)(bits & 0xFFFFFFFF),
+                            hi = (uint)(bits >> 32)
+                        });
+                    }
+                    else if (arg is long lVal && webGlAccel.Backend.Options.EnableI64Emulation)
+                    {
+                        var bits = (ulong)lVal;
+                        jsParams.Add(new
+                        {
+                            kind = "scalar_emu64",
+                            paramIndex = glslParamIndex,
+                            lo = (uint)(bits & 0xFFFFFFFF),
+                            hi = (uint)(bits >> 32)
+                        });
+                    }
+                    else
+                    {
+                        string scalarType = arg switch
+                        {
+                            int => "int",
+                            uint => "uint",
+                            float => "float",
+                            double => "double",
+                            bool => "bool",
+                            byte => "byte",
+                            long => "int",
+                            ulong => "uint",
+                            _ => throw new NotSupportedException($"Unsupported scalar argument type: {arg?.GetType()}")
+                        };
+
+                        object value = arg switch
+                        {
+                            int iVal => iVal,
+                            uint uiVal => uiVal,
+                            float fVal => fVal,
+                            double dValFb => (float)dValFb,
+                            bool blVal => blVal ? 1 : 0,
+                            byte bVal => (int)bVal,
+                            long lValFb => (int)lValFb,
+                            ulong ulVal => (uint)ulVal,
+                            _ => throw new NotSupportedException($"Unsupported scalar: {arg?.GetType()}")
+                        };
+
+                        jsParams.Add(new
+                        {
+                            kind = "scalar",
+                            paramIndex = glslParamIndex,
+                            scalarType,
+                            value
+                        });
+                    }
+                }
             }
 
-            return shader;
+            // Build output varying descriptors
+            var outputs = new List<object>();
+            var outputVaryings = compiledKernel.OutputVaryings;
+            for (int outIdx = 0; outIdx < outputVaryings.Count; outIdx++)
+            {
+                var outputInfo = outputVaryings[outIdx];
+                var argsIdx = outputInfo.ParamIndex - glslParamOffset;
+
+                if (argsIdx >= 0 && argsIdx < args.Length)
+                {
+                    var arg = args[argsIdx];
+                    IArrayView? arrView = arg as IArrayView;
+                    if (arrView == null && arg != null)
+                    {
+                        var refCache = GetOrCreateReflectionCache(arg.GetType());
+                        if (refCache.BaseViewProperty != null)
+                            arrView = refCache.BaseViewProperty.GetValue(arg) as IArrayView;
+                    }
+
+                    if (arrView != null)
+                    {
+                        var contiguous = arrView as IContiguousArrayView;
+                        if (contiguous == null)
+                        {
+                            var viewRefCache = GetOrCreateReflectionCache(arrView.GetType());
+                            contiguous = (viewRefCache.BaseViewProperty != null ? viewRefCache.BaseViewProperty.GetValue(arrView) : arrView) as IContiguousArrayView;
+                        }
+
+                        if (contiguous?.Buffer is WebGLMemoryBuffer)
+                        {
+                            outputs.Add(new
+                            {
+                                paramIndex = outputInfo.ParamIndex,
+                                outputIndex = outputInfo.OutputIndex,
+                                varyingName = outputInfo.VaryingName,
+                                isEmulated = outputInfo.IsEmulated,
+                                emulatedSuffix = outputInfo.EmulatedSuffix ?? "",
+                                fieldIndex = outputInfo.FieldIndex,
+                                argIndex = argsIdx,
+                                writeByteOffset = (int)contiguous.Index,
+                                writeLengthBytes = (int)contiguous.LengthInBytes
+                            });
+                        }
+                    }
+                }
+            }
+
+            return (jsParams, bufferArgs, strideMap, outputs);
+        }
+
+        /// <summary>
+        /// Receives transferred ArrayBuffers back from the GL worker and replaces the
+        /// underlying buffer references in WebGLMemoryBuffer (zero-copy).
+        /// </summary>
+        private static void ReceiveTransferredBuffers(JSObject data, List<BufferArg> bufferArgs)
+        {
+            try
+            {
+                using var buffersArr = data.JSRef!.Get<Array<JSObject>?>("buffers");
+                if (buffersArr == null) return;
+
+                for (int i = 0; i < buffersArr.Length; i++)
+                {
+                    using var bufObj = buffersArr[i];
+                    var argIndex = bufObj.JSRef!.Get<int>("index");
+                    // Get the transferred ArrayBuffer (do NOT dispose — we're taking ownership)
+                    var transferredBuffer = bufObj.JSRef!.Get<ArrayBuffer>("buffer");
+
+                    // Replace the underlying ArrayBuffer in the matching WebGLMemoryBuffer
+                    var match = bufferArgs.FirstOrDefault(b => b.ArgIndex == argIndex);
+                    if (match != null)
+                    {
+                        match.MemoryBuffer.ReplaceArrayBuffer(transferredBuffer);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Log($"[WebGL] Error receiving transferred buffers: {ex.Message}");
+            }
         }
 
         #endregion
@@ -744,9 +573,8 @@ namespace SpawnDev.ILGPU.WebGL
 
         protected override void SynchronizeInternal()
         {
-            // WebGL2 rendering is synchronous on the main thread.
-            // glFinish() ensures all GL commands complete.
-            GLContext?.Finish();
+            // With worker offloading, synchronous Synchronize is a no-op
+            // (use SynchronizeAsync extension method instead)
         }
 
         protected override void OnBind() { }
@@ -756,7 +584,12 @@ namespace SpawnDev.ILGPU.WebGL
         {
             if (disposing)
             {
-                GLContext?.Dispose();
+                // Terminate the GL worker
+                _glWorker?.Terminate();
+                _glWorker?.Dispose();
+                _glWorker = null;
+                _workerInitialized = false;
+
                 Canvas?.Dispose();
             }
         }
