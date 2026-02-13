@@ -5,7 +5,7 @@ using System.Runtime.InteropServices;
 
 namespace SpawnDev.ILGPU.WebGPU.Backend
 {
-    public class WebGPUMemoryBuffer : MemoryBuffer
+    public class WebGPUMemoryBuffer : MemoryBuffer, IBrowserMemoryBuffer
     {
         private readonly WebGPUBuffer<byte> _buffer;
 

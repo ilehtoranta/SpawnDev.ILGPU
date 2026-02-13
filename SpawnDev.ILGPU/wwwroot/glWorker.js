@@ -130,6 +130,10 @@ function dispatchKernel(msg) {
     const cached = getOrCompileProgram(programId, source, varyingNames || []);
     gl.useProgram(cached.program);
 
+    // ---- ANGLE f64 workaround: set u_one = 1.0 (opaque to compiler) ----
+    const uOneLoc = getUniformLoc(cached, 'u_one');
+    if (uOneLoc !== null) gl.uniform1f(uOneLoc, 1.0);
+
     // ---- Step 2: Dimension uniforms ----
     const dimWLoc = getUniformLoc(cached, 'u_dimWidth');
     if (dimWLoc) gl.uniform1i(dimWLoc, dimX);

@@ -30,15 +30,26 @@ namespace SpawnDev.ILGPU.WebGL.Backend
 // ============================================================================
 // emu_f64 Emulation Functions (Double-Float: vec2 where x=high, y=low)
 // ============================================================================
+// ANTI-OPTIMIZATION: Uses the luma.gl/deck.gl 'ONE' technique to prevent
+// GLSL compilers (especially ANGLE/D3D11) from optimizing away the error
+// terms in double-float arithmetic. The uniform u_one is set to 1.0 at
+// runtime but is unknown to the compiler at compile time, so the compiler
+// cannot simplify expressions like (s * u_one - a) into (s - a).
+// Without this, ANGLE collapses the two-sum error computation, reducing
+// ~48-bit precision back to ~24-bit (regular float).
+// ============================================================================
+
+// Runtime constant: always 1.0, but opaque to the compiler
+uniform highp float u_one;
 
 // --- IEEE 754 double bits to double-float conversion ---
 vec2 f64_from_ieee754_bits(uint lo, uint hi) {
     uint sign_bit = (hi >> 31u) & 1u;
     uint exponent = (hi >> 20u) & 0x7FFu;
-    uint mantissa_hi = hi & 0xFFFFFu;
-    uint mantissa_lo = lo;
+    uint mantissa_hi20 = hi & 0xFFFFFu;
+    uint mantissa_lo32 = lo;
 
-    if (exponent == 0u && mantissa_hi == 0u && mantissa_lo == 0u) {
+    if (exponent == 0u && mantissa_hi20 == 0u && mantissa_lo32 == 0u) {
         return vec2(0.0, 0.0);
     }
     if (exponent == 0x7FFu) {
@@ -47,75 +58,143 @@ vec2 f64_from_ieee754_bits(uint lo, uint hi) {
 
     int exp_bias = 1023;
     int exp_val = int(exponent) - exp_bias;
-
     int f32_exp_bias = 127;
     int f32_exp = exp_val + f32_exp_bias;
 
     if (f32_exp <= 0 || f32_exp >= 255) {
-        float val_approx = float(hi) * 0.00000000023283064;
+        uint f32_bits_approx = (sign_bit << 31u) | (uint(clamp(f32_exp, 1, 254)) << 23u) | (mantissa_hi20 << 3u);
+        float val_approx = intBitsToFloat(int(f32_bits_approx));
         return vec2(val_approx, 0.0);
     }
 
-    uint f32_bits = (sign_bit << 31u) | (uint(f32_exp) << 23u) | (mantissa_hi << 3u);
-    float val = intBitsToFloat(int(f32_bits));
+    uint top23 = (mantissa_hi20 << 3u) | (mantissa_lo32 >> 29u);
+    uint f32_bits_h = (sign_bit << 31u) | (uint(f32_exp) << 23u) | top23;
+    float val_hi = intBitsToFloat(int(f32_bits_h));
 
-    return vec2(val, 0.0);
+    uint remaining = mantissa_lo32 & 0x1FFFFFFFu;
+    if (remaining == 0u) {
+        return vec2(val_hi, 0.0);
+    }
+
+    int lo_exp = exp_val - 29 + f32_exp_bias;
+    float val_lo;
+    if (lo_exp > 0 && lo_exp < 255) {
+        float rem_f = float(remaining);
+        int scale_exp = exp_val - 23 + f32_exp_bias;
+        if (scale_exp > 0 && scale_exp < 255) {
+            uint scale_bits = uint(scale_exp) << 23u;
+            float scale = intBitsToFloat(int(scale_bits));
+            val_lo = (rem_f / 536870912.0) * scale;
+        } else {
+            val_lo = 0.0;
+        }
+    } else {
+        val_lo = 0.0;
+    }
+
+    if (sign_bit != 0u) {
+        val_lo = -val_lo;
+    }
+
+    // Inline two-sum normalization with u_one anti-optimization
+    float _s = (val_hi + val_lo);
+    float _v = (_s * u_one - val_hi) * u_one;
+    float _e = (val_hi - (_s - _v) * u_one) * u_one * u_one * u_one + (val_lo - _v);
+    return vec2(_s, _e);
 }
 
 // Store emu_f64 back to IEEE 754 bits
 uvec2 f64_to_ieee754_bits(vec2 v) {
-    float val = v.x + v.y;
-    if (val == 0.0) {
+    float val_hi = v.x;
+    float val_lo = v.y;
+
+    if (val_hi == 0.0 && val_lo == 0.0) {
         return uvec2(0u, 0u);
     }
 
-    uint f32_bits = uint(floatBitsToInt(val));
-    uint sign = (f32_bits >> 31u) & 1u;
-    uint f32_exp = (f32_bits >> 23u) & 0xFFu;
-    uint f32_mantissa = f32_bits & 0x7FFFFFu;
+    uint f32_bits_h = uint(floatBitsToInt(val_hi));
+    uint sign = (f32_bits_h >> 31u) & 1u;
+    uint f32_exp = (f32_bits_h >> 23u) & 0xFFu;
+    uint f32_mantissa = f32_bits_h & 0x7FFFFFu;
 
     int f32_bias = 127;
     int f64_bias = 1023;
     int exp_val = int(f32_exp) - f32_bias;
     uint f64_exp = uint(exp_val + f64_bias);
 
-    uint mantissa_hi = f32_mantissa >> 3u;
-    uint mantissa_lo = (f32_mantissa & 0x7u) << 29u;
+    uint mantissa_hi20 = f32_mantissa >> 3u;
+    uint mantissa_lo32 = (f32_mantissa & 0x7u) << 29u;
 
-    uint hi = (sign << 31u) | (f64_exp << 20u) | mantissa_hi;
-    uint lo = mantissa_lo;
+    if (val_lo != 0.0) {
+        int scale_exp = exp_val - 23 + f32_bias;
+        if (scale_exp > 0 && scale_exp < 255) {
+            uint scale_bits = uint(scale_exp) << 23u;
+            float scale = intBitsToFloat(int(scale_bits));
+            float abs_lo = abs(val_lo);
+            float rem_f = (abs_lo / scale) * 536870912.0;
+            uint remaining = uint(clamp(rem_f + 0.5, 0.0, 536870911.0));
+            mantissa_lo32 = mantissa_lo32 | (remaining & 0x1FFFFFFFu);
+        }
+    }
 
-    return uvec2(lo, hi);
+    uint out_hi = (sign << 31u) | (f64_exp << 20u) | mantissa_hi20;
+    uint out_lo = mantissa_lo32;
+    return uvec2(out_lo, out_hi);
 }
 
-// Create emu_f64 from float
-vec2 f64_from_f32(float v) {
-    return vec2(v, 0.0);
+vec2 f64_from_f32(float v) { return vec2(v, 0.0); }
+float f64_to_f32(vec2 v) { return v.x + v.y; }
+vec2 f64_new(float hi, float lo) { return vec2(hi, lo); }
+vec2 f64_neg(vec2 a) { return vec2(-a.x, -a.y); }
+
+// ============================================================================
+// Double-float arithmetic with ANGLE code-elimination workaround.
+// u_one = 1.0 at runtime but opaque to compiler, preventing simplification.
+// Based on the battle-tested luma.gl/deck.gl fp64 implementation.
+// ============================================================================
+
+// Dekker split: a = a_hi + a_lo, a_hi has <= 12 significant bits
+vec2 f64_split(float a) {
+    float c = 4097.0 * a;
+    float a_hi = c * u_one - (c - a);
+    float a_lo = a * u_one - a_hi;
+    return vec2(a_hi, a_lo);
 }
 
-// Convert emu_f64 to float (loses precision)
-float f64_to_f32(vec2 v) {
-    return v.x + v.y;
+// Two-sum: s = a + b exactly as (sum, error) — Knuth's algorithm
+vec2 f64_two_sum(float a, float b) {
+    float s = (a + b);
+    float v = (s * u_one - a) * u_one;
+    float err = (a - (s - v) * u_one) * u_one * u_one * u_one + (b - v);
+    return vec2(s, err);
 }
 
-// Create emu_f64 from high and low
-vec2 f64_new(float hi, float lo) {
-    return vec2(hi, lo);
+// Quick two-sum: assumes |a| >= |b|
+vec2 f64_quick_two_sum(float a, float b) {
+    float s = (a + b) * u_one;
+    float err = b - (s - a) * u_one;
+    return vec2(s, err);
 }
 
-// emu_f64 negation
-vec2 f64_neg(vec2 a) {
-    return vec2(-a.x, -a.y);
+// Two-product: p = a * b exactly as (product, error)
+vec2 f64_two_prod(float a, float b) {
+    float p = a * b;
+    vec2 a_s = f64_split(a);
+    vec2 b_s = f64_split(b);
+    float err = ((a_s.x * b_s.x - p) * u_one + a_s.x * b_s.y * u_one * u_one
+        + a_s.y * b_s.x) + a_s.y * b_s.y * u_one * u_one * u_one;
+    return vec2(p, err);
 }
 
-// emu_f64 addition using Dekker's algorithm
+// emu_f64 addition (full error propagation from both hi and lo parts)
 vec2 f64_add(vec2 a, vec2 b) {
-    float s = a.x + b.x;
-    float v = s - a.x;
-    float e = (a.x - (s - v)) + (b.x - v) + a.y + b.y;
-    float z_hi = s + e;
-    float z_lo = e - (z_hi - s);
-    return vec2(z_hi, z_lo);
+    vec2 s = f64_two_sum(a.x, b.x);
+    vec2 t = f64_two_sum(a.y, b.y);
+    s.y += t.x;
+    s = f64_quick_two_sum(s.x, s.y);
+    s.y += t.y;
+    s = f64_quick_two_sum(s.x, s.y);
+    return s;
 }
 
 // emu_f64 subtraction
@@ -123,41 +202,26 @@ vec2 f64_sub(vec2 a, vec2 b) {
     return f64_add(a, f64_neg(b));
 }
 
-// Helper: split float for multiplication
-vec2 f64_split(float a) {
-    float c = 4097.0 * a;
-    float a_hi = c - (c - a);
-    float a_lo = a - a_hi;
-    return vec2(a_hi, a_lo);
-}
-
-// Helper: two-product algorithm
-vec2 f64_two_prod(float a, float b) {
-    float p = a * b;
-    vec2 a_s = f64_split(a);
-    vec2 b_s = f64_split(b);
-    float e = ((a_s.x * b_s.x - p) + a_s.x * b_s.y + a_s.y * b_s.x) + a_s.y * b_s.y;
-    return vec2(p, e);
-}
-
 // emu_f64 multiplication
 vec2 f64_mul(vec2 a, vec2 b) {
     vec2 p = f64_two_prod(a.x, b.x);
-    float e = a.x * b.y + a.y * b.x + p.y;
-    float z_hi = p.x + e;
-    float z_lo = e - (z_hi - p.x);
-    return vec2(z_hi, z_lo);
+    p.y += a.x * b.y;
+    p = f64_quick_two_sum(p.x, p.y);
+    p.y += a.y * b.x;
+    p = f64_quick_two_sum(p.x, p.y);
+    return p;
 }
 
 // emu_f64 division
 vec2 f64_div(vec2 a, vec2 b) {
-    float q = a.x / b.x;
-    vec2 r = f64_sub(a, f64_mul(b, f64_from_f32(q)));
-    float q2 = r.x / b.x;
-    return f64_add(f64_from_f32(q), f64_from_f32(q2));
+    float xn = 1.0 / b.x;
+    vec2 yn = a * xn;
+    float diff = (f64_sub(a, f64_mul(b, yn))).x;
+    vec2 prod = f64_two_prod(xn, diff);
+    return f64_add(yn, prod);
 }
 
-// emu_f64 comparisons
+// emu_f64 comparisons (no precision-sensitive operations)
 bool f64_lt(vec2 a, vec2 b) {
     return (a.x < b.x) || (a.x == b.x && a.y < b.y);
 }

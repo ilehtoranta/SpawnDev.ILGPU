@@ -34,75 +34,113 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 // ============================================================================
 
 // --- IEEE 754 double bits to double-float conversion ---
+// Properly splits a 64-bit IEEE 754 double into a double-float emu_f64(hi, lo)
+// preserving ~48 bits of mantissa precision via Dekker-style two-sum.
 // When CPU sends a raw 64-bit double, we receive it as vec2<u32> (lo, hi bits)
-// This function converts those raw bits to our double-float representation
 fn f64_from_ieee754_bits(lo: u32, hi: u32) -> emu_f64 {
-    // Extract IEEE 754 components from the 64-bit double
     let sign_bit = (hi >> 31u) & 1u;
-    let exponent = (hi >> 20u) & 0x7FFu; // 11 bits
-    let mantissa_hi = hi & 0xFFFFFu; // top 20 bits of 52-bit mantissa
-    let mantissa_lo = lo; // bottom 32 bits of mantissa
-    
-    // Handle special cases
-    if (exponent == 0u && mantissa_hi == 0u && mantissa_lo == 0u) {
-        // Zero
+    let exponent = (hi >> 20u) & 0x7FFu;
+    let mantissa_hi20 = hi & 0xFFFFFu;
+    let mantissa_lo32 = lo;
+
+    // Zero
+    if (exponent == 0u && mantissa_hi20 == 0u && mantissa_lo32 == 0u) {
         return emu_f64(0.0, 0.0);
     }
+    // Inf/NaN
     if (exponent == 0x7FFu) {
-        // Infinity or NaN - return max or 0
         return emu_f64(0.0, 0.0);
     }
-    
-    // Convert to f32 (with precision loss)
-    // The key is to get the value into our double-float representation
-    let exp_bias: i32 = 1023; // IEEE 754 double bias
+
+    let exp_bias: i32 = 1023;
     let exp_val: i32 = i32(exponent) - exp_bias;
-    
-    // Build the f32 representation
     let f32_exp_bias: i32 = 127;
     let f32_exp: i32 = exp_val + f32_exp_bias;
-    
-    // Check if exponent fits in f32 range (-126 to 127)
+
+    // Out of f32 exponent range
     if (f32_exp <= 0 || f32_exp >= 255) {
-        // Overflow or underflow for f32
-        let val_approx = f32(hi) * 0.00000000023283064; // rough approximation
+        let f32_bits_approx = (sign_bit << 31u) | (u32(clamp(f32_exp, 1, 254)) << 23u) | (mantissa_hi20 << 3u);
+        let val_approx = bitcast<f32>(f32_bits_approx);
         return emu_f64(val_approx, 0.0);
     }
-    
-    // Take top 23 bits of mantissa for f32
-    let f32_mantissa = mantissa_hi >> 0u; // We only have 20 bits in hi, need to shift
-    let f32_bits = (sign_bit << 31u) | (u32(f32_exp) << 23u) | (mantissa_hi << 3u);
-    let val = bitcast<f32>(f32_bits);
-    
-    return emu_f64(val, 0.0);
+
+    // Build high part: sign + exponent + top 23 bits of 52-bit mantissa
+    // We take all 20 bits from mantissa_hi20 + top 3 bits from mantissa_lo32
+    let top23 = (mantissa_hi20 << 3u) | (mantissa_lo32 >> 29u);
+    let f32_bits_h = (sign_bit << 31u) | (u32(f32_exp) << 23u) | top23;
+    let val_hi = bitcast<f32>(f32_bits_h);
+
+    // Build low part: remaining 29 bits of mantissa, scaled properly
+    let remaining = mantissa_lo32 & 0x1FFFFFFFu;
+    if (remaining == 0u) {
+        return emu_f64(val_hi, 0.0);
+    }
+
+    // remaining represents bits at position 2^(exp_val - 52) relative to 1.0
+    // = remaining * 2^(-29) * 2^(exp_val - 23)
+    let lo_exp: i32 = exp_val - 29 + f32_exp_bias;
+    var val_lo: f32 = 0.0;
+    if (lo_exp > 0 && lo_exp < 255) {
+        let rem_f = f32(remaining);
+        let scale_exp: i32 = exp_val - 23 + f32_exp_bias;
+        if (scale_exp > 0 && scale_exp < 255) {
+            let scale_bits = u32(scale_exp) << 23u;
+            let scale = bitcast<f32>(scale_bits);
+            val_lo = (rem_f / 536870912.0) * scale;
+        }
+    }
+
+    if (sign_bit != 0u) {
+        val_lo = -val_lo;
+    }
+
+    // Inline two-sum normalization (Knuth's algorithm)
+    // Cannot call f64_add here as it may be declared later in the library
+    let s = val_hi + val_lo;
+    let e = val_lo - (s - val_hi);
+    return emu_f64(s, e);
 }
 
-// Store emu_f64 back to IEEE 754 bits for buffer write (approximate - loses precision)
+// Store emu_f64 back to IEEE 754 bits for buffer write
+// Reconstructs an approximate IEEE 754 double from both hi and lo float components
 fn f64_to_ieee754_bits(v: emu_f64) -> vec2<u32> {
-    let val = v.x + v.y; // Combine to single f32
-    if (val == 0.0) {
+    let val_hi = v.x;
+    let val_lo = v.y;
+
+    if (val_hi == 0.0 && val_lo == 0.0) {
         return vec2<u32>(0u, 0u);
     }
-    
-    let f32_bits = bitcast<u32>(val);
-    let sign = (f32_bits >> 31u) & 1u;
-    let f32_exp = (f32_bits >> 23u) & 0xFFu;
-    let f32_mantissa = f32_bits & 0x7FFFFFu;
-    
-    // Convert f32 exponent to emu_f64 exponent
+
+    let f32_bits_h = bitcast<u32>(val_hi);
+    let sign = (f32_bits_h >> 31u) & 1u;
+    let f32_exp = (f32_bits_h >> 23u) & 0xFFu;
+    let f32_mantissa = f32_bits_h & 0x7FFFFFu;
+
     let f32_bias: i32 = 127;
     let f64_bias: i32 = 1023;
     let exp_val: i32 = i32(f32_exp) - f32_bias;
     let f64_exp: u32 = u32(exp_val + f64_bias);
-    
-    // Extend 23-bit mantissa to 52-bit (left-shift, zero-fill low bits)
-    let mantissa_hi = f32_mantissa >> 3u; // top 20 bits
-    let mantissa_lo = (f32_mantissa & 0x7u) << 29u; // bottom 3 bits shifted up
-    
-    let hi = (sign << 31u) | (f64_exp << 20u) | mantissa_hi;
-    let lo = mantissa_lo;
-    
-    return vec2<u32>(lo, hi);
+
+    // High part: top 23 bits of f32 mantissa -> top 23 bits of 52-bit double mantissa
+    var mantissa_hi20 = f32_mantissa >> 3u;
+    var mantissa_lo32 = (f32_mantissa & 0x7u) << 29u;
+
+    // Recover extra bits from val_lo
+    if (val_lo != 0.0) {
+        let scale_exp: i32 = exp_val - 23 + f32_bias;
+        if (scale_exp > 0 && scale_exp < 255) {
+            let scale_bits = u32(scale_exp) << 23u;
+            let scale = bitcast<f32>(scale_bits);
+            let abs_lo = abs(val_lo);
+            let rem_f = (abs_lo / scale) * 536870912.0;
+            let remaining = u32(clamp(rem_f + 0.5, 0.0, 536870911.0));
+            mantissa_lo32 = mantissa_lo32 | (remaining & 0x1FFFFFFFu);
+        }
+    }
+
+    let out_hi = (sign << 31u) | (f64_exp << 20u) | mantissa_hi20;
+    let out_lo = mantissa_lo32;
+    return vec2<u32>(out_lo, out_hi);
 }
 
 // Create emu_f64 from a single f32 value

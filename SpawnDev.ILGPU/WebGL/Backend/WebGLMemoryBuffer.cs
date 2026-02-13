@@ -10,7 +10,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
     /// WebGL2 does not have persistent GPU buffers like WebGPU — data lives in
     /// CPU-side ArrayBuffers and is uploaded to GL buffers at dispatch time.
     /// </summary>
-    public class WebGLMemoryBuffer : MemoryBuffer
+    public class WebGLMemoryBuffer : MemoryBuffer, IBrowserMemoryBuffer
     {
         private Uint8Array? _backingArray;
         private bool _disposed;

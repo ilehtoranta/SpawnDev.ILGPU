@@ -18,7 +18,7 @@ namespace SpawnDev.ILGPU.Wasm
     /// <summary>
     /// Wasm memory buffer backed by a SharedArrayBuffer for zero-copy sharing across workers.
     /// </summary>
-    public class WasmMemoryBuffer : MemoryBuffer
+    public class WasmMemoryBuffer : MemoryBuffer, IBrowserMemoryBuffer
     {
         /// <summary>
         /// The SharedArrayBuffer backing this buffer.

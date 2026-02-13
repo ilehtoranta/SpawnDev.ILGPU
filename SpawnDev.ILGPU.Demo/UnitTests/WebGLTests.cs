@@ -2,6 +2,7 @@ using ILGPU;
 using ILGPU.Runtime;
 using SpawnDev.Blazor.UnitTesting;
 using SpawnDev.ILGPU.WebGL;
+using SpawnDev.ILGPU.WebGL.Backend;
 
 namespace SpawnDev.ILGPU.Demo.UnitTests
 {
@@ -23,6 +24,22 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
             if (devices.Count == 0)
                 throw new UnsupportedTestException("No WebGL2 devices found");
             var accelerator = devices[0].CreateAccelerator(context);
+            return (context, accelerator);
+        }
+
+        protected override async Task<(Context context, Accelerator accelerator)> CreateEmulatedAcceleratorAsync()
+        {
+            var builder = Context.Create();
+            await builder.WebGL();
+            var context = builder.ToContext();
+            var devices = context.GetWebGLDevices();
+            if (devices.Count == 0)
+                throw new UnsupportedTestException("No WebGL2 devices found");
+            var accelerator = devices[0].CreateAccelerator(context, new WebGLBackendOptions
+            {
+                EnableF64Emulation = true,
+                EnableI64Emulation = true
+            });
             return (context, accelerator);
         }
 

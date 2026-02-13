@@ -1732,6 +1732,64 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             AppendLine($"{prefix}{target} = {left} {op} {right};");
         }
 
+        public override void GenerateCode(UnaryArithmeticValue value)
+        {
+            var target = Load(value);
+            var operand = Load(value.Value);
+            var operandType = TypeGenerator[value.Value.Type];
+            string prefix = _hoistedPrimitives.Contains(value) ? "" : $"{TypeGenerator[value.Type]} ";
+
+            bool isEmulatedF64 = Backend.Options.EnableF64Emulation && operandType == "vec2";
+            bool isEmulatedI64 = Backend.Options.EnableI64Emulation && operandType == "uvec2";
+
+            if (isEmulatedF64)
+            {
+                string? emulFunc = value.Kind switch
+                {
+                    UnaryArithmeticKind.Neg => "f64_neg",
+                    UnaryArithmeticKind.Abs => "f64_abs",
+                    _ => null
+                };
+                if (emulFunc != null) { AppendLine($"{prefix}{target} = {emulFunc}({operand});"); return; }
+            }
+
+            if (isEmulatedI64)
+            {
+                string? emulFunc = value.Kind switch
+                {
+                    UnaryArithmeticKind.Neg => "i64_neg",
+                    UnaryArithmeticKind.Abs => "i64_abs",
+                    _ => null
+                };
+                if (emulFunc != null) { AppendLine($"{prefix}{target} = {emulFunc}({operand});"); return; }
+            }
+
+            // Fall back to base class for non-emulated types
+            base.GenerateCode(value);
+        }
+
+        public override void GenerateCode(TernaryArithmeticValue value)
+        {
+            var target = Load(value);
+            var first = Load(value.First);
+            var second = Load(value.Second);
+            var third = Load(value.Third);
+            string prefix = _hoistedPrimitives.Contains(value) ? "" : $"{TypeGenerator[value.Type]} ";
+
+            var firstType = TypeGenerator[value.First.Type];
+            bool isEmulatedF64 = Backend.Options.EnableF64Emulation && firstType == "vec2";
+
+            if (isEmulatedF64)
+            {
+                // FMA: a*b+c using double-float emulation
+                AppendLine($"{prefix}{target} = f64_add(f64_mul({first}, {second}), {third});");
+                return;
+            }
+
+            // Fall back: GLSL ES 3.0 has no fma() — emulate with a*b+c
+            AppendLine($"{prefix}{target} = ({first} * {second} + {third});");
+        }
+
         public override void GenerateCode(CompareValue value)
         {
             var target = Load(value);

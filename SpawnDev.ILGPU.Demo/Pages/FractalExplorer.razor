@@ -397,6 +397,9 @@
 
     private async Task InitializeWebGL()
     {
+        // Temporarily enable verbose logging to diagnose shader generation
+        WebGLBackend.VerboseLogging = true;
+        WebGLAccelerator.VerboseLogging = true;
         _ilgpuContext = await Context.CreateAsync(builder => builder.WebGL());
         var devices = _ilgpuContext.GetWebGLDevices();
         if (devices.Count == 0) throw new Exception("No WebGL2 device found");
@@ -603,8 +606,13 @@
             }
 
             var destPixels = _cachedDestPixels!;
-
-            if (internalBuffer is WorkersMemoryBuffer workersBuf)
+            if (internalBuffer is IBrowserMemoryBuffer browserMemoryBuffer)
+            {
+                // JS-side copy: source view from shared buffer → non-shared ImageData
+                using var srcView = await browserMemoryBuffer.CopyToHostUint8ArrayAsync(0, byteCount);
+                destPixels.Set(srcView);
+            }
+            else if (internalBuffer is WorkersMemoryBuffer workersBuf)
             {
                 // JS-side copy: source view from shared buffer → non-shared ImageData
                 using var srcView = await workersBuf.CopyToHostUint8ArrayAsync(0, byteCount);

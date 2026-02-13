@@ -22,7 +22,7 @@ namespace SpawnDev.ILGPU.Workers
     /// When Cross-Origin Isolation is not available, falls back to a regular ArrayBuffer
     /// which still supports single-threaded kernel execution.
     /// </summary>
-    public class WorkersMemoryBuffer : MemoryBuffer
+    public class WorkersMemoryBuffer : MemoryBuffer, IBrowserMemoryBuffer
     {
         private SharedArrayBuffer? _sharedBuffer;
         private ArrayBuffer? _arrayBuffer;
