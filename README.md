@@ -27,8 +27,10 @@ The demo application is located in [SpawnDev.ILGPU.Demo](SpawnDev.ILGPU.Demo) an
 - Interactive Mandelbrot / Fractal Explorer (WebGPU, WebGL, Wasm, Workers)
 - Comprehensive unit test suites for WebGPU, WebGL, Workers, Wasm, and CPU backends
 - [Live Demo](https://lostbeard.github.io/SpawnDev.ILGPU/)
-- [Live Demo - Fractal Explorer](https://lostbeard.github.io/SpawnDev.ILGPU/fractals)
+- [Fractal Explorer](https://lostbeard.github.io/SpawnDev.ILGPU/fractals)
+- [Run Benchmarks](https://lostbeard.github.io/SpawnDev.ILGPU/benchmarks)
 
+[![Benchmarks Screenshot](https://raw.githubusercontent.com/LostBeard/SpawnDev.ILGPU/master/SpawnDev.ILGPU.Demo/wwwroot/screenshots/benchmark-1.jpg)](https://lostbeard.github.io/SpawnDev.ILGPU/benchmarks)  
 [![Fractal Explorer Screenshot](https://raw.githubusercontent.com/LostBeard/SpawnDev.ILGPU/master/SpawnDev.ILGPU.Demo/wwwroot/screenshots/spawndev-ilgpu-fractal-explorer.jpg)](https://lostbeard.github.io/SpawnDev.ILGPU/fractals)
 
 ## Backends at a Glance
