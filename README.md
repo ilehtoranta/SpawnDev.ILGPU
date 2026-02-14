@@ -25,7 +25,6 @@ Write parallel compute code in C# and let the library pick the best available ba
 The [Live Demo](https://lostbeard.github.io/SpawnDev.ILGPU/) source is located in [SpawnDev.ILGPU.Demo](SpawnDev.ILGPU.Demo) and showcases:
 - [Fractal Explorer](https://lostbeard.github.io/SpawnDev.ILGPU/fractals) - Interactive Mandelbrot / Fractal Explorer
 - [Run Benchmarks](https://lostbeard.github.io/SpawnDev.ILGPU/benchmarks) - Comprehensive unit test suites for all backends
-- Automatic device detection across all backends
 
 [![Benchmarks Screenshot](https://raw.githubusercontent.com/LostBeard/SpawnDev.ILGPU/master/SpawnDev.ILGPU.Demo/wwwroot/screenshots/benchmark-1.jpg)](https://lostbeard.github.io/SpawnDev.ILGPU/benchmarks)  
 [![Fractal Explorer Screenshot](https://raw.githubusercontent.com/LostBeard/SpawnDev.ILGPU/master/SpawnDev.ILGPU.Demo/wwwroot/screenshots/spawndev-ilgpu-fractal-explorer.jpg)](https://lostbeard.github.io/SpawnDev.ILGPU/fractals)
