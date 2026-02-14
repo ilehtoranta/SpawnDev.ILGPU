@@ -24,11 +24,9 @@ Write parallel compute code in C# and let the library pick the best available ba
 
 The demo application is located in [SpawnDev.ILGPU.Demo](SpawnDev.ILGPU.Demo) and showcases:
 - Automatic device detection across all backends
-- Interactive Mandelbrot / Fractal Explorer (WebGPU, WebGL, Wasm, Workers)
-- Comprehensive unit test suites for WebGPU, WebGL, Workers, Wasm, and CPU backends
-- [Live Demo](https://lostbeard.github.io/SpawnDev.ILGPU/)
-- [Fractal Explorer](https://lostbeard.github.io/SpawnDev.ILGPU/fractals)
-- [Run Benchmarks](https://lostbeard.github.io/SpawnDev.ILGPU/benchmarks)
+- [Live Demo](https://lostbeard.github.io/SpawnDev.ILGPU/) - Interactive demos (WebGPU, WebGL, Wasm, Workers)
+- [Fractal Explorer](https://lostbeard.github.io/SpawnDev.ILGPU/fractals) - Interactive Mandelbrot / Fractal Explorer (WebGPU, WebGL, Wasm, Workers)
+- [Run Benchmarks](https://lostbeard.github.io/SpawnDev.ILGPU/benchmarks) - Comprehensive unit test suites for WebGPU, WebGL, Workers, Wasm, and CPU backends
 
 [![Benchmarks Screenshot](https://raw.githubusercontent.com/LostBeard/SpawnDev.ILGPU/master/SpawnDev.ILGPU.Demo/wwwroot/screenshots/benchmark-1.jpg)](https://lostbeard.github.io/SpawnDev.ILGPU/benchmarks)  
 [![Fractal Explorer Screenshot](https://raw.githubusercontent.com/LostBeard/SpawnDev.ILGPU/master/SpawnDev.ILGPU.Demo/wwwroot/screenshots/spawndev-ilgpu-fractal-explorer.jpg)](https://lostbeard.github.io/SpawnDev.ILGPU/fractals)
