@@ -22,7 +22,7 @@ Write parallel compute code in C# and let the library pick the best available ba
 
 ## Demo Application
 
-The demo application is located in [SpawnDev.ILGPU.Demo](SpawnDev.ILGPU.Demo) and showcases:
+The demo application source is located in [SpawnDev.ILGPU.Demo](SpawnDev.ILGPU.Demo) and showcases:
 - Automatic device detection across all backends
 - [Live Demo](https://lostbeard.github.io/SpawnDev.ILGPU/) - Interactive demos (WebGPU, WebGL, Wasm, Workers)
 - [Fractal Explorer](https://lostbeard.github.io/SpawnDev.ILGPU/fractals) - Interactive Mandelbrot / Fractal Explorer (WebGPU, WebGL, Wasm, Workers)
