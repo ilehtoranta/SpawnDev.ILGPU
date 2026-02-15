@@ -232,6 +232,7 @@ namespace SpawnDev.ILGPU.WebGPU
                 using var mappedRange = _cachedStagingBuffer.GetMappedRange();
                 if (mappedRange != null)
                 {
+                    // msut copy the data out of the mapped range before unmapping, as the mapped range becomes invalid after unmap
                     result = new Uint8Array(mappedRange.Slice(0));
                 }
             }

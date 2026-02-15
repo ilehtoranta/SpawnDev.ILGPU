@@ -148,6 +148,204 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
             }
         }
 
+        /// <summary>
+        /// Test that f32-only kernels work correctly even when f64 emulation is enabled.
+        /// This verifies the emulation library doesn't break f32 shaders.
+        /// Regression test for the Rendusa DepthEstimationService issue.
+        /// </summary>
+        [TestMethod]
+        public async Task WebGPUF32WithEmulationTest()
+        {
+            // Force-enable emulation on an f32-only kernel
+            var (context, accelerator) = await CreateAcceleratorAsync(enableEmulation: true);
+            try
+            {
+                int length = 64;
+                var a = Enumerable.Range(0, length).Select(i => (float)i).ToArray();
+                var b = Enumerable.Range(0, length).Select(i => (float)(i * 2)).ToArray();
+                var expected = a.Zip(b, (x, y) => x + y).ToArray();
+
+                using var bufA = accelerator.Allocate1D(a);
+                using var bufB = accelerator.Allocate1D(b);
+                using var bufC = accelerator.Allocate1D<float>(length);
+
+                var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<float>, ArrayView<float>, ArrayView<float>>(
+                    static (Index1D index, ArrayView<float> a, ArrayView<float> b, ArrayView<float> c) => { c[index] = a[index] + b[index]; });
+                kernel((Index1D)length, bufA.View, bufB.View, bufC.View);
+                await accelerator.SynchronizeAsync();
+
+                var result = await bufC.CopyToHostAsync<float>();
+                for (int i = 0; i < length; i++)
+                {
+                    if (Math.Abs(result[i] - expected[i]) > 0.001f)
+                        throw new Exception($"VectorAdd with emulation failed at index {i}. Expected {expected[i]}, got {result[i]}");
+                }
+            }
+            finally
+            {
+                accelerator.Dispose();
+                context.Dispose();
+            }
+        }
+
+        /// <summary>
+        /// Replicates the Rendusa ReduceMinMaxKernel pattern:
+        /// SharedMemory, Group.Barrier, tree reduction, Math.Min/Max, explicitly grouped.
+        /// Runs with emulation enabled to verify compatibility.
+        /// </summary>
+        [TestMethod]
+        public async Task RendusaReduceMinMaxTest()
+        {
+            var (context, accelerator) = await CreateAcceleratorAsync(enableEmulation: true);
+            try
+            {
+                // WebGPU bakes @workgroup_size(64) into WGSL — must match at dispatch time
+                const int groupSize = 64;
+                int length = 256;
+                int numGroups = (length + groupSize - 1) / groupSize; // 4 groups
+                var input = Enumerable.Range(0, length).Select(i => (float)i).ToArray();
+                // Output: [min, max] per workgroup → 2 * numGroups values
+                var output = new float[numGroups * 2];
+
+                using var bufInput = accelerator.Allocate1D(input);
+                using var bufOutput = accelerator.Allocate1D(output);
+
+                var kernel = accelerator.LoadStreamKernel<ArrayView<float>, ArrayView<float>, int>(RendusaReduceMinMaxKernel);
+                kernel(new KernelConfig(numGroups, groupSize), bufInput.View, bufOutput.View, length);
+                await accelerator.SynchronizeAsync();
+
+                var result = await bufOutput.CopyToHostAsync<float>();
+                Console.WriteLine($"[REDUCE-DEBUG] numGroups={numGroups} result.Length={result.Length}");
+                for (int g = 0; g < numGroups; g++)
+                {
+                    Console.WriteLine($"[REDUCE-DEBUG] Group {g}: min={result[g * 2]}, max={result[g * 2 + 1]}");
+                }
+                // Reduce per-group results on CPU
+                float globalMin = float.MaxValue, globalMax = float.MinValue;
+                for (int g = 0; g < numGroups; g++)
+                {
+                    globalMin = Math.Min(globalMin, result[g * 2]);
+                    globalMax = Math.Max(globalMax, result[g * 2 + 1]);
+                }
+                if (Math.Abs(globalMin - 0.0f) > 0.001f)
+                    throw new Exception($"ReduceMinMax min failed. Expected 0, got {globalMin}");
+                if (Math.Abs(globalMax - 255.0f) > 0.001f)
+                    throw new Exception($"ReduceMinMax max failed. Expected 255, got {globalMax}");
+            }
+            finally
+            {
+                accelerator.Dispose();
+                context.Dispose();
+            }
+        }
+
+        /// <summary>
+        /// Replicates the Rendusa NormalizeSmoothKernel pattern:
+        /// Scalar float params, control flow (if/else), Math.Min/Max for clamping.
+        /// Runs with emulation enabled to verify compatibility.
+        /// </summary>
+        [TestMethod]
+        public async Task RendusaNormalizeSmoothTest()
+        {
+            var (context, accelerator) = await CreateAcceleratorAsync(enableEmulation: true);
+            try
+            {
+                int length = 64;
+                var input = Enumerable.Range(0, length).Select(i => (float)i).ToArray();
+                var smoothed = new float[length]; // will be seeded
+
+                float dMin = 0f;
+                float invRange = 1f / 63f; // normalize to [0,1]
+                float alpha = 0.5f;
+                int seedMode = 1; // seed mode = first frame
+
+                using var bufInput = accelerator.Allocate1D(input);
+                using var bufSmoothed = accelerator.Allocate1D(smoothed);
+
+                var kernel = accelerator.LoadAutoGroupedStreamKernel<
+                    Index1D, ArrayView<float>, ArrayView<float>,
+                    float, float, float, int>(RendusaNormalizeSmoothKernel);
+                kernel((Index1D)length, bufInput.View, bufSmoothed.View,
+                    dMin, invRange, alpha, seedMode);
+                await accelerator.SynchronizeAsync();
+
+                var result = await bufSmoothed.CopyToHostAsync<float>();
+                for (int i = 0; i < length; i++)
+                {
+                    float expected = Math.Min(Math.Max((input[i] - dMin) * invRange, 0f), 1f);
+                    if (Math.Abs(result[i] - expected) > 0.001f)
+                        throw new Exception($"NormalizeSmooth failed at {i}. Expected {expected}, got {result[i]}");
+                }
+            }
+            finally
+            {
+                accelerator.Dispose();
+                context.Dispose();
+            }
+        }
+
+        #region Rendusa-Pattern Kernels
+
+        static void RendusaReduceMinMaxKernel(
+            ArrayView<float> input,
+            ArrayView<float> output,
+            int length)
+        {
+            int index = Grid.GlobalIndex.X;
+            float localMin = index < length ? input[index] : 1e38f;
+            float localMax = index < length ? input[index] : -1e38f;
+
+            // Must match @workgroup_size(64) — WebGPU bakes this at compile time
+            var sharedMin = SharedMemory.Allocate<float>(64);
+            var sharedMax = SharedMemory.Allocate<float>(64);
+
+            int lid = Group.IdxX;
+            sharedMin[lid] = localMin;
+            sharedMax[lid] = localMax;
+            Group.Barrier();
+
+            for (int stride = Group.DimX / 2; stride > 0; stride /= 2)
+            {
+                if (lid < stride)
+                {
+                    sharedMin[lid] = Math.Min(sharedMin[lid], sharedMin[lid + stride]);
+                    sharedMax[lid] = Math.Max(sharedMax[lid], sharedMax[lid + stride]);
+                }
+                Group.Barrier();
+            }
+
+            if (lid == 0)
+            {
+                int groupIdx = Grid.IdxX;
+                output[groupIdx * 2] = sharedMin[0];
+                output[groupIdx * 2 + 1] = sharedMax[0];
+            }
+        }
+
+        static void RendusaNormalizeSmoothKernel(
+            Index1D index,
+            ArrayView<float> input,
+            ArrayView<float> smoothed,
+            float dMin,
+            float invRange,
+            float alpha,
+            int seedMode)
+        {
+            float normalized = (input[index] - dMin) * invRange;
+            float blended;
+            if (seedMode != 0)
+            {
+                blended = normalized;
+            }
+            else
+            {
+                blended = alpha * normalized + (1f - alpha) * smoothed[index];
+            }
+            smoothed[index] = Math.Min(Math.Max(blended, 0f), 1f);
+        }
+
+        #endregion
+
         #endregion
 
     }

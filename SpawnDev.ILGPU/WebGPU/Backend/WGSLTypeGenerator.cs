@@ -58,6 +58,20 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         public IRTypeContext TypeContext { get; }
 
         /// <summary>
+        /// Per-kernel override: when set to false, Int64 maps to i32 even if Backend.Options.EnableI64Emulation is true.
+        /// Set by GenerateHeader based on whether the kernel parameters actually contain Int64.
+        /// When null, falls back to Backend.Options.EnableI64Emulation.
+        /// </summary>
+        public bool? KernelUsesI64 { get; set; }
+
+        /// <summary>
+        /// Per-kernel override: when set to false, Float64 maps to f32 even if Backend.Options.EnableF64Emulation is true.
+        /// Set by GenerateHeader based on whether the kernel parameters actually contain Float64.
+        /// When null, falls back to Backend.Options.EnableF64Emulation.
+        /// </summary>
+        public bool? KernelUsesF64 { get; set; }
+
+        /// <summary>
         /// Returns the associated WGSL type name.
         /// </summary>
         public string this[TypeNode typeNode]
@@ -92,36 +106,42 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
         public string GetBasicValueType(BasicValueType type)
         {
+            // Use per-kernel overrides if set, otherwise fall back to global options
+            var useI64Emu = KernelUsesI64 ?? Backend.Options.EnableI64Emulation;
+            var useF64Emu = KernelUsesF64 ?? Backend.Options.EnableF64Emulation;
             return type switch
             {
                 BasicValueType.Int1 => "bool",
                 BasicValueType.Int8 => "i32", // WGSL doesn't have i8, promote to i32
                 BasicValueType.Int16 => "i32", // WGSL doesn't have i16, promote to i32
                 BasicValueType.Int32 => "i32",
-                BasicValueType.Int64 => Backend.Options.EnableI64Emulation ? "emu_i64" : "i32",
+                BasicValueType.Int64 => useI64Emu ? "emu_i64" : "i32",
                 BasicValueType.Float16 => "f32", // Promoting
                 BasicValueType.Float32 => "f32",
-                BasicValueType.Float64 => Backend.Options.EnableF64Emulation ? "emu_f64" : "f32",
+                BasicValueType.Float64 => useF64Emu ? "emu_f64" : "f32",
                 _ => null
             };
         }
 
         public string GetBasicValueType(ArithmeticBasicValueType type)
         {
+            // Use per-kernel overrides if set, otherwise fall back to global options
+            var useI64Emu = KernelUsesI64 ?? Backend.Options.EnableI64Emulation;
+            var useF64Emu = KernelUsesF64 ?? Backend.Options.EnableF64Emulation;
             return type switch
             {
                 ArithmeticBasicValueType.UInt1 => "bool",
                 ArithmeticBasicValueType.Int8 => "i32",
                 ArithmeticBasicValueType.Int16 => "i32",
                 ArithmeticBasicValueType.Int32 => "i32",
-                ArithmeticBasicValueType.Int64 => Backend.Options.EnableI64Emulation ? "emu_i64" : "i32",
+                ArithmeticBasicValueType.Int64 => useI64Emu ? "emu_i64" : "i32",
                 ArithmeticBasicValueType.UInt8 => "u32",
                 ArithmeticBasicValueType.UInt16 => "u32",
                 ArithmeticBasicValueType.UInt32 => "u32",
-                ArithmeticBasicValueType.UInt64 => Backend.Options.EnableI64Emulation ? "emu_u64" : "u32",
+                ArithmeticBasicValueType.UInt64 => useI64Emu ? "emu_u64" : "u32",
                 ArithmeticBasicValueType.Float16 => "f32",
                 ArithmeticBasicValueType.Float32 => "f32",
-                ArithmeticBasicValueType.Float64 => Backend.Options.EnableF64Emulation ? "emu_f64" : "f32",
+                ArithmeticBasicValueType.Float64 => useF64Emu ? "emu_f64" : "f32",
                 _ => null
             };
         }

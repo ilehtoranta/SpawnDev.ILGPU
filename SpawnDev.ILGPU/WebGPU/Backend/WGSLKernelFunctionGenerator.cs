@@ -111,9 +111,28 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
         private Value? _indexParameterAddress;
 
-        // Force offset 1 if we have a valid index type, ignoring IsExplicitlyGrouped
-        // This fixes cases where SharedMemory usage flags the kernel as explicit but it still has an Index parameter.
-        private int KernelParamOffset => EntryPoint.IndexType != IndexType.None ? 1 : 0;
+        // Returns 1 if the first IR parameter is an implicit index (auto-grouped kernels),
+        // 0 if the first IR parameter is a user-supplied parameter (stream/explicitly-grouped kernels).
+        // The old logic (IndexType != None ? 1 : 0) was wrong for explicitly grouped kernels
+        // that still report a non-None IndexType, because those kernels' first parameter is a user buffer.
+        private int KernelParamOffset
+        {
+            get
+            {
+                if (EntryPoint.IndexType == IndexType.None) return 0;
+                // Check if Method.Parameters[0] is actually an index-like type (not a ViewType/buffer)
+                if (Method.Parameters.Count > 0)
+                {
+                    var firstParamType = Method.Parameters[0].Type;
+                    if (firstParamType is global::ILGPU.IR.Types.ViewType)
+                    {
+                        // First param is a buffer (ArrayView) — it's a user param, not an index
+                        return 0;
+                    }
+                }
+                return 1;
+            }
+        }
 
         #endregion
 
@@ -161,14 +180,26 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             if (emitSubgroups || Backend.HasShaderF16)
                 builder.AppendLine();
 
-            // Emit emulation library FIRST (type aliases + helper functions must precede struct definitions
-            // that reference emu_i64/emu_f64 types — WGSL requires types be defined before use)
-            if (Backend.Options.EnableF64Emulation || Backend.Options.EnableI64Emulation)
+            // Pre-scan parameters to detect if any actually use f64/i64 types.
+            // IMPORTANT: We check IR types directly (BasicValueType) instead of going through
+            // TypeGenerator[...] which would populate the mapping dictionary and cause
+            // GenerateTypeDefinitions to emit struct definitions prematurely.
+            bool needsF64Emulation = Backend.Options.EnableF64Emulation && ContainsBasicValueType(BasicValueType.Float64);
+            bool needsI64Emulation = Backend.Options.EnableI64Emulation && ContainsBasicValueType(BasicValueType.Int64);
+
+            // Set per-kernel overrides on the TypeGenerator so that intermediate IR values
+            // (e.g., Grid.GlobalIndex.X → Int64) map to i32 instead of emu_i64 when the
+            // kernel parameters don't actually use 64-bit data types.
+            TypeGenerator.KernelUsesI64 = needsI64Emulation;
+            TypeGenerator.KernelUsesF64 = needsF64Emulation;
+
+            // Only emit emulation library if it's both enabled AND actually needed by this kernel
+            if (needsF64Emulation || needsI64Emulation)
             {
                 builder.AppendLine("// ============ 64-bit Emulation Library ============");
                 builder.AppendLine(WGSLEmulationLibrary.GetEmulationLibrary(
-                    Backend.Options.EnableF64Emulation,
-                    Backend.Options.EnableI64Emulation));
+                    needsF64Emulation,
+                    needsI64Emulation));
             }
 
             // Emit struct definitions (may reference emu_i64/emu_f64 from the library above)
@@ -361,23 +392,14 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             }
             else
             {
-                AppendLine("var current_block : i32 = 0;");
-                AppendLine("loop {");
-                PushIndent();
-
-                AppendLine("switch (current_block) {");
-                PushIndent();
-
-                GenerateCodeInternal();
-
-                PopIndent();
-                AppendLine("default: { break; }");
-                AppendLine("}"); // End Switch
-
-                AppendLine("if (current_block == -1) { break; }");
-
-                PopIndent();
-                AppendLine("}"); // End Loop
+                // CYCLIC KERNEL: Use Structured Control Flow with Loop constructs
+                // Instead of the state machine (loop { switch { case: ... } }) which is
+                // incompatible with workgroupBarrier() due to WGSL's uniform control flow
+                // requirements, we generate proper WGSL loop {} constructs using the
+                // loop analysis data from ILGPU. This allows barriers to be in uniform
+                // control flow (inside the loop body at the top level, not inside a switch).
+                var pd = global::ILGPU.IR.Analyses.Dominators.CreatePostDominators(Method.Blocks);
+                GenerateStructuredCode(Method.EntryBlock, null, pd);
             }
 
             // CRITICAL: Post-process to fix variable scoping issues.
@@ -394,6 +416,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     @"^(\s*)let\s+(v_\d+(?:_\w+)?)\s*=\s*(.+);",
                     System.Text.RegularExpressions.RegexOptions.Multiline);
                 var missingDeclarations = new List<string>(); // var declarations to add
+                var hoistedLetDeclarations = new List<string>(); // pointer-alias lets to hoist
                 bool anyReplacements = false;
                 string processed = letPattern.Replace(generatedCode, match =>
                 {
@@ -401,11 +424,27 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     string varName = match.Groups[2].Value;
                     string expr = match.Groups[3].Value;
 
-                    // Keep pointer aliases as 'let' (they can't be var)
-                    // This includes &param (buffer refs), &temp_ (temporaries), 
-                    // and &v_N (shared memory refs like &v_18)
+                    // Pointer aliases (expressions starting with '&') can't be declared as 'var'
+                    // in WGSL — they must remain as 'let'. But 'let' has block scope, so if they're
+                    // inside a case block and used from other case blocks, we must hoist them to
+                    // function scope. ONLY hoist simple pointer aliases like &v_67 (references to
+                    // module-scope shared memory). DO NOT hoist indexed expressions like &v_66[v_82]
+                    // since those depend on block-local variables.
                     if (expr.TrimStart().StartsWith("&"))
+                    {
+                        var trimmed = expr.TrimStart();
+                        // Simple pointer alias: &identifier (no brackets, no dots, no operators)
+                        // e.g. &v_67, &param0 — these reference module-scope or function-scope vars
+                        bool isSimpleRef = System.Text.RegularExpressions.Regex.IsMatch(trimmed, @"^\&\w+$");
+                        if (isSimpleRef)
+                        {
+                            hoistedLetDeclarations.Add($"    let {varName} = {trimmed};");
+                            anyReplacements = true;
+                            return ""; // Remove from case block; will be emitted at function scope
+                        }
+                        // Complex pointer expression (e.g. &v_66[v_82]) — keep as-is in block
                         return match.Value;
+                    }
 
                     anyReplacements = true;
 
@@ -445,8 +484,20 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                             Builder.AppendLine(decl);
                     }
 
+                    // Insert hoisted pointer-alias let declarations at function scope
+                    if (hoistedLetDeclarations.Count > 0)
+                    {
+                        foreach (var decl in hoistedLetDeclarations)
+                            Builder.AppendLine(decl);
+                    }
+
                     Builder.Append(processed);
                 }
+
+                // Note: Barrier extraction post-processing is no longer needed.
+                // With structured loop generation, barriers are emitted directly
+                // in the loop body at the correct scope, ensuring uniform control flow.
+
             }
 
             PopIndent();
@@ -515,6 +566,56 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 IndexType.Index3D => "4, 4, 4",
                 _ => "64"
             };
+        }
+
+        /// <summary>
+        /// Checks whether ANY value in the kernel IR (parameters AND internal values)
+        /// contains the specified BasicValueType.
+        /// This scans the full IR because intermediate values (e.g. Grid.GlobalIndex.X → Int64,
+        /// loop counters, comparisons) generate 64-bit IR operations that require the
+        /// emulation library even when no kernel parameter uses 64-bit types.
+        /// </summary>
+        private bool ContainsBasicValueType(BasicValueType targetType)
+        {
+            // First check parameters
+            int paramOffset = KernelParamOffset;
+            foreach (var param in Method.Parameters)
+            {
+                if (param.Index < paramOffset) continue;
+                if (TypeContainsBasicValue(param.ParameterType, targetType, new HashSet<TypeNode>()))
+                    return true;
+            }
+            // Then check ALL values in all blocks (catches intermediate Int64/Float64 from
+            // Grid.GlobalIndex.X, loop counters, comparison results, etc.)
+            foreach (var block in Method.Blocks)
+            {
+                foreach (var value in block)
+                {
+                    if (value.Value.Type is PrimitiveType pt && pt.BasicValueType == targetType)
+                        return true;
+                }
+            }
+            return false;
+        }
+
+        private bool TypeContainsBasicValue(TypeNode type, BasicValueType targetType, HashSet<TypeNode> visited)
+        {
+            if (type == null || !visited.Add(type)) return false;
+            if (type is PrimitiveType pt)
+                return pt.BasicValueType == targetType;
+            if (type is ViewType vt)
+                return TypeContainsBasicValue(vt.ElementType, targetType, visited);
+            if (type is global::ILGPU.IR.Types.PointerType ptr)
+                return TypeContainsBasicValue(ptr.ElementType, targetType, visited);
+            if (type is StructureType st)
+            {
+                foreach (var field in st.Fields)
+                {
+                    if (TypeContainsBasicValue(field, targetType, visited))
+                        return true;
+                }
+            }
+            return false;
         }
 
         private TypeNode GetBufferElementType(TypeNode type)
@@ -707,7 +808,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 else if (basicType == BasicValueType.Float64)
                 {
                     // emu_f64 is emulated as vec2<f32> when emulation is enabled
-                    if (Backend.Options.EnableF64Emulation)
+                    if (wgslType == "emu_f64")
                         init = " = emu_f64(0.0, 0.0)";
                     else
                         init = " = 0.0";
@@ -715,7 +816,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 else if (basicType == BasicValueType.Int64)
                 {
                     // emu_i64 is emulated as vec2<u32> when emulation is enabled
-                    if (Backend.Options.EnableI64Emulation)
+                    if (wgslType == "emu_i64" || wgslType == "emu_u64")
                         init = " = emu_i64(0u, 0u)";
                     else
                         init = " = 0";
@@ -733,6 +834,14 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             is3DView = false;
             isMultiDim = false;
             isView = false;
+
+            // 0. Direct ViewType Check — for stream kernels where the IR type is View<T> directly
+            if (ParameterType is ViewType)
+            {
+                isView = true;
+                is1DView = true;
+                return;
+            }
 
             string typeName = ParameterType.ToString();
 
@@ -868,7 +977,19 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             // But for Shared Memory (var<workgroup> arr), it's treated as value, so we need &
 
             declaredVariables.Add(target.Name);
-            AppendLine($"let {target.Name} = {refPrefix}{source};");
+
+            if (IsStateMachineActive)
+            {
+                // Hoist let declarations to function scope (VariableBuilder) so they
+                // are accessible across all case blocks in the state machine.
+                // Without this, the let has block scope inside a case and becomes
+                // "unresolved value" in other case blocks that reference it.
+                VariableBuilder.AppendLine($"    let {target.Name} = {refPrefix}{source};");
+            }
+            else
+            {
+                AppendLine($"let {target.Name} = {refPrefix}{source};");
+            }
         }
 
         public override void GenerateCode(DynamicMemoryLengthValue value)
@@ -901,6 +1022,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             if (ResolveToParameter(value.Source) is global::ILGPU.IR.Values.Parameter param)
             {
                 int paramOffset = KernelParamOffset;
+                Console.WriteLine($"[LEA-PARAM] Resolved param.Index={param.Index} paramOffset={paramOffset} param.Type={param.Type} check={param.Index >= paramOffset}");
                 if (param.Index >= paramOffset)
                 {
                     // Check if this is an emulated 64-bit buffer
@@ -947,6 +1069,9 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             var sourceVal = Load(value.Source);
             AppendIndent();
             Builder.Append($"let {target.Name} = ");
+
+            // TEMP DEBUG: trace what generates &sourceVal[offset]
+            Console.WriteLine($"[LEA-DEBUG] {target.Name} = &{sourceVal}[{offset}] | Source={value.Source} SourceType={value.Source.Type} IsPointer={value.Source.Type.IsPointerType} SourceValueKind={value.Source.GetType().Name} WGSL-Type={TypeGenerator[value.Source.Type]}");
 
             // POINTER DEREFERENCE LOGIC
             // If the source comes from NewView, it's a pointer (let v_3 = &v_4).
@@ -1264,8 +1389,10 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             var targetIndex = GetBlockIndex(branch.Target);
             AppendIndent();
             Builder.AppendLine($"current_block = {targetIndex};");
-            AppendIndent();
-            Builder.AppendLine("continue;");
+            // Note: NO continue; here. In WGSL switch, cases don't fall through.
+            // Control naturally flows to after the switch, where workgroupBarrier()
+            // is placed for uniform control flow. The loop's implicit continuation
+            // returns to the top for the next state machine iteration.
         }
         private new void GenerateCodeInternal()
         {
@@ -1431,16 +1558,27 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
             AppendIndent();
             Builder.AppendLine("}");
-
-            AppendIndent();
-            Builder.AppendLine("continue;");
+            // Note: NO continue; here — same rationale as UnconditionalBranch.
+            // Control flows to after the switch where barriers are placed.
         }
         // 3. Handles 'return' to exit the kernel
         public override void GenerateCode(ReturnTerminator returnTerminator)
         {
-            // In WGSL compute shaders, we simply return to exit the main function
-            AppendIndent();
-            AppendLine("return;");
+            // In state machine mode, we can't use 'return;' directly because it would
+            // skip the workgroupBarrier() placed after the switch statement, violating
+            // WGSL's uniform control flow requirement. Instead, set the exit signal
+            // and let the loop's exit check handle the termination.
+            if (_loops.Count > 0 && Method.Blocks.Count > 1)
+            {
+                AppendIndent();
+                Builder.AppendLine("current_block = -1;");
+            }
+            else
+            {
+                // Single-block or non-state-machine: direct return
+                AppendIndent();
+                AppendLine("return;");
+            }
         }
 
         public override void GenerateCode(CompareValue value)
@@ -1918,18 +2056,21 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
         private global::ILGPU.IR.Values.Parameter? ResolveToParameter(global::ILGPU.IR.Value value)
         {
+            Console.WriteLine($"[RTP-DEBUG] Type={value.GetType().Name} IRType={value.Type} Value={value}");
             if (value is global::ILGPU.IR.Values.Parameter p) return p;
             if (value is GetField gf) return ResolveToParameter(gf.ObjectValue);
 
             if (value is global::ILGPU.IR.Values.Load load) return ResolveToParameter(load.Source);
             if (value is LoadElementAddress lea) return ResolveToParameter(lea.Source);
             if (value is LoadFieldAddress lfa) return ResolveToParameter(lfa.Source);
+            if (value is global::ILGPU.IR.Values.NewView nv) return ResolveToParameter(nv.Pointer);
 
             if (_indexParameterAddress != null && value == _indexParameterAddress)
             {
                 return Method.Parameters[0];
             }
 
+            Console.WriteLine($"[RTP-DEBUG] FAILED to resolve: {value.GetType().Name}");
             return null;
         }
 
@@ -1957,8 +2098,65 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
         private void GenerateStructuredCode(BasicBlock block, BasicBlock? stopBlock, global::ILGPU.IR.Analyses.Dominators<global::ILGPU.IR.Analyses.ControlFlowDirection.Backwards> pd)
         {
+            var visited = new HashSet<BasicBlock>(new BasicBlock.Comparer());
+
+            GenerateStructuredCodeRecursive(block, stopBlock, pd, visited);
+        }
+
+        private void GenerateStructuredCodeRecursive(BasicBlock? block, BasicBlock? stopBlock, global::ILGPU.IR.Analyses.Dominators<global::ILGPU.IR.Analyses.ControlFlowDirection.Backwards> pd, HashSet<BasicBlock> visited, Loops<ReversePostOrder, Forwards>.Node? currentLoop = null)
+        {
             while (block != null && block != stopBlock)
             {
+                // Check if this block is a loop header that we're entering for the first time
+                Loops<ReversePostOrder, Forwards>.Node? loopNode = null;
+                foreach (var loop in _loops)
+                {
+                    foreach (var header in loop.Headers)
+                    {
+                        if (header == block)
+                        {
+                            loopNode = loop;
+                            break;
+                        }
+                    }
+                    if (loopNode != null) break;
+                }
+
+                if (loopNode != null && !visited.Contains(block))
+                {
+                    // Entering a loop — emit a WGSL loop {} construct
+                    visited.Add(block);
+                    GenerateLoopConstruct(block, loopNode, stopBlock, pd, visited);
+
+                    // After the loop, continue with the exit block
+                    if (loopNode.Exits.Length > 0)
+                    {
+                        block = loopNode.Exits[0];
+                    }
+                    else
+                    {
+                        block = null;
+                    }
+                    continue;
+                }
+
+                // Back-edge check: if this is a loop header we've already visited,
+                // this is a back-edge — the loop handles re-iteration implicitly.
+                if (visited.Contains(block))
+                {
+                    // If we're inside a loop and this is the header, push phi values for the
+                    // back-edge and let the loop iterate naturally.
+                    break;
+                }
+                visited.Add(block);
+
+                // If we're inside a loop and this block is OUTSIDE the loop,
+                // we shouldn't be here. This shouldn't happen if stopBlock is set correctly.
+                if (currentLoop != null && !currentLoop.Contains(block))
+                {
+                    break;
+                }
+
                 // Emit Block Body
                 GenerateBasicBlockCode(block);
 
@@ -1969,52 +2167,121 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     var trueTarget = branch.TrueTarget;
                     var falseTarget = branch.FalseTarget;
 
-                    // Compute Merge Node via Post Dominators
+                    // Check if we're inside a loop and one target exits the loop
+                    if (currentLoop != null)
+                    {
+                        bool trueExitsLoop = !currentLoop.Contains(trueTarget);
+                        bool falseExitsLoop = !currentLoop.Contains(falseTarget);
+                        bool trueIsBackEdge = IsLoopHeader(trueTarget, currentLoop);
+                        bool falseIsBackEdge = IsLoopHeader(falseTarget, currentLoop);
+
+                        // Case: if (cond) break; — true exits loop
+                        if (trueExitsLoop && !falseExitsLoop)
+                        {
+                            AppendLine($"if ({Load(branch.Condition)}) {{");
+                            PushIndent();
+                            PushPhiValues(trueTarget, block);
+                            AppendLine("break;");
+                            PopIndent();
+                            AppendLine("}");
+                            PushPhiValues(falseTarget, block);
+                            block = falseTarget;
+                            continue;
+                        }
+                        // Case: if (!cond) break; — false exits loop (i.e., condition is true → continue)
+                        else if (falseExitsLoop && !trueExitsLoop)
+                        {
+                            AppendLine($"if (!{Load(branch.Condition)}) {{");
+                            PushIndent();
+                            PushPhiValues(falseTarget, block);
+                            AppendLine("break;");
+                            PopIndent();
+                            AppendLine("}");
+                            PushPhiValues(trueTarget, block);
+                            block = trueTarget;
+                            continue;
+                        }
+                        // Case: if (cond) continue; — true goes back to header
+                        else if (trueIsBackEdge && !falseIsBackEdge)
+                        {
+                            AppendLine($"if ({Load(branch.Condition)}) {{");
+                            PushIndent();
+                            PushPhiValues(trueTarget, block);
+                            AppendLine("continue;");
+                            PopIndent();
+                            AppendLine("}");
+                            PushPhiValues(falseTarget, block);
+                            block = falseTarget;
+                            continue;
+                        }
+                        // Case: if (!cond) continue; — false goes back to header
+                        else if (falseIsBackEdge && !trueIsBackEdge)
+                        {
+                            AppendLine($"if (!{Load(branch.Condition)}) {{");
+                            PushIndent();
+                            PushPhiValues(falseTarget, block);
+                            AppendLine("continue;");
+                            PopIndent();
+                            AppendLine("}");
+                            PushPhiValues(trueTarget, block);
+                            block = trueTarget;
+                            continue;
+                        }
+                    }
+
+                    // Standard if/else handling (no loop break/continue)
                     BasicBlock? mergeNode = pd.GetImmediateDominator(block);
                     if (mergeNode == block) mergeNode = null;
 
-                    // If simple If-Then (FalseTarget == MergeNode)
-                    // e.g. if (cond) { TrueBody } -> Merge
                     if (falseTarget == mergeNode)
                     {
                         AppendLine($"if ({Load(branch.Condition)}) {{");
                         PushIndent();
-                        GenerateStructuredCode(trueTarget, mergeNode, pd);
+                        PushPhiValues(trueTarget, block);
+                        GenerateStructuredCodeRecursive(trueTarget, mergeNode, pd, visited, currentLoop);
                         PopIndent();
                         AppendLine("}");
                     }
-                    // If simple If-Then Inverted (TrueTarget == MergeNode)
-                    // e.g. if (cond) { Merge } else { FalseBody } -> if (!cond) { FalseBody }
                     else if (trueTarget == mergeNode)
                     {
                         AppendLine($"if (!{Load(branch.Condition)}) {{");
                         PushIndent();
-                        GenerateStructuredCode(falseTarget, mergeNode, pd);
+                        PushPhiValues(falseTarget, block);
+                        GenerateStructuredCodeRecursive(falseTarget, mergeNode, pd, visited, currentLoop);
                         PopIndent();
                         AppendLine("}");
                     }
                     else
                     {
-                        // If-Else
                         AppendLine($"if ({Load(branch.Condition)}) {{");
                         PushIndent();
-                        GenerateStructuredCode(trueTarget, mergeNode, pd);
+                        PushPhiValues(trueTarget, block);
+                        GenerateStructuredCodeRecursive(trueTarget, mergeNode, pd, visited, currentLoop);
                         PopIndent();
                         AppendLine("} else {");
                         PushIndent();
-                        GenerateStructuredCode(falseTarget, mergeNode, pd);
+                        PushPhiValues(falseTarget, block);
+                        GenerateStructuredCodeRecursive(falseTarget, mergeNode, pd, visited, currentLoop);
                         PopIndent();
                         AppendLine("}");
                     }
 
-                    // Continue from Merge Node
                     block = mergeNode;
                 }
                 else if (terminator is global::ILGPU.IR.Values.UnconditionalBranch uBranch)
                 {
-                    // Push phi values for the target block before transitioning
                     PushPhiValues(uBranch.Target, block);
-                    block = uBranch.Target;
+
+                    // Check if this is a back-edge to the loop header (implicit continue)
+                    if (currentLoop != null && IsLoopHeader(uBranch.Target, currentLoop))
+                    {
+                        // Back-edge: phi values pushed, loop continues naturally
+                        block = null;
+                    }
+                    else
+                    {
+                        block = uBranch.Target;
+                    }
                 }
                 else if (terminator is global::ILGPU.IR.Values.ReturnTerminator)
                 {
@@ -2023,10 +2290,105 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 }
                 else
                 {
-                    // Fallback or Switch (Not fully supported in limited logic, but should not crash)
                     block = null;
                 }
             }
+        }
+
+        /// <summary>
+        /// Checks if a block is a header of the given loop.
+        /// </summary>
+        private static bool IsLoopHeader(BasicBlock block, Loops<ReversePostOrder, Forwards>.Node loopNode)
+        {
+            foreach (var header in loopNode.Headers)
+            {
+                if (header == block) return true;
+            }
+            return false;
+        }
+
+        /// <summary>
+        /// Generates a WGSL loop {} construct for a natural loop detected by ILGPU's loop analysis.
+        /// The loop header block is emitted first, followed by a break condition check,
+        /// then the loop body blocks. This ensures barriers are in uniform control flow.
+        /// </summary>
+        private void GenerateLoopConstruct(
+            BasicBlock headerBlock,
+            Loops<ReversePostOrder, Forwards>.Node loopNode,
+            BasicBlock? outerStopBlock,
+            global::ILGPU.IR.Analyses.Dominators<global::ILGPU.IR.Analyses.ControlFlowDirection.Backwards> pd,
+            HashSet<BasicBlock> visited)
+        {
+            AppendLine("loop {");
+            PushIndent();
+
+            // Emit the header block's body (instructions)
+            GenerateBasicBlockCode(headerBlock);
+
+            var terminator = headerBlock.Terminator;
+
+            if (terminator is global::ILGPU.IR.Values.IfBranch headerBranch)
+            {
+                var trueTarget = headerBranch.TrueTarget;
+                var falseTarget = headerBranch.FalseTarget;
+
+                // Determine which branch exits the loop and which continues
+                bool trueIsExit = !loopNode.Contains(trueTarget);
+                bool falseIsExit = !loopNode.Contains(falseTarget);
+
+                if (trueIsExit)
+                {
+                    // True branch exits → break when condition is true
+                    AppendLine($"if ({Load(headerBranch.Condition)}) {{");
+                    PushIndent();
+                    PushPhiValues(trueTarget, headerBlock);
+                    AppendLine("break;");
+                    PopIndent();
+                    AppendLine("}");
+
+                    // False branch is the loop body
+                    PushPhiValues(falseTarget, headerBlock);
+                    GenerateStructuredCodeRecursive(falseTarget, headerBlock, pd, visited, loopNode);
+                }
+                else if (falseIsExit)
+                {
+                    // False branch exits → break when condition is false
+                    AppendLine($"if (!{Load(headerBranch.Condition)}) {{");
+                    PushIndent();
+                    PushPhiValues(falseTarget, headerBlock);
+                    AppendLine("break;");
+                    PopIndent();
+                    AppendLine("}");
+
+                    // True branch is the loop body
+                    PushPhiValues(trueTarget, headerBlock);
+                    GenerateStructuredCodeRecursive(trueTarget, headerBlock, pd, visited, loopNode);
+                }
+                else
+                {
+                    // Both branches stay in the loop — emit if/else inside loop
+                    AppendLine($"if ({Load(headerBranch.Condition)}) {{");
+                    PushIndent();
+                    PushPhiValues(trueTarget, headerBlock);
+                    GenerateStructuredCodeRecursive(trueTarget, headerBlock, pd, visited, loopNode);
+                    PopIndent();
+                    AppendLine("} else {");
+                    PushIndent();
+                    PushPhiValues(falseTarget, headerBlock);
+                    GenerateStructuredCodeRecursive(falseTarget, headerBlock, pd, visited, loopNode);
+                    PopIndent();
+                    AppendLine("}");
+                }
+            }
+            else if (terminator is global::ILGPU.IR.Values.UnconditionalBranch uBranch)
+            {
+                // Unconditional branch in header — emit body, loop continues implicitly
+                PushPhiValues(uBranch.Target, headerBlock);
+                GenerateStructuredCodeRecursive(uBranch.Target, headerBlock, pd, visited, loopNode);
+            }
+
+            PopIndent();
+            AppendLine("}");
         }
 
 

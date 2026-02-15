@@ -10,6 +10,8 @@
 
 using global::ILGPU;
 using global::ILGPU.Runtime;
+using ILGPU.Runtime.CPU;
+using SpawnDev.BlazorJS.JSObjects;
 using SpawnDev.ILGPU.Wasm;
 using SpawnDev.ILGPU.WebGL;
 using SpawnDev.ILGPU.WebGL.Backend;
@@ -30,7 +32,7 @@ namespace SpawnDev.ILGPU
         #region Builder Extensions
 
         /// <summary>
-        /// Enables all supported WASM accelerators: CPU, Workers, and WebGPU.
+        /// Enables all supported WASM accelerators: CPU, Workers, WebGL, and WebGPU.
         /// WebGPU requires async GPU probing, so this method is async.
         /// If WebGPU is not available, it is silently skipped.
         /// </summary>
@@ -75,7 +77,7 @@ namespace SpawnDev.ILGPU
 
         /// <summary>
         /// Creates the preferred accelerator for WASM environments.
-        /// Priority: WebGPU (GPU compute) > Wasm (native Wasm) > Workers (multi-threaded JS) > CPU (fallback).
+        /// Priority: WebGPU (GPU compute) > WebGL (GPU compute) > Wasm (native Wasm) > Workers (multi-threaded JS) > CPU (fallback).
         /// </summary>
         /// <param name="context">The ILGPU context (must have devices registered).</param>
         /// <returns>The best available accelerator.</returns>
@@ -137,7 +139,7 @@ namespace SpawnDev.ILGPU
         #region Unified Buffer Readback
 
         /// <summary>
-        /// Copies data from any ILGPU buffer (WebGPU, Workers, or CPU) back to the host.
+        /// Copies data from any ILGPU buffer (WebGPU, WebGL, Workers, or CPU) back to the host.
         /// Automatically detects the underlying buffer type and uses the appropriate method.
         /// Use this instead of backend-specific CopyToHostAsync to avoid ambiguity.
         /// </summary>
@@ -151,7 +153,7 @@ namespace SpawnDev.ILGPU
         }
 
         /// <summary>
-        /// Copies data from any ILGPU buffer (WebGPU, Workers, or CPU) back to the host.
+        /// Copies data from any ILGPU buffer (WebGPU, WebGL, Workers, or CPU) back to the host.
         /// Automatically detects the underlying buffer type and uses the appropriate method.
         /// Use this instead of backend-specific CopyToHostAsync to avoid ambiguity.
         /// </summary>
@@ -205,6 +207,97 @@ namespace SpawnDev.ILGPU
             var cpuResult = new T[buffer.Length];
             buffer.AsArrayView<T>(0, buffer.Length).CopyToCPU(cpuResult);
             return cpuResult;
+        }
+
+        /// <summary>
+        /// Copies data from any ILGPU buffer (WebGPU, WebGL, Workers, or CPU) back to the host as a Uint8Array.
+        /// </summary>
+        /// <param name="buffer"></param>
+        /// <param name="sourceByteOffset"></param>
+        /// <param name="copyBytes"></param>
+        /// <returns></returns>
+        public static async Task<Uint8Array> CopyToHostUint8ArrayAsync(this MemoryBuffer buffer,long sourceByteOffset = 0, long? copyBytes = null)
+        {
+            var iView = (IArrayView)buffer;
+
+            // Check for WebGPU buffer
+            if (iView.Buffer is WebGPUMemoryBuffer webGpuBuffer)
+            {
+                var result = await webGpuBuffer.NativeBuffer.CopyToHostUint8ArrayAsync(sourceByteOffset, copyBytes);
+                return result;
+            }
+
+            // Check for WebGL2 buffer
+            if (iView.Buffer is WebGLMemoryBuffer webGlBuffer)
+            {
+                if (webGlBuffer.BackingArray == null) return new Uint8Array();
+                return copyBytes == null ? webGlBuffer.BackingArray.SubArray(sourceByteOffset) : webGlBuffer.BackingArray.SubArray(sourceByteOffset, copyBytes.Value + sourceByteOffset);
+            }
+
+            // Check for Workers buffer
+            if (iView.Buffer is WorkersMemoryBuffer workersBuffer)
+            {
+                if (workersBuffer.Uint8View == null) return new Uint8Array();
+                return copyBytes == null ? workersBuffer.Uint8View.SubArray(sourceByteOffset) : workersBuffer.Uint8View.SubArray(sourceByteOffset, copyBytes.Value + sourceByteOffset);
+            }
+
+            // Check for Wasm buffer
+            if (iView.Buffer is WasmMemoryBuffer wasmBuffer)
+            {
+                using var uint8Array = new Uint8Array(wasmBuffer.SharedBuffer);
+                return copyBytes == null ? uint8Array.SubArray(sourceByteOffset) : uint8Array.SubArray(sourceByteOffset, copyBytes.Value + sourceByteOffset);
+            }
+
+            // Check for CPU buffer
+            if (iView.Buffer is CPUMemoryBuffer)
+            {
+                // CPU buffer — use standard ILGPU synchronous copy
+                var cpuResult = await CopyToHostAsync<byte>(buffer);
+                using var uint8Array = new Uint8Array(cpuResult);
+                return copyBytes == null ? uint8Array.SubArray(sourceByteOffset) : uint8Array.SubArray(sourceByteOffset, copyBytes.Value + sourceByteOffset);
+            }
+
+            throw new NotSupportedException();
+        }
+
+        /// <summary>
+        /// Copies data from the buffer back to the host as a TypedArray asynchronously.
+        /// </summary>
+        /// <typeparam name="T"></typeparam>
+        /// <param name="buffer"></param>
+        /// <returns></returns>
+        public static async Task<T> CopyToHostTypeArrayAsync<T>(this MemoryBuffer buffer) where T : TypedArray
+        {
+            var iView = (IArrayView)buffer;
+
+            // Check for WebGPU buffer
+            if (iView.Buffer is WebGPUMemoryBuffer webGpuBuffer)
+            {
+                var result = await webGpuBuffer.NativeBuffer.CopyToHostUint8ArrayAsync();
+                return result.ReCast<T>();
+            }
+
+            // Check for WebGL2 buffer
+            if (iView.Buffer is WebGLMemoryBuffer webGlBuffer)
+            {
+                return webGlBuffer.BackingArray!.ReCast<T>();
+            }
+
+            // Check for Workers buffer
+            if (iView.Buffer is WorkersMemoryBuffer workersBuffer)
+            {
+                return workersBuffer.Uint8View!.ReCast<T>();
+            }
+
+            // Check for Wasm buffer
+            if (iView.Buffer is WasmMemoryBuffer wasmBuffer)
+            {
+                return new Uint8Array(wasmBuffer.SharedBuffer).ReCast<T>();
+            }
+
+            // CPU buffer — use standard ILGPU synchronous copy
+            var cpuResult = await CopyToHostAsync<byte>(buffer);
+            return new Uint8Array(cpuResult).ReCast<T>();
         }
 
         #endregion

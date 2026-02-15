@@ -42,6 +42,11 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         public static bool VerboseLogging { get; set; } = false;
 
         /// <summary>
+        /// Stores the last generated WGSL source for debugging. Temporary.
+        /// </summary>
+        public static string? LastGeneratedWGSL { get; set; }
+
+        /// <summary>
         /// Enables shader pipeline caching. Disable for debugging shader compilation issues.
         /// When enabled, compiled shaders are cached and reused across kernel invocations.
         /// </summary>
@@ -470,6 +475,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             WGSLCodeGenerator.GeneratorArgs data)
         {
             var wgslSource = builder.ToString();
+            LastGeneratedWGSL = wgslSource;
             WebGPUBackend.Log("--- GENERATED WGSL ---");
             WebGPUBackend.Log(wgslSource);
             WebGPUBackend.Log("-----------------------");

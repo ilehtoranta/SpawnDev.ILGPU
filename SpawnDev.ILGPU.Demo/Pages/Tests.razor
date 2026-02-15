@@ -1,12 +1,26 @@
 ﻿@page "/tests"
 @using System.Reflection
 @using SpawnDev.Blazor.UnitTesting
+@using SpawnDev.ILGPU.WebGPU.Backend
 
 <PageTitle>Unit Tests</PageTitle>
 
 <h3>Unit Tests</h3>
 
 <UnitTestsView TypeInstanceResolver="TestTypeResolver" TestAssemblies="Assemblies" TestTypes="Types"></UnitTestsView>
+
+<hr />
+<h4>Last Generated WGSL Source</h4>
+<button @onclick="RefreshWGSL">Refresh WGSL</button>
+@if (!string.IsNullOrEmpty(_lastWGSL))
+{
+    <p>Length: @_lastWGSL.Length chars, @_lastWGSL.Split('\n').Length lines</p>
+    <pre style="max-height:600px;overflow:auto;background:#1e1e1e;color:#d4d4d4;padding:8px;font-size:12px;white-space:pre;border:1px solid #444;">@_lastWGSL</pre>
+}
+else
+{
+    <p><em>No WGSL generated yet. Run a test first, then click Refresh.</em></p>
+}
 
 @code{
     [Inject]
@@ -17,6 +31,12 @@
     {
         if (testType == this.GetType()) return this;
         return null;
+    }
+    string? _lastWGSL;
+    void RefreshWGSL()
+    {
+        _lastWGSL = WebGPUBackend.LastGeneratedWGSL;
+        StateHasChanged();
     }
     protected override void OnInitialized()
     {

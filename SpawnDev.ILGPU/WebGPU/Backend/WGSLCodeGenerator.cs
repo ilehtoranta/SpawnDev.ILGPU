@@ -1123,6 +1123,15 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             if (float.IsPositiveInfinity(value)) return "3.402823e+38";
             if (float.IsNegativeInfinity(value)) return "-3.402823e+38";
 
+            // float.MaxValue / float.MinValue exceed what the WGSL parser
+            // can represent as a decimal literal.  Use bitcast instead.
+            if (value == float.MaxValue || value == float.MinValue ||
+                value == -float.MaxValue)
+            {
+                uint bits = BitConverter.SingleToUInt32Bits(value);
+                return $"bitcast<f32>(0x{bits:X8}u)";
+            }
+
             var str = value.ToString("G9");
             if (!str.Contains('.') && !str.Contains('e') && !str.Contains('E'))
                 str += ".0";
