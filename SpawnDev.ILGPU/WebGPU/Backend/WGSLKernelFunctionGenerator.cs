@@ -1476,9 +1476,13 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 var merge = _postDominators.GetImmediateDominator(current);
 
                 // Resolve Phi nodes for outgoing branches
-                PushPhiValues(trueTarget, current); // Assignments for True path
-                // Note: In structured IF, false path assignments might need careful placement if we don't declare vars ahead
-                // But hoisting handles declarations.
+                PushPhiValues(trueTarget, current);
+
+                // SHORT-CIRCUIT FIX: Save visited state before true branch so that
+                // blocks visited during the true path can be re-visited by the false
+                // path. This is essential for || short-circuit patterns where both
+                // branches converge on a shared body block (e.g. if (a || b) { body }).
+                var visitedBeforeTrueBranch = new HashSet<BasicBlock>(_visitedBlocks);
 
                 var cond = Load(ib.Condition);
                 AppendLine($"if ({cond}) {{");
@@ -1488,6 +1492,9 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 AppendLine("} else {");
                 PushIndent();
                 PushPhiValues(falseTarget, current);
+                // Restore visited state: remove blocks that were only visited during
+                // the true branch, so the false branch can reach shared targets.
+                _visitedBlocks.IntersectWith(visitedBeforeTrueBranch);
                 GenerateStructuredCode(falseTarget, merge);
                 PopIndent();
                 AppendLine("}");
@@ -2253,6 +2260,12 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     }
                     else
                     {
+                        // SHORT-CIRCUIT FIX: Save visited state before true branch so that
+                        // blocks visited during the true path can be re-visited by the false
+                        // path. This is essential for || short-circuit patterns where both
+                        // branches converge on a shared body block (e.g. if (a || b) { body }).
+                        var visitedBeforeTrueBranch = new HashSet<BasicBlock>(visited);
+
                         AppendLine($"if ({Load(branch.Condition)}) {{");
                         PushIndent();
                         PushPhiValues(trueTarget, block);
@@ -2261,6 +2274,9 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                         AppendLine("} else {");
                         PushIndent();
                         PushPhiValues(falseTarget, block);
+                        // Restore visited state: remove blocks that were only visited during
+                        // the true branch, so the false branch can reach shared targets.
+                        visited.IntersectWith(visitedBeforeTrueBranch);
                         GenerateStructuredCodeRecursive(falseTarget, mergeNode, pd, visited, currentLoop);
                         PopIndent();
                         AppendLine("}");

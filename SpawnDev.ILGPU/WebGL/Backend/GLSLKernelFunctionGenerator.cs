@@ -1119,6 +1119,13 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             var merge = _postDominators?.GetImmediateDominator(source);
 
             PushPhiValues(trueTarget, source);
+
+            // SHORT-CIRCUIT FIX: Save visited state before true branch so that
+            // blocks visited during the true path can be re-visited by the false
+            // path. This is essential for || short-circuit patterns where both
+            // branches converge on a shared body block (e.g. if (a || b) { body }).
+            var visitedBeforeTrueBranch = new HashSet<BasicBlock>(_visitedBlocks);
+
             var cond = Load(ib.Condition);
             AppendLine($"if ({cond}) {{");
             PushIndent();
@@ -1127,6 +1134,9 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             AppendLine("} else {");
             PushIndent();
             PushPhiValues(falseTarget, source);
+            // Restore visited state: remove blocks that were only visited during
+            // the true branch, so the false branch can reach shared targets.
+            _visitedBlocks.IntersectWith(visitedBeforeTrueBranch);
             GenerateStructuredCode(falseTarget, merge);
             PopIndent();
             AppendLine("}");
