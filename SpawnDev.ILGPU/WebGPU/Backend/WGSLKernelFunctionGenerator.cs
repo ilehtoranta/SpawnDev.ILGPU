@@ -782,7 +782,15 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     {
                         if (defBlocks.TryGetValue(use.Target, out var defBlock) && defBlock != block)
                         {
-                            if (!value.Value.Type.IsPointerType && !value.Value.Type.IsVoidType)
+                            // CRITICAL FIX: Skip hoisting values whose IR type is ViewType.
+                            // ViewType values (ArrayView references extracted via GetField from
+                            // parameter structs) will be aliased to buffer bindings by
+                            // GenerateCode(LoadElementAddress) which emits "let v_X = &paramY[offset];".
+                            // Hoisting them as "var v_X : <element_type> = 0;" causes a redeclaration
+                            // conflict because TypeGenerator maps ViewType to its element type.
+                            bool isViewType = value.Value.Type is global::ILGPU.IR.Types.ViewType;
+
+                            if (!value.Value.Type.IsPointerType && !value.Value.Type.IsVoidType && !isViewType)
                             {
                                 _hoistedPrimitives.Add(value.Value);
                             }
@@ -796,11 +804,13 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 }
             }
 
+            AppendLine("// HOIST-FIX-V2-ACTIVE");
             foreach (var val in _hoistedPrimitives)
             {
                 var variable = Allocate(val);
                 var wgslType = TypeGenerator[val.Type];
                 var basicType = val.Type.BasicValueType;
+
 
                 string init = " = 0";
                 if (basicType == BasicValueType.Int1) init = " = false";
@@ -1022,7 +1032,6 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             if (ResolveToParameter(value.Source) is global::ILGPU.IR.Values.Parameter param)
             {
                 int paramOffset = KernelParamOffset;
-                Console.WriteLine($"[LEA-PARAM] Resolved param.Index={param.Index} paramOffset={paramOffset} param.Type={param.Type} check={param.Index >= paramOffset}");
                 if (param.Index >= paramOffset)
                 {
                     // Check if this is an emulated 64-bit buffer
@@ -1069,9 +1078,6 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             var sourceVal = Load(value.Source);
             AppendIndent();
             Builder.Append($"let {target.Name} = ");
-
-            // TEMP DEBUG: trace what generates &sourceVal[offset]
-            Console.WriteLine($"[LEA-DEBUG] {target.Name} = &{sourceVal}[{offset}] | Source={value.Source} SourceType={value.Source.Type} IsPointer={value.Source.Type.IsPointerType} SourceValueKind={value.Source.GetType().Name} WGSL-Type={TypeGenerator[value.Source.Type]}");
 
             // POINTER DEREFERENCE LOGIC
             // If the source comes from NewView, it's a pointer (let v_3 = &v_4).
@@ -2063,7 +2069,6 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
         private global::ILGPU.IR.Values.Parameter? ResolveToParameter(global::ILGPU.IR.Value value)
         {
-            Console.WriteLine($"[RTP-DEBUG] Type={value.GetType().Name} IRType={value.Type} Value={value}");
             if (value is global::ILGPU.IR.Values.Parameter p) return p;
             if (value is GetField gf) return ResolveToParameter(gf.ObjectValue);
 
@@ -2077,7 +2082,6 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 return Method.Parameters[0];
             }
 
-            Console.WriteLine($"[RTP-DEBUG] FAILED to resolve: {value.GetType().Name}");
             return null;
         }
 
@@ -2247,6 +2251,14 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                         PushPhiValues(trueTarget, block);
                         GenerateStructuredCodeRecursive(trueTarget, mergeNode, pd, visited, currentLoop);
                         PopIndent();
+                        // When falseTarget == merge, the false path goes directly to merge.
+                        // We must still push the merge's phi values for this path, otherwise
+                        // variables that should retain their pre-branch values will stay at
+                        // their hoisted defaults (e.g., 0.0 instead of pixel coordinates).
+                        AppendLine("} else {");
+                        PushIndent();
+                        PushPhiValues(mergeNode, block);
+                        PopIndent();
                         AppendLine("}");
                     }
                     else if (trueTarget == mergeNode)
@@ -2256,14 +2268,27 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                         PushPhiValues(falseTarget, block);
                         GenerateStructuredCodeRecursive(falseTarget, mergeNode, pd, visited, currentLoop);
                         PopIndent();
+                        // When trueTarget == merge, the true path goes directly to merge.
+                        // Push the merge's phi values for the true-path (condition was true
+                        // but negated above, so this else is the "original true" path).
+                        AppendLine("} else {");
+                        PushIndent();
+                        PushPhiValues(mergeNode, block);
+                        PopIndent();
                         AppendLine("}");
                     }
                     else
                     {
-                        // SHORT-CIRCUIT FIX: Save visited state before true branch so that
-                        // blocks visited during the true path can be re-visited by the false
-                        // path. This is essential for || short-circuit patterns where both
-                        // branches converge on a shared body block (e.g. if (a || b) { body }).
+                        // SHORT-CIRCUIT FIX: For || short-circuit patterns where both
+                        // branches converge on a shared body block (e.g. if (a || b) { body }),
+                        // we need to allow the false branch to re-visit blocks that were
+                        // visited by the true branch. However, we must NOT blindly restore
+                        // all visited state, as that would cause duplicate code emission in
+                        // normal if-else branches (breaking the f64 emulation library etc).
+                        //
+                        // Strategy: After the true branch, check if the false target has a
+                        // direct branch to the same block as trueTarget. If so, un-visit
+                        // that shared target so the false path can emit it too.
                         var visitedBeforeTrueBranch = new HashSet<BasicBlock>(visited);
 
                         AppendLine($"if ({Load(branch.Condition)}) {{");
@@ -2274,9 +2299,10 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                         AppendLine("} else {");
                         PushIndent();
                         PushPhiValues(falseTarget, block);
-                        // Restore visited state: remove blocks that were only visited during
-                        // the true branch, so the false branch can reach shared targets.
-                        visited.IntersectWith(visitedBeforeTrueBranch);
+                        // Targeted restore: only un-visit blocks that are shared convergence
+                        // targets reachable from the false branch. This handles || patterns
+                        // without duplicating code in normal if-else branches.
+                        UnvisitSharedTargets(falseTarget, visitedBeforeTrueBranch, visited);
                         GenerateStructuredCodeRecursive(falseTarget, mergeNode, pd, visited, currentLoop);
                         PopIndent();
                         AppendLine("}");
@@ -2307,6 +2333,60 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 else
                 {
                     block = null;
+                }
+            }
+        }
+
+        /// <summary>
+        /// For || short-circuit patterns: un-visit blocks that are shared convergence
+        /// targets between the true and false branches of an if-else. This walks the
+        /// false target's CFG (following unconditional branches and if-branch targets)
+        /// to find blocks that were newly visited by the true branch. Only those blocks
+        /// are removed from the visited set, avoiding duplicate code emission in normal
+        /// if-else branches.
+        /// </summary>
+        private void UnvisitSharedTargets(BasicBlock falseTarget, HashSet<BasicBlock> visitedBefore, HashSet<BasicBlock> visited)
+        {
+            // Collect blocks newly visited by the true branch
+            var newlyVisited = new HashSet<BasicBlock>(visited, new BasicBlock.Comparer());
+            newlyVisited.ExceptWith(visitedBefore);
+            if (newlyVisited.Count == 0) return;
+
+            // Walk the false path to find reachable blocks that were also visited
+            // by the true path. Only walk a few steps to find immediate convergence
+            // (the || pattern typically converges within 1-2 blocks).
+            var toCheck = new Queue<BasicBlock>();
+            toCheck.Enqueue(falseTarget);
+            var checked_ = new HashSet<BasicBlock>(new BasicBlock.Comparer());
+
+            while (toCheck.Count > 0)
+            {
+                var bb = toCheck.Dequeue();
+                if (!checked_.Add(bb)) continue;
+
+                // If this block was newly visited by the true branch, un-visit it
+                // so the false branch can re-emit it
+                if (newlyVisited.Contains(bb))
+                {
+                    visited.Remove(bb);
+                    // Continue checking successors — the shared body might chain
+                    // to more shared blocks via unconditional branches
+                }
+
+                // Only follow edges from blocks we haven't un-visited yet or that
+                // are the starting block (to find its successors)
+                var term = bb.Terminator;
+                if (term is global::ILGPU.IR.Values.IfBranch ib)
+                {
+                    if (newlyVisited.Contains(ib.TrueTarget))
+                        toCheck.Enqueue(ib.TrueTarget);
+                    if (newlyVisited.Contains(ib.FalseTarget))
+                        toCheck.Enqueue(ib.FalseTarget);
+                }
+                else if (term is global::ILGPU.IR.Values.UnconditionalBranch ub)
+                {
+                    if (newlyVisited.Contains(ub.Target))
+                        toCheck.Enqueue(ub.Target);
                 }
             }
         }
