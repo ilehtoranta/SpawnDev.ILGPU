@@ -17,7 +17,7 @@ using SpawnDev.ILGPU.WebGL;
 using SpawnDev.ILGPU.WebGL.Backend;
 using SpawnDev.ILGPU.WebGPU;
 using SpawnDev.ILGPU.WebGPU.Backend;
-using SpawnDev.ILGPU.Workers;
+
 using System.Runtime.InteropServices;
 
 namespace SpawnDev.ILGPU
@@ -25,14 +25,14 @@ namespace SpawnDev.ILGPU
     /// <summary>
     /// Unified context extensions for Blazor WebAssembly.
     /// Provides async device probing for all WASM-compatible backends
-    /// (WebGPU, Wasm, Workers, CPU).
+    /// (WebGPU, WebGL, Wasm, CPU).
     /// </summary>
     public static class SpawnDevContextExtensions
     {
         #region Builder Extensions
 
         /// <summary>
-        /// Enables all supported WASM accelerators: CPU, Workers, WebGL, and WebGPU.
+        /// Enables all supported WASM accelerators: CPU, WebGL, Wasm, and WebGPU.
         /// WebGPU requires async GPU probing, so this method is async.
         /// If WebGPU is not available, it is silently skipped.
         /// </summary>
@@ -43,7 +43,7 @@ namespace SpawnDev.ILGPU
         {
             // Synchronous backends first
             builder.AllAccelerators(); // CPU, OpenCL, Cuda (latter two will fail silently in WASM)
-            builder.Workers();         // Always available in WASM
+
             builder.Wasm();            // Always available in WASM
 
             // WebGPU requires async probing — may not be available
@@ -77,7 +77,7 @@ namespace SpawnDev.ILGPU
 
         /// <summary>
         /// Creates the preferred accelerator for WASM environments.
-        /// Priority: WebGPU (GPU compute) > WebGL (GPU compute) > Wasm (native Wasm) > Workers (multi-threaded JS) > CPU (fallback).
+        /// Priority: WebGPU (GPU compute) > WebGL (GPU compute) > Wasm (native Wasm) > CPU (fallback).
         /// </summary>
         /// <param name="context">The ILGPU context (must have devices registered).</param>
         /// <returns>The best available accelerator.</returns>
@@ -105,12 +105,7 @@ namespace SpawnDev.ILGPU
                 return await WasmAccelerator.Create(context);
             }
 
-            // Try Workers (multi-threaded JS)
-            var workersDevices = context.GetDevices<WorkersILGPUDevice>();
-            if (workersDevices.Count > 0)
-            {
-                return workersDevices[0].CreateAccelerator(context);
-            }
+
 
             // Fall back to CPU
             return context.GetPreferredDevice(preferCPU: true).CreateAccelerator(context);
@@ -139,7 +134,7 @@ namespace SpawnDev.ILGPU
         #region Unified Buffer Readback
 
         /// <summary>
-        /// Copies data from any ILGPU buffer (WebGPU, WebGL, Workers, or CPU) back to the host.
+        /// Copies data from any ILGPU buffer (WebGPU, WebGL, Wasm, or CPU) back to the host.
         /// Automatically detects the underlying buffer type and uses the appropriate method.
         /// Use this instead of backend-specific CopyToHostAsync to avoid ambiguity.
         /// </summary>
@@ -183,16 +178,7 @@ namespace SpawnDev.ILGPU
                 return result;
             }
 
-            // Check for Workers buffer
-            if (iView.Buffer is WorkersMemoryBuffer workersBuffer)
-            {
-                var uint8View = workersBuffer.Uint8View
-                    ?? throw new ObjectDisposedException(nameof(WorkersMemoryBuffer));
-                var byteData = uint8View.ReadBytes();
-                var result = new T[buffer.Length];
-                MemoryMarshal.Cast<byte, T>(byteData).CopyTo(new Span<T>(result));
-                return result;
-            }
+
 
             // Check for Wasm buffer
             if (iView.Buffer is WasmMemoryBuffer wasmBuffer)
@@ -210,7 +196,7 @@ namespace SpawnDev.ILGPU
         }
 
         /// <summary>
-        /// Copies data from any ILGPU buffer (WebGPU, WebGL, Workers, or CPU) back to the host as a Uint8Array.
+        /// Copies data from any ILGPU buffer (WebGPU, WebGL, Wasm, or CPU) back to the host as a Uint8Array.
         /// </summary>
         /// <param name="buffer"></param>
         /// <param name="sourceByteOffset"></param>
@@ -234,12 +220,7 @@ namespace SpawnDev.ILGPU
                 return copyBytes == null ? webGlBuffer.BackingArray.SubArray(sourceByteOffset) : webGlBuffer.BackingArray.SubArray(sourceByteOffset, copyBytes.Value + sourceByteOffset);
             }
 
-            // Check for Workers buffer
-            if (iView.Buffer is WorkersMemoryBuffer workersBuffer)
-            {
-                if (workersBuffer.Uint8View == null) return new Uint8Array();
-                return copyBytes == null ? workersBuffer.Uint8View.SubArray(sourceByteOffset) : workersBuffer.Uint8View.SubArray(sourceByteOffset, copyBytes.Value + sourceByteOffset);
-            }
+
 
             // Check for Wasm buffer
             if (iView.Buffer is WasmMemoryBuffer wasmBuffer)
@@ -283,11 +264,7 @@ namespace SpawnDev.ILGPU
                 return webGlBuffer.BackingArray!.ReCast<T>();
             }
 
-            // Check for Workers buffer
-            if (iView.Buffer is WorkersMemoryBuffer workersBuffer)
-            {
-                return workersBuffer.Uint8View!.ReCast<T>();
-            }
+
 
             // Check for Wasm buffer
             if (iView.Buffer is WasmMemoryBuffer wasmBuffer)
@@ -307,7 +284,7 @@ namespace SpawnDev.ILGPU
         /// <summary>
         /// Asynchronously waits for all submitted work to complete.
         /// Works with any ILGPU Accelerator — dispatches to the correct
-        /// backend-specific implementation (WebGPU, Workers, or CPU).
+        /// backend-specific implementation (WebGPU, Wasm, or CPU).
         /// </summary>
         /// <param name="accelerator">The ILGPU accelerator.</param>
         /// <returns>A task that completes when all work is done.</returns>
@@ -322,10 +299,7 @@ namespace SpawnDev.ILGPU
                 // WebGL2 now uses async worker dispatch — must await pending tasks
                 await WebGLAcceleratorExtensions.SynchronizeAsync(webGlAccelerator);
             }
-            else if (accelerator is WorkersAccelerator workersAccelerator)
-            {
-                await WorkersAcceleratorExtensions.SynchronizeAsync(workersAccelerator);
-            }
+
             else if (accelerator is WasmAccelerator wasmAccelerator)
             {
                 await wasmAccelerator.SynchronizeAsync();

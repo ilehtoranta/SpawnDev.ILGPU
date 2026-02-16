@@ -7,14 +7,14 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
     /// <summary>
     /// Tests for device enumeration and preferred (default) accelerator selection.
     /// Validates that AllAcceleratorsAsync registers all WASM backends
-    /// and that CreatePreferredAcceleratorAsync picks: WebGPU > Workers > CPU.
+    /// and that CreatePreferredAcceleratorAsync picks: WebGPU > Wasm > CPU.
     /// </summary>
     public class DefaultTests
     {
         #region Device Enumeration
 
         /// <summary>
-        /// Verifies that AllAcceleratorsAsync registers WebGPU, Workers, and CPU devices.
+        /// Verifies that AllAcceleratorsAsync registers WebGPU, Wasm, and CPU devices.
         /// </summary>
         [TestMethod]
         public async Task DeviceEnumerationTest()
@@ -34,9 +34,7 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
             if (devices.Count == 0)
                 throw new Exception("No devices registered");
 
-            // Verify we have Workers
-            bool hasWorkers = devices.Any(d => d.Type == AcceleratorType.Workers);
-            Console.WriteLine($"Workers available: {hasWorkers}");
+
 
             // Verify we have WebGPU (expected in Chrome/Edge)
             bool hasWebGPU = devices.Any(d => d.Type == AcceleratorType.WebGPU);
@@ -53,7 +51,7 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
 
         /// <summary>
         /// Verifies that CreatePreferredAcceleratorAsync selects the best backend.
-        /// Expected priority: WebGPU > Workers > CPU.
+        /// Expected priority: WebGPU > Wasm > CPU.
         /// </summary>
         [TestMethod]
         public async Task PreferredAcceleratorTest()

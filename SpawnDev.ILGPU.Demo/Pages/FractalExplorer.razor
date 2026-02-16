@@ -3,7 +3,7 @@
 @implements IAsyncDisposable
 @using SpawnDev.ILGPU.WebGPU
 @using SpawnDev.ILGPU.WebGPU.Backend
-@using SpawnDev.ILGPU.Workers
+
 @using SpawnDev.ILGPU.WebGL
 @using SpawnDev.ILGPU.WebGL.Backend
 @using SpawnDev.ILGPU.Wasm
@@ -268,8 +268,7 @@
         // Wasm — always available in Blazor WASM
         backends.Add(new("Wasm", "⚡⚡ Wasm (Multi-core Wasm)"));
 
-        // Workers — always available in Blazor WASM
-        backends.Add(new("Workers", "⚡ Workers (Multi-core CPU)"));
+
 
         // CPU — always available
         backends.Add(new("CPU", "🐢 CPU (Single-thread)"));
@@ -366,9 +365,7 @@
             case "WebGL":
                 await InitializeWebGL();
                 break;
-            case "Workers":
-                await InitializeWorkers();
-                break;
+
             case "Wasm":
                 await InitializeWasm();
                 break;
@@ -409,13 +406,7 @@
         _ilgpuAccelerator = devices[0].CreateAccelerator(_ilgpuContext, options);
     }
 
-    private async Task InitializeWorkers()
-    {
-        _ilgpuContext = await Context.CreateAsync(builder => builder.Workers());
-        var devices = _ilgpuContext.GetDevices<WorkersILGPUDevice>();
-        if (devices.Count == 0) throw new Exception("No Workers device found");
-        _ilgpuAccelerator = await devices[0].CreateAcceleratorAsync(_ilgpuContext);
-    }
+
 
     private async Task InitializeWasm()
     {
@@ -612,12 +603,7 @@
                 using var srcView = await browserMemoryBuffer.CopyToHostUint8ArrayAsync(0, byteCount);
                 destPixels.Set(srcView);
             }
-            else if (internalBuffer is WorkersMemoryBuffer workersBuf)
-            {
-                // JS-side copy: source view from shared buffer → non-shared ImageData
-                using var srcView = await workersBuf.CopyToHostUint8ArrayAsync(0, byteCount);
-                destPixels.Set(srcView);
-            }
+
             else if (internalBuffer is WasmMemoryBuffer wasmBuf)
             {
                 // JS-side copy: source view from shared buffer → non-shared ImageData
@@ -714,7 +700,7 @@
     }
 
     // ========== Fractal Kernel ==========
-    // Pure ILGPU — works on any backend (WebGPU, Workers, Wasm)
+    // Pure ILGPU — works on any backend (WebGPU, WebGL, Wasm, CPU)
 
     static void FractalKernel(
         Index2D index,

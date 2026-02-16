@@ -4,14 +4,14 @@
 		<TargetFramework>net10.0</TargetFramework>
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>enable</Nullable>
-		<Version>2.3.0</Version>
+		<Version>3.0.0-rc.1</Version>
 		<GeneratePackageOnBuild>True</GeneratePackageOnBuild>
 		<GenerateDocumentationFile>true</GenerateDocumentationFile>
 		<EmbedAllSources>true</EmbedAllSources>
 		<DebugType>Embedded</DebugType>
 		<Title>SpawnDev.ILGPU</Title>
 		<Authors>LostBeard</Authors>
-		<Description>Run ILGPU kernels in Blazor WebAssembly with five supported backends; WebGPU, WebGL, Wasm Workers, Javascript Workers, and CPU</Description>
+		<Description>Massive Parallelism in Blazor Wasm: Running C# ILGPU kernels on WebGPU, WebGL, and Wasm.</Description>
 		<PackageProjectUrl>https://github.com/LostBeard/SpawnDev.ILGPU</PackageProjectUrl>
 		<PackageReadmeFile>README.md</PackageReadmeFile>
 		<PackageLicenseFile>LICENSE.txt</PackageLicenseFile>

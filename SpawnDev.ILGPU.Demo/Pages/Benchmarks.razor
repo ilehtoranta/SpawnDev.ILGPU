@@ -2,7 +2,7 @@
 @implements IAsyncDisposable
 @using SpawnDev.ILGPU.WebGPU
 @using SpawnDev.ILGPU.WebGPU.Backend
-@using SpawnDev.ILGPU.Workers
+
 @using SpawnDev.ILGPU.WebGL
 @using SpawnDev.ILGPU.WebGL.Backend
 @using SpawnDev.ILGPU.Wasm
@@ -20,7 +20,7 @@
 <div class="bench-page">
     <div class="bench-header">
         <h1 class="bench-title"><span class="gradient-text">⚡ Backend Benchmarks</span></h1>
-        <p class="bench-subtitle">Compare performance across WebGPU, Workers, Wasm, WebGL, and CPU backends</p>
+        <p class="bench-subtitle">Compare performance across WebGPU, Wasm, WebGL, and CPU backends</p>
     </div>
 
     @* ── Controls ── *@
@@ -241,7 +241,7 @@
     private static string GetBackendColor(string name) => name switch
     {
         "WebGPU" => "#22c55e",
-        "Workers" => "#3b82f6",
+
         "Wasm" => "#a855f7",
         "WebGL" => "#f97316",
         "CPU" => "#64748b",
@@ -281,7 +281,7 @@
         new BackendInfo("WebGPU", 1_000_000, 512, 1_000_000),
         new BackendInfo("WebGL", 1_000_000, 512, 1_000_000),
         new BackendInfo("Wasm", 1_000_000, 512, 1_000_000),
-        new BackendInfo("Workers", 1_000_000, 512, 1_000_000),
+
         new BackendInfo("CPU", 1_000_000, 512, 500_000),
     };
 
@@ -353,14 +353,7 @@
                     var acc = await devs[0].CreateAcceleratorAsync(ctx);
                     return (ctx, acc);
                 }
-                case "Workers":
-                {
-                    var ctx = await global::ILGPU.Context.CreateAsync(b => b.Workers());
-                    var devs = ctx.GetDevices<WorkersILGPUDevice>();
-                    if (devs.Count == 0) { ctx.Dispose(); return null; }
-                    var acc = await devs[0].CreateAcceleratorAsync(ctx);
-                    return (ctx, acc);
-                }
+
                 case "Wasm":
                 {
                     var ctx = await global::ILGPU.Context.CreateAsync(b => b.Wasm());

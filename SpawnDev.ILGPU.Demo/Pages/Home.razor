@@ -1,17 +1,17 @@
 ﻿@page "/"
 
-<PageTitle>SpawnDev.ILGPU Demo</PageTitle>
+<PageTitle>SpawnDev.ILGPU — Massive Parallelism in Blazor Wasm</PageTitle>
 
 <div class="hero-section">
     <div class="hero-content">
         <h1 class="hero-title">
-            <span class="gradient-text">ILGPU for the Browser</span>
+            <span class="gradient-text">Massive Parallelism in Blazor Wasm</span>
         </h1>
-        <p class="hero-subtitle">C# GPU Computing in Every Browser with Blazor WebAssembly</p>
+        <p class="hero-subtitle">Running C# ILGPU kernels on WebGPU, WebGL, and Wasm</p>
         <p class="hero-description">
-            Run ILGPU kernels in Blazor WebAssembly across five backends.
-            WebGPU and WebGL for GPU compute on virtually every device, multi-threaded WebAssembly for near-native speed, Web Workers for parallel execution, or CPU as a universal fallback —
-            the library picks the best available automatically.
+            Run ILGPU kernels in Blazor WebAssembly across three parallel backends.
+            WebGPU and WebGL dispatch to the GPU for maximum throughput, while the Wasm backend compiles kernels to native WebAssembly and distributes them across Web Workers —
+            all backends run off the main thread, keeping your UI responsive.
         </p>
         <div class="hero-buttons">
             <a href="fractals" class="btn btn-primary btn-lg">
@@ -25,7 +25,7 @@
 </div>
 
 <div class="features-section">
-    <h2 class="section-title">Five Backends, One API</h2>
+    <h2 class="section-title">Three Parallel Backends, One API</h2>
     <div class="features-grid">
         <div class="feature-card feature-highlight">
             <div class="feature-icon">🎮</div>
@@ -40,17 +40,12 @@
         <div class="feature-card feature-highlight">
             <div class="feature-icon">🧊</div>
             <h3>Wasm Backend</h3>
-            <p>Kernels compiled to native WebAssembly binary and dispatched to Web Workers for near-native parallel execution.</p>
+            <p>Kernels compiled to native WebAssembly binary and dispatched to Web Workers for near-native parallel execution. Compatible with every browser that runs Blazor WASM — even with a single worker if SharedArrayBuffer is unavailable.</p>
         </div>
-        <div class="feature-card feature-highlight">
-            <div class="feature-icon">🧵</div>
-            <h3>Workers Backend</h3>
-            <p>Kernels transpiled to JavaScript and distributed across Web Workers for multi-threaded CPU parallelism via SharedArrayBuffer.</p>
-        </div>
-        <div class="feature-card feature-highlight">
-            <div class="feature-icon">💻</div>
-            <h3>CPU Backend</h3>
-            <p>Standard ILGPU CPU accelerator — works everywhere as a universal fallback. Runs on the main thread (blocking).</p>
+        <div class="feature-card">
+            <div class="feature-icon">�</div>
+            <h3>CPU Backend <span style="font-size:0.75em; opacity:0.7;">(Debug)</span></h3>
+            <p>Standard ILGPU CPU accelerator — useful for debugging and performance comparison. Runs on the main thread.</p>
         </div>
         <div class="feature-card">
             <div class="feature-icon">⚡</div>
@@ -60,7 +55,7 @@
         <div class="feature-card">
             <div class="feature-icon">🔀</div>
             <h3>Auto Backend Selection</h3>
-            <p>CreatePreferredAcceleratorAsync() picks the best backend: WebGPU → WebGL → Wasm → Workers → CPU.</p>
+            <p>CreatePreferredAcceleratorAsync() picks the best backend: WebGPU → WebGL → Wasm.</p>
         </div>
         <div class="feature-card">
             <div class="feature-icon">🌐</div>
@@ -92,7 +87,7 @@
             <div class="step-number">2</div>
             <div class="step-content">
                 <h3>Initialize All Backends</h3>
-                <p>Register WebGPU, WebGL, Wasm, Workers, and CPU in one call.</p>
+                <p>Register all parallel backends in one call.</p>
                 <div class="code-block">
                     <pre><code><span class="keyword">var</span> builder = Context.<span class="method">Create</span>();
 <span class="keyword">await</span> builder.<span class="method">AllAcceleratorsAsync</span>();
@@ -107,7 +102,7 @@
                 <h3>Create Best Accelerator</h3>
                 <p>Automatically selects the best available backend.</p>
                 <div class="code-block">
-                    <pre><code><span class="comment">// Priority: WebGPU → WebGL → Wasm → Workers → CPU</span>
+                    <pre><code><span class="comment">// Priority: WebGPU → WebGL → Wasm</span>
 <span class="keyword">using var</span> accelerator = <span class="keyword">await</span> context.<span class="method">CreatePreferredAcceleratorAsync</span>();</code></pre>
                 </div>
             </div>

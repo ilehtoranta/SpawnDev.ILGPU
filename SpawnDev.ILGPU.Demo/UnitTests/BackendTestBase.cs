@@ -7,7 +7,7 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
 {
     /// <summary>
     /// Abstract base class containing all shared kernel tests.
-    /// Each backend (WebGPU, Workers, CPU) inherits and overrides CreateAcceleratorAsync().
+    /// Each backend (WebGPU, Wasm, CPU) inherits and overrides CreateAcceleratorAsync().
     /// </summary>
     public abstract partial class BackendTestBase
     {
