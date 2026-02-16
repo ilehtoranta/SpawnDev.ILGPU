@@ -122,8 +122,8 @@ namespace SpawnDev.ILGPU.WebGPU
             }
 
             _scalarBufferPool ??= new List<GPUBuffer>();
-            // Limit pool size to prevent memory bloat
-            if (_scalarBufferPool.Count < 32)
+            // Limit pool size to prevent memory bloat (increased for batching headroom)
+            if (_scalarBufferPool.Count < 64)
             {
                 _scalarBufferPool.Add(buffer);
             }
@@ -172,6 +172,8 @@ namespace SpawnDev.ILGPU.WebGPU
             accelerator.Backend = new WebGPUBackend(context, options ?? WebGPUBackendOptions.Default, accelerator.NativeAccelerator.EnabledFeatures);
             accelerator.Init(accelerator.Backend);
             accelerator.DefaultStream = accelerator.CreateStreamInternal();
+            // Wire flush callback so WebGPUBuffer readback operations auto-flush pending dispatches
+            accelerator.NativeAccelerator.FlushPendingCommands = () => accelerator.FlushPendingCommands();
 
             // Always log detected features (important for diagnostics)
             var features = accelerator.NativeAccelerator.EnabledFeatures;
@@ -625,16 +627,13 @@ namespace SpawnDev.ILGPU.WebGPU
                     Entries = entries.ToArray()
                 };
 
-                using var bindGroup = device.CreateBindGroup(bindGroupDesc);
+                var bindGroup = device.CreateBindGroup(bindGroupDesc);
 
                 uint workX = 1, workY = 1, workZ = 1;
 
                 // Handle KernelConfig for explicit launches
                 if (dimension is KernelConfig config)
                 {
-                    // For explicit kernels, the GridDim IS the number of groups or related.
-                    // ILGPU KernelConfig: GridDim is the number of groups if explicit?
-                    // "The grid dimension specifies the number of blocks per grid."
                     workX = (uint)config.GridDim.X;
                     workY = (uint)config.GridDim.Y;
                     workZ = (uint)config.GridDim.Z;
@@ -648,14 +647,21 @@ namespace SpawnDev.ILGPU.WebGPU
 
                 WebGPUBackend.Log($"[WebGPU-Debug] Dispatching: ({workX}, {workY}, {workZ})");
 
-                using var encoder = device.CreateCommandEncoder();
+                // Use the stream's shared encoder for batched submission
+                var webGpuStream = stream as WebGPUStream ?? (WebGPUStream)webGpuAccel.DefaultStream;
+                var encoder = webGpuStream.GetOrCreateEncoder();
                 using var pass = encoder.BeginComputePass();
                 pass.SetPipeline(shader.Pipeline);
                 pass.SetBindGroup(0, bindGroup);
                 pass.DispatchWorkgroups(workX, workY, workZ);
                 pass.End();
-                using var cmd = encoder.Finish();
-                nativeAccel.Queue!.Submit(new[] { cmd });
+                webGpuStream.IncrementPassCount();
+
+                // Defer resource cleanup until the batch is flushed
+                webGpuStream.DeferBindGroupDisposal(bindGroup);
+                foreach (var buffer in scalarBuffersToReturn)
+                    webGpuStream.DeferScalarReturn(buffer);
+                scalarBuffersToReturn.Clear();
             }
             catch (Exception ex)
             {
@@ -664,7 +670,7 @@ namespace SpawnDev.ILGPU.WebGPU
             }
             finally
             {
-                // Return scalar buffers to pool
+                // Return any scalar buffers not deferred (error path)
                 foreach (var buffer in scalarBuffersToReturn)
                 {
                     ReturnPooledScalarBuffer(buffer);
@@ -676,8 +682,8 @@ namespace SpawnDev.ILGPU.WebGPU
         protected override AcceleratorStream CreateStreamInternal() => new WebGPUStream(this);
         protected override void SynchronizeInternal()
         {
-            // WebGPU in Blazor WASM cannot block. Use SynchronizeAsync() instead.
-            WebGPUBackend.Log("[WebGPU Warning] Synchronize() is non-blocking in Blazor WASM. Use 'await accelerator.SynchronizeAsync()' for async waiting.");
+            // Flush any pending batched commands on the default stream
+            ((WebGPUStream)DefaultStream).Flush();
         }
         protected override void OnBind() { }
         protected override void OnUnbind() { }
@@ -690,11 +696,94 @@ namespace SpawnDev.ILGPU.WebGPU
         protected override void EnablePeerAccessInternal(Accelerator other) { }
         protected override void DisablePeerAccessInternal(Accelerator other) { }
         protected override bool CanAccessPeerInternal(Accelerator other) => false;
+
+        /// <summary>
+        /// Flush any pending batched kernel dispatches to the GPU.
+        /// Call this after kernel sequences before consuming results externally.
+        /// </summary>
+        public void FlushPendingCommands() => ((WebGPUStream)DefaultStream).Flush();
+
+        /// <summary>
+        /// WebGPU stream that batches multiple kernel dispatches into a single command buffer.
+        /// Compute passes are accumulated in a shared GPUCommandEncoder and submitted together
+        /// when Synchronize() or Flush() is called, matching CUDA's streaming dispatch model.
+        /// </summary>
         private class WebGPUStream : AcceleratorStream
         {
-            public WebGPUStream(Accelerator acc) : base(acc) { }
-            protected override void DisposeAcceleratorObject(bool disposing) { }
-            public override void Synchronize() { }
+            private readonly WebGPUAccelerator _webGpuAccelerator;
+            private GPUCommandEncoder? _encoder;
+            private readonly List<GPUBindGroup> _pendingBindGroups = new();
+            private readonly List<GPUBuffer> _pendingScalarBuffers = new();
+            private int _pendingPassCount;
+
+            public WebGPUStream(Accelerator acc) : base(acc)
+            {
+                _webGpuAccelerator = (WebGPUAccelerator)acc;
+            }
+
+            /// <summary>
+            /// Gets or creates the shared command encoder for this batch.
+            /// </summary>
+            internal GPUCommandEncoder GetOrCreateEncoder()
+            {
+                if (_encoder == null)
+                {
+                    var device = _webGpuAccelerator.NativeAccelerator.NativeDevice!;
+                    _encoder = device.CreateCommandEncoder();
+                    _pendingPassCount = 0;
+                }
+                return _encoder;
+            }
+
+            /// <summary>
+            /// Defer a bind group's disposal until the batch is flushed.
+            /// </summary>
+            internal void DeferBindGroupDisposal(GPUBindGroup bg) => _pendingBindGroups.Add(bg);
+
+            /// <summary>
+            /// Defer a scalar buffer's return to pool until the batch is flushed.
+            /// </summary>
+            internal void DeferScalarReturn(GPUBuffer buf) => _pendingScalarBuffers.Add(buf);
+
+            /// <summary>
+            /// Flush accumulated compute passes: Finish the command encoder and submit to GPU queue.
+            /// After submission, dispose deferred bind groups and return scalar buffers to pool.
+            /// </summary>
+            public void Flush()
+            {
+                if (_encoder == null) return;
+
+                WebGPUBackend.Log($"[WebGPU] Flushing batch: {_pendingPassCount} compute passes");
+
+                using var cmd = _encoder.Finish();
+                _webGpuAccelerator.NativeAccelerator.Queue!.Submit(new[] { cmd });
+                _encoder.Dispose();
+                _encoder = null;
+
+                // Clean up deferred resources
+                foreach (var bg in _pendingBindGroups)
+                    bg.Dispose();
+                _pendingBindGroups.Clear();
+
+                foreach (var buf in _pendingScalarBuffers)
+                    ReturnPooledScalarBuffer(buf);
+                _pendingScalarBuffers.Clear();
+
+                _pendingPassCount = 0;
+            }
+
+            /// <summary>
+            /// Track that a compute pass was appended to the current batch.
+            /// </summary>
+            internal void IncrementPassCount() => _pendingPassCount++;
+
+            public override void Synchronize() => Flush();
+
+            protected override void DisposeAcceleratorObject(bool disposing)
+            {
+                if (disposing) Flush();
+            }
+
             protected override global::ILGPU.Runtime.ProfilingMarker AddProfilingMarkerInternal() => throw new NotSupportedException();
         }
     }

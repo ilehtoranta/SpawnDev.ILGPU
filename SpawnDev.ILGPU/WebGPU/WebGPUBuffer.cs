@@ -159,6 +159,9 @@ namespace SpawnDev.ILGPU.WebGPU
                 _cachedStagingSize = copyBytes;
             }
 
+            // Flush pending ILGPU kernel dispatches before copying
+            Accelerator.FlushPendingCommands?.Invoke();
+
             // Copy from GPU buffer to cached staging buffer
             using var encoder = device.CreateCommandEncoder();
             encoder.CopyBufferToBuffer(_buffer, (ulong)sourceByteOffset, _cachedStagingBuffer, 0, (ulong)copyBytes);
@@ -217,6 +220,9 @@ namespace SpawnDev.ILGPU.WebGPU
                 _cachedStagingBuffer = device.CreateBuffer(stagingDescriptor);
                 _cachedStagingSize = copyBytes.Value;
             }
+
+            // Flush pending ILGPU kernel dispatches before copying
+            Accelerator.FlushPendingCommands?.Invoke();
 
             // Copy from GPU buffer to cached staging buffer
             using var encoder = device.CreateCommandEncoder();
@@ -289,6 +295,9 @@ namespace SpawnDev.ILGPU.WebGPU
                 _cachedStagingBuffer = device.CreateBuffer(stagingDescriptor);
                 _cachedStagingSize = copyBytes;
             }
+
+            // Flush pending ILGPU kernel dispatches before copying
+            Accelerator.FlushPendingCommands?.Invoke();
 
             // Copy from GPU buffer to cached staging buffer
             using var encoder = device.CreateCommandEncoder();

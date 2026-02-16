@@ -187,6 +187,13 @@ namespace SpawnDev.ILGPU.WebGPU
         /// <summary>Returns true if timestamp queries are enabled on this device.</summary>
         public bool HasTimestampQuery => EnabledFeatures.Contains("timestamp-query");
 
+        /// <summary>
+        /// Optional callback to flush pending batched ILGPU kernel dispatches.
+        /// Set by WebGPUAccelerator to allow WebGPUBuffer readback operations
+        /// to auto-flush before copying, ensuring kernel results are available.
+        /// </summary>
+        internal Action? FlushPendingCommands { get; set; }
+
         #endregion
 
         #region Buffer Methods

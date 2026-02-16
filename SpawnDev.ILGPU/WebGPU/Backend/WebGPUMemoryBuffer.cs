@@ -34,8 +34,10 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 var byteArray = new byte[length];
                 Marshal.Copy(srcPtr, byteArray, 0, length);
 
-                // Use TypedArray for efficient transfer to GPU
+                // Flush pending dispatches before writing to the buffer
                 var accelerator = (WebGPUAccelerator)Accelerator;
+                accelerator.FlushPendingCommands();
+
                 var destContiguous = (IContiguousArrayView)destination;
                 using var typedArray = new Uint8Array(byteArray);
                 accelerator.NativeAccelerator.Queue!.WriteBuffer(_buffer.NativeBuffer!, (long)destContiguous.Index, typedArray);
@@ -56,10 +58,12 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
         protected override void MemSet(AcceleratorStream stream, byte value, in ArrayView<byte> view)
         {
-            // Use GPU queue ClearBuffer if available or WriteBuffer with filled array
+            // Use GPU queue WriteBuffer with filled array
             var data = new byte[view.Length];
             if (value != 0) global::System.Array.Fill(data, value);
             var accelerator = (WebGPUAccelerator)Accelerator;
+            // Flush pending dispatches before writing to the buffer
+            accelerator.FlushPendingCommands();
             var viewContiguous = (IContiguousArrayView)view;
             accelerator.NativeAccelerator.Queue!.WriteBuffer(_buffer.NativeBuffer!, (long)viewContiguous.Index, data);
         }
