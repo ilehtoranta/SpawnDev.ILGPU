@@ -23,6 +23,10 @@ namespace SpawnDev.ILGPU.WebGPU
         /// <returns>A task that completes when all GPU work is done.</returns>
         public static async Task SynchronizeAsync(this WebGPUAccelerator accelerator)
         {
+            // Flush any pending compute passes from the command encoder to the GPU queue.
+            // Without this, OnSubmittedWorkDone() could return immediately because the
+            // work is still in the encoder, not yet submitted.
+            accelerator.FlushPendingCommands();
             var queue = accelerator.NativeAccelerator.Queue;
             if (queue != null)
             {
