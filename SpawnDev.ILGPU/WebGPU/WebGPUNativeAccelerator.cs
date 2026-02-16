@@ -58,9 +58,16 @@ namespace SpawnDev.ILGPU.WebGPU
             var adapter = Device.Adapter;
             var requestedFeatures = Device.SupportedFeatures.ToList();
 
-            // Request device with detected features and higher storage buffer limits.
-            // WebGPU defaults to 8 maxStorageBuffersPerShaderStage, but complex kernels
-            // with many parameters may need more. Most adapters support at least 10.
+            // Query the adapter's actual limits so we can request the maximum supported.
+            // WebGPU defaults to 8 maxStorageBuffersPerShaderStage, but ILGPU kernels
+            // use one storage buffer per parameter, so complex kernels need much more.
+            int maxStorageBuffers;
+            using (var adapterLimits = adapter.Limits)
+            {
+                maxStorageBuffers = adapterLimits.MaxStorageBuffersPerShaderStage ?? 10;
+            }
+
+            // Request device with detected features and the adapter's max storage buffer limit.
             try
             {
                 var descriptor = new GPUDeviceDescriptor
@@ -68,7 +75,7 @@ namespace SpawnDev.ILGPU.WebGPU
                     RequiredFeatures = requestedFeatures.Count > 0 ? requestedFeatures : null,
                     RequiredLimits = new
                     {
-                        maxStorageBuffersPerShaderStage = 10
+                        maxStorageBuffersPerShaderStage = maxStorageBuffers
                     }
                 };
                 _gpuDevice = await adapter.RequestDevice(descriptor);
@@ -82,7 +89,7 @@ namespace SpawnDev.ILGPU.WebGPU
                     {
                         RequiredLimits = new
                         {
-                            maxStorageBuffersPerShaderStage = 10
+                            maxStorageBuffersPerShaderStage = maxStorageBuffers
                         }
                     };
                     _gpuDevice = await adapter.RequestDevice(descriptor);
