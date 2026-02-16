@@ -51,13 +51,10 @@
                 <div class="progress-bar-fill" style="width: @(_progressPercent)%"></div>
             </div>
             <div class="progress-label">@_progressLabel</div>
-            @if (_currentBackend == "CPU")
-            {
-                <div class="freeze-warning">
-                    <span class="freeze-icon">⚠️</span>
-                    <span>The <strong>CPU backend</strong> runs on the main thread — the UI will freeze during each iteration.</span>
-                </div>
-            }
+            <div class="freeze-warning">
+                <span class="freeze-icon">⚠️</span>
+                <span>The <strong>CPU backend</strong> runs on the main thread — the UI may freeze during its iterations.</span>
+            </div>
         </div>
     }
 
