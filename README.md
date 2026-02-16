@@ -28,7 +28,7 @@ The [Live Demo](https://lostbeard.github.io/SpawnDev.ILGPU/) source is located i
 - [Unit Tests](https://lostbeard.github.io/SpawnDev.ILGPU/tests) - Comprehensive unit tests for all backends
 
 [![Benchmarks Screenshot](https://raw.githubusercontent.com/LostBeard/SpawnDev.ILGPU/master/SpawnDev.ILGPU.Demo/wwwroot/screenshots/benchmark-3.jpg)](https://lostbeard.github.io/SpawnDev.ILGPU/benchmarks)  
-[![Fractal Explorer Screenshot](https://raw.githubusercontent.com/LostBeard/SpawnDev.ILGPU/master/SpawnDev.ILGPU.Demo/wwwroot/screenshots/spawndev-ilgpu-fractal-explorer.jpg)](https://lostbeard.github.io/SpawnDev.ILGPU/fractals)
+[![Fractal Explorer Screenshot](https://raw.githubusercontent.com/LostBeard/SpawnDev.ILGPU/master/SpawnDev.ILGPU.Demo/wwwroot/screenshots/spawndev-ilgpu-fractal-explorer-3.jpg)](https://lostbeard.github.io/SpawnDev.ILGPU/fractals)
 
 ## Backends at a Glance
 
