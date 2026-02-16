@@ -81,6 +81,15 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
             public float Value;
         }
 
+        /// <summary>
+        /// Simple struct for testing struct scalar kernel arguments.
+        /// </summary>
+        struct ScalarStruct
+        {
+            public float X;
+            public float Y;
+        }
+
         #endregion
 
         #region Kernel Methods
@@ -544,6 +553,24 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
             // Each thread reads from lane 0 of its subgroup via warp shuffle
             int shuffled = Warp.Shuffle(val, 0);
             data[index] = shuffled;
+        }
+
+        /// <summary>
+        /// Kernel that takes a struct as a direct scalar argument (not in an ArrayView).
+        /// Writes the sum of the struct's fields to each element of the output buffer.
+        /// </summary>
+        static void StructScalarArgKernel(Index1D index, ArrayView<float> output, ScalarStruct s)
+        {
+            output[index] = s.X + s.Y;
+        }
+
+        /// <summary>
+        /// Kernel that takes a nested struct as a direct scalar argument.
+        /// Writes Inner.A + Inner.B + (int)Value to each element of the output buffer.
+        /// </summary>
+        static void NestedStructScalarArgKernel(Index1D index, ArrayView<int> output, NestedOuterStruct s)
+        {
+            output[index] = s.Inner.A + s.Inner.B + (int)s.Value;
         }
 
         #endregion

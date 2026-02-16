@@ -6,6 +6,7 @@ using SpawnDev.ILGPU.WebGPU.Backend;
 using System.Collections.Concurrent;
 using System.Reflection;
 using System.Reflection.Emit;
+using System.Runtime.InteropServices;
 using Array = System.Array;
 
 namespace SpawnDev.ILGPU.WebGPU
@@ -175,9 +176,9 @@ namespace SpawnDev.ILGPU.WebGPU
             // Always log detected features (important for diagnostics)
             var features = accelerator.NativeAccelerator.EnabledFeatures;
             if (features.Count > 0)
-                Console.WriteLine($"[WebGPU] Enabled features ({features.Count}): {string.Join(", ", features)}");
+                WebGPUBackend.Log($"[WebGPU] Enabled features ({features.Count}): {string.Join(", ", features)}");
             else
-                Console.WriteLine("[WebGPU] No optional features detected");
+                WebGPUBackend.Log("[WebGPU] No optional features detected");
 
             return accelerator;
         }
@@ -485,7 +486,19 @@ namespace SpawnDev.ILGPU.WebGPU
                         }
                         else if (arg is byte bVal) device.Queue.WriteBuffer(uBuffer, 0, new byte[] { bVal });
                         else if (arg is bool blVal) device.Queue.WriteBuffer(uBuffer, 0, BitConverter.GetBytes(blVal ? 1u : 0u));
-                        else throw new NotSupportedException($"Unsupported scalar argument type: {arg.GetType()}");
+                        else if (arg != null && arg.GetType().IsValueType)
+                        {
+                            // Struct scalar: serialize raw bytes to the storage buffer
+                            // The WGSL shader reads this via array<StructType> binding
+                            int structSize = Marshal.SizeOf(arg.GetType());
+                            byte[] bytes = new byte[structSize];
+                            var handle = GCHandle.Alloc(bytes, GCHandleType.Pinned);
+                            try { Marshal.StructureToPtr(arg, handle.AddrOfPinnedObject(), false); }
+                            finally { handle.Free(); }
+                            device.Queue.WriteBuffer(uBuffer, 0, bytes);
+                            WebGPUBackend.Log($"[WebGPU-Debug] Arg {i}: Struct scalar {arg.GetType().Name}, Size={structSize} bytes");
+                        }
+                        else throw new NotSupportedException($"Unsupported scalar argument type: {arg?.GetType()}");
 
                         resource = new GPUBufferBinding { Buffer = uBuffer, Offset = 0, Size = (ulong)size };
                     }

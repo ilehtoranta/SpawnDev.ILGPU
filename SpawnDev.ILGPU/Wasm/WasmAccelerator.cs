@@ -384,6 +384,10 @@ namespace SpawnDev.ILGPU.Wasm
                 }
 
                 // Build flat argument list
+                // Track struct scalar args that need to be written into scratch memory
+                var structScratchWrites = new List<(int scratchOffset, byte[] bytes)>();
+                int scratchCursor = 0; // offset within scratch region
+
                 var flatArgs = new List<string>();
                 int bufferIndex = 0;
                 foreach (var (isBuffer, buffer, length, stride, stride2, value) in wasmArgs)
@@ -400,7 +404,34 @@ namespace SpawnDev.ILGPU.Wasm
                     {
                         if (value is float fv) flatArgs.Add(fv.ToString("G9"));
                         else if (value is double dv) flatArgs.Add(dv.ToString("G17"));
+                        else if (value != null && value.GetType().IsValueType && !value.GetType().IsPrimitive && !value.GetType().IsEnum)
+                        {
+                            // Struct scalar: serialize to scratch memory, pass offset
+                            int structSize = System.Runtime.InteropServices.Marshal.SizeOf(value.GetType());
+                            byte[] bytes = new byte[structSize];
+                            var handle = System.Runtime.InteropServices.GCHandle.Alloc(bytes, System.Runtime.InteropServices.GCHandleType.Pinned);
+                            try { System.Runtime.InteropServices.Marshal.StructureToPtr(value, handle.AddrOfPinnedObject(), false); }
+                            finally { handle.Free(); }
+
+                            // Align to 4 bytes within scratch
+                            scratchCursor = (scratchCursor + 3) & ~3;
+                            int absoluteOffset = scratchBase + scratchCursor;
+                            structScratchWrites.Add((absoluteOffset, bytes));
+                            flatArgs.Add(absoluteOffset.ToString());
+                            scratchCursor += structSize;
+                            WasmBackend.Log($"[Wasm] Struct scalar arg: type={value.GetType().Name}, size={structSize}, scratchOffset={absoluteOffset}");
+                        }
                         else flatArgs.Add(value?.ToString() ?? "0");
+                    }
+                }
+
+                // Write struct scalar args into scratch memory region
+                if (structScratchWrites.Count > 0)
+                {
+                    foreach (var (scratchOffset, bytes) in structScratchWrites)
+                    {
+                        using var dstView = new Uint8Array(memoryBuffer, scratchOffset, bytes.Length);
+                        dstView.JSRef!.CallVoid("set", (object)bytes);
                     }
                 }
 

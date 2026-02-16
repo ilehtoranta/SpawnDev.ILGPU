@@ -441,6 +441,7 @@ namespace SpawnDev.ILGPU.Workers
             sb.AppendLine("  // Kernel function");
             sb.AppendLine("  " + cleanedSource.Replace("\n", "\n  "));
             sb.AppendLine();
+            sb.AppendLine();
 
             // Create typed array views from args
             sb.AppendLine("  // Create parameter views");
@@ -458,6 +459,7 @@ namespace SpawnDev.ILGPU.Workers
                 }
                 else
                 {
+
                     callArgs.Add($"d.args[{argIdx}].value");
                 }
                 argIdx++;
@@ -871,15 +873,60 @@ namespace SpawnDev.ILGPU.Workers
                         }
                     }
                 }
+                else if (arg != null && arg.GetType().IsValueType && !arg.GetType().IsPrimitive && !arg.GetType().IsEnum)
+                {
+                    // Struct scalar: convert to JS-compatible object with f0, f1, f2... keys
+                    // matching the ILGPU IR's GetField access pattern (param.f0, param.f0.f1, etc.)
+                    jsArgs.Add(ConvertStructToJSObject(arg));
+                    WorkersBackend.Log($"[Workers-Debug] Arg {i}: Struct, converted {arg.GetType().Name} to f{{N}} object");
+                }
                 else
                 {
-                    // Scalar argument — pass directly
+                    // Primitive scalar argument — pass directly
                     jsArgs.Add(arg);
                     WorkersBackend.Log($"[Workers-Debug] Arg {i}: Scalar, Value={arg}");
                 }
             }
 
             return jsArgs;
+        }
+
+        /// <summary>
+        /// Recursively flattens a C# struct value into a single-level Dictionary
+        /// with sequential f0, f1, f2... keys for all leaf primitive fields.
+        /// ILGPU IR flattens nested structs: NestedOuterStruct { NestedInnerStruct { A, B }, Value }
+        /// becomes 3 flat fields: f0=A, f1=B, f2=Value (NOT f0={f0:A,f1:B}, f1=Value).
+        /// </summary>
+        private static object ConvertStructToJSObject(object structValue)
+        {
+            var result = new Dictionary<string, object?>();
+            int fieldCounter = 0;
+            FlattenStructFields(structValue, result, ref fieldCounter);
+            return result;
+        }
+
+        /// <summary>
+        /// Recursively extracts all leaf primitive fields from a struct and adds them
+        /// to the result dictionary with sequential f{N} keys.
+        /// </summary>
+        private static void FlattenStructFields(object structValue, Dictionary<string, object?> result, ref int fieldCounter)
+        {
+            var fields = structValue.GetType().GetFields(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+            foreach (var field in fields)
+            {
+                var fieldVal = field.GetValue(structValue);
+                if (fieldVal != null && fieldVal.GetType().IsValueType && !fieldVal.GetType().IsPrimitive && !fieldVal.GetType().IsEnum)
+                {
+                    // Nested struct — recurse (flatten into same level)
+                    FlattenStructFields(fieldVal, result, ref fieldCounter);
+                }
+                else
+                {
+                    // Leaf primitive — add with sequential index
+                    result[$"f{fieldCounter}"] = fieldVal;
+                    fieldCounter++;
+                }
+            }
         }
 
         /// <summary>

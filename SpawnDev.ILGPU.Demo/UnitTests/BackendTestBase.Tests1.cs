@@ -336,5 +336,41 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
                     throw new Exception($"FMA failed at {i}. Expected {expected}, got {result[i]}");
             }
         });
+
+        [TestMethod]
+        public async Task StructScalarArgTest() => await RunTest(async accelerator =>
+        {
+            int len = 32;
+            using var buf = accelerator.Allocate1D<float>(len);
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<float>, ScalarStruct>(StructScalarArgKernel);
+            var s = new ScalarStruct { X = 3.0f, Y = 7.0f };
+            kernel((Index1D)len, buf.View, s);
+            await accelerator.SynchronizeAsync();
+            var result = await buf.CopyToHostAsync<float>();
+            for (int i = 0; i < len; i++)
+            {
+                float expected = 10.0f; // 3.0 + 7.0
+                if (MathF.Abs(result[i] - expected) > 0.001f)
+                    throw new Exception($"Struct scalar arg failed at {i}. Expected {expected}, got {result[i]}");
+            }
+        });
+
+        [TestMethod]
+        public async Task NestedStructScalarArgTest() => await RunTest(async accelerator =>
+        {
+            int len = 32;
+            using var buf = accelerator.Allocate1D<int>(len);
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<int>, NestedOuterStruct>(NestedStructScalarArgKernel);
+            var s = new NestedOuterStruct { Inner = new NestedInnerStruct { A = 3, B = 5 }, Value = 2.0f };
+            kernel((Index1D)len, buf.View, s);
+            await accelerator.SynchronizeAsync();
+            var result = await buf.CopyToHostAsync<int>();
+            for (int i = 0; i < len; i++)
+            {
+                int expected = 10; // 3 + 5 + 2
+                if (result[i] != expected)
+                    throw new Exception($"Nested struct scalar arg failed at {i}. Expected {expected}, got {result[i]}");
+            }
+        });
     }
 }

@@ -491,29 +491,51 @@ namespace SpawnDev.ILGPU.WebGL
                             byte => "byte",
                             long => "int",
                             ulong => "uint",
-                            _ => throw new NotSupportedException($"Unsupported scalar argument type: {arg?.GetType()}")
+                            _ => null
                         };
 
-                        object value = arg switch
+                        if (scalarType != null)
                         {
-                            int iVal => iVal,
-                            uint uiVal => uiVal,
-                            float fVal => fVal,
-                            double dValFb => (float)dValFb,
-                            bool blVal => blVal ? 1 : 0,
-                            byte bVal => (int)bVal,
-                            long lValFb => (int)lValFb,
-                            ulong ulVal => (uint)ulVal,
-                            _ => throw new NotSupportedException($"Unsupported scalar: {arg?.GetType()}")
-                        };
+                            object value = arg switch
+                            {
+                                int iVal => iVal,
+                                uint uiVal => uiVal,
+                                float fVal => fVal,
+                                double dValFb => (float)dValFb,
+                                bool blVal => blVal ? 1 : 0,
+                                byte bVal => (int)bVal,
+                                long lValFb => (int)lValFb,
+                                ulong ulVal => (uint)ulVal,
+                                _ => throw new NotSupportedException($"Unsupported scalar: {arg?.GetType()}")
+                            };
 
-                        jsParams.Add(new
+                            jsParams.Add(new
+                            {
+                                kind = "scalar",
+                                paramIndex = glslParamIndex,
+                                scalarType,
+                                value
+                            });
+                        }
+                        else if (arg != null && arg.GetType().IsValueType && !arg.GetType().IsEnum)
                         {
-                            kind = "scalar",
-                            paramIndex = glslParamIndex,
-                            scalarType,
-                            value
-                        });
+                            // Struct scalar: recursively flatten all leaf fields with their uniform paths
+                            // For nested structs like NestedOuterStruct { NestedInnerStruct Inner; float Value; }
+                            // the GLSL declares struct_X { int field_0; int field_1; } and struct_Y { struct_X field_0; float field_1; }
+                            // WebGL2 uniform paths: u_paramN.field_0.field_0, u_paramN.field_0.field_1, u_paramN.field_1
+                            var flatFields = new List<object>();
+                            FlattenStructFieldsForUniform(arg, "", flatFields);
+                            jsParams.Add(new
+                            {
+                                kind = "struct",
+                                paramIndex = glslParamIndex,
+                                fields = flatFields.ToArray()
+                            });
+                        }
+                        else
+                        {
+                            throw new NotSupportedException($"Unsupported scalar argument type: {arg?.GetType()}");
+                        }
                     }
                 }
             }
@@ -719,6 +741,63 @@ namespace SpawnDev.ILGPU.WebGL
             protected override void DisposeAcceleratorObject(bool disposing) { }
             public override void Synchronize() { }
             protected override global::ILGPU.Runtime.ProfilingMarker AddProfilingMarkerInternal() => throw new NotSupportedException();
+        }
+
+
+        /// <summary>
+        /// Recursively flattens a struct value into leaf fields with sequential field_N naming.
+        /// The GLSL type generator flattens nested structs into a single-level struct:
+        /// NestedOuterStruct { NestedInnerStruct { A, B }, Value } becomes
+        /// struct_X { int field_0; int field_1; float field_2; }
+        /// So uniform paths must be: field_0, field_1, field_2 (NOT field_0.field_0 etc.)
+        /// </summary>
+        private static void FlattenStructFieldsForUniform(object structValue, string prefix, List<object> results)
+        {
+            // Ignore the prefix parameter — we use a sequential counter instead
+            int fieldCounter = 0;
+            FlattenStructFieldsForUniformRecursive(structValue, results, ref fieldCounter);
+        }
+
+        /// <summary>
+        /// Recursively extracts leaf primitive fields from a struct, assigning sequential field_N names.
+        /// </summary>
+        private static void FlattenStructFieldsForUniformRecursive(object structValue, List<object> results, ref int fieldCounter)
+        {
+            var fields = structValue.GetType().GetFields(BindingFlags.Public | BindingFlags.Instance);
+            foreach (var field in fields)
+            {
+                var fieldVal = field.GetValue(structValue);
+                if (fieldVal != null && fieldVal.GetType().IsValueType && !fieldVal.GetType().IsPrimitive && !fieldVal.GetType().IsEnum)
+                {
+                    // Nested struct — recurse (flatten into same level)
+                    FlattenStructFieldsForUniformRecursive(fieldVal, results, ref fieldCounter);
+                }
+                else
+                {
+                    // Leaf primitive field
+                    string path = $"field_{fieldCounter}";
+                    string scalarType = fieldVal switch
+                    {
+                        int => "int",
+                        uint => "uint",
+                        float => "float",
+                        double => "float",
+                        bool => "bool",
+                        _ => "float"
+                    };
+                    object value = fieldVal switch
+                    {
+                        int iVal => iVal,
+                        uint uiVal => uiVal,
+                        float fVal => fVal,
+                        double dVal => (float)dVal,
+                        bool bVal => bVal ? 1 : 0,
+                        _ => fieldVal ?? 0
+                    };
+                    results.Add(new { path, scalarType, value });
+                    fieldCounter++;
+                }
+            }
         }
 
         #endregion
