@@ -61,11 +61,24 @@ namespace SpawnDev.ILGPU.WebGPU
             // Query the adapter's actual limits so we can request the maximum supported.
             // WebGPU defaults to 8 maxStorageBuffersPerShaderStage, but ILGPU kernels
             // use one storage buffer per parameter, so complex kernels need much more.
-            int maxStorageBuffers;
-            using (var adapterLimits = adapter.Limits)
+            int maxStorageBuffers = 10; // safe fallback
+            try
             {
+                using var adapterLimits = adapter.Limits;
                 maxStorageBuffers = adapterLimits.MaxStorageBuffersPerShaderStage ?? 10;
             }
+            catch
+            {
+                // Limits query failed — use fallback
+            }
+            Console.WriteLine($"[WebGPU] Adapter maxStorageBuffersPerShaderStage: {maxStorageBuffers}");
+
+            // Use Dictionary for RequiredLimits to ensure reliable JS interop serialization.
+            // Anonymous objects may not serialize correctly through BlazorJS's interop layer.
+            var requiredLimits = new Dictionary<string, object>
+            {
+                ["maxStorageBuffersPerShaderStage"] = maxStorageBuffers
+            };
 
             // Request device with detected features and the adapter's max storage buffer limit.
             try
@@ -73,33 +86,32 @@ namespace SpawnDev.ILGPU.WebGPU
                 var descriptor = new GPUDeviceDescriptor
                 {
                     RequiredFeatures = requestedFeatures.Count > 0 ? requestedFeatures : null,
-                    RequiredLimits = new
-                    {
-                        maxStorageBuffersPerShaderStage = maxStorageBuffers
-                    }
+                    RequiredLimits = requiredLimits
                 };
                 _gpuDevice = await adapter.RequestDevice(descriptor);
+                Console.WriteLine($"[WebGPU] Device created with features + limits (maxStorage={maxStorageBuffers})");
             }
-            catch
+            catch (Exception ex)
             {
+                Console.WriteLine($"[WebGPU] Device creation with features failed: {ex.Message}");
                 // Fall back: try without features but with limits
                 try
                 {
                     var descriptor = new GPUDeviceDescriptor
                     {
-                        RequiredLimits = new
-                        {
-                            maxStorageBuffersPerShaderStage = maxStorageBuffers
-                        }
+                        RequiredLimits = requiredLimits
                     };
                     _gpuDevice = await adapter.RequestDevice(descriptor);
+                    Console.WriteLine($"[WebGPU] Device created with limits only (maxStorage={maxStorageBuffers})");
                     // Clear features since we couldn't request them
                     requestedFeatures.Clear();
                 }
-                catch
+                catch (Exception ex2)
                 {
+                    Console.WriteLine($"[WebGPU] Device creation with limits failed: {ex2.Message}");
                     // Fall back to fully default device
                     _gpuDevice = await adapter.RequestDevice();
+                    Console.WriteLine("[WebGPU] Device created with defaults (no limits override)");
                     requestedFeatures.Clear();
                 }
             }

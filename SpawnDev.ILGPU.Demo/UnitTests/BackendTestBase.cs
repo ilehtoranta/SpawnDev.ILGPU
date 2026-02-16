@@ -573,6 +573,21 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
             output[index] = s.Inner.A + s.Inner.B + (int)s.Value;
         }
 
+        /// <summary>
+        /// Kernel with 12 scalar parameters to test high storage buffer binding counts.
+        /// With auto-grouping overhead (~7 additional bindings), this kernel requires ~19
+        /// storage buffer bindings — well above WebGPU's default limit of 8.
+        /// Validates that the adapter's max limit is requested correctly.
+        /// </summary>
+        static void ManyScalarKernel(
+            Index1D index, ArrayView<int> output,
+            int a, int b, int c, int d,
+            int e, int f, int g, int h,
+            int i, int j, int k, int l)
+        {
+            output[index] = a + b + c + d + e + f + g + h + i + j + k + l;
+        }
+
         #endregion
 
 

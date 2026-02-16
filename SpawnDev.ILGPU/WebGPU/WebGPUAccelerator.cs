@@ -403,12 +403,61 @@ namespace SpawnDev.ILGPU.WebGPU
                 _reusableEntryList.Clear();
                 var entries = _reusableEntryList;
 
+                // Build a lookup of packed scalar params by their args-array index.
+                // ScalarPackingManifest stores IR param.Index (0-based, includes implicit index param).
+                // The WGSL generator (KernelParamOffset) always skips param 0 if it's an Index type,
+                // regardless of KernelConfig grouping. We must replicate this logic here.
+                //
+                // For auto-grouped kernels: KernelIndexParameterOffset=1, args excludes Index
+                // For stream kernels with Index: KernelIndexParameterOffset=0, args INCLUDES Index
+                // But the WGSL generator skips Index param in both cases (KernelParamOffset=1).
+                //
+                // So we need a "runtime skip" count to align args[] with WGSL bindings.
+                int kernelParamOffset = compiledKernel.EntryPoint.KernelIndexParameterOffset;
+                var paramTypes = compiledKernel.EntryPoint.Parameters;
+
+                // Detect if args[0] is an Index type that should be skipped for bindings.
+                // This happens with explicitly grouped stream kernels where KernelIndexParameterOffset=0
+                // but the WGSL generator still skips the Index param.
+                int runtimeIndexSkip = 0;
+                if (kernelParamOffset == 0 && paramTypes.Count > 0)
+                {
+                    var first = paramTypes[0];
+                    if (first == typeof(Index1D) || first == typeof(Index2D) || first == typeof(Index3D) ||
+                        first == typeof(LongIndex1D) || first == typeof(LongIndex2D) || first == typeof(LongIndex3D))
+                        runtimeIndexSkip = 1;
+                }
+
+                // The effective offset for mapping IR param indices to args[] indices:
+                // effectiveOffset = kernelParamOffset + runtimeIndexSkip
+                // For auto-grouped: effectiveOffset = 1 + 0 = 1
+                // For stream with Index: effectiveOffset = 0 + 1 = 1
+                // For stream without Index: effectiveOffset = 0 + 0 = 0
+                int effectiveOffset = kernelParamOffset + runtimeIndexSkip;
+
+                var packedScalarLookup = new Dictionary<int, ScalarPackingEntry>();
+                if (compiledKernel.HasScalarPacking)
+                {
+                    foreach (var entry in compiledKernel.ScalarPackingManifest)
+                    {
+                        // Map from IR param index to args array index
+                        int argsIndex = entry.ParamIndex - effectiveOffset;
+                        if (argsIndex >= 0)
+                            packedScalarLookup[argsIndex] = entry;
+                    }
+                }
+
+                // --- Phase 1: Emit bindings for non-packed params (views, structs, atomics) ---
+                // Note: args[] and paramTypes both exclude KernelIndexParameterOffset params.
+                // But they may include the Index type param for explicitly grouped kernels.
                 for (int i = 0; i < args.Length; i++)
                 {
-                    var paramType = compiledKernel.EntryPoint.Parameters[i];
+                    // Skip the Index type param at args[0] for explicitly grouped kernels
+                    if (i < runtimeIndexSkip)
+                        continue;
 
-                    if (i == 0 && (paramType == typeof(Index1D) || paramType == typeof(Index2D) || paramType == typeof(Index3D) ||
-                                   paramType == typeof(LongIndex1D) || paramType == typeof(LongIndex2D) || paramType == typeof(LongIndex3D)))
+                    // Skip packed scalars — they'll be handled in Phase 2
+                    if (packedScalarLookup.ContainsKey(i))
                         continue;
 
                     var arg = args[i];
@@ -446,7 +495,6 @@ namespace SpawnDev.ILGPU.WebGPU
                         var nativeBuffer = contiguous.Buffer as WebGPUMemoryBuffer;
                         var gpuBuffer = nativeBuffer!.NativeBuffer.NativeBuffer!;
 
-                        // DEBUG LOG
                         WebGPUBackend.Log($"[WebGPU-Debug] Arg {i}: Binding Buffer. Size={contiguous.LengthInBytes}, Offset={contiguous.IndexInBytes}");
 
                         resource = new GPUBufferBinding
@@ -458,38 +506,15 @@ namespace SpawnDev.ILGPU.WebGPU
                     }
                     else
                     {
+                        // Non-packed, non-view param (struct scalar with own binding)
                         var size = 256;
                         var uBuffer = GetPooledScalarBuffer(device);
                         scalarBuffersToReturn.Add(uBuffer);
 
-                        // DEBUG LOG
-                        WebGPUBackend.Log($"[WebGPU-Debug] Arg {i}: Binding Scalar. Value={arg}");
+                        WebGPUBackend.Log($"[WebGPU-Debug] Arg {i}: Binding Struct Scalar. Value={arg}");
 
-                        if (arg is int iVal) device.Queue.WriteBuffer(uBuffer, 0, BitConverter.GetBytes(iVal));
-                        else if (arg is float fVal) device.Queue.WriteBuffer(uBuffer, 0, BitConverter.GetBytes(fVal));
-                        else if (arg is uint uiVal) device.Queue.WriteBuffer(uBuffer, 0, BitConverter.GetBytes(uiVal));
-                        else if (arg is long lVal) device.Queue.WriteBuffer(uBuffer, 0, BitConverter.GetBytes((int)lVal));
-                        else if (arg is ulong ulVal) device.Queue.WriteBuffer(uBuffer, 0, BitConverter.GetBytes((uint)ulVal));
-                        else if (arg is double dVal)
+                        if (arg != null && arg.GetType().IsValueType)
                         {
-                            if (webGpuAccel.Backend.Options.EnableF64Emulation)
-                            {
-                                // CRITICAL: For f64 emulation, write full 64-bit IEEE-754 representation as 2 u32 values
-                                // The shader will read these as (lo, hi) and convert using f64_from_ieee754_bits
-                                device.Queue.WriteBuffer(uBuffer, 0, BitConverter.GetBytes(dVal));
-                            }
-                            else
-                            {
-                                // Without emulation, truncate to float (loses precision but matches shader expectation)
-                                device.Queue.WriteBuffer(uBuffer, 0, BitConverter.GetBytes((float)dVal));
-                            }
-                        }
-                        else if (arg is byte bVal) device.Queue.WriteBuffer(uBuffer, 0, new byte[] { bVal });
-                        else if (arg is bool blVal) device.Queue.WriteBuffer(uBuffer, 0, BitConverter.GetBytes(blVal ? 1u : 0u));
-                        else if (arg != null && arg.GetType().IsValueType)
-                        {
-                            // Struct scalar: serialize raw bytes to the storage buffer
-                            // The WGSL shader reads this via array<StructType> binding
                             int structSize = Marshal.SizeOf(arg.GetType());
                             byte[] bytes = new byte[structSize];
                             var handle = GCHandle.Alloc(bytes, GCHandleType.Pinned);
@@ -498,7 +523,7 @@ namespace SpawnDev.ILGPU.WebGPU
                             device.Queue.WriteBuffer(uBuffer, 0, bytes);
                             WebGPUBackend.Log($"[WebGPU-Debug] Arg {i}: Struct scalar {arg.GetType().Name}, Size={structSize} bytes");
                         }
-                        else throw new NotSupportedException($"Unsupported scalar argument type: {arg?.GetType()}");
+                        else throw new NotSupportedException($"Unsupported non-packed non-view argument type: {arg?.GetType()}");
 
                         resource = new GPUBufferBinding { Buffer = uBuffer, Offset = 0, Size = (ulong)size };
                     }
@@ -524,6 +549,74 @@ namespace SpawnDev.ILGPU.WebGPU
                         entries.Add(new GPUBindGroupEntry { Binding = (uint)currentBindingIndex, Resource = new GPUBufferBinding { Buffer = strideBuffer, Offset = 0, Size = (ulong)strideSize } });
                         currentBindingIndex++;
                     }
+                }
+
+                // --- Phase 2: Pack all scalar args into single buffer ---
+                if (compiledKernel.HasScalarPacking)
+                {
+                    var manifest = compiledKernel.ScalarPackingManifest;
+
+                    // Calculate total packed buffer size (round up to 4-byte alignment, min 256 for WebGPU)
+                    int totalSlots = 0;
+                    foreach (var entry in manifest)
+                        totalSlots = Math.Max(totalSlots, entry.ByteOffset / 4 + entry.SlotCount);
+                    int totalBytes = Math.Max(totalSlots * 4, 4);
+
+                    var packedData = new byte[totalBytes];
+
+                    foreach (var entry in manifest)
+                    {
+                        // Map from IR param index to args array index (using effectiveOffset, same as Phase 1)
+                        int argsIdx = entry.ParamIndex - effectiveOffset;
+                        if (argsIdx < 0 || argsIdx >= args.Length)
+                            throw new InvalidOperationException($"[SCALAR-PACK] ParamIndex {entry.ParamIndex} (argsIdx={argsIdx}) is out of bounds for args (Length={args.Length}, offset={effectiveOffset})");
+                        var arg = args[argsIdx];
+                        int byteOffset = entry.ByteOffset;
+
+                        WebGPUBackend.Log($"[WebGPU-Debug] Packing scalar param {entry.ParamIndex} (args[{argsIdx}]) at byte offset {byteOffset}: {arg}");
+
+                        if (arg is int iVal)
+                            BitConverter.GetBytes(iVal).CopyTo(packedData, byteOffset);
+                        else if (arg is float fVal)
+                            BitConverter.GetBytes(fVal).CopyTo(packedData, byteOffset);
+                        else if (arg is uint uiVal)
+                            BitConverter.GetBytes(uiVal).CopyTo(packedData, byteOffset);
+                        else if (arg is long lVal)
+                            BitConverter.GetBytes((int)lVal).CopyTo(packedData, byteOffset);
+                        else if (arg is ulong ulVal)
+                            BitConverter.GetBytes((uint)ulVal).CopyTo(packedData, byteOffset);
+                        else if (arg is double dVal)
+                        {
+                            if (webGpuAccel.Backend.Options.EnableF64Emulation)
+                            {
+                                // Write full 64-bit IEEE-754 as 2 u32 values
+                                BitConverter.GetBytes(dVal).CopyTo(packedData, byteOffset);
+                            }
+                            else
+                            {
+                                BitConverter.GetBytes((float)dVal).CopyTo(packedData, byteOffset);
+                            }
+                        }
+                        else if (arg is byte bVal)
+                            BitConverter.GetBytes((uint)bVal).CopyTo(packedData, byteOffset);
+                        else if (arg is bool blVal)
+                            BitConverter.GetBytes(blVal ? 1u : 0u).CopyTo(packedData, byteOffset);
+                        else if (arg != null)
+                            throw new NotSupportedException($"Unsupported packed scalar type: {arg.GetType()}");
+                    }
+
+                    var packedBuffer = GetPooledScalarBuffer(device);
+                    scalarBuffersToReturn.Add(packedBuffer);
+                    device.Queue.WriteBuffer(packedBuffer, 0, packedData);
+
+                    entries.Add(new GPUBindGroupEntry
+                    {
+                        Binding = (uint)currentBindingIndex,
+                        Resource = new GPUBufferBinding { Buffer = packedBuffer, Offset = 0, Size = 256 }
+                    });
+                    currentBindingIndex++;
+
+                    WebGPUBackend.Log($"[WebGPU-Debug] Packed {manifest.Count} scalars into 1 buffer ({totalBytes} bytes used, binding {currentBindingIndex - 1})");
                 }
 
                 var bindGroupDesc = new GPUBindGroupDescriptor

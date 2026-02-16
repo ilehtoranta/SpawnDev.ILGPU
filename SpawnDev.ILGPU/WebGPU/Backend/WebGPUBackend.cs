@@ -483,7 +483,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 Context,
                 entryPoint,
                 wgslSource,
-                data.DynamicSharedOverrides.Count > 0 ? data.DynamicSharedOverrides : null);
+                data.DynamicSharedOverrides.Count > 0 ? data.DynamicSharedOverrides : null,
+                data.ScalarPackingManifest.Count > 0 ? data.ScalarPackingManifest : null);
         }
 
         #endregion
@@ -511,17 +512,30 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         public bool HasDynamicSharedMemory => DynamicSharedOverrides.Count > 0;
 
         /// <summary>
+        /// Gets the scalar packing manifest describing how scalar params are packed into a single buffer.
+        /// Empty list if no scalar packing is used (e.g., no scalar params).
+        /// </summary>
+        public IReadOnlyList<ScalarPackingEntry> ScalarPackingManifest { get; }
+
+        /// <summary>
+        /// Returns true if this kernel uses scalar parameter packing.
+        /// </summary>
+        public bool HasScalarPacking => ScalarPackingManifest.Count > 0;
+
+        /// <summary>
         /// Creates a new compiled WebGPU kernel.
         /// </summary>
         public WebGPUCompiledKernel(
             Context context,
             EntryPoint entryPoint,
             string wgslSource,
-            IReadOnlyList<DynamicSharedOverrideInfo>? dynamicSharedOverrides = null)
+            IReadOnlyList<DynamicSharedOverrideInfo>? dynamicSharedOverrides = null,
+            IReadOnlyList<ScalarPackingEntry>? scalarPackingManifest = null)
             : base(context, entryPoint, null)
         {
             WGSLSource = wgslSource;
             DynamicSharedOverrides = dynamicSharedOverrides ?? Array.Empty<DynamicSharedOverrideInfo>();
+            ScalarPackingManifest = scalarPackingManifest ?? Array.Empty<ScalarPackingEntry>();
         }
     }
 
@@ -567,5 +581,35 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         public WebGPUCapabilityContext() : base()
         {
         }
+    }
+
+    /// <summary>
+    /// Describes how a single scalar kernel parameter is packed into the shared scalar buffer.
+    /// </summary>
+    public class ScalarPackingEntry
+    {
+        /// <summary>The kernel parameter index (matches ILGPU EntryPoint.Parameters).</summary>
+        public int ParamIndex { get; set; }
+
+        /// <summary>Byte offset within the packed buffer where this scalar starts.</summary>
+        public int ByteOffset { get; set; }
+
+        /// <summary>Size in bytes of this scalar (4 for i32/f32/u32, 8 for emulated f64/i64).</summary>
+        public int ByteSize { get; set; }
+
+        /// <summary>The WGSL type string for unpacking (e.g., "i32", "f32", "u32").</summary>
+        public string WgslType { get; set; } = "i32";
+
+        /// <summary>True if this is an emulated 64-bit float parameter.</summary>
+        public bool IsEmulatedF64 { get; set; }
+
+        /// <summary>True if this is an emulated 64-bit integer parameter.</summary>
+        public bool IsEmulatedI64 { get; set; }
+
+        /// <summary>True if this is a struct parameter.</summary>
+        public bool IsStruct { get; set; }
+
+        /// <summary>Number of u32 slots this scalar occupies (1 for 4-byte, 2 for 8-byte).</summary>
+        public int SlotCount => (ByteSize + 3) / 4;
     }
 }

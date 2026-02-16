@@ -747,6 +747,28 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
             }
         });
 
+        /// <summary>
+        /// Tests a kernel with 12 scalar parameters. With auto-grouping overhead (~7 additional
+        /// bindings), this generates ~19 storage buffer bindings — well above WebGPU's default
+        /// limit of 8. Validates that the adapter's max limit is properly requested.
+        /// </summary>
+        [TestMethod]
+        public async Task ManyScalarKernelTest() => await RunTest(async accelerator =>
+        {
+            int len = 64;
+            using var buf = accelerator.Allocate1D<int>(len);
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<
+                Index1D, ArrayView<int>,
+                int, int, int, int, int, int, int, int, int, int, int, int>(ManyScalarKernel);
+            // Sum of 1+2+3+4+5+6+7+8+9+10+11+12 = 78
+            kernel((Index1D)len, buf.View, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12);
+            await accelerator.SynchronizeAsync();
+            var result = await buf.CopyToHostAsync<int>();
+            for (int i = 0; i < len; i++)
+                if (result[i] != 78)
+                    throw new Exception($"Many scalar kernel failed at {i}. Expected 78, got {result[i]}");
+        });
+
         #endregion
     }
 }

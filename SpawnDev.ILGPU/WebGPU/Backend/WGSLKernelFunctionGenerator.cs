@@ -36,6 +36,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         private Dictionary<string, string> _crossBlockPointerExprs = new Dictionary<string, string>();
         // Set of LoadElementAddress Values that cross block boundaries
         private HashSet<Value> _crossBlockPointers = new HashSet<Value>();
+        // Scalar packing manifest — populated during GenerateHeader(), used by SetupParameterBindings()
+        private List<ScalarPackingEntry> _scalarManifest = new List<ScalarPackingEntry>();
         private CFG<ReversePostOrder, Forwards> _cfg;
         private Dominators<Backwards> _postDominators;
         private Loops<ReversePostOrder, Forwards> _loops;
@@ -208,52 +210,128 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             int bindingIdx = 0;
             int paramOffset = KernelParamOffset;
 
+            // --- SCALAR PACKING ---
+            // Instead of emitting one @binding per param, we pack all non-view, non-struct
+            // scalar params into a single array<u32> storage buffer. This drastically reduces
+            // the binding count, staying within WebGPU's maxStorageBuffersPerShaderStage limit.
+            //
+            // Phase 1: Classify params and emit view bindings. Collect scalar packing info.
+            // Phase 2: Emit single packed scalar binding (if any).
+
+            var scalarManifest = new List<ScalarPackingEntry>();
+            int scalarSlotOffset = 0; // current u32 slot index in packed buffer
+
             foreach (var param in Method.Parameters)
             {
                 if (param.Index < paramOffset) continue;
 
                 var elementType = GetBufferElementType(param.ParameterType);
                 var wgslType = TypeGenerator[elementType];
-                string accessMode = "read_write";
 
                 // Debug info
                 builder.AppendLine($"// Param {param.Index}: {param.ParameterType} (Element: {elementType})");
 
-                // Track if this is an emulated 64-bit buffer
-                bool isEmulated64Bit = false;
-                if (Backend.Options.EnableF64Emulation && wgslType == "emu_f64")
+                // Determine if this is a view, multidim view, struct, or primitive scalar
+                IsMultiDim(param.ParameterType, out var isMultiDim, out var isView, out var is1DView, out var is2DView, out var is3DView);
+
+                bool isStruct = param.ParameterType is global::ILGPU.IR.Types.StructureType && !isView;
+                bool isAtomic = _atomicParameters.Contains(param.Index);
+
+                // Check emulation
+                bool isEmulatedF64 = Backend.Options.EnableF64Emulation && wgslType == "emu_f64";
+                bool isEmulatedI64 = Backend.Options.EnableI64Emulation && (wgslType == "emu_i64" || wgslType == "emu_u64");
+
+                if (isEmulatedF64)
                 {
-                    wgslType = "u32"; // Raw bits storage (2 u32 per emu_f64)
-                    isEmulated64Bit = true;
                     _emulatedF64Params.Add(param.Index);
                 }
-                else if (Backend.Options.EnableI64Emulation && (wgslType == "emu_i64" || wgslType == "emu_u64"))
+                else if (isEmulatedI64)
                 {
-                    wgslType = "u32"; // Raw bits storage (2 u32 per emu_i64)
-                    isEmulated64Bit = true;
                     _emulatedI64Params.Add(param.Index);
                 }
 
-                if (_atomicParameters.Contains(param.Index))
+                // DECISION: Does this param get its own binding, or is it packed?
+                bool ownBinding = isView || isStruct || isAtomic;
+
+                if (ownBinding)
                 {
-                    wgslType = $"atomic<{wgslType}>";
-                }
+                    // --- OWN BINDING (views, structs, atomics) ---
+                    string accessMode = "read_write";
+                    string bindingWgslType = wgslType;
 
-                var bindingDecl = $"@group(0) @binding({bindingIdx}) var<storage, {accessMode}> param{param.Index} : array<{wgslType}>;";
-                builder.AppendLine(bindingDecl);
-                bindingIdx++;
+                    if (isEmulatedF64 || isEmulatedI64)
+                    {
+                        bindingWgslType = "u32"; // Raw bits storage
+                    }
 
-                IsMultiDim(param.ParameterType, out var isMultiDim, out var isView, out var is1DView, out var is2DView, out var is3DView);
+                    if (isAtomic)
+                    {
+                        bindingWgslType = $"atomic<{bindingWgslType}>";
+                    }
 
-                // STRICT STRIDE LOGIC: Only emit stride buffer for 2D/3D Views.
-                // General Structs (even if they mimic views) should NOT have a stride buffer unless they ARE views.
-                if (isView && isMultiDim && (is2DView || is3DView))
-                {
-                    var strideDecl = $"@group(0) @binding({bindingIdx}) var<storage, read> param{param.Index}_stride : array<i32>;";
-                    builder.AppendLine(strideDecl);
+                    var bindingDecl = $"@group(0) @binding({bindingIdx}) var<storage, {accessMode}> param{param.Index} : array<{bindingWgslType}>;";
+                    builder.AppendLine(bindingDecl);
                     bindingIdx++;
+
+                    // Stride buffer for 2D/3D views
+                    if (isView && isMultiDim && (is2DView || is3DView))
+                    {
+                        var strideDecl = $"@group(0) @binding({bindingIdx}) var<storage, read> param{param.Index}_stride : array<i32>;";
+                        builder.AppendLine(strideDecl);
+                        bindingIdx++;
+                    }
+                }
+                else
+                {
+                    // --- PACKED SCALAR ---
+                    // Determine how many u32 slots this scalar needs
+                    int slotCount = 1; // default: 4 bytes
+                    int byteSize = 4;
+                    string scalarWgslType = wgslType;
+
+                    if (isEmulatedF64)
+                    {
+                        slotCount = 2;
+                        byteSize = 8;
+                        scalarWgslType = "emu_f64";
+                    }
+                    else if (isEmulatedI64)
+                    {
+                        slotCount = 2;
+                        byteSize = 8;
+                        scalarWgslType = wgslType; // emu_i64 or emu_u64
+                    }
+
+                    var entry = new ScalarPackingEntry
+                    {
+                        ParamIndex = param.Index,
+                        ByteOffset = scalarSlotOffset * 4,
+                        ByteSize = byteSize,
+                        WgslType = scalarWgslType,
+                        IsEmulatedF64 = isEmulatedF64,
+                        IsEmulatedI64 = isEmulatedI64,
+                        IsStruct = false,
+                    };
+                    scalarManifest.Add(entry);
+                    builder.AppendLine($"// -> Packed scalar at slot {scalarSlotOffset} ({slotCount} slots, type: {scalarWgslType})");
+
+                    scalarSlotOffset += slotCount;
                 }
             }
+
+            // Emit the single packed scalar binding (if any scalars were packed)
+            if (scalarManifest.Count > 0)
+            {
+                builder.AppendLine($"@group(0) @binding({bindingIdx}) var<storage, read> _scalar_params : array<u32>;");
+                bindingIdx++;
+
+                // Store manifest in generator args for the compiled kernel
+                foreach (var entry in scalarManifest)
+                    _generatorArgs.ScalarPackingManifest.Add(entry);
+            }
+
+            // Store manifest locally for SetupParameterBindings()
+            _scalarManifest = scalarManifest;
 
             builder.AppendLine();
 
@@ -893,7 +971,45 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
         private void SetupParameterBindings()
         {
+            // NOTE: GenerateHeader() runs AFTER body generation in ILGPU's pipeline,
+            // so _scalarManifest is not yet populated. We must replicate the same
+            // classification logic here to determine which params are packed scalars.
+            // Both this method and GenerateHeader iterate Method.Parameters in the same
+            // order, so the slot offsets will match.
+
             int paramOffset = KernelParamOffset;
+
+            // First pass: classify all params and compute slot offsets for packed scalars
+            var packedScalarSlots = new Dictionary<int, (int slot, int slotCount, string wgslType, bool isEmuF64, bool isEmuI64)>();
+            int scalarSlotOffset = 0;
+
+            foreach (var param in Method.Parameters)
+            {
+                if (param.Index < paramOffset) continue;
+
+                IsMultiDim(param.ParameterType, out var isMultiDim, out var isView, out var is1DView, out var is2DView, out var is3DView);
+                bool isStruct = param.ParameterType is global::ILGPU.IR.Types.StructureType && !isView;
+                bool isAtomic = _atomicParameters.Contains(param.Index);
+
+                // Does this param get its own binding? (same logic as GenerateHeader)
+                bool ownBinding = isView || isStruct || isAtomic;
+
+                if (!ownBinding)
+                {
+                    // This is a packed scalar
+                    var elementType = GetBufferElementType(param.ParameterType);
+                    var wgslType = TypeGenerator[elementType];
+
+                    bool isEmuF64 = Backend.Options.EnableF64Emulation && wgslType == "emu_f64";
+                    bool isEmuI64 = Backend.Options.EnableI64Emulation && (wgslType == "emu_i64" || wgslType == "emu_u64");
+
+                    int slotCount = (isEmuF64 || isEmuI64) ? 2 : 1;
+                    packedScalarSlots[param.Index] = (scalarSlotOffset, slotCount, wgslType, isEmuF64, isEmuI64);
+                    scalarSlotOffset += slotCount;
+                }
+            }
+
+            // Second pass: emit variable declarations
             foreach (var param in Method.Parameters)
             {
                 if (param.Index < paramOffset) continue;
@@ -901,57 +1017,79 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
                 IsMultiDim(param.ParameterType, out var isMultiDim, out var isView, out var is1DView, out var is2DView, out var is3DView);
 
+                // Check if this param is packed
+                if (packedScalarSlots.TryGetValue(param.Index, out var packInfo))
+                {
+                    // --- PACKED SCALAR: read from _scalar_params buffer ---
+                    int slot = packInfo.slot;
+
+                    if (packInfo.isEmuF64)
+                    {
+                        AppendLine($"var {variable.Name} = f64_from_ieee754_bits(_scalar_params[{slot}], _scalar_params[{slot + 1}]);");
+                    }
+                    else if (packInfo.isEmuI64)
+                    {
+                        AppendLine($"var {variable.Name} = emu_i64(_scalar_params[{slot}], _scalar_params[{slot + 1}]);");
+                    }
+                    else
+                    {
+                        // Standard scalar: bitcast from u32 to the target type
+                        string wgslType = packInfo.wgslType;
+                        if (wgslType == "u32")
+                        {
+                            AppendLine($"var {variable.Name} = _scalar_params[{slot}];");
+                        }
+                        else if (wgslType == "i32")
+                        {
+                            AppendLine($"var {variable.Name} = bitcast<i32>(_scalar_params[{slot}]);");
+                        }
+                        else if (wgslType == "f32")
+                        {
+                            AppendLine($"var {variable.Name} = bitcast<f32>(_scalar_params[{slot}]);");
+                        }
+                        else
+                        {
+                            AppendLine($"var {variable.Name} = bitcast<{wgslType}>(_scalar_params[{slot}]);");
+                        }
+                    }
+                    continue;
+                }
+
+                // --- NON-PACKED: original binding logic ---
                 if (!isView)
                 {
-                    // Check if it's an atomic parameter (even if not explicitly a ViewType in C# reflection terms)
-                    // Atomic operations in WGSL work on pointers to storage buffer elements.
                     bool isAtomic = _atomicParameters.Contains(param.Index);
-
-                    // Check if it's a Structure (that might contain Views). 
-                    // If we try to 'load' a struct from a buffer that is array<f32>, it fails.
-                    // We should treat structs as pointers/references so GetField can handle them.
                     bool isStruct = param.ParameterType is global::ILGPU.IR.Types.StructureType;
 
                     if (isAtomic)
                     {
-                        // Treat as pointer/reference
                         AppendLine($"let {variable.Name} = &param{param.Index};");
                     }
                     else if (isStruct)
                     {
-                        // Optimization:
-                        // If this is a View-Like struct (ArrayView2D/3D), we want to alias it as the Buffer Pointer (&param)
-                        // so that GetField can detect it as a Parameter and applying Field 0 logic.
-                        // If it is a PURE data struct, we alias as &param[0].
-
                         if (isMultiDim)
                         {
                             AppendLine($"let {variable.Name} = &param{param.Index};");
                         }
                         else
                         {
-                            // Structs are loaded as pointers to the first element of the array
-                            // param is array<MyStruct>, so &param is ptr<array<MyStruct>>.
-                            // We want ptr<MyStruct>, which is &param[0].
                             AppendLine($"let {variable.Name} = &param{param.Index}[0];");
                         }
                     }
                     else
                     {
-                        // Scalar load - check for emulated emu_f64/emu_i64
+                        // Non-packed scalar that has its own binding (shouldn't normally happen,
+                        // but kept for safety/fallback)
                         if (_emulatedF64Params.Contains(param.Index))
                         {
-                            // emu_f64 emulation: read 2 u32 values and convert to emulated emu_f64
                             AppendLine($"var {variable.Name} = f64_from_ieee754_bits(param{param.Index}[0], param{param.Index}[1]);");
                         }
                         else if (_emulatedI64Params.Contains(param.Index))
                         {
-                            // emu_i64 emulation: combine 2 u32 values into vec2<u32>
                             AppendLine($"var {variable.Name} = emu_i64(param{param.Index}[0], param{param.Index}[1]);");
                         }
                         else
                         {
-                            // Standard scalar load
                             AppendLine($"var {variable.Name} = param{param.Index}[0];");
                         }
                     }
@@ -960,7 +1098,6 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 {
                     AppendLine($"let {variable.Name} = &param{param.Index};");
 
-                    // STRICT STRIDE INITIALIZATION: Only for 2D/3D Views
                     if (isView && isMultiDim && (is2DView || is3DView))
                     {
                         AppendLine($"let {variable.Name}_stride = &param{param.Index}_stride;");

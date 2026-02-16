@@ -47,6 +47,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 SharedAllocations = sharedAllocations;
                 DynamicSharedAllocations = dynamicSharedAllocations;
                 DynamicSharedOverrides = new List<DynamicSharedOverrideInfo>();
+                ScalarPackingManifest = new List<ScalarPackingEntry>();
             }
 
             /// <summary>The parent backend.</summary>
@@ -69,6 +70,12 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             /// the WGSL override constant names for dynamic shared memory.
             /// </summary>
             public List<DynamicSharedOverrideInfo> DynamicSharedOverrides { get; }
+
+            /// <summary>
+            /// Populated by the kernel code generator during GenerateHeader() with
+            /// the scalar parameter packing layout for this kernel.
+            /// </summary>
+            public List<ScalarPackingEntry> ScalarPackingManifest { get; }
         }
 
         /// <summary>
