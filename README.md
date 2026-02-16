@@ -8,7 +8,7 @@ Write parallel compute code in C# and let the library pick the best available ba
 ## Architecture
 
 ```
-┌──────────────────────────────────────────────────────────────┐
+┌────────────────────────────────────────────────────────────────┐
 │                     Your C# ILGPU Kernel                       │
 ├──────────────────┬──────────────────┬──────────────────────────┤
 │     WebGPU       │     WebGL        │          Wasm            │
