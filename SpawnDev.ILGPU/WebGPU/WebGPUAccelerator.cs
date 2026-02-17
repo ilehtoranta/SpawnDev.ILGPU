@@ -185,6 +185,35 @@ namespace SpawnDev.ILGPU.WebGPU
             return accelerator;
         }
 
+        /// <summary>
+        /// Creates a new WebGPU accelerator from an externally-provided GPUDevice.
+        /// This is used when sharing a device with another library (e.g., ONNX Runtime Web).
+        /// The external device is used directly — no adapter probing or device creation.
+        /// </summary>
+        /// <param name="context">The ILGPU context.</param>
+        /// <param name="externalDevice">An existing GPUDevice (e.g., from ort.env.webgpu.device).</param>
+        /// <param name="options">The backend configuration options (null for defaults).</param>
+        /// <returns>A new WebGPU accelerator using the external device.</returns>
+        public static WebGPUAccelerator CreateFromExternalDevice(Context context, GPUDevice externalDevice, WebGPUBackendOptions? options = null)
+        {
+            var ilgpuDevice = new WebGPUILGPUDevice(externalDevice);
+            var accelerator = new WebGPUAccelerator(context, ilgpuDevice);
+            accelerator.NativeAccelerator = WebGPUNativeAccelerator.CreateFromExternalDevice(externalDevice);
+            accelerator.Backend = new WebGPUBackend(context, options ?? WebGPUBackendOptions.Default, accelerator.NativeAccelerator.EnabledFeatures);
+            accelerator.Init(accelerator.Backend);
+            accelerator.DefaultStream = accelerator.CreateStreamInternal();
+            accelerator.NativeAccelerator.FlushPendingCommands = () => accelerator.FlushPendingCommands();
+
+            var features = accelerator.NativeAccelerator.EnabledFeatures;
+            if (features.Count > 0)
+                WebGPUBackend.Log($"[WebGPU] Enabled features ({features.Count}): {string.Join(", ", features)}");
+            else
+                WebGPUBackend.Log("[WebGPU] No optional features detected");
+
+            WebGPUBackend.Log("[WebGPU] Accelerator created from external GPUDevice");
+            return accelerator;
+        }
+
         /// <inheritdoc/>
         protected override WebGPUKernel CreateKernel(WebGPUCompiledKernel compiledKernel)
         {

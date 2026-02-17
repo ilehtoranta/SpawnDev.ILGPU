@@ -7,6 +7,7 @@
 
 using global::ILGPU;
 using global::ILGPU.Runtime;
+using SpawnDev.BlazorJS.JSObjects;
 using SpawnDev.ILGPU.WebGPU.Backend;
 
 namespace SpawnDev.ILGPU.WebGPU
@@ -97,6 +98,59 @@ namespace SpawnDev.ILGPU.WebGPU
             // Create basic capability context
             Capabilities = new WebGPUCapabilityContext();
         }
+
+        /// <summary>
+        /// Constructs a WebGPU ILGPU device from an externally-provided GPUDevice.
+        /// This is used when sharing a device with another library (e.g., ONNX Runtime Web)
+        /// that has already created its own GPUDevice. Skips adapter/device probing.
+        /// </summary>
+        /// <param name="externalDevice">An existing GPUDevice (e.g., from ort.env.webgpu.device).</param>
+        public WebGPUILGPUDevice(GPUDevice externalDevice)
+        {
+            ExternalGPUDevice = externalDevice ?? throw new ArgumentNullException(nameof(externalDevice));
+
+            // Read device info from the GPUDevice if available
+            Name = "WebGPU Device (External)";
+            WarpSize = 32;
+
+            // Read limits from the external device
+            int maxWorkgroupSizeX = 256, maxWorkgroupSizeY = 256, maxWorkgroupSizeZ = 64;
+            int maxInvocations = 256, maxWorkgroups = 65535, maxSharedMem = 16384;
+            long maxBufferSize = 268435456;
+
+            try
+            {
+                using var limits = externalDevice.Limits;
+                if (limits != null)
+                {
+                    maxWorkgroupSizeX = (int)(limits.MaxComputeWorkgroupSizeX ?? 256);
+                    maxWorkgroupSizeY = (int)(limits.MaxComputeWorkgroupSizeY ?? 256);
+                    maxWorkgroupSizeZ = (int)(limits.MaxComputeWorkgroupSizeZ ?? 64);
+                    maxInvocations = (int)(limits.MaxComputeInvocationsPerWorkgroup ?? 256);
+                    maxWorkgroups = (int)(limits.MaxComputeWorkgroupsPerDimension ?? 65535);
+                    maxSharedMem = (int)(limits.MaxComputeWorkgroupStorageSize ?? 16384);
+                    maxBufferSize = (long)(limits.MaxBufferSize ?? 268435456);
+                }
+            }
+            catch { }
+
+            MaxGroupSize = new Index3D(maxWorkgroupSizeX, maxWorkgroupSizeY, maxWorkgroupSizeZ);
+            MaxNumThreadsPerGroup = maxInvocations;
+            NumMultiprocessors = 16;
+            MaxNumThreadsPerMultiprocessor = maxInvocations;
+            MaxGridSize = new Index3D(maxWorkgroups, maxWorkgroups, maxWorkgroups);
+            MemorySize = maxBufferSize;
+            MaxSharedMemoryPerGroup = maxSharedMem;
+            MaxConstantMemory = 65536;
+
+            Capabilities = new WebGPUCapabilityContext();
+        }
+
+        /// <summary>
+        /// An externally-provided GPUDevice, set when this device was created via the
+        /// external device constructor. Null for standard adapter-based devices.
+        /// </summary>
+        internal GPUDevice? ExternalGPUDevice { get; }
 
         /// <summary>
         /// Gets the native WebGPU device.

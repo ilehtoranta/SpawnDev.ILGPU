@@ -27,6 +27,22 @@ namespace SpawnDev.ILGPU.WebGPU
             return accelerator;
         }
 
+        /// <summary>
+        /// Creates a WebGPU accelerator from an externally-provided GPUDevice.
+        /// This is used when sharing a device with another library (e.g., ONNX Runtime Web)
+        /// that has already created its own GPUDevice. Skips adapter probing and device
+        /// creation — uses the provided device directly.
+        /// </summary>
+        /// <param name="externalDevice">An existing GPUDevice (e.g., from ORT's env.webgpu.device).</param>
+        public static WebGPUNativeAccelerator CreateFromExternalDevice(GPUDevice externalDevice)
+        {
+            if (externalDevice == null)
+                throw new ArgumentNullException(nameof(externalDevice));
+
+            var accelerator = new WebGPUNativeAccelerator(externalDevice);
+            return accelerator;
+        }
+
         #endregion
 
         #region Instance
@@ -40,11 +56,40 @@ namespace SpawnDev.ILGPU.WebGPU
         private readonly Dictionary<string, WebGPUComputeShader> _shaderCache = new();
 
         /// <summary>
-        /// Constructs a new WebGPU accelerator.
+        /// Constructs a new WebGPU accelerator from a WebGPUDevice (adapter-based, needs InitializeAsync).
         /// </summary>
         private WebGPUNativeAccelerator(WebGPUDevice device)
         {
             Device = device ?? throw new ArgumentNullException(nameof(device));
+        }
+
+        /// <summary>
+        /// Constructs a WebGPU accelerator from an existing GPUDevice (external device injection).
+        /// The device is already initialized — no adapter probing or device creation needed.
+        /// </summary>
+        private WebGPUNativeAccelerator(GPUDevice externalDevice)
+        {
+            _gpuDevice = externalDevice ?? throw new ArgumentNullException(nameof(externalDevice));
+            _queue = externalDevice.Queue;
+            _isInitialized = true;
+
+            // Read device features
+            EnabledFeatures = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            try
+            {
+                using var features = externalDevice.Features;
+                foreach (var featureName in new[] { "shader-f16", "subgroups", "timestamp-query" })
+                {
+                    if (features.Has(featureName))
+                        EnabledFeatures.Add(featureName);
+                }
+            }
+            catch { }
+
+            // Listen for uncaptured GPU errors
+            _gpuDevice.OnUncapturedError += OnGPUUncapturedError;
+
+            Console.WriteLine("[WebGPU] Accelerator created from external GPUDevice (shared with ORT)");
         }
 
         /// <summary>
@@ -154,9 +199,9 @@ namespace SpawnDev.ILGPU.WebGPU
         #region Properties
 
         /// <summary>
-        /// Returns the parent WebGPU device.
+        /// Returns the parent WebGPU device. Null when using an externally-provided GPUDevice.
         /// </summary>
-        public WebGPUDevice Device { get; }
+        public WebGPUDevice? Device { get; }
 
         /// <summary>
         /// Returns the native GPU device.
