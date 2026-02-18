@@ -441,7 +441,8 @@ namespace SpawnDev.ILGPU.WebGL
                         byteLength,
                         glslType = bufferGlslType,
                         paramIndex = glslParamIndex,
-                        argIndex = pIdx
+                        argIndex = pIdx,
+                        elementCount = length  // for u_param{N}_length uniform (GetViewLength support)
                     });
 
                     // Extract stride dimensions for multi-dim views

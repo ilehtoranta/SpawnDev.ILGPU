@@ -881,6 +881,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 case global::ILGPU.IR.Values.WriteToOutput v: GenerateCode(v); break;
                 case global::ILGPU.IR.Values.Predicate v: GenerateCode(v); break;
                 case global::ILGPU.IR.Values.DynamicMemoryLengthValue v: GenerateCode(v); break;
+                case global::ILGPU.IR.Values.GetViewLength v: GenerateCode(v); break;
                 case global::ILGPU.IR.Values.AlignTo v: GenerateCode(v); break;
                 case global::ILGPU.IR.Values.AsAligned v: GenerateCode(v); break;
                 case global::ILGPU.IR.Values.LanguageEmitValue v: GenerateCode(v); break;
@@ -1091,6 +1092,17 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             var source = Load(value.Pointer);
             Declare(target);
             AppendLine($"{target} = {source}; // newView");
+        }
+
+        /// <summary>
+        /// Default GetViewLength handler: emits 0. Overridden in GLSLKernelFunctionGenerator
+        /// to emit the u_param{N}_length uniform that was set at dispatch time.
+        /// </summary>
+        public virtual void GenerateCode(global::ILGPU.IR.Values.GetViewLength value)
+        {
+            var target = Load(value);
+            Declare(target);
+            AppendLine($"{target} = 0; // GetViewLength (base: no param info)");
         }
 
         public virtual void GenerateCode(LoadFieldAddress value)

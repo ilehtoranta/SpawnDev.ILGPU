@@ -455,6 +455,11 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                         // Emit length uniform for struct buffers (element count, not texel count)
                         Builder.AppendLine($"uniform highp int u_param{param.Index}_length; // struct element count");
                     }
+                    else
+                    {
+                        // Emit length uniform for all view params so GetViewLength can reference it
+                        Builder.AppendLine($"uniform highp int u_param{param.Index}_length; // element count");
+                    }
 
                     // Multi-dim stride buffer
                     if (isMultiDim && (is2DView || is3DView))
@@ -1514,6 +1519,44 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             if (_leaParamMap.TryGetValue(source.ToString(), out var paramIdx))
                 _leaParamMap[target.Name] = paramIdx;
             AppendLine($"// NewView: {target} aliases {source}");
+        }
+
+        /// <summary>
+        /// Handles ArrayView.Length: traces the view back to its kernel parameter
+        /// and emits a reference to the u_param{N}_length uniform.
+        /// This uniform is already declared by EmitParameterDeclarations and set at dispatch time.
+        /// </summary>
+        public override void GenerateCode(GetViewLength value)
+        {
+            var target = Load(value);
+            string prefix = _hoistedPrimitives.Contains(value) ? "" : $"{TypeGenerator[value.Type]} ";
+
+            // Trace the view back to its kernel parameter
+            var param = ResolveToParameter(value.View);
+            if (param != null && param.Index >= KernelParamOffset)
+            {
+                // GetViewLength returns long (Int64). In emulated i64 mode, the GLSL type is uvec2.
+                // We must construct uvec2(uint(length), 0u) rather than assigning int directly.
+                string glslType = TypeGenerator[value.Type];
+                string lengthExpr;
+                if (glslType == "uvec2")
+                {
+                    // Emulated i64: wrap the int length as uvec2(uint(len), 0u)
+                    lengthExpr = $"uvec2(uint(u_param{param.Index}_length), 0u)";
+                }
+                else
+                {
+                    // Non-emulated path (shouldn't happen for long, but be safe)
+                    lengthExpr = $"u_param{param.Index}_length";
+                }
+                AppendLine($"{prefix}{target} = {lengthExpr};");
+            }
+            else
+            {
+                // Fallback: emit 0 (should not happen for well-formed kernels)
+                Declare(target);
+                AppendLine($"{target} = 0; // GetViewLength: could not resolve view to parameter");
+            }
         }
 
         public override void GenerateCode(GetField value)

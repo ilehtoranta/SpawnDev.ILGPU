@@ -1272,6 +1272,44 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             WasmBackend.Log($"[Wasm-DynShared] DynamicMemoryLengthValue -> local_{target} = local_{_dynamicSharedLengthLocal}");
         }
 
+        /// <summary>
+        /// Handles ArrayView.Length: traces the view back to its kernel parameter
+        /// and reads the pre-stored length local (locals[1]).
+        /// This is the correct cross-backend approach — the length is already passed
+        /// at dispatch time as a Wasm function parameter.
+        /// </summary>
+        public override void GenerateCode(GetViewLength value)
+        {
+            // GetViewLength returns i64 (long) in ILGPU, but our length local is i32.
+            // We must extend i32 → i64 using I64ExtendI32S.
+            var target = AllocateLocal(value, WasmOpCodes.I64);
+
+            // Trace the view back to its kernel parameter
+            var viewSource = value.View.Resolve();
+            int paramIdx = -1;
+            for (int pi = 0; pi < Method.Parameters.Count; pi++)
+            {
+                if (Method.Parameters[pi] == viewSource) { paramIdx = pi; break; }
+            }
+
+            if (paramIdx >= 0 && _paramLocals.TryGetValue(paramIdx, out var locals) && locals.Length > 1)
+            {
+                // locals[1] is the element count (i32) for this view parameter.
+                // Extend to i64 since GetViewLength returns long.
+                WasmModuleBuilder.EmitLocalGet(Code, locals[1]);
+                Code.Add(WasmOpCodes.I64ExtendI32S);
+                WasmBackend.Log($"[Wasm-GetViewLength] param[{paramIdx}] length -> local_{locals[1]} (i32 extended to i64)");
+            }
+            else
+            {
+                // Fallback: emit 0 as i64 (should not happen for well-formed kernels)
+                WasmModuleBuilder.EmitI64Const(Code, 0);
+                WasmBackend.Log($"[Wasm-GetViewLength] WARN: could not resolve view to parameter, emitting 0L");
+            }
+
+            WasmModuleBuilder.EmitLocalSet(Code, target);
+        }
+
         #endregion
 
         #region Shared Memory

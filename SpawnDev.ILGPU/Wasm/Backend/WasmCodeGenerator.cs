@@ -986,6 +986,17 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             WasmModuleBuilder.EmitLocalSet(Code, target);
         }
 
+        /// <summary>
+        /// Default GetViewLength handler: emits 0. Overridden in WasmKernelFunctionGenerator
+        /// to read the actual length local that was passed at dispatch time.
+        /// </summary>
+        public virtual void GenerateCode(GetViewLength value)
+        {
+            var target = AllocateLocal(value, WasmOpCodes.I32);
+            WasmModuleBuilder.EmitI32Const(Code, 0);
+            WasmModuleBuilder.EmitLocalSet(Code, target);
+        }
+
         // Views
         /// <summary>
         /// Generates code for a NewView IR node.
@@ -1661,6 +1672,9 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                     GenerateCode(v);
                     break;
                 case global::ILGPU.IR.Values.DynamicMemoryLengthValue v:
+                    GenerateCode(v);
+                    break;
+                case global::ILGPU.IR.Values.GetViewLength v:
                     GenerateCode(v);
                     break;
                 case global::ILGPU.IR.Values.LanguageEmitValue v:
