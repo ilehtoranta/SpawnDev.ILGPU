@@ -379,4 +379,32 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
         #endregion
 
     }
+
+    /// <summary>
+    /// Runs the full WebGPU test suite with <see cref="WebGPUBackendOptions.ForceDisableSubgroups"/> = true.
+    /// This exercises the workgroup shared-memory shuffle emulation path, allowing developers to verify
+    /// their ILGPU kernels work correctly on both the native-subgroup and emulation paths — even on
+    /// hardware that natively supports subgroups.
+    /// </summary>
+    public class WebGPUNoSubgroupsTests : BackendTestBase
+    {
+        protected override string BackendName => "WebGPU (No Subgroups)";
+
+        protected override async Task<(Context context, Accelerator accelerator)> CreateAcceleratorAsync()
+        {
+            var builder = Context.Create();
+            await builder.WebGPU();
+            var context = builder.ToContext();
+            var devices = context.GetWebGPUDevices();
+            if (devices.Count == 0)
+                throw new UnsupportedTestException("No WebGPU devices found");
+            var device = devices[0];
+            var options = new WebGPUBackendOptions
+            {
+                ForceDisableSubgroups = true   // Force shared-memory emulation path
+            };
+            var accelerator = await device.CreateAcceleratorAsync(context, options);
+            return (context, accelerator);
+        }
+    }
 }

@@ -74,6 +74,14 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
         public new async Task SubgroupShuffleTest() =>
             throw new UnsupportedTestException("WebGL: no subgroup support");
 
+        [TestMethod]
+        public new async Task ReduceMinMaxTest() =>
+            throw new UnsupportedTestException("WebGL: no float atomics or warp shuffle in vertex shaders");
+
+        [TestMethod]
+        public new async Task ILGPUReduceTest() =>
+            throw new UnsupportedTestException("WebGL: GroupExtensions.Reduce requires shared memory + barriers + atomics, unsupported in vertex shaders");
+
         // --- Atomics (WebGL vertex shader TF pipeline has no atomic operations) ---
         [TestMethod]
         public new async Task AtomicTest() =>

@@ -1,4 +1,5 @@
 using ILGPU;
+using ILGPU.Algorithms;
 using ILGPU.Runtime;
 using SpawnDev.Blazor.UnitTesting;
 
@@ -318,6 +319,94 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
                 if (result[baseIdx] != i) throw new Exception($"GlobalId failed at {i}. Got {result[baseIdx]}");
                 if (result[baseIdx + 3] != numThreads) throw new Exception($"GroupDim failed at {i}. Got {result[baseIdx + 3]}");
             }
+        });
+
+        // Custom warp-shuffle reduction kernel — directly exercises WarpShuffle, LaneIdx, WarpSize,
+        // and Atomic.Add on float. Uses a butterfly reduction pattern.
+        // NOTE: WGSL has no native atomic<f32>. The WebGPU backend emulates float atomics via a
+        // CAS loop on atomic<u32> with bitcast<f32/u32> conversions.
+        static void WarpReduceSumKernel(Index1D index, ArrayView<float> input, ArrayView<float> output)
+        {
+            int i = index;
+            float val = i < input.Length ? input[i] : 0f;
+
+            // Warp-level butterfly reduction using shuffle
+            int warpSize = Warp.WarpSize;
+            for (int offset = warpSize / 2; offset > 0; offset /= 2)
+                val += Warp.Shuffle(val, Warp.LaneIdx ^ offset);
+
+            // Lane 0 of each warp atomically accumulates the partial sum.
+            // Float atomic add is emulated via CAS loop in the WebGPU backend.
+            if (Warp.LaneIdx == 0)
+                Atomic.Add(ref output[0], val);
+        }
+
+        [TestMethod]
+        public async Task ReduceMinMaxTest() => await RunTest(async accelerator =>
+        {
+            // Tests warp shuffle emulation (or native subgroups) and float atomic add emulation.
+            // Uses 64 elements to match the default WebGPU workgroup size so the butterfly
+            // reduction reads from valid lanes. Expected sum = 1+2+...+64 = 2080.
+            const int count = 64;
+            var data = new float[count];
+            for (int i = 0; i < count; i++) data[i] = i + 1f;
+            float expectedSum = count * (count + 1) / 2f;  // 2080
+
+            using var inputBuf = accelerator.Allocate1D(data);
+            using var outputBuf = accelerator.Allocate1D<float>(1);
+            outputBuf.MemSetToZero();
+
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<float>, ArrayView<float>>(WarpReduceSumKernel);
+            kernel((Index1D)count, inputBuf.View, outputBuf.View);
+            await accelerator.SynchronizeAsync();
+
+            var result = await outputBuf.CopyToHostAsync<float>();
+            if (MathF.Abs(result[0] - expectedSum) > 0.5f)
+                throw new Exception($"WarpReduceSum expected {expectedSum}, got {result[0]}");
+        });
+
+        // Tests the high-level ILGPU Algorithms Reduce API (GroupExtensions.Reduce + AtomicApply).
+        // This is the primary goal: using accelerator.Reduce<T, TReduction>() for min/max/sum.
+        // Internally uses warp shuffles, shared memory, and integer atomics.
+        [TestMethod]
+        public async Task ILGPUReduceTest() => await RunTest(async accelerator =>
+        {
+            // TEMP: Enable verbose logging to capture WGSL source for debugging
+            SpawnDev.ILGPU.WebGPU.Backend.WebGPUBackend.VerboseLogging = true;
+            // Use the output-buffer overload to avoid blocking (CopyToCPU would deadlock in WASM).
+            const int count = 256;
+            var data = new int[count];
+            for (int i = 0; i < count; i++) data[i] = i + 1; // 1..256
+
+            using var inputBuf = accelerator.Allocate1D(data);
+
+            // --- Max reduction: max(1..256) = 256 ---
+            using var maxOut = accelerator.Allocate1D<int>(1);
+            accelerator.Reduce<int, global::ILGPU.Algorithms.ScanReduceOperations.MaxInt32>(
+                accelerator.DefaultStream, inputBuf.View, maxOut.View);
+            await accelerator.SynchronizeAsync();
+            var maxResult = await maxOut.CopyToHostAsync<int>();
+            if (maxResult[0] != 256)
+                throw new Exception($"Reduce<MaxInt32> expected 256, got {maxResult[0]}");
+
+            // --- Min reduction: min(1..256) = 1 ---
+            using var minOut = accelerator.Allocate1D<int>(1);
+            accelerator.Reduce<int, global::ILGPU.Algorithms.ScanReduceOperations.MinInt32>(
+                accelerator.DefaultStream, inputBuf.View, minOut.View);
+            await accelerator.SynchronizeAsync();
+            var minResult = await minOut.CopyToHostAsync<int>();
+            if (minResult[0] != 1)
+                throw new Exception($"Reduce<MinInt32> expected 1, got {minResult[0]}");
+
+            // --- Sum reduction: sum(1..256) = 32896 ---
+            using var sumOut = accelerator.Allocate1D<int>(1);
+            accelerator.Reduce<int, global::ILGPU.Algorithms.ScanReduceOperations.AddInt32>(
+                accelerator.DefaultStream, inputBuf.View, sumOut.View);
+            await accelerator.SynchronizeAsync();
+            var sumResult = await sumOut.CopyToHostAsync<int>();
+            int expectedSum2 = count * (count + 1) / 2; // 32896
+            if (sumResult[0] != expectedSum2)
+                throw new Exception($"Reduce<AddInt32> expected {expectedSum2}, got {sumResult[0]}");
         });
     }
 }

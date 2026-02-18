@@ -96,5 +96,13 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
         public new async Task SubgroupShuffleTest() =>
             throw new UnsupportedTestException("Subgroups not supported on CPU in WASM");
 
+        [TestMethod]
+        public new async Task ReduceMinMaxTest() =>
+            throw new UnsupportedTestException("CPU: float atomics and warp shuffle not supported in WASM");
+
+        [TestMethod]
+        public new async Task ILGPUReduceTest() =>
+            throw new UnsupportedTestException("CPU: GroupExtensions.Reduce requires warp shuffles + barriers, unsupported in WASM");
+
     }
 }

@@ -27,5 +27,9 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
         public new async Task SubgroupShuffleTest() =>
             throw new UnsupportedTestException("Subgroups not supported in browser environment");
 
+        [TestMethod]
+        public new async Task ILGPUReduceTest() =>
+            throw new UnsupportedTestException("Wasm: GroupExtensions.Reduce requires warp shuffles, unsupported in browser environment");
+
     }
 }

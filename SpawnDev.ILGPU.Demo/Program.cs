@@ -8,6 +8,7 @@ using SpawnDev.ILGPU.Demo.UnitTests;
 var builder = WebAssemblyHostBuilder.CreateDefault(args);
 builder.Services.AddBlazorJSRuntime();
 builder.Services.AddSingleton<WebGPUTests>();
+builder.Services.AddSingleton<WebGPUNoSubgroupsTests>();
 
 builder.Services.AddSingleton<CPUTests>();
 builder.Services.AddSingleton<WasmTests>();
