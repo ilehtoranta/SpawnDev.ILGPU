@@ -588,6 +588,50 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
             output[index] = a + b + c + d + e + f + g + h + i + j + k + l;
         }
 
+        /// <summary>
+        /// GPU kernel: depth float → RGBA inferno-style colormap.
+        /// Uses multiple Math.Min(Math.Max(...)) calls and ArrayView.Length —
+        /// the pattern that originally triggered the GetViewLength code generation bug.
+        /// </summary>
+        static void ColormapKernel(
+            Index1D index,
+            ArrayView<float> depth,
+            ArrayView<uint> output,
+            float minVal, float invRange)
+        {
+            int len = (int)output.Length;
+            if (index >= len) return;
+
+            float raw = (depth[index] - minVal) * invRange;
+            float t = Math.Min(Math.Max(raw, 0f), 1f);
+
+            // Three-segment colormap with multiple Math.Min/Max clamps
+            float s0 = Math.Min(Math.Max(t * 3.030303f, 0f), 1f);
+            float s1 = Math.Min(Math.Max((t - 0.33f) * 3.030303f, 0f), 1f);
+            float s2 = Math.Min(Math.Max((t - 0.66f) * 2.941176f, 0f), 1f);
+
+            float r0 = 0.05f + s0 * 0.35f;
+            float r1 = 0.4f + s1 * 0.5f;
+            float r2 = 0.9f + s2 * 0.1f;
+
+            float g0 = 0.0f + s0 * 0.1f;
+            float g1 = 0.1f + s1 * 0.3f;
+            float g2 = 0.4f + s2 * 0.55f;
+
+            float b0 = 0.2f + s0 * 0.4f;
+            float b1 = 0.6f - s1 * 0.3f;
+            float b2 = 0.3f - s2 * 0.15f;
+
+            float r = r0 + s1 * (r1 - r0) + s2 * (r2 - r1);
+            float g = g0 + s1 * (g1 - g0) + s2 * (g2 - g1);
+            float b = b0 + s1 * (b1 - b0) + s2 * (b2 - b1);
+
+            uint ri = (uint)(r * 255f);
+            uint gi = (uint)(g * 255f);
+            uint bi = (uint)(b * 255f);
+            output[index] = ri | (gi << 8) | (bi << 16) | 0xFF000000u;
+        }
+
         #endregion
 
 

@@ -769,6 +769,48 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
                     throw new Exception($"Many scalar kernel failed at {i}. Expected 78, got {result[i]}");
         });
 
+        /// <summary>
+        /// Tests the colormap kernel which uses multiple Math.Min(Math.Max(...)) calls,
+        /// float→uint casts, bitwise operations, and ArrayView.Length — the pattern
+        /// that originally triggered the GetViewLength code generation bug.
+        /// </summary>
+        [TestMethod]
+        public async Task ColormapKernelTest() => await RunTest(async accelerator =>
+        {
+            int length = 64;
+            var depthData = Enumerable.Range(0, length).Select(i => (float)i).ToArray();
+            float minVal = 0f;
+            float invRange = 1f / 63f;
+
+            using var depthBuf = accelerator.Allocate1D(depthData);
+            using var colorBuf = accelerator.Allocate1D<uint>(length);
+
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<
+                Index1D, ArrayView<float>, ArrayView<uint>, float, float>(ColormapKernel);
+            kernel((Index1D)length, depthBuf.View, colorBuf.View, minVal, invRange);
+            await accelerator.SynchronizeAsync();
+
+            var result = await colorBuf.CopyToHostAsync<uint>();
+
+            for (int i = 0; i < length; i++)
+            {
+                uint pixel = result[i];
+                uint a = (pixel >> 24) & 0xFF;
+                if (a != 255)
+                    throw new Exception($"Colormap alpha failed at {i}. Expected 255, got {a}");
+            }
+
+            // First pixel (t=0) should be dark
+            uint r0 = result[0] & 0xFF;
+            if (r0 > 100)
+                throw new Exception($"First pixel should be dark, but R={r0}");
+
+            // Last pixel (t=1) should be bright
+            uint rLast = result[length - 1] & 0xFF;
+            if (rLast < 200)
+                throw new Exception($"Last pixel should be bright, but R={rLast}");
+        });
+
         #endregion
     }
 }

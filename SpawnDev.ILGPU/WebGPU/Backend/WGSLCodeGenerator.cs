@@ -636,6 +636,9 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 case global::ILGPU.IR.Values.NewView v:
                     GenerateCode(v);
                     break;
+                case global::ILGPU.IR.Values.GetViewLength v:
+                    GenerateCode(v);
+                    break;
 
                 // Constants
                 case global::ILGPU.IR.Values.PrimitiveValue v:
@@ -1035,6 +1038,23 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             var source = Load(value.Pointer);
             Declare(target);
             AppendLine($"{target} = {source}; // newView");
+        }
+
+        /// <summary>
+        /// Generates code for GetViewLength (ArrayView.Length).
+        /// Base implementation emits a comment; override in kernel generator
+        /// to emit arrayLength(&paramN) for storage buffer bindings.
+        /// </summary>
+        public virtual void GenerateCode(global::ILGPU.IR.Values.GetViewLength value)
+        {
+            var target = Load(value);
+            var source = Load(value.View);
+            Declare(target);
+            // In non-kernel contexts (helper functions), length might
+            // not be directly available. For kernel params, the kernel
+            // function generator overrides this.
+            string lengthType = value.LengthType == BasicValueType.Int64 ? "i64" : "i32";
+            AppendLine($"{target} = {lengthType}(arrayLength(&{source}));");
         }
 
         public virtual void GenerateCode(LoadFieldAddress value)

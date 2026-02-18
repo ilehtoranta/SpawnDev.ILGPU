@@ -2222,6 +2222,37 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             return null;
         }
 
+        /// <summary>
+        /// Kernel-specific GetViewLength: resolves the view back to a kernel parameter
+        /// and emits i32(arrayLength(&paramN)) for storage buffer bindings.
+        /// </summary>
+        public override void GenerateCode(global::ILGPU.IR.Values.GetViewLength value)
+        {
+            var target = Load(value);
+
+            // Try to resolve the view to a kernel parameter
+            if (ResolveToParameter(value.View) is global::ILGPU.IR.Values.Parameter param
+                && param.Index >= KernelParamOffset)
+            {
+                string prefix = _hoistedPrimitives.Contains(value) ? "" : "let ";
+                var lengthExpr = $"i32(arrayLength(&param{param.Index}))";
+
+                // Handle emulated i64 case
+                var targetWgslType = TypeGenerator[value.Type];
+                if (Backend.Options.EnableI64Emulation &&
+                    (targetWgslType == "emu_i64" || targetWgslType == "emu_u64"))
+                {
+                    lengthExpr = $"i64_from_i32({lengthExpr})";
+                }
+
+                AppendLine($"{prefix}{target} = {lengthExpr};");
+                return;
+            }
+
+            // Fallback to base implementation
+            base.GenerateCode(value);
+        }
+
         protected override bool IsAtomicPointer(Value ptr)
         {
             if (ResolveToParameter(ptr) is global::ILGPU.IR.Values.Parameter param)
