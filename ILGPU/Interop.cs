@@ -97,17 +97,36 @@ namespace ILGPU
         /// <param name="type">The target type</param>
         /// <remarks>Only supports unmanaged types.</remarks>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public static int SizeOf(Type type) =>
-            (int)InteropSizeOfMethod
-            .MakeGenericMethod(type)
-            .Invoke(null, null)
-            .AsNotNull();
+        public static int SizeOf(Type type)
+        {
+            // Interop.SizeOf<T>() has an 'unmanaged' constraint, so MakeGenericMethod fails
+            // for closed generic types (e.g. ReductionImplementation<T,S,R>).
+            // Unsafe.SizeOf<T>() has NO unmanaged constraint and works for all struct types,
+            // including closed generics. Use it as a fallback via reflection.
+            if (type.IsGenericType)
+                return (int)UnsafeSizeOfMethod
+                    .MakeGenericMethod(type)
+                    .Invoke(null, null)
+                    .AsNotNull();
+            return (int)InteropSizeOfMethod
+                .MakeGenericMethod(type)
+                .Invoke(null, null)
+                .AsNotNull();
+        }
 
         private static readonly MethodInfo InteropSizeOfMethod =
             typeof(Interop).GetMethod(
                 nameof(SizeOf),
                 Type.EmptyTypes,
                 null)
+            .ThrowIfNull();
+
+        // System.Runtime.CompilerServices.Unsafe.SizeOf<T>() has no 'unmanaged' constraint
+        // so it can be called via reflection with closed generic type arguments.
+        private static readonly MethodInfo UnsafeSizeOfMethod =
+            typeof(System.Runtime.CompilerServices.Unsafe).GetMethod(
+                nameof(System.Runtime.CompilerServices.Unsafe.SizeOf),
+                Type.EmptyTypes)
             .ThrowIfNull();
 
         /// <summary>

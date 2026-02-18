@@ -346,6 +346,36 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
 
         #endregion
 
+        /// <summary>
+        /// Verifies the Interop.SizeOf(Type) fix for closed generic types.
+        /// Previously, calling Interop.SizeOf with a closed generic type (e.g. a struct
+        /// instantiated with type parameters) would throw Argument_NeedNonGenericType
+        /// because MakeGenericMethod does not accept a closed generic as a type argument.
+        /// The fix adds a Marshal.SizeOf fallback for generic types.
+        /// This test does NOT run a GPU kernel — it verifies the reflection fix directly.
+        /// </summary>
+        [TestMethod]
+        public Task InteropSizeOfClosedGenericTest()
+        {
+            // A simple closed generic struct to test with
+            // (mimics what ReductionImplementation<T,TStride,TReduction> looks like to the runtime)
+            var closedGenericType = typeof(System.Collections.Generic.KeyValuePair<int, float>);
+
+            // This should NOT throw Argument_NeedNonGenericType after the fix
+            int size = Interop.SizeOf(closedGenericType);
+
+            // KeyValuePair<int, float> = 4 (int) + 4 (float) = 8 bytes
+            if (size != 8)
+                throw new Exception($"Interop.SizeOf(KeyValuePair<int,float>) returned {size}, expected 8");
+
+            // Also verify a non-generic type still works
+            int intSize = Interop.SizeOf(typeof(int));
+            if (intSize != 4)
+                throw new Exception($"Interop.SizeOf(int) returned {intSize}, expected 4");
+
+            return Task.CompletedTask;
+        }
+
         #endregion
 
     }
