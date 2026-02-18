@@ -733,6 +733,33 @@ namespace SpawnDev.ILGPU.WebGPU
         public void FlushPendingCommands() => ((WebGPUStream)DefaultStream).Flush();
 
         /// <summary>
+        /// Wraps an externally-owned <see cref="GPUBuffer"/> as an ILGPU <see cref="ArrayView{T}"/>.
+        /// The buffer is NOT owned — it will not be destroyed when the returned view is no longer used.
+        /// <para>
+        /// Use this to pass an external GPU buffer (e.g. from ONNX Runtime Web) directly to ILGPU kernels
+        /// without copying data. Both the external buffer and this accelerator must share the same GPUDevice.
+        /// </para>
+        /// </summary>
+        /// <typeparam name="T">The element type to interpret the buffer as.</typeparam>
+        /// <param name="externalBuffer">The externally-owned GPU buffer to wrap.</param>
+        /// <param name="elementCount">Number of elements of type <typeparamref name="T"/> in the buffer.</param>
+        /// <returns>
+        /// An <see cref="ArrayView{T}"/> backed by the external buffer.
+        /// The caller must ensure <paramref name="externalBuffer"/> remains valid for the duration of any kernel that uses this view.
+        /// Dispose the returned <see cref="ExternalWebGPUMemoryBuffer"/> when done to release the non-owning wrapper.
+        /// </returns>
+        public (ArrayView<T> View, ExternalWebGPUMemoryBuffer Buffer) WrapExternalBuffer<T>(GPUBuffer externalBuffer, int elementCount)
+            where T : unmanaged
+        {
+            int elementSize = System.Runtime.InteropServices.Marshal.SizeOf<T>();
+            var memBuffer = new ExternalWebGPUMemoryBuffer(this, externalBuffer, elementCount, elementSize);
+            // Build a typed ArrayView<T> over the full buffer (byte buffer reinterpreted as T)
+            var rawView = memBuffer.AsRawArrayView();
+            var typedView = rawView.Cast<T>();
+            return (typedView, memBuffer);
+        }
+
+        /// <summary>
         /// WebGPU stream that batches multiple kernel dispatches into a single command buffer.
         /// Compute passes are accumulated in a shared GPUCommandEncoder and submitted together
         /// when Synchronize() or Flush() is called, matching CUDA's streaming dispatch model.

@@ -7,7 +7,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 {
     public class WebGPUMemoryBuffer : MemoryBuffer, IBrowserMemoryBuffer
     {
-        private readonly WebGPUBuffer<byte> _buffer;
+        private readonly WebGPUBuffer<byte>? _buffer;
 
         public WebGPUMemoryBuffer(WebGPUAccelerator accelerator, long length, int elementSize)
             : base(accelerator, length, elementSize)
@@ -15,9 +15,22 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             _buffer = accelerator.NativeAccelerator.Allocate<byte>(LengthInBytes);
         }
 
+        /// <summary>
+        /// Protected constructor for subclasses that provide their own buffer (e.g. ExternalWebGPUMemoryBuffer).
+        /// Does NOT allocate a new GPU buffer — the subclass is responsible for providing NativeBuffer.
+        /// </summary>
+        protected WebGPUMemoryBuffer(WebGPUAccelerator accelerator, long length, int elementSize, bool skipAllocation)
+            : base(accelerator, length, elementSize)
+        {
+            // _buffer intentionally left null — subclass overrides NativeBuffer
+        }
+
         public Task<Uint8Array> CopyToHostUint8ArrayAsync(long sourceByteOffset = 0, long? copyBytes = null) => NativeBuffer.CopyToHostUint8ArrayAsync(sourceByteOffset, copyBytes);
 
-        public WebGPUBuffer<byte> NativeBuffer => _buffer;
+        /// <summary>
+        /// Returns the underlying WebGPU byte buffer. Virtual so subclasses can provide an external buffer.
+        /// </summary>
+        public virtual WebGPUBuffer<byte> NativeBuffer => _buffer!;
         // Implementation of abstract members
         protected override void CopyFrom(AcceleratorStream stream, in ArrayView<byte> source, in ArrayView<byte> destination)
         {
@@ -71,7 +84,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         // DisposeAcceleratorObject is protected (not protected internal) in base AcceleratorObject
         protected override void DisposeAcceleratorObject(bool disposing)
         {
-            if (disposing) _buffer.Dispose();
+            if (disposing) _buffer?.Dispose();
         }
 
 

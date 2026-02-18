@@ -20,6 +20,7 @@ namespace SpawnDev.ILGPU.WebGPU
 
         private GPUBuffer? _buffer;
         private bool _disposed;
+        private readonly bool _ownsBuffer;
 
         /// <summary>
         /// Constructs a new WebGPU buffer.
@@ -30,6 +31,7 @@ namespace SpawnDev.ILGPU.WebGPU
             Length = length;
             ElementSize = Marshal.SizeOf<T>();
             LengthInBytes = length * ElementSize;
+            _ownsBuffer = true;
 
             var device = accelerator.NativeDevice;
             if (device == null)
@@ -45,6 +47,22 @@ namespace SpawnDev.ILGPU.WebGPU
 
             _buffer = device.CreateBuffer(descriptor);
         }
+
+        /// <summary>
+        /// Constructs a non-owning wrapper around an externally-managed GPUBuffer.
+        /// The buffer will NOT be destroyed when this instance is disposed.
+        /// Both the external buffer and the accelerator must share the same GPUDevice.
+        /// </summary>
+        internal WebGPUBuffer(WebGPUNativeAccelerator accelerator, GPUBuffer externalBuffer, long length)
+        {
+            Accelerator = accelerator ?? throw new ArgumentNullException(nameof(accelerator));
+            Length = length;
+            ElementSize = Marshal.SizeOf<T>();
+            LengthInBytes = length * ElementSize;
+            _buffer = externalBuffer;
+            _ownsBuffer = false;
+        }
+
 
         #endregion
 
@@ -340,8 +358,13 @@ namespace SpawnDev.ILGPU.WebGPU
             _cachedStagingBuffer?.Dispose();
             _cachedStagingBuffer = null;
 
-            _buffer?.Destroy();
-            _buffer?.Dispose();
+            // Only destroy the underlying GPUBuffer if we own it.
+            // Non-owning instances (wrapping external buffers) must not destroy the buffer.
+            if (_ownsBuffer)
+            {
+                _buffer?.Destroy();
+                _buffer?.Dispose();
+            }
             _buffer = null;
         }
 
