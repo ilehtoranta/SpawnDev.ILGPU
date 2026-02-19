@@ -31,7 +31,6 @@ namespace ILGPU.Algorithms.IL
             AllReduce<T, TReduction>(value);
 
         /// <summary cref="GroupExtensions.AllReduce{T, TReduction}(T)"/>
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static T AllReduce<T, TReduction>(T value)
             where T : unmanaged
             where TReduction : struct, IScanReduceOperation<T>

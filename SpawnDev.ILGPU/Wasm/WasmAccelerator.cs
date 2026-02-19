@@ -407,7 +407,7 @@ namespace SpawnDev.ILGPU.Wasm
                         else if (value != null && value.GetType().IsValueType && !value.GetType().IsPrimitive && !value.GetType().IsEnum)
                         {
                             // Struct scalar: serialize to scratch memory, pass offset
-                            int structSize = System.Runtime.InteropServices.Marshal.SizeOf(value.GetType());
+                            int structSize = global::ILGPU.Interop.SizeOf(value.GetType());
                             byte[] bytes = new byte[structSize];
                             var handle = System.Runtime.InteropServices.GCHandle.Alloc(bytes, System.Runtime.InteropServices.GCHandleType.Pinned);
                             try { System.Runtime.InteropServices.Marshal.StructureToPtr(value, handle.AddrOfPinnedObject(), false); }

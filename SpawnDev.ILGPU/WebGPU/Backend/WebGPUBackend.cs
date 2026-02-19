@@ -91,8 +91,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         /// <summary>Returns true if shader-f16 is enabled.</summary>
         public bool HasShaderF16 => EnabledFeatures.Contains("shader-f16");
 
-        /// <summary>Returns true if subgroups are enabled.</summary>
-        public bool HasSubgroups => EnabledFeatures.Contains("subgroups");
+        /// <summary>Returns true if subgroups are enabled and not force-disabled by options.</summary>
+        public bool HasSubgroups => !Options.ForceDisableSubgroups && EnabledFeatures.Contains("subgroups");
 
         /// <summary>Returns true if timestamp queries are enabled.</summary>
         public bool HasTimestampQuery => EnabledFeatures.Contains("timestamp-query");
@@ -403,7 +403,125 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             {
                 WebGPUBackend.Log($"WebGPU: Error registering XMath intrinsics: {ex.Message}");
             }
+
+            // Register ILGPU.Algorithms group/warp reduction intrinsics.
+            // These override the default IL fallback (PTXWarpExtensions butterfly shuffle)
+            // with WGSL subgroup intrinsics (subgroupMax, subgroupMin, subgroupAdd, etc.)
+            // The open generic method definition is registered so all TReduction specializations
+            // (MaxInt32, MinInt32, AddInt32, etc.) are handled by a single registration.
+            try
+            {
+                var groupExtType = Type.GetType("ILGPU.Algorithms.GroupExtensions, ILGPU.Algorithms");
+                var warpExtType = Type.GetType("ILGPU.Algorithms.WarpExtensions, ILGPU.Algorithms");
+                const BindingFlags algorithmFlags = BindingFlags.Public | BindingFlags.Static;
+
+                if (groupExtType != null)
+                {
+                    var groupReduce = groupExtType.GetMethod("Reduce", algorithmFlags);
+                    var groupAllReduce = groupExtType.GetMethod("AllReduce", algorithmFlags);
+
+                    if (groupReduce != null)
+                    {
+                        RegisterIntrinsic(groupReduce, WGSLCodeGenerator.GenerateGroupReduce);
+                        WebGPUBackend.Log("WebGPU: Registered GroupExtensions.Reduce intrinsic");
+                    }
+                    if (groupAllReduce != null)
+                    {
+                        RegisterIntrinsic(groupAllReduce, WGSLCodeGenerator.GenerateGroupReduce);
+                        WebGPUBackend.Log("WebGPU: Registered GroupExtensions.AllReduce intrinsic");
+                    }
+                }
+                else
+                {
+                    WebGPUBackend.Log("WebGPU: GroupExtensions type not found - ILGPU.Algorithms may not be loaded");
+                }
+
+                if (warpExtType != null)
+                {
+                    var warpReduce = warpExtType.GetMethod("Reduce", algorithmFlags);
+                    var warpAllReduce = warpExtType.GetMethod("AllReduce", algorithmFlags);
+
+                    if (warpReduce != null)
+                    {
+                        RegisterIntrinsic(warpReduce, WGSLCodeGenerator.GenerateWarpReduce);
+                        WebGPUBackend.Log("WebGPU: Registered WarpExtensions.Reduce intrinsic");
+                    }
+                    if (warpAllReduce != null)
+                    {
+                        RegisterIntrinsic(warpAllReduce, WGSLCodeGenerator.GenerateWarpReduce);
+                        WebGPUBackend.Log("WebGPU: Registered WarpExtensions.AllReduce intrinsic");
+                    }
+                }
+                else
+                {
+                    WebGPUBackend.Log("WebGPU: WarpExtensions type not found - ILGPU.Algorithms may not be loaded");
+                }
+
+                // Also register the IL-level implementations that ILGPU inlines when compiling
+                // ILGroupExtensions.AllReduce and PTXWarpExtensions.Reduce. Without these, ILGPU
+                // compiles the C# IL bodies — which use Warp.IsFirstLane compiled as GroupIndexValue
+                // (local_id == 0) instead of LaneIdxValue (subgroup_invocation_id == 0), causing
+                // atomicMax to only fire for thread 0 and silently dropping all but the first subgroup.
+                const BindingFlags internalFlags = BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Static;
+
+                var ilGroupExtType = Type.GetType("ILGPU.Algorithms.IL.ILGroupExtensions, ILGPU.Algorithms");
+                if (ilGroupExtType != null)
+                {
+                    var ilGroupReduce = ilGroupExtType.GetMethod("Reduce", internalFlags);
+                    var ilGroupAllReduce = ilGroupExtType.GetMethod("AllReduce", internalFlags);
+                    if (ilGroupReduce != null)
+                    {
+                        RegisterIntrinsic(ilGroupReduce, WGSLCodeGenerator.GenerateGroupAllReduce);
+                        WebGPUBackend.Log("WebGPU: Registered ILGroupExtensions.Reduce intrinsic");
+                    }
+                    if (ilGroupAllReduce != null)
+                    {
+                        RegisterIntrinsic(ilGroupAllReduce, WGSLCodeGenerator.GenerateGroupAllReduce);
+                        WebGPUBackend.Log("WebGPU: Registered ILGroupExtensions.AllReduce intrinsic");
+                    }
+                }
+
+                var ilWarpExtType = Type.GetType("ILGPU.Algorithms.IL.ILWarpExtensions, ILGPU.Algorithms");
+                if (ilWarpExtType != null)
+                {
+                    var ilWarpReduce = ilWarpExtType.GetMethod("Reduce", internalFlags);
+                    var ilWarpAllReduce = ilWarpExtType.GetMethod("AllReduce", internalFlags);
+                    if (ilWarpReduce != null)
+                    {
+                        RegisterIntrinsic(ilWarpReduce, WGSLCodeGenerator.GenerateWarpReduce);
+                        WebGPUBackend.Log("WebGPU: Registered ILWarpExtensions.Reduce intrinsic");
+                    }
+                    if (ilWarpAllReduce != null)
+                    {
+                        RegisterIntrinsic(ilWarpAllReduce, WGSLCodeGenerator.GenerateWarpReduce);
+                        WebGPUBackend.Log("WebGPU: Registered ILWarpExtensions.AllReduce intrinsic");
+                    }
+                }
+
+                var ptxWarpExtType = Type.GetType("ILGPU.Algorithms.PTX.PTXWarpExtensions, ILGPU.Algorithms");
+                if (ptxWarpExtType != null)
+                {
+                    var ptxWarpReduce = ptxWarpExtType.GetMethod("Reduce", internalFlags);
+                    var ptxWarpAllReduce = ptxWarpExtType.GetMethod("AllReduce", internalFlags);
+                    if (ptxWarpReduce != null)
+                    {
+                        RegisterIntrinsic(ptxWarpReduce, WGSLCodeGenerator.GenerateWarpReduce);
+                        WebGPUBackend.Log("WebGPU: Registered PTXWarpExtensions.Reduce intrinsic");
+                    }
+                    if (ptxWarpAllReduce != null)
+                    {
+                        RegisterIntrinsic(ptxWarpAllReduce, WGSLCodeGenerator.GenerateWarpReduce);
+                        WebGPUBackend.Log("WebGPU: Registered PTXWarpExtensions.AllReduce intrinsic");
+                    }
+                }
+
+            }
+            catch (Exception ex)
+            {
+                WebGPUBackend.Log($"WebGPU: Error registering group/warp reduction intrinsics: {ex.Message}");
+            }
         }
+
 
         /// <summary>
         /// Creates a new entry point.

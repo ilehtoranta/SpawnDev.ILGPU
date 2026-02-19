@@ -23,12 +23,25 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         #region Instance
 
         private HashSet<int> _atomicParameters = new HashSet<int>();
+        // Subset of _atomicParameters where the element type is float (f32/f16).
+        // WGSL does not support atomic<f32>, so these are declared as atomic<u32> (raw bits)
+        // and emulated via a CAS loop in WGSLCodeGenerator.GenerateCode(GenericAtomic).
+        private HashSet<int> _floatAtomicParameters = new HashSet<int>();
         private HashSet<Value> _hoistedPrimitives = new HashSet<Value>();
+        // Tracks WGSL variable names that hold pointer aliases (e.g., "v_27_f0" which is 'let v_27_f0 = &param1_f0;').
+        // The post-processor checks this to avoid converting 'let v_28 = v_27_f0;' to 'v_28 = v_27_f0;'
+        // which would be a type error (can't assign a pointer to a 'var' variable in WGSL).
+        private HashSet<string> _viewPointerVarNames = new HashSet<string>();
         private HashSet<int> _emulatedF64Params = new HashSet<int>();
         private HashSet<int> _emulatedI64Params = new HashSet<int>();
         private List<DynamicSharedOverrideInfo> _dynamicSharedOverrides = new List<DynamicSharedOverrideInfo>();
         private bool _usesBroadcast = false;
         private bool _usesSubgroups = false;
+        // Set to true by GenerateGroupAllReduce so the module-scope atomic<i32> workgroup var is emitted.
+        // The static handler sets this via the public property to signal the need for _grp_reduce_i32.
+        private bool _usesGroupReduce = false;
+        /// <summary>Set to true by GenerateGroupAllReduce to request emission of <c>var&lt;workgroup&gt; _grp_reduce_i32: atomic&lt;i32&gt;</c>.</summary>
+        public override bool UsesGroupReduce { get => _usesGroupReduce; set => _usesGroupReduce = value; }
         // Maps variable names to their emulation info (param index, is emu_f64)
         private Dictionary<string, (int ParamIndex, bool IsF64)> _emulatedVarMappings = new Dictionary<string, (int, bool)>();
         // Maps cross-block pointer variable names to inline expressions (e.g. "param1[v_3_idx]")
@@ -42,6 +55,46 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         private Dominators<Backwards> _postDominators;
         private Loops<ReversePostOrder, Forwards> _loops;
         private GeneratorArgs _generatorArgs;
+
+        // --- Body Struct Decomposition ---
+        // A "body struct" is a struct parameter (e.g. IGridStrideKernelBody implementations like
+        // ReductionImplementation) that contains ArrayView fields mixed with scalar fields.
+        // WGSL cannot represent such a struct as a single buffer binding, so we decompose it:
+        // - Each view field gets its own storage buffer binding: param{N}_f{fieldIdx}
+        // - Scalar fields are packed into _scalar_params
+        //
+        // _bodyStructParams: paramIndex → list of field info
+        // _bodyStructAtomicFields: (paramIndex, fieldIndex) → true if this view field is atomic
+        // _bodyStructAtomicFloatFields: (paramIndex, fieldIndex) → true if float atomic
+        private Dictionary<int, List<BodyStructFieldInfo>> _bodyStructParams = new Dictionary<int, List<BodyStructFieldInfo>>();
+        private HashSet<(int paramIdx, int fieldIdx)> _bodyStructAtomicFields = new HashSet<(int, int)>();
+        private HashSet<(int paramIdx, int fieldIdx)> _bodyStructAtomicFloatFields = new HashSet<(int, int)>();
+
+        /// <summary>
+        /// Describes one field of a decomposed body struct parameter.
+        /// </summary>
+        private sealed class BodyStructFieldInfo
+        {
+            public int FieldIndex { get; init; }
+            public TypeNode FieldType { get; init; } = null!;
+            public bool IsView { get; init; }   // true → gets its own buffer binding
+            public bool IsScalar { get; init; } // true → packed into _scalar_params OR is view metadata
+            // For view fields: the WGSL binding name (e.g. "param1_f0")
+            public string BindingName { get; set; } = "";
+            // For scalar fields: the slot index in _scalar_params (-1 if view metadata)
+            public int ScalarSlot { get; set; } = -1;
+            // True if this scalar field is metadata of a preceding view field (e.g. ArrayView1D.Length)
+            // These fields use arrayLength(&bindingName) instead of _scalar_params
+            public bool IsViewMetadata { get; set; } = false;
+            // For IsViewMetadata fields: the binding name of the associated view field
+            public string AssociatedViewBindingName { get; set; } = "";
+            // True if this is a length field (Int64 following a view), false if flag (Int8 following a view)
+            public bool IsLengthField { get; set; } = false;
+        }
+        // _bodyStructFieldVars: (paramIndex, fieldIndex) → WGSL variable name
+        // Used by GetField code generation to redirect field accesses to the appropriate binding.
+        private Dictionary<(int, int), string> _bodyStructFieldVars = new Dictionary<(int, int), string>();
+
         public WGSLKernelFunctionGenerator(
             in GeneratorArgs args,
             Method method,
@@ -56,6 +109,11 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             _loops = _cfg.CreateLoops();
 
             ScanForAtomicUsage();
+            // CRITICAL: ScanBodyStructParams must run before body generation
+            // because SetupParameterBindings (called during body generation) needs _bodyStructParams.
+            // GenerateHeader runs AFTER body generation, so we cannot rely on GenerateHeader
+            // to populate _bodyStructParams.
+            ScanBodyStructParams();
 
             if (!EntryPoint.IsExplicitlyGrouped && method.Parameters.Count > 0)
             {
@@ -83,20 +141,227 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 {
                     if (entry.Value is global::ILGPU.IR.Values.GenericAtomic atomic)
                     {
-                        if (ResolveToParameter(atomic.Target) is global::ILGPU.IR.Values.Parameter param)
+                        // Resolve the atomic target to a parameter, tracking GetField chain
+                        if (ResolveToParameterWithFieldChain(atomic.Target, out var param, out var fieldIdx))
                         {
-                            _atomicParameters.Add(param.Index);
+                            if (fieldIdx >= 0)
+                            {
+                                // Atomic on a field of a body struct — track the specific field
+                                _bodyStructAtomicFields.Add((param!.Index, fieldIdx));
+                                var elemType = atomic.Value.Type;
+                                if (elemType is global::ILGPU.IR.Types.PrimitiveType pt &&
+                                    (pt.BasicValueType == global::ILGPU.BasicValueType.Float32 ||
+                                     pt.BasicValueType == global::ILGPU.BasicValueType.Float16))
+                                    _bodyStructAtomicFloatFields.Add((param.Index, fieldIdx));
+                            }
+                            else
+                            {
+                                // Atomic directly on a parameter
+                                _atomicParameters.Add(param!.Index);
+                                var elemType = atomic.Value.Type;
+                                if (elemType is global::ILGPU.IR.Types.PrimitiveType pt &&
+                                    (pt.BasicValueType == global::ILGPU.BasicValueType.Float32 ||
+                                     pt.BasicValueType == global::ILGPU.BasicValueType.Float16))
+                                    _floatAtomicParameters.Add(param.Index);
+                            }
                         }
                     }
                     else if (entry.Value is global::ILGPU.IR.Values.AtomicCAS cas)
                     {
-                        if (ResolveToParameter(cas.Target) is global::ILGPU.IR.Values.Parameter param)
+                        if (ResolveToParameterWithFieldChain(cas.Target, out var param, out var fieldIdx))
                         {
-                            _atomicParameters.Add(param.Index);
+                            if (fieldIdx >= 0)
+                                _bodyStructAtomicFields.Add((param!.Index, fieldIdx));
+                            else
+                                _atomicParameters.Add(param!.Index);
                         }
                     }
                 }
             }
+        }
+
+        /// <summary>
+        /// Pre-populates _bodyStructParams by classifying struct parameters as body structs.
+        /// MUST be called from the constructor, before body generation and SetupParameterBindings.
+        /// GenerateHeader runs AFTER body generation in ILGPU's pipeline, so we cannot rely on
+        /// GenerateHeader to populate _bodyStructParams. We do the field classification here so
+        /// SetupParameterBindings can correctly handle body struct parameters.
+        /// </summary>
+        private void ScanBodyStructParams()
+        {
+            int paramOffset = KernelParamOffset;
+            // Track global scalar slot offset across all params (as GenerateHeader does)
+            int globalScalarSlotOffset = 0;
+
+            foreach (var param in Method.Parameters)
+            {
+                if (param.Index < paramOffset) continue;
+
+                var elementType = GetBufferElementType(param.ParameterType);
+                var wgslType = TypeGenerator[elementType];
+                bool isEmuF64 = Backend.Options.EnableF64Emulation && wgslType == "emu_f64";
+                bool isEmuI64 = Backend.Options.EnableI64Emulation && (wgslType == "emu_i64" || wgslType == "emu_u64");
+
+                // Body struct detection: structs containing view fields (e.g., ReductionImplementation,
+                // InitializerImplementation) must be decomposed into individual bindings.
+                //
+                // Challenge: ArrayView2D/3D are also structs with view fields but should NOT be decomposed.
+                // They use the IsMultiDim / view binding path which matches the runtime's binding layout.
+                //
+                // Solution: For grid-stride kernels (KernelParamOffset == 0), ALL struct params with view
+                // fields are body structs — grid-stride kernels never receive raw ArrayView2D/3D params.
+                // For stream kernels (KernelParamOffset > 0), use IsMultiDim to distinguish view wrappers.
+                IsMultiDim(param.ParameterType, out var earlyIsMultiDimInit, out _, out _, out _, out _);
+                if (param.ParameterType is global::ILGPU.IR.Types.StructureType bodyStructType
+                    && IsBodyStruct(bodyStructType)
+                    && (KernelParamOffset == 0 || !earlyIsMultiDimInit))
+                {
+                    var fieldInfos = new List<BodyStructFieldInfo>();
+                    string lastViewBindingName = "";
+
+                    for (int fi = 0; fi < bodyStructType.NumFields; fi++)
+                    {
+                        var fieldType = bodyStructType.Fields[fi];
+                        bool fieldIsView = IsViewFieldType(fieldType);
+
+                        // Detect view metadata: Int64 or Int8 fields immediately following a view field
+                        bool isViewMetadata = false;
+                        bool isLengthField = false;
+                        if (!fieldIsView && lastViewBindingName != "")
+                        {
+                            string typeStr = fieldType.ToString();
+                            if (typeStr.Contains("Int64") || typeStr.Contains("Int8"))
+                            {
+                                isViewMetadata = true;
+                                isLengthField = typeStr.Contains("Int64");
+                            }
+                            else
+                            {
+                                lastViewBindingName = "";
+                            }
+                        }
+
+                        var info = new BodyStructFieldInfo
+                        {
+                            FieldIndex = fi,
+                            FieldType = fieldType,
+                            IsView = fieldIsView,
+                            IsScalar = !fieldIsView,
+                            IsViewMetadata = isViewMetadata,
+                            IsLengthField = isLengthField,
+                            BindingName = fieldIsView ? $"param{param.Index}_f{fi}" : "",
+                            AssociatedViewBindingName = isViewMetadata ? lastViewBindingName : "",
+                        };
+                        fieldInfos.Add(info);
+
+                        if (fieldIsView)
+                        {
+                            lastViewBindingName = $"param{param.Index}_f{fi}";
+                        }
+                        else if (!isViewMetadata)
+                        {
+                            // User scalar field: assign scalar slot
+                            var scalarElemType = GetBufferElementType(fieldType);
+                            var scalarWgslType = TypeGenerator[scalarElemType];
+                            bool fieldIsEmuF64 = Backend.Options.EnableF64Emulation && scalarWgslType == "emu_f64";
+                            bool fieldIsEmuI64 = Backend.Options.EnableI64Emulation && (scalarWgslType == "emu_i64" || scalarWgslType == "emu_u64");
+                            int slotCount = (fieldIsEmuF64 || fieldIsEmuI64) ? 2 : 1;
+                            info.ScalarSlot = globalScalarSlotOffset;
+                            globalScalarSlotOffset += slotCount;
+                            lastViewBindingName = "";
+                        }
+                    }
+                    _bodyStructParams[param.Index] = fieldInfos;
+                }
+                else
+                {
+                    // Non-body-struct param: track if it's a packed scalar
+                    IsMultiDim(param.ParameterType, out _, out var isView, out _, out _, out _);
+                    bool isStruct = param.ParameterType is global::ILGPU.IR.Types.StructureType && !isView;
+                    bool isAtomic = _atomicParameters.Contains(param.Index);
+                    bool ownBinding = isView || isStruct || isAtomic;
+                    if (!ownBinding)
+                    {
+                        // This is a packed scalar — advance the slot offset
+                        int slotCount = (isEmuF64 || isEmuI64) ? 2 : 1;
+                        globalScalarSlotOffset += slotCount;
+                    }
+                }
+            }
+        }
+
+
+        /// <summary>
+        /// Resolves a value to a parameter, also tracking if the access goes through a GetField
+        /// on a body struct. Returns true if resolved, with fieldIdx=-1 for direct param access
+        /// or fieldIdx>=0 for a field of a body struct.
+        /// </summary>
+        private bool ResolveToParameterWithFieldChain(Value target, out global::ILGPU.IR.Values.Parameter? param, out int fieldIdx)
+        {
+            param = null;
+            fieldIdx = -1;
+            var current = target;
+            int lastFieldIdx = -1;
+            while (current != null)
+            {
+                if (current is global::ILGPU.IR.Values.Parameter p)
+                {
+                    param = p;
+                    fieldIdx = lastFieldIdx;
+                    return true;
+                }
+                if (current is global::ILGPU.IR.Values.LoadElementAddress lea)
+                {
+                    current = lea.Source;
+                    continue;
+                }
+                if (current is global::ILGPU.IR.Values.GetField gf)
+                {
+                    lastFieldIdx = gf.FieldSpan.Index;
+                    current = gf.ObjectValue;
+                    continue;
+                }
+                if (current is global::ILGPU.IR.Values.AddressSpaceCast cast)
+                {
+                    current = cast.Value;
+                    continue;
+                }
+                break;
+            }
+            // Fallback: use original ResolveToParameter
+            param = ResolveToParameter(target) as global::ILGPU.IR.Values.Parameter;
+            return param != null;
+        }
+
+        /// <summary>
+        /// Returns true if the given StructureType is a "body struct" — i.e., it contains
+        /// at least one view field (ViewType or struct with View as first field).
+        /// Body structs (like ReductionImplementation, InitializerImplementation) cannot be
+        /// represented as a single WGSL buffer binding and must be decomposed.
+        /// </summary>
+        private bool IsBodyStruct(global::ILGPU.IR.Types.StructureType st)
+        {
+            for (int i = 0; i < st.NumFields; i++)
+            {
+                var field = st.Fields[i];
+                if (IsViewFieldType(field)) return true;
+            }
+            return false;
+        }
+
+        /// <summary>
+        /// Returns true if the given type is a view type (ViewType or struct whose first field is a view).
+        /// </summary>
+        private bool IsViewFieldType(TypeNode type)
+        {
+            if (type is ViewType) return true;
+            if (type is global::ILGPU.IR.Types.StructureType st)
+            {
+                if (st.NumFields > 0 && (st.Fields[0] is ViewType || st.Fields[0].ToString().Contains("View")))
+                    return true;
+            }
+            if (type.ToString().Contains("View")) return true;
+            return false;
         }
 
         #endregion
@@ -113,32 +378,67 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
         private Value? _indexParameterAddress;
 
-        // Returns 1 if the first IR parameter is an implicit index (auto-grouped kernels),
-        // 0 if the first IR parameter is a user-supplied parameter (stream/explicitly-grouped kernels).
-        // The old logic (IndexType != None ? 1 : 0) was wrong for explicitly grouped kernels
-        // that still report a non-None IndexType, because those kernels' first parameter is a user buffer.
+        // Returns 1 if the first IR parameter is an index that should be skipped
+        // (for bindings/scalar packing), 0 if it's a user-supplied parameter.
+        //
+        // For auto-grouped kernels (IndexType = Index1D/2D/3D/LongIndex*),
+        // ILGPU always puts the index as Method.Parameters[0] and it should be skipped.
+        // Note: Index2D/3D are StructureType in IR (they have X,Y,Z fields).
+        //
+        // For KernelConfig (stream/explicitly-grouped kernels), the first IR param
+        // may or may not be an index. LoadStreamKernel<Index1D, ...> puts Index1D
+        // (PrimitiveType) at param 0. LoadStreamKernel<ArrayView<T>> puts a ViewType.
+        // We only skip primitives (actual index types), not views or structs.
         private int KernelParamOffset
         {
             get
             {
                 if (EntryPoint.IndexType == IndexType.None) return 0;
-                // Check if Method.Parameters[0] is actually an index-like type (not a ViewType/buffer)
-                if (Method.Parameters.Count > 0)
+
+                // For auto-grouped kernels, the first param is always the index — skip it.
+                // This covers Index1D (PrimitiveType), Index2D/3D (StructureType), and LongIndex* types.
+                if (EntryPoint.IndexType != IndexType.KernelConfig) return 1;
+
+                // KernelConfig: explicitly grouped / grid-stride kernels.
+                // ILGPU's KernelIndexParameterOffset is 0 for KernelConfig, meaning ALL
+                // params are in EntryPoint.Parameters[]. However, stream kernels loaded
+                // via LoadStreamKernel<Index1D, ...> have Index1D as Parameters[0] —
+                // this is the thread index and should be skipped (mapped to global_id.x).
+                //
+                // Grid-stride kernels (e.g. reduce, initialize) use LongIndex1D as their
+                // first param — this is the padded data count, NOT a thread index.
+                // It must NOT be skipped; it needs a buffer binding.
+                //
+                // Distinction: Index1D/2D/3D → stream kernel index → skip (offset=1)
+                //              LongIndex1D/2D/3D → grid-stride data count → don't skip (offset=0)
+                //
+                // This mirrors the runtime's runtimeIndexSkip logic in WebGPUAccelerator.cs.
+                if (EntryPoint.Parameters.Count > 0)
                 {
-                    var firstParamType = Method.Parameters[0].Type;
-                    if (firstParamType is global::ILGPU.IR.Types.ViewType)
-                    {
-                        // First param is a buffer (ArrayView) — it's a user param, not an index
-                        return 0;
-                    }
+                    var firstParamType = EntryPoint.Parameters[0];
+                    if (firstParamType == typeof(Index1D) || firstParamType == typeof(Index2D) || firstParamType == typeof(Index3D))
+                        return 1;
                 }
-                return 1;
+                return 0;
             }
         }
+
 
         #endregion
 
         #region Methods
+
+        /// <summary>
+        /// Returns true if the atomic target pointer resolves to a parameter that was
+        /// detected as float-typed during ScanForAtomicUsage. Used by the base class
+        /// GenerateCode(GenericAtomic) to select the CAS-loop emulation path.
+        /// </summary>
+        protected override bool IsFloatAtomicTarget(global::ILGPU.IR.Value target)
+        {
+            if (ResolveToParameter(target) is global::ILGPU.IR.Values.Parameter param)
+                return _floatAtomicParameters.Contains(param.Index);
+            return false;
+        }
 
         private TypeNode UnwrapType(TypeNode type)
         {
@@ -187,7 +487,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             // TypeGenerator[...] which would populate the mapping dictionary and cause
             // GenerateTypeDefinitions to emit struct definitions prematurely.
             bool needsF64Emulation = Backend.Options.EnableF64Emulation && ContainsBasicValueType(BasicValueType.Float64);
-            bool needsI64Emulation = Backend.Options.EnableI64Emulation && ContainsBasicValueType(BasicValueType.Int64);
+            bool containsI64 = ContainsBasicValueType(BasicValueType.Int64);
+            bool needsI64Emulation = Backend.Options.EnableI64Emulation && containsI64;
 
             // Set per-kernel overrides on the TypeGenerator so that intermediate IR values
             // (e.g., Grid.GlobalIndex.X → Int64) map to i32 instead of emu_i64 when the
@@ -231,6 +532,130 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 // Debug info
                 builder.AppendLine($"// Param {param.Index}: {param.ParameterType} (Element: {elementType})");
 
+                // --- BODY STRUCT DECOMPOSITION ---
+                // We must check for body structs (e.g. ReductionImplementation<T>, InitializerImplementation<T>)
+                // that contain view fields mixed with scalar fields.
+                // These get decomposed into individual bindings.
+                //
+                // Challenge: ArrayView2D/3D are also StructureTypes with a view field, but they
+                // should NOT be treated as body structs. They are handled by the IsMultiDim / view
+                // binding path, which matches the runtime's binding layout.
+                //
+                // Solution: For grid-stride kernels (KernelParamOffset == 0), ALL struct params with
+                // view fields are body structs — grid-stride kernels never receive raw view params.
+                // For stream kernels (KernelParamOffset > 0), use IsMultiDim to exclude view wrappers.
+                IsMultiDim(param.ParameterType, out var earlyIsMultiDim, out var earlyIsView, out var earlyIs1D, out var earlyIs2D, out var earlyIs3D);
+                if (param.ParameterType is global::ILGPU.IR.Types.StructureType earlyBodyStructType
+                    && IsBodyStruct(earlyBodyStructType)
+                    && (KernelParamOffset == 0 || !earlyIsMultiDim))
+                {
+                    var fieldInfos = new List<BodyStructFieldInfo>();
+                    string lastViewBindingName = "";
+
+                    for (int fi = 0; fi < earlyBodyStructType.NumFields; fi++)
+                    {
+                        var fieldType = earlyBodyStructType.Fields[fi];
+                        bool fieldIsView = IsViewFieldType(fieldType);
+
+                        // Detect view metadata: Int64 or Int8 fields immediately following a view field
+                        // These are internal fields of ArrayView1D (Length, flag) — not user scalars
+                        bool isViewMetadata = false;
+                        bool isLengthField = false;
+                        if (!fieldIsView && lastViewBindingName != "")
+                        {
+                            // Check if this is an Int64 (length) or Int8 (flag) following a view
+                            string typeStr = fieldType.ToString();
+                            if (typeStr.Contains("Int64") || typeStr.Contains("Int8"))
+                            {
+                                isViewMetadata = true;
+                                isLengthField = typeStr.Contains("Int64");
+                            }
+                            else
+                            {
+                                // Not a metadata field — reset the view tracking
+                                lastViewBindingName = "";
+                            }
+                        }
+
+                        var info = new BodyStructFieldInfo
+                        {
+                            FieldIndex = fi,
+                            FieldType = fieldType,
+                            IsView = fieldIsView,
+                            IsScalar = !fieldIsView,
+                            IsViewMetadata = isViewMetadata,
+                            IsLengthField = isLengthField,
+                            AssociatedViewBindingName = isViewMetadata ? lastViewBindingName : "",
+                        };
+                        fieldInfos.Add(info);
+
+                        if (fieldIsView)
+                        {
+                            // View field: create a separate buffer binding
+                            string bindingName = $"param{param.Index}_f{fi}";
+                            info.BindingName = bindingName;
+                            lastViewBindingName = bindingName;
+
+                            // Determine element type for this view field
+                            var viewElemType = GetBufferElementType(fieldType);
+                            var viewWgslType = TypeGenerator[viewElemType];
+
+                            // Check if this view field is atomic
+                            bool fieldIsAtomic = _bodyStructAtomicFields.Contains((param.Index, fi));
+                            bool fieldIsFloatAtomic = _bodyStructAtomicFloatFields.Contains((param.Index, fi));
+
+                            string bindingWgslType = viewWgslType;
+                            if (fieldIsAtomic)
+                            {
+                                bindingWgslType = fieldIsFloatAtomic ? "atomic<u32>" : $"atomic<{viewWgslType}>";
+                            }
+
+                            builder.AppendLine($"// Body struct field {fi}: {fieldType} (view)");
+                            builder.AppendLine($"@group(0) @binding({bindingIdx}) var<storage, read_write> {bindingName} : array<{bindingWgslType}>;");
+                            bindingIdx++;
+                        }
+                        else if (isViewMetadata)
+                        {
+                            // View metadata field: NOT packed into _scalar_params
+                            // Will use arrayLength(&bindingName) or 0 in SetupParameterBindings
+                            builder.AppendLine($"// Body struct field {fi}: {fieldType} (view metadata, {(isLengthField ? "length" : "flag")})");
+                            // Don't reset lastViewBindingName — there may be more metadata fields
+                        }
+                        else
+                        {
+                            // User scalar field: pack into _scalar_params
+                            lastViewBindingName = ""; // Reset view tracking
+                            var scalarElemType = GetBufferElementType(fieldType);
+                            var scalarWgslType = TypeGenerator[scalarElemType];
+
+                            bool isEmuF64 = Backend.Options.EnableF64Emulation && scalarWgslType == "emu_f64";
+                            bool isEmuI64 = Backend.Options.EnableI64Emulation && (scalarWgslType == "emu_i64" || scalarWgslType == "emu_u64");
+                            int slotCount = (isEmuF64 || isEmuI64) ? 2 : 1;
+
+                            info.ScalarSlot = scalarSlotOffset;
+
+                            // Use a synthetic param index for the scalar manifest entry
+                            // We encode it as paramIndex * 1000 + fieldIndex to make it unique
+                            int syntheticParamIdx = param.Index * 1000 + fi;
+                            var entry = new ScalarPackingEntry
+                            {
+                                ParamIndex = syntheticParamIdx,
+                                ByteOffset = scalarSlotOffset * 4,
+                                ByteSize = slotCount * 4,
+                                WgslType = scalarWgslType,
+                                IsEmulatedF64 = isEmuF64,
+                                IsEmulatedI64 = isEmuI64,
+                                IsStruct = false,
+                            };
+                            scalarManifest.Add(entry);
+                            builder.AppendLine($"// Body struct field {fi}: {fieldType} (user scalar, slot {scalarSlotOffset})");
+                            scalarSlotOffset += slotCount;
+                        }
+                    }
+                    _bodyStructParams[param.Index] = fieldInfos;
+                    continue; // Skip normal binding logic for this param
+                }
+
                 // Determine if this is a view, multidim view, struct, or primitive scalar
                 IsMultiDim(param.ParameterType, out var isMultiDim, out var isView, out var is1DView, out var is2DView, out var is3DView);
 
@@ -242,13 +667,9 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 bool isEmulatedI64 = Backend.Options.EnableI64Emulation && (wgslType == "emu_i64" || wgslType == "emu_u64");
 
                 if (isEmulatedF64)
-                {
                     _emulatedF64Params.Add(param.Index);
-                }
                 else if (isEmulatedI64)
-                {
                     _emulatedI64Params.Add(param.Index);
-                }
 
                 // DECISION: Does this param get its own binding, or is it packed?
                 bool ownBinding = isView || isStruct || isAtomic;
@@ -266,7 +687,13 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
                     if (isAtomic)
                     {
-                        bindingWgslType = $"atomic<{bindingWgslType}>";
+                        // WGSL only supports atomic<i32> and atomic<u32>.
+                        // Float atomics (f32/f16) must be stored as atomic<u32> (raw bits)
+                        // and emulated via a CAS loop.
+                        if (_floatAtomicParameters.Contains(param.Index))
+                            bindingWgslType = "atomic<u32>";
+                        else
+                            bindingWgslType = $"atomic<{bindingWgslType}>";
                     }
 
                     var bindingDecl = $"@group(0) @binding({bindingIdx}) var<storage, {accessMode}> param{param.Index} : array<{bindingWgslType}>;";
@@ -281,6 +708,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                         bindingIdx++;
                     }
                 }
+
                 else
                 {
                     // --- PACKED SCALAR ---
@@ -388,6 +816,28 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 builder.AppendLine("var<workgroup> _broadcast_temp : i32;");
             }
 
+            // Emit warp shuffle shared memory buffer when subgroups are NOT available
+            // but the kernel uses shuffle/lane/warpsize operations (shared-memory emulation path)
+            // OR when the Reduce handler needs shared memory for workgroup-level reduction
+            if ((_usesSubgroups || UsesWarpShuffleEmulation) && !Backend.HasSubgroups)
+            {
+                builder.AppendLine();
+                builder.AppendLine("// Warp shuffle emulation shared memory (64 u32 slots = 1 slot per thread at workgroup_size 64)");
+                builder.AppendLine("var<workgroup> _warp_shuffle_buf : array<u32, 64>;");
+            }
+
+            // Emit workgroup-level group-reduce atomic variable when GenerateGroupAllReduce is used.
+            // Declared as atomic<i32> for integer max/min/add, plus an auxiliary slot array
+            // holding per-subgroup partial results (max 32 subgroups for workgroup_size 2048).
+            if (_usesGroupReduce)
+            {
+                builder.AppendLine();
+                builder.AppendLine("// Group-level reduction shared memory (for GenerateGroupAllReduce)");
+                builder.AppendLine("var<workgroup> _grp_reduce_i32 : atomic<i32>;");
+                builder.AppendLine("var<workgroup> _grp_reduce_u32 : atomic<u32>;");
+                builder.AppendLine("var<workgroup> _grp_sg_results : array<i32, 32>; // per-subgroup partial results");
+            }
+
             builder.AppendLine();
         }
 
@@ -415,6 +865,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                         case global::ILGPU.IR.Values.WarpShuffle:
                         case global::ILGPU.IR.Values.SubWarpShuffle:
                         case global::ILGPU.IR.Values.LaneIdxValue:
+                        case global::ILGPU.IR.Values.WarpSizeValue:
                             _usesSubgroups = true;
                             break;
                     }
@@ -425,12 +876,21 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         public override void GenerateCode()
         {
             string workgroupSize = GetWorkgroupSize();
-            Builder.AppendLine($"@compute @workgroup_size({workgroupSize})");
-            Builder.Append("fn main(@builtin(global_invocation_id) global_id : vec3<u32>, @builtin(local_invocation_id) local_id : vec3<u32>, @builtin(workgroup_id) group_id : vec3<u32>, @builtin(num_workgroups) num_workgroups : vec3<u32>, @builtin(local_invocation_index) local_index : u32");
-            // Add subgroup builtins only when the shader actually uses subgroup operations
-            if (Backend.HasSubgroups && _usesSubgroups)
-                Builder.Append(", @builtin(subgroup_invocation_id) subgroup_invocation_id : u32, @builtin(subgroup_size) subgroup_size : u32");
-            Builder.AppendLine(") {");
+
+            // --- BODY-FIRST GENERATION ---
+            // We need to know if the body uses subgroup builtins BEFORE emitting the signature.
+            // The IR pre-scan (_usesSubgroups) may miss inlined methods. Instead, generate the
+            // body into a temporary StringBuilder, check if it references subgroup_size or
+            // subgroup_invocation_id, then emit the correct function signature.
+
+            // Save the current builder position so we can inject the signature before the body.
+            int signatureInsertPosition = Builder.Length;
+
+            // Emit a placeholder for the signature (we'll replace it after generating the body).
+            // We use a unique sentinel that we'll replace with the real signature.
+            const string signatureSentinel = "/*__WGSL_SIGNATURE_PLACEHOLDER__*/";
+            Builder.AppendLine(signatureSentinel);
+
             PushIndent();
 
             // Declare workgroup_size constant for access by intrinsics
@@ -508,9 +968,18 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     // function scope. ONLY hoist simple pointer aliases like &v_67 (references to
                     // module-scope shared memory). DO NOT hoist indexed expressions like &v_66[v_82]
                     // since those depend on block-local variables.
-                    if (expr.TrimStart().StartsWith("&"))
+                    if (expr.TrimStart().StartsWith("&") || _viewPointerVarNames.Contains(expr.Trim()))
                     {
                         var trimmed = expr.TrimStart();
+                        if (_viewPointerVarNames.Contains(expr.Trim()))
+                        {
+                            // The RHS is a pointer alias variable (e.g. v_27_f0, which is 'let v_27_f0 = &param1_f0;').
+                            // WGSL cannot assign pointers to 'var' variables — keep as 'let' and hoist to function scope.
+                            hoistedLetDeclarations.Add($"    let {varName} = {trimmed};");
+                            _viewPointerVarNames.Add(varName); // Also track v_28 as a pointer alias
+                            anyReplacements = true;
+                            return ""; // Remove from case block; will be emitted at function scope
+                        }
                         // Simple pointer alias: &identifier (no brackets, no dots, no operators)
                         // e.g. &v_67, &param0 — these reference module-scope or function-scope vars
                         bool isSimpleRef = System.Text.RegularExpressions.Regex.IsMatch(trimmed, @"^\&\w+$");
@@ -580,6 +1049,35 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
             PopIndent();
             Builder.AppendLine("}"); // End Function
+
+            // --- NOW BUILD THE REAL SIGNATURE ---
+            // Check the generated body to see if it actually uses subgroup builtins.
+            // This is more reliable than the IR pre-scan which may miss inlined methods.
+            string bodyText = Builder.ToString(signatureInsertPosition + signatureSentinel.Length + Environment.NewLine.Length,
+                Builder.Length - signatureInsertPosition - signatureSentinel.Length - Environment.NewLine.Length);
+            bool bodyUsesSubgroups = Backend.HasSubgroups &&
+                (bodyText.Contains("subgroup_size") || bodyText.Contains("subgroup_invocation_id") ||
+                 bodyText.Contains("subgroupShuffle") || bodyText.Contains("subgroupAdd") ||
+                 bodyText.Contains("subgroupBroadcastFirst") || bodyText.Contains("subgroup_id"));
+
+            // Include subgroup_id builtin when group reduce or subgroup ops are used.
+            // subgroup_id is needed by GenerateGroupAllReduce to index the per-subgroup results array.
+            bool bodyNeedsSubgroupId = bodyUsesSubgroups || _usesGroupReduce;
+
+            string signature = $"@compute @workgroup_size({workgroupSize})\n" +
+                "fn main(@builtin(global_invocation_id) global_id : vec3<u32>, " +
+                "@builtin(local_invocation_id) local_id : vec3<u32>, " +
+                "@builtin(workgroup_id) group_id : vec3<u32>, " +
+                "@builtin(num_workgroups) num_workgroups : vec3<u32>, " +
+                "@builtin(local_invocation_index) local_index : u32" +
+                (bodyNeedsSubgroupId ? ", @builtin(subgroup_invocation_id) subgroup_invocation_id : u32, @builtin(subgroup_size) subgroup_size : u32, @builtin(subgroup_id) subgroup_id : u32" : "") +
+                ") {";
+
+            // Replace the sentinel with the real signature
+            string fullOutput = Builder.ToString(signatureInsertPosition, Builder.Length - signatureInsertPosition);
+            fullOutput = fullOutput.Replace(signatureSentinel, signature);
+            Builder.Remove(signatureInsertPosition, Builder.Length - signatureInsertPosition);
+            Builder.Append(fullOutput);
         }
         private string GetPrefix(Value value)
         {
@@ -787,13 +1285,37 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     }
                 }
             }
+            // LongIndex1D Kernel (grid-stride kernels, e.g. from LoadGridStrideKernel/accelerator.Reduce)
+            // LongIndex1D is an emulated i64 (vec2<u32>) representing the 64-bit thread index.
+            else if (EntryPoint.IndexType == IndexType.LongIndex1D)
+            {
+                // Map to emulated i64: pack the 32-bit global linear index into the low word
+                AppendLine($"var {indexVar.Name} : vec2<u32> = vec2<u32>(u32(local_index) + u32(group_id.x) * u32(workgroup_size.x), 0u); // LongIndex1D (emu_i64)");
+            }
+            // LongIndex2D Kernel
+            else if (EntryPoint.IndexType == IndexType.LongIndex2D)
+            {
+                // Map to pair of emulated i64 (vec2<u32> per dimension)
+                // This is rare - map to a struct with two emu_i64 fields for X and Y
+                AppendLine($"var {indexVar.Name}_x : vec2<u32> = vec2<u32>(u32(global_id.x), 0u); // LongIndex2D X");
+                AppendLine($"var {indexVar.Name}_y : vec2<u32> = vec2<u32>(u32(global_id.y), 0u); // LongIndex2D Y");
+                // Note: LongIndex2D field accesses may still need handling in GetField
+            }
+            // LongIndex3D Kernel
+            else if (EntryPoint.IndexType == IndexType.LongIndex3D)
+            {
+                AppendLine($"var {indexVar.Name}_x : vec2<u32> = vec2<u32>(u32(global_id.x), 0u); // LongIndex3D X");
+                AppendLine($"var {indexVar.Name}_y : vec2<u32> = vec2<u32>(u32(global_id.y), 0u); // LongIndex3D Y");
+                AppendLine($"var {indexVar.Name}_z : vec2<u32> = vec2<u32>(u32(global_id.z), 0u); // LongIndex3D Z");
+            }
             else
             {
                 // Fallback: Default to 1D if we skipped the param but didn't match specific types
                 // This protects against weird IndexType states
-                AppendLine($"var {indexVar.Name} : i32 = i32(global_id.x); // Fallback mapping");
+                AppendLine($"var {indexVar.Name} : i32 = i32(global_id.x); // Fallback mapping (IndexType={EntryPoint.IndexType})");
             }
         }
+
 
         /// <summary>
         /// Pre-scans parameters to identify which buffers use emulated 64-bit types.
@@ -987,6 +1509,9 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             {
                 if (param.Index < paramOffset) continue;
 
+                // Skip body struct params — they're handled separately in _bodyStructParams
+                if (_bodyStructParams.ContainsKey(param.Index)) continue;
+
                 IsMultiDim(param.ParameterType, out var isMultiDim, out var isView, out var is1DView, out var is2DView, out var is3DView);
                 bool isStruct = param.ParameterType is global::ILGPU.IR.Types.StructureType && !isView;
                 bool isAtomic = _atomicParameters.Contains(param.Index);
@@ -1016,6 +1541,74 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 var variable = Allocate(param);
 
                 IsMultiDim(param.ParameterType, out var isMultiDim, out var isView, out var is1DView, out var is2DView, out var is3DView);
+
+                // --- BODY STRUCT: create individual field variables ---
+                if (_bodyStructParams.TryGetValue(param.Index, out var fieldInfos))
+                {
+                    // The param variable itself is allocated but not used directly.
+                    // Instead, create individual variables for each field.
+                    for (int fi = 0; fi < fieldInfos.Count; fi++)
+                    {
+                        var fieldInfo = fieldInfos[fi];
+                        string fieldVarName = $"{variable.Name}_f{fi}";
+                        _bodyStructFieldVars[(param.Index, fi)] = fieldVarName;
+                        declaredVariables.Add(fieldVarName);
+
+                        if (fieldInfo.IsView)
+                        {
+                            // View field: create a pointer to the view buffer (a 'let' pointer alias)
+                            // Track the var name as a pointer alias so the post-processor won't
+                            // convert 'let v_28 = v_27_f0;' to 'v_28 = v_27_f0;' (pointer→i32 error).
+                            _viewPointerVarNames.Add(fieldVarName);
+                            AppendLine($"let {fieldVarName} = &{fieldInfo.BindingName};");
+                        }
+                        else if (fieldInfo.IsViewMetadata)
+                        {
+                            // View metadata field: use arrayLength() for length, 0 for flags
+                            if (fieldInfo.IsLengthField)
+                            {
+                                // Length field: use arrayLength(&bindingName) cast to i32
+                                // The IR type is Int64, but we use i32 since WGSL doesn't have i64 natively
+                                var scalarElemType = GetBufferElementType(fieldInfo.FieldType);
+                                var scalarWgslType = TypeGenerator[scalarElemType];
+                                bool isEmuI64 = Backend.Options.EnableI64Emulation && (scalarWgslType == "emu_i64" || scalarWgslType == "emu_u64");
+                                if (isEmuI64)
+                                    AppendLine($"var {fieldVarName} = i64_from_i32(i32(arrayLength(&{fieldInfo.AssociatedViewBindingName})));");
+                                else
+                                    AppendLine($"var {fieldVarName} = i32(arrayLength(&{fieldInfo.AssociatedViewBindingName}));");
+                            }
+                            else
+                            {
+                                // Flag field: use 0 (unused in WGSL)
+                                AppendLine($"var {fieldVarName} = 0;");
+                            }
+                        }
+                        else
+                        {
+                            // User scalar field: read from _scalar_params
+                            int slot = fieldInfo.ScalarSlot;
+                            var scalarElemType = GetBufferElementType(fieldInfo.FieldType);
+                            var scalarWgslType = TypeGenerator[scalarElemType];
+                            bool isEmuF64 = Backend.Options.EnableF64Emulation && scalarWgslType == "emu_f64";
+                            bool isEmuI64 = Backend.Options.EnableI64Emulation && (scalarWgslType == "emu_i64" || scalarWgslType == "emu_u64");
+
+                            if (isEmuF64)
+                                AppendLine($"var {fieldVarName} = f64_from_ieee754_bits(_scalar_params[{slot}], _scalar_params[{slot + 1}]);");
+                            else if (isEmuI64)
+                                AppendLine($"var {fieldVarName} = emu_i64(_scalar_params[{slot}], _scalar_params[{slot + 1}]);");
+                            else if (scalarWgslType == "u32")
+                                AppendLine($"var {fieldVarName} = _scalar_params[{slot}];");
+                            else if (scalarWgslType == "i32")
+                                AppendLine($"var {fieldVarName} = bitcast<i32>(_scalar_params[{slot}]);");
+                            else if (scalarWgslType == "f32")
+                                AppendLine($"var {fieldVarName} = bitcast<f32>(_scalar_params[{slot}]);");
+                            else
+                                AppendLine($"var {fieldVarName} = bitcast<{scalarWgslType}>(_scalar_params[{slot}]);");
+                        }
+                    }
+                    continue; // Skip normal variable declaration for this param
+                }
+
 
                 // Check if this param is packed
                 if (packedScalarSlots.TryGetValue(param.Index, out var packInfo))
@@ -1166,6 +1759,38 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         {
             var target = Load(value);
             var offset = Load(value.Offset);
+
+            // When i64 emulation is active, Int64 indices become emu_i64 (vec2<u32>)
+            // which cannot be used as WGSL array indices. Wrap with i64_to_i32().
+            bool offsetIsEmulatedI64 = Backend.Options.EnableI64Emulation
+                && value.Offset.Resolve().BasicValueType == BasicValueType.Int64;
+            string offsetExpr = offsetIsEmulatedI64 ? $"i64_to_i32({offset})" : $"{offset}";
+
+            // --- BODY STRUCT VIEW FIELD ACCESS ---
+            // When LoadElementAddress is called on a GetField result from a body struct parameter,
+            // redirect to the correct per-field binding (e.g. param1_f0[offset]).
+            // This handles: GetField(bodyStruct, viewFieldIdx) → LoadElementAddress(viewField, offset)
+            if (value.Source.Resolve() is global::ILGPU.IR.Values.GetField gf
+                && gf.ObjectValue.Resolve() is global::ILGPU.IR.Values.Parameter bsParam
+                && _bodyStructParams.TryGetValue(bsParam.Index, out var bsFields))
+            {
+                int fieldIdx = gf.FieldSpan.Index;
+                if (fieldIdx < bsFields.Count && bsFields[fieldIdx].IsView)
+                {
+                    string bindingName = bsFields[fieldIdx].BindingName;
+                    if (_crossBlockPointers.Contains(value))
+                    {
+                        _crossBlockPointerExprs[target.Name] = $"{bindingName}[{offsetExpr}]";
+                        AppendLine($"let {target.Name} = &{bindingName}[{offsetExpr}];");
+                    }
+                    else
+                    {
+                        AppendLine($"let {target.Name} = &{bindingName}[{offsetExpr}];");
+                    }
+                    return;
+                }
+            }
+
             if (ResolveToParameter(value.Source) is global::ILGPU.IR.Values.Parameter param)
             {
                 int paramOffset = KernelParamOffset;
@@ -1181,7 +1806,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                         // For emulated buffers, we need to address 2 u32 per element
                         // Store the base index (multiplied by 2) for later use in Load/Store
                         AppendIndent();
-                        Builder.Append($"let {target.Name}_base_idx = i32({offset}) * 2;");
+                        Builder.Append($"let {target.Name}_base_idx = i32({offsetExpr}) * 2;");
                         Builder.AppendLine();
                         // Also create an alias for compatibility
                         AppendIndent();
@@ -1197,16 +1822,16 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     if (_crossBlockPointers.Contains(value))
                     {
                         // Register the inline array access expression
-                        _crossBlockPointerExprs[target.Name] = $"param{param.Index}[{offset}]";
+                        _crossBlockPointerExprs[target.Name] = $"param{param.Index}[{offsetExpr}]";
                         // Still emit a local declaration for same-block uses
                         AppendIndent();
-                        Builder.Append($"let {target.Name} = &param{param.Index}[{offset}];");
+                        Builder.Append($"let {target.Name} = &param{param.Index}[{offsetExpr}];");
                         Builder.AppendLine();
                         return;
                     }
 
                     AppendIndent();
-                    Builder.Append($"let {target.Name} = &param{param.Index}[{offset}];");
+                    Builder.Append($"let {target.Name} = &param{param.Index}[{offsetExpr}];");
                     Builder.AppendLine();
                     return;
                 }
@@ -1221,11 +1846,11 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             // To access element at offset: (*ptr)[offset] -> &(*ptr)[offset] gives the address
             if (value.Source is global::ILGPU.IR.Values.NewView || value.Source.Type.IsPointerType)
             {
-                Builder.Append($"&(*{sourceVal})[{offset}];");
+                Builder.Append($"&(*{sourceVal})[{offsetExpr}];");
             }
             else
             {
-                Builder.Append($"&{sourceVal}[{offset}];");
+                Builder.Append($"&{sourceVal}[{offsetExpr}];");
             }
             Builder.AppendLine();
         }
@@ -1961,6 +2586,48 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             // already hoisted in SetupIndexVariables, skip it.
             if (_hoistedIndexFields.Contains(value)) return;
 
+            // 1b. Body struct field access: redirect to the per-field variable.
+            // When a body struct parameter (e.g. ReductionImplementation) is accessed,
+            // we redirect GetField to the individual field variable created in SetupParameterBindings.
+            if (value.ObjectValue.Resolve() is global::ILGPU.IR.Values.Parameter bodyParam
+                && _bodyStructParams.ContainsKey(bodyParam.Index))
+            {
+                int fieldIdx = value.FieldSpan.Index;
+                if (_bodyStructFieldVars.TryGetValue((bodyParam.Index, fieldIdx), out var fieldVarName)
+                    && fieldIdx < _bodyStructParams[bodyParam.Index].Count)
+                {
+                    var fieldInfo = _bodyStructParams[bodyParam.Index][fieldIdx];
+
+                    if (fieldInfo.IsView)
+                    {
+                        // View field: the fieldVarName is a pointer (&param1_f0).
+                        // WGSL does NOT support assigning pointers to 'var' variables — only 'let' bindings.
+                        // If this GetField result was hoisted (declared as 'var v_28 : i32'), we CANNOT
+                        // assign a pointer to it. This would cause a WGSL validation error.
+                        // Instead, skip the assignment — the 'var v_28' stays at 0 (unused placeholder).
+                        // The actual buffer access is handled by LoadElementAddress, which detects
+                        // body struct view field accesses through the IR chain and uses param{N}_f{M}[idx]
+                        // directly, without needing the v_28 intermediate variable.
+                        if (!_hoistedPrimitives.Contains(value))
+                        {
+                            var target = Load(value);
+                            AppendLine($"let {target} = {fieldVarName};");
+                        }
+                        // If hoisted: skip the assignment to avoid pointer→i32 type error.
+                        return;
+                    }
+                    else
+                    {
+                        // Scalar or metadata field: the fieldVarName is a value (i32, etc.).
+                        // Safe to assign to a hoisted var.
+                        var target = Load(value);
+                        string prefix = _hoistedPrimitives.Contains(value) ? "" : "let ";
+                        AppendLine($"{prefix}{target} = {fieldVarName};");
+                        return;
+                    }
+                }
+            }
+
             // 2. Identify if the object being accessed is DIRECTLY a Parameter (likely an ArrayView)
             // We use direct type check to avoid confusing hierarchical access (View.Stride.X) with Root access (View.Stride)
             if (ResolveToParameter(value.ObjectValue) is global::ILGPU.IR.Values.Parameter param)
@@ -1969,6 +2636,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 if (param.Index >= paramOffset)
                 {
                     IsMultiDim(param.ParameterType, out var isMultiDim, out var isView, out var is1DView, out var is2DView, out var is3DView);
+
                     if (isView)
                     {
                         var target = Load(value);

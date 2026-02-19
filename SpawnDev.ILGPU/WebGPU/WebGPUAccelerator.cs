@@ -54,6 +54,89 @@ namespace SpawnDev.ILGPU.WebGPU
         [ThreadStatic]
         private static List<GPUBindGroupEntry>? _reusableEntryList;
 
+        // Cache for CopyStructToBytes<T> MethodInfo per type (avoids repeated MakeGenericMethod)
+        private static readonly ConcurrentDictionary<Type, MethodInfo> _copyStructMethodCache = new();
+
+        /// <summary>
+        /// Copies the raw bytes of a value-type struct into the destination byte array.
+        /// Uses MemoryMarshal.AsBytes to reinterpret the struct as bytes — no GCHandle pinning required.
+        /// This works for all value types including closed generic structs.
+        /// </summary>
+        private static void CopyStructToBytes<T>(T value, byte[] dest) where T : struct
+        {
+            var span = System.Runtime.InteropServices.MemoryMarshal.AsBytes(
+                System.Runtime.InteropServices.MemoryMarshal.CreateReadOnlySpan(ref value, 1));
+            span.CopyTo(dest);
+        }
+
+        private static MethodInfo GetCopyStructMethod(Type type)
+        {
+            return _copyStructMethodCache.GetOrAdd(type, t =>
+                typeof(WebGPUAccelerator)
+                    .GetMethod(nameof(CopyStructToBytes), BindingFlags.NonPublic | BindingFlags.Static)!
+                    .MakeGenericMethod(t));
+        }
+
+        /// <summary>
+        /// Checks if a value-type struct contains any pointer-like fields (IntPtr, UIntPtr, or pointer types)
+        /// at any nesting level. Such structs cannot be safely copied with MemoryMarshal.AsBytes in Blazor WASM
+        /// and must be decomposed into their constituent fields.
+        /// This catches IGridStrideKernelBody implementations like InitializerImplementation and
+        /// ReductionImplementation which contain ArrayView fields (which internally hold an IntPtr).
+        /// </summary>
+        private static readonly ConcurrentDictionary<Type, bool> _containsPointerCache = new();
+        private static bool ContainsPointerFields(Type type)
+        {
+            if (!type.IsValueType || type.IsPrimitive) return false;
+            if (type == typeof(IntPtr) || type == typeof(UIntPtr)) return true;
+            return _containsPointerCache.GetOrAdd(type, t =>
+            {
+                var flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+                foreach (var field in t.GetFields(flags))
+                {
+                    var ft = field.FieldType;
+                    // MemoryMarshal.AsBytes fails for structs containing:
+                    // 1. Raw pointer types (T*)
+                    // 2. IntPtr / UIntPtr
+                    // 3. Reference types (class instances, e.g. MemoryBuffer inside ArrayView<T>)
+                    if (ft.IsPointer || ft == typeof(IntPtr) || ft == typeof(UIntPtr)) return true;
+                    if (!ft.IsValueType) return true; // reference type field (class)
+                    if (!ft.IsPrimitive && ContainsPointerFields(ft)) return true;
+                }
+                return false;
+            });
+        }
+
+        /// <summary>
+        /// Flattens a body struct into its constituent field values (in declaration order).
+        /// This mirrors what the ILGPU compiler does when it inlines struct parameters into
+        /// separate IR parameters.
+        /// </summary>
+        private static List<object?> FlattenStructFields(object structValue)
+        {
+            var result = new List<object?>();
+            var flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+            var type = structValue.GetType();
+            foreach (var field in type.GetFields(flags))
+            {
+                var fieldVal = field.GetValue(structValue);
+                var ft = field.FieldType;
+                // Recursively flatten nested structs that also contain pointers
+                // but stop at IArrayView — those are leaf nodes handled by the view binding path
+                if (fieldVal != null && ft.IsValueType && !ft.IsPrimitive
+                    && !typeof(IArrayView).IsAssignableFrom(ft)
+                    && ContainsPointerFields(ft))
+                {
+                    result.AddRange(FlattenStructFields(fieldVal));
+                }
+                else
+                {
+                    result.Add(fieldVal);
+                }
+            }
+            return result;
+        }
+
         private class ReflectionMetadataCache
         {
             public PropertyInfo? BaseViewProperty { get; set; }
@@ -447,15 +530,15 @@ namespace SpawnDev.ILGPU.WebGPU
                 int kernelParamOffset = compiledKernel.EntryPoint.KernelIndexParameterOffset;
                 var paramTypes = compiledKernel.EntryPoint.Parameters;
 
-                // Detect if args[0] is an Index type that should be skipped for bindings.
+                // Detect if args[0] is a short Index type that should be skipped for bindings.
                 // This happens with explicitly grouped stream kernels where KernelIndexParameterOffset=0
-                // but the WGSL generator still skips the Index param.
+                // but the WGSL generator still skips the Index param (mapped to global_id.x).
+                // Note: LongIndex types are NOT skipped — they are data counts for grid-stride kernels.
                 int runtimeIndexSkip = 0;
                 if (kernelParamOffset == 0 && paramTypes.Count > 0)
                 {
                     var first = paramTypes[0];
-                    if (first == typeof(Index1D) || first == typeof(Index2D) || first == typeof(Index3D) ||
-                        first == typeof(LongIndex1D) || first == typeof(LongIndex2D) || first == typeof(LongIndex3D))
+                    if (first == typeof(Index1D) || first == typeof(Index2D) || first == typeof(Index3D))
                         runtimeIndexSkip = 1;
                 }
 
@@ -466,24 +549,120 @@ namespace SpawnDev.ILGPU.WebGPU
                 // For stream without Index: effectiveOffset = 0 + 0 = 0
                 int effectiveOffset = kernelParamOffset + runtimeIndexSkip;
 
+                // --- PRE-EXPAND: Flatten body structs in args[] ---
+                // IGridStrideKernelBody implementations (e.g. InitializerImplementation, ReductionImplementation)
+                // contain IArrayView fields. The ILGPU compiler inlines these structs into separate IR
+                // parameters, so the WGSL generator creates one binding per field. We must match this
+                // at runtime by expanding the args array to replace each body struct with its fields.
+                //
+                // We also build argsToEffectiveOffset: for each original args[i], the starting index
+                // in effectiveArgs where args[i]'s contribution begins. This lets Phase 2 (scalar packing)
+                // correctly look up scalar values from effectiveArgs using IR param indices.
+                var expandedArgs = new List<object?>();
+                // argsToEffectiveOffset[i] = index in effectiveArgs where args[i] starts
+                var argsToEffectiveOffset = new int[args.Length];
+                for (int i = 0; i < args.Length; i++)
+                {
+                    argsToEffectiveOffset[i] = expandedArgs.Count;
+                    var a = args[i];
+                    if (a != null && a.GetType().IsValueType && !(a is IArrayView) && ContainsPointerFields(a.GetType()))
+                    {
+                        WebGPUBackend.Log($"[WebGPU-Debug] Pre-expand: Flattening body struct {a.GetType().Name} at args[{i}]");
+                        expandedArgs.AddRange(FlattenStructFields(a));
+                    }
+                    else
+                    {
+                        expandedArgs.Add(a);
+                    }
+                }
+                var effectiveArgs = expandedArgs.ToArray();
+
+                // Build packed scalar lookup mapping effectiveArgs index → ScalarPackingEntry.
+                //
+                // For regular params: effectiveArgsIdx = paramIndex - kernelParamOffset
+                // For body struct scalar fields: ScalarPackingManifest uses synthetic ParamIndex
+                //   = bodyStructParamIndex * 1000 + irFieldIndex
+                // We need to find the effectiveArgs index for the non-view backing field.
+                //
+                // Strategy: track which effectiveArgs indices are non-view backing fields of body structs.
+                // bodyStructScalarEffectiveIdx[argsIdx][nthNonViewField] = effectiveArgsIdx
+                var bodyStructScalarEffectiveIdxMap = new Dictionary<int, List<int>>(); // argsIdx → list of effectiveArgs indices for non-view fields
+                for (int i = 0; i < args.Length; i++)
+                {
+                    var a = args[i];
+                    if (a != null && a.GetType().IsValueType && !(a is IArrayView) && ContainsPointerFields(a.GetType()))
+                    {
+                        // This is a body struct — track which effectiveArgs entries are non-view fields
+                        var nonViewIndices = new List<int>();
+                        int baseIdx = argsToEffectiveOffset[i];
+                        var fields = a.GetType().GetFields(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                        int fieldEffIdx = baseIdx;
+                        foreach (var field in fields)
+                        {
+                            var fieldVal = field.GetValue(a);
+                            if (fieldVal is IArrayView)
+                                fieldEffIdx++; // View field → buffer binding, not scalar
+                            else
+                            {
+                                nonViewIndices.Add(fieldEffIdx); // Non-view field → scalar
+                                fieldEffIdx++;
+                            }
+                        }
+                        bodyStructScalarEffectiveIdxMap[i] = nonViewIndices;
+                    }
+                }
+
                 var packedScalarLookup = new Dictionary<int, ScalarPackingEntry>();
                 if (compiledKernel.HasScalarPacking)
                 {
                     foreach (var entry in compiledKernel.ScalarPackingManifest)
                     {
-                        // Map from IR param index to args array index
-                        int argsIndex = entry.ParamIndex - effectiveOffset;
-                        if (argsIndex >= 0)
-                            packedScalarLookup[argsIndex] = entry;
+                        if (entry.ParamIndex >= 1000)
+                        {
+                            // Synthetic param index: body struct scalar field
+                            // Decode: bodyStructParamIndex = entry.ParamIndex / 1000
+                            // Find the args index for this body struct
+                            int bodyStructIRParamIdx = entry.ParamIndex / 1000;
+                            int bodyStructArgsIdx = bodyStructIRParamIdx - kernelParamOffset;
+
+                            // Find the nth non-view field in the body struct
+                            // We need to determine which non-view field this is
+                            // The scalar manifest entries for a body struct are in order of non-view fields
+                            // Count how many scalar manifest entries have the same bodyStructIRParamIdx and come before this one
+                            int nthScalarField = 0;
+                            foreach (var e2 in compiledKernel.ScalarPackingManifest)
+                            {
+                                if (e2.ParamIndex >= 1000 && e2.ParamIndex / 1000 == bodyStructIRParamIdx)
+                                {
+                                    if (e2.ByteOffset < entry.ByteOffset)
+                                        nthScalarField++;
+                                }
+                            }
+
+                            if (bodyStructScalarEffectiveIdxMap.TryGetValue(bodyStructArgsIdx, out var nonViewIdxList)
+                                && nthScalarField < nonViewIdxList.Count)
+                            {
+                                int effectiveArgsIdx = nonViewIdxList[nthScalarField];
+                                packedScalarLookup[effectiveArgsIdx] = entry;
+                                WebGPUBackend.Log($"[WebGPU-Debug] Body struct scalar: ParamIndex={entry.ParamIndex}, effectiveArgsIdx={effectiveArgsIdx}, nthScalarField={nthScalarField}");
+                            }
+                        }
+                        else
+                        {
+                            // Regular param: map IR param index to effectiveArgs index
+                            int effectiveArgsIdx = entry.ParamIndex - kernelParamOffset;
+                            if (effectiveArgsIdx >= 0 && effectiveArgsIdx < effectiveArgs.Length)
+                                packedScalarLookup[effectiveArgsIdx] = entry;
+                        }
                     }
                 }
 
                 // --- Phase 1: Emit bindings for non-packed params (views, structs, atomics) ---
-                // Note: args[] and paramTypes both exclude KernelIndexParameterOffset params.
-                // But they may include the Index type param for explicitly grouped kernels.
-                for (int i = 0; i < args.Length; i++)
+                // effectiveArgs[] has body structs pre-expanded into their constituent fields.
+                // Skip the index param (effectiveArgs[0..runtimeIndexSkip-1]) and packed scalars.
+                for (int i = 0; i < effectiveArgs.Length; i++)
                 {
-                    // Skip the Index type param at args[0] for explicitly grouped kernels
+                    // Skip the Index type param at effectiveArgs[0] for explicitly grouped kernels
                     if (i < runtimeIndexSkip)
                         continue;
 
@@ -491,7 +670,8 @@ namespace SpawnDev.ILGPU.WebGPU
                     if (packedScalarLookup.ContainsKey(i))
                         continue;
 
-                    var arg = args[i];
+                    var arg = effectiveArgs[i];
+
                     IArrayView? arrayView = arg as IArrayView;
                     int[] dims = Array.Empty<int>();
 
@@ -546,13 +726,20 @@ namespace SpawnDev.ILGPU.WebGPU
 
                         if (arg != null && arg.GetType().IsValueType)
                         {
-                            int structSize = Marshal.SizeOf(arg.GetType());
+                            Type argType = arg.GetType();
+
+                            // Use Interop.SizeOf(Type) which handles generic structs via Unsafe.SizeOf<T>
+                            // (Marshal.SizeOf fails on generic types like ReductionImplementation<T,S,R>).
+                            int structSize = global::ILGPU.Interop.SizeOf(argType);
                             byte[] bytes = new byte[structSize];
-                            var handle = GCHandle.Alloc(bytes, GCHandleType.Pinned);
-                            try { Marshal.StructureToPtr(arg, handle.AddrOfPinnedObject(), false); }
-                            finally { handle.Free(); }
+
+                            // GCHandle.Alloc(Pinned) fails for boxed generic structs in Blazor WASM
+                            // (ArgumentException_NotIsomorphic). Use our CopyStructToBytes<T> helper
+                            // which uses MemoryMarshal.AsBytes — no GC pinning required.
+                            GetCopyStructMethod(argType).Invoke(null, new object[] { arg, bytes });
+
                             device.Queue.WriteBuffer(uBuffer, 0, bytes);
-                            WebGPUBackend.Log($"[WebGPU-Debug] Arg {i}: Struct scalar {arg.GetType().Name}, Size={structSize} bytes");
+                            WebGPUBackend.Log($"[WebGPU-Debug] Arg {i}: Struct scalar {argType.Name}, Size={structSize} bytes");
                         }
                         else throw new NotSupportedException($"Unsupported non-packed non-view argument type: {arg?.GetType()}");
 
@@ -595,16 +782,16 @@ namespace SpawnDev.ILGPU.WebGPU
 
                     var packedData = new byte[totalBytes];
 
-                    foreach (var entry in manifest)
+                    // Use packedScalarLookup (effectiveArgsIdx → entry) which correctly handles
+                    // both regular params and body struct scalar fields (synthetic param indices).
+                    foreach (var kvp in packedScalarLookup)
                     {
-                        // Map from IR param index to args array index (using effectiveOffset, same as Phase 1)
-                        int argsIdx = entry.ParamIndex - effectiveOffset;
-                        if (argsIdx < 0 || argsIdx >= args.Length)
-                            throw new InvalidOperationException($"[SCALAR-PACK] ParamIndex {entry.ParamIndex} (argsIdx={argsIdx}) is out of bounds for args (Length={args.Length}, offset={effectiveOffset})");
-                        var arg = args[argsIdx];
+                        int effectiveArgsIdx = kvp.Key;
+                        var entry = kvp.Value;
+                        var arg = effectiveArgs[effectiveArgsIdx];
                         int byteOffset = entry.ByteOffset;
 
-                        WebGPUBackend.Log($"[WebGPU-Debug] Packing scalar param {entry.ParamIndex} (args[{argsIdx}]) at byte offset {byteOffset}: {arg}");
+                        WebGPUBackend.Log($"[WebGPU-Debug] Packing scalar param {entry.ParamIndex} (effectiveArgs[{effectiveArgsIdx}]) at byte offset {byteOffset}: {arg}");
 
                         if (arg is int iVal)
                             BitConverter.GetBytes(iVal).CopyTo(packedData, byteOffset);
@@ -613,9 +800,53 @@ namespace SpawnDev.ILGPU.WebGPU
                         else if (arg is uint uiVal)
                             BitConverter.GetBytes(uiVal).CopyTo(packedData, byteOffset);
                         else if (arg is long lVal)
-                            BitConverter.GetBytes((int)lVal).CopyTo(packedData, byteOffset);
+                        {
+                            // emu_i64: pack as two u32 values (low word, high word)
+                            BitConverter.GetBytes((uint)(lVal & 0xFFFFFFFFL)).CopyTo(packedData, byteOffset);
+                            if (byteOffset + 4 < packedData.Length)
+                                BitConverter.GetBytes((uint)((lVal >> 32) & 0xFFFFFFFFL)).CopyTo(packedData, byteOffset + 4);
+                        }
                         else if (arg is ulong ulVal)
-                            BitConverter.GetBytes((uint)ulVal).CopyTo(packedData, byteOffset);
+                        {
+                            // emu_u64: pack as two u32 values (low word, high word)
+                            BitConverter.GetBytes((uint)(ulVal & 0xFFFFFFFFL)).CopyTo(packedData, byteOffset);
+                            if (byteOffset + 4 < packedData.Length)
+                                BitConverter.GetBytes((uint)((ulVal >> 32) & 0xFFFFFFFFL)).CopyTo(packedData, byteOffset + 4);
+                        }
+                        else if (arg is LongIndex1D li1)
+                        {
+                            // LongIndex1D wraps a long — pack as emu_i64 (two u32 values)
+                            long rawVal = li1.X;
+                            BitConverter.GetBytes((uint)(rawVal & 0xFFFFFFFFL)).CopyTo(packedData, byteOffset);
+                            if (byteOffset + 4 < packedData.Length)
+                                BitConverter.GetBytes((uint)((rawVal >> 32) & 0xFFFFFFFFL)).CopyTo(packedData, byteOffset + 4);
+                        }
+                        else if (arg is LongIndex2D li2)
+                        {
+                            // LongIndex2D: pack X then Y as two emu_i64 pairs
+                            BitConverter.GetBytes((uint)(li2.X & 0xFFFFFFFFL)).CopyTo(packedData, byteOffset);
+                            if (byteOffset + 4 < packedData.Length)
+                                BitConverter.GetBytes((uint)((li2.X >> 32) & 0xFFFFFFFFL)).CopyTo(packedData, byteOffset + 4);
+                            if (byteOffset + 8 < packedData.Length)
+                                BitConverter.GetBytes((uint)(li2.Y & 0xFFFFFFFFL)).CopyTo(packedData, byteOffset + 8);
+                            if (byteOffset + 12 < packedData.Length)
+                                BitConverter.GetBytes((uint)((li2.Y >> 32) & 0xFFFFFFFFL)).CopyTo(packedData, byteOffset + 12);
+                        }
+                        else if (arg is LongIndex3D li3)
+                        {
+                            // LongIndex3D: pack X, Y, Z as three emu_i64 pairs
+                            BitConverter.GetBytes((uint)(li3.X & 0xFFFFFFFFL)).CopyTo(packedData, byteOffset);
+                            if (byteOffset + 4 < packedData.Length)
+                                BitConverter.GetBytes((uint)((li3.X >> 32) & 0xFFFFFFFFL)).CopyTo(packedData, byteOffset + 4);
+                            if (byteOffset + 8 < packedData.Length)
+                                BitConverter.GetBytes((uint)(li3.Y & 0xFFFFFFFFL)).CopyTo(packedData, byteOffset + 8);
+                            if (byteOffset + 12 < packedData.Length)
+                                BitConverter.GetBytes((uint)((li3.Y >> 32) & 0xFFFFFFFFL)).CopyTo(packedData, byteOffset + 12);
+                            if (byteOffset + 16 < packedData.Length)
+                                BitConverter.GetBytes((uint)(li3.Z & 0xFFFFFFFFL)).CopyTo(packedData, byteOffset + 16);
+                            if (byteOffset + 20 < packedData.Length)
+                                BitConverter.GetBytes((uint)((li3.Z >> 32) & 0xFFFFFFFFL)).CopyTo(packedData, byteOffset + 20);
+                        }
                         else if (arg is double dVal)
                         {
                             if (webGpuAccel.Backend.Options.EnableF64Emulation)
@@ -634,6 +865,7 @@ namespace SpawnDev.ILGPU.WebGPU
                             BitConverter.GetBytes(blVal ? 1u : 0u).CopyTo(packedData, byteOffset);
                         else if (arg != null)
                             throw new NotSupportedException($"Unsupported packed scalar type: {arg.GetType()}");
+
                     }
 
                     var packedBuffer = GetPooledScalarBuffer(device);
@@ -647,8 +879,9 @@ namespace SpawnDev.ILGPU.WebGPU
                     });
                     currentBindingIndex++;
 
-                    WebGPUBackend.Log($"[WebGPU-Debug] Packed {manifest.Count} scalars into 1 buffer ({totalBytes} bytes used, binding {currentBindingIndex - 1})");
+                    WebGPUBackend.Log($"[WebGPU-Debug] Packed {packedScalarLookup.Count} scalars into 1 buffer ({totalBytes} bytes used, binding {currentBindingIndex - 1})");
                 }
+
 
                 var bindGroupDesc = new GPUBindGroupDescriptor
                 {

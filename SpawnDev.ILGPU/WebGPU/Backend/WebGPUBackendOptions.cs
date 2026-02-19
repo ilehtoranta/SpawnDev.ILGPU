@@ -32,6 +32,18 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         public bool EnableI64Emulation { get; init; } = true;
 
         /// <summary>
+        /// When true, disables native subgroup operations (subgroupShuffle, subgroupBroadcastFirst, etc.)
+        /// even if the GPU device supports them, and falls back to workgroup shared-memory emulation instead.
+        /// <para>
+        /// This is useful for developers who want to verify their ILGPU kernel code works correctly
+        /// on both the native-subgroup path and the shared-memory emulation path, without needing
+        /// hardware that lacks subgroup support.
+        /// </para>
+        /// Default: false (use native subgroups when available).
+        /// </summary>
+        public bool ForceDisableSubgroups { get; init; } = false;
+
+        /// <summary>
         /// Default options with F64 and I64 emulation enabled for full precision.
         /// </summary>
         public static WebGPUBackendOptions Default { get; } = new();
