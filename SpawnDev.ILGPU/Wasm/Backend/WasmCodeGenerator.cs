@@ -483,6 +483,28 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                         Code.Add(WasmOpCodes.F32Div);
                     }
                     break;
+                // IsNaN: NaN != NaN is true in IEEE 754
+                case UnaryArithmeticKind.IsNaNF:
+                    EmitGetLocal(src);
+                    EmitGetLocal(src);
+                    Code.Add(wasmType == WasmOpCodes.F64 ? WasmOpCodes.F64Ne : WasmOpCodes.F32Ne);
+                    // Result is i32 (0 or 1) but target local may be i32 too — fine for bool
+                    break;
+                // IsInf: |x| == +Infinity
+                case UnaryArithmeticKind.IsInfF:
+                    EmitGetLocal(src);
+                    Code.Add(wasmType == WasmOpCodes.F64 ? WasmOpCodes.F64Abs : WasmOpCodes.F32Abs);
+                    if (wasmType == WasmOpCodes.F64)
+                    {
+                        WasmModuleBuilder.EmitF64Const(Code, double.PositiveInfinity);
+                        Code.Add(WasmOpCodes.F64Eq);
+                    }
+                    else
+                    {
+                        WasmModuleBuilder.EmitF32Const(Code, float.PositiveInfinity);
+                        Code.Add(WasmOpCodes.F32Eq);
+                    }
+                    break;
                 default:
                     EmitGetLocal(src);
                     break;
@@ -581,6 +603,32 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                     WasmModuleBuilder.EmitLocalSet(Code, target);
                     return;
                 }
+            }
+
+            // Handle float Rem (no native Wasm opcode): x % y = x - trunc(x / y) * y
+            if (value.Kind == BinaryArithmeticKind.Rem &&
+                (wasmType == WasmOpCodes.F32 || wasmType == WasmOpCodes.F64))
+            {
+                // Left and right are already on the stack.
+                // We need: left - trunc(left / right) * right
+                // Store left and right in temp locals since we need them multiple times.
+                var rightLocal = AllocateNewLocal(wasmType);
+                WasmModuleBuilder.EmitLocalSet(Code, rightLocal); // pop right
+                var leftLocal = AllocateNewLocal(wasmType);
+                WasmModuleBuilder.EmitLocalSet(Code, leftLocal); // pop left
+
+                // result = left - trunc(left / right) * right
+                WasmModuleBuilder.EmitLocalGet(Code, leftLocal);
+                WasmModuleBuilder.EmitLocalGet(Code, leftLocal);
+                WasmModuleBuilder.EmitLocalGet(Code, rightLocal);
+                Code.Add(wasmType == WasmOpCodes.F64 ? WasmOpCodes.F64Div : WasmOpCodes.F32Div);
+                Code.Add(wasmType == WasmOpCodes.F64 ? WasmOpCodes.F64Trunc : WasmOpCodes.F32Trunc);
+                WasmModuleBuilder.EmitLocalGet(Code, rightLocal);
+                Code.Add(wasmType == WasmOpCodes.F64 ? WasmOpCodes.F64Mul : WasmOpCodes.F32Mul);
+                Code.Add(wasmType == WasmOpCodes.F64 ? WasmOpCodes.F64Sub : WasmOpCodes.F32Sub);
+
+                WasmModuleBuilder.EmitLocalSet(Code, target);
+                return;
             }
 
             byte opcode = (wasmType, value.Kind) switch

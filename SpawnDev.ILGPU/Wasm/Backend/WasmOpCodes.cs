@@ -171,6 +171,8 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         public const byte F64Neg = 0x9A;
         public const byte F64Ceil = 0x9B;
         public const byte F64Floor = 0x9C;
+        public const byte F64Trunc = 0x9D;
+        public const byte F64Nearest = 0x9E;
         public const byte F64Sqrt = 0x9F;
         public const byte F64Add = 0xA0;
         public const byte F64Sub = 0xA1;
@@ -178,6 +180,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         public const byte F64Div = 0xA3;
         public const byte F64Min = 0xA4;
         public const byte F64Max = 0xA5;
+        public const byte F64Copysign = 0xA6;
 
         // === Conversions ===
         public const byte I32WrapI64 = 0xA7;
