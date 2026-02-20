@@ -1064,16 +1064,6 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             {
                 AppendLine($"{target} = atomicLoad({source});");
             }
-            else if (sourceType == "emu_f64" || targetType == "emu_f64")
-            {
-                // emu_f64 (Dekker vec2<f32>) is NOT bit-compatible with IEEE-754 double.
-                // Buffers contain IEEE-754 bytes written by the C# host.
-                // Reinterpret the raw f32 pair as u32 bits and convert to Dekker format.
-                string rawBitsVar = $"_raw_bits_{target.Name}";
-                AppendLine($"let {rawBitsVar} = bitcast<vec2<u32>>(*{source});");
-                AppendLine($"{target} = f64_from_ieee754_bits({rawBitsVar}.x, {rawBitsVar}.y);");
-            }
-
             else if (targetType != sourceType)
             {
                 AppendLine($"{target} = bitcast<{targetType}>(*{source});");
@@ -1099,13 +1089,6 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             if (isAtomic)
             {
                 AppendLine($"atomicStore({address}, {val});");
-            }
-            else if (targetElemType == "emu_f64")
-            {
-                // Convert Dekker emu_f64 result back to IEEE-754 bits before writing to buffer.
-                string outBitsVar = $"_out_bits_{val}";
-                AppendLine($"let {outBitsVar} = f64_to_ieee754_bits({val});");
-                AppendLine($"*{address} = bitcast<emu_f64>({outBitsVar});");
             }
             else
             {
@@ -1790,10 +1773,23 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
                         // Step 1: all threads write their value to shared memory
                         string storeVal = needsBitcast ? $"bitcast<{wgslType}>({reduceSrc})" : $"{reduceSrc}";
+                        bool isOzakiF64 = wgslType == "emu_f64" && Backend.Options.UseOzakiF64Emulation;
                         if (is64Bit)
                         {
-                            AppendLine($"_warp_shuffle_buf[local_index * 2u] = bitcast<u32>({storeVal}.x);");
-                            AppendLine($"_warp_shuffle_buf[local_index * 2u + 1u] = bitcast<u32>({storeVal}.y);");
+                            if (isOzakiF64)
+                            {
+                                // Ozaki emu_f64 = vec4<f32>: store all 4 components
+                                AppendLine($"_warp_shuffle_buf[local_index * 4u] = bitcast<u32>({storeVal}.x);");
+                                AppendLine($"_warp_shuffle_buf[local_index * 4u + 1u] = bitcast<u32>({storeVal}.y);");
+                                AppendLine($"_warp_shuffle_buf[local_index * 4u + 2u] = bitcast<u32>({storeVal}.z);");
+                                AppendLine($"_warp_shuffle_buf[local_index * 4u + 3u] = bitcast<u32>({storeVal}.w);");
+                            }
+                            else
+                            {
+                                // Dekker emu_f64 = vec2<f32> or emu_i64/emu_u64 = vec2<u32>: store 2 components
+                                AppendLine($"_warp_shuffle_buf[local_index * 2u] = bitcast<u32>({storeVal}.x);");
+                                AppendLine($"_warp_shuffle_buf[local_index * 2u + 1u] = bitcast<u32>({storeVal}.y);");
+                            }
                         }
                         else
                         {
@@ -1806,8 +1802,18 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                         string load0, loadN;
                         if (is64Bit)
                         {
-                            load0 = $"{wgslType}(bitcast<{componentType}>(_warp_shuffle_buf[0u]), bitcast<{componentType}>(_warp_shuffle_buf[1u]))";
-                            loadN = $"{wgslType}(bitcast<{componentType}>(_warp_shuffle_buf[_ri * 2u]), bitcast<{componentType}>(_warp_shuffle_buf[_ri * 2u + 1u]))";
+                            if (isOzakiF64)
+                            {
+                                // Ozaki: reconstruct vec4<f32> from 4 u32 slots
+                                load0 = $"{wgslType}(bitcast<{componentType}>(_warp_shuffle_buf[0u]), bitcast<{componentType}>(_warp_shuffle_buf[1u]), bitcast<{componentType}>(_warp_shuffle_buf[2u]), bitcast<{componentType}>(_warp_shuffle_buf[3u]))";
+                                loadN = $"{wgslType}(bitcast<{componentType}>(_warp_shuffle_buf[_ri * 4u]), bitcast<{componentType}>(_warp_shuffle_buf[_ri * 4u + 1u]), bitcast<{componentType}>(_warp_shuffle_buf[_ri * 4u + 2u]), bitcast<{componentType}>(_warp_shuffle_buf[_ri * 4u + 3u]))";
+                            }
+                            else
+                            {
+                                // Dekker or integer: reconstruct from 2 u32 slots
+                                load0 = $"{wgslType}(bitcast<{componentType}>(_warp_shuffle_buf[0u]), bitcast<{componentType}>(_warp_shuffle_buf[1u]))";
+                                loadN = $"{wgslType}(bitcast<{componentType}>(_warp_shuffle_buf[_ri * 2u]), bitcast<{componentType}>(_warp_shuffle_buf[_ri * 2u + 1u]))";
+                            }
                         }
                         else
                         {
@@ -2488,7 +2494,6 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
             Console.WriteLine($"[WGSL-DBG] HasSubgroups={backend.HasSubgroups}, wgslOp={wgslOp}, identityExpr={identityExpr}");
 
-            // CRITICAL: subgroupMax/Min/Add do NOT work on vec2<u32> (emulated 64-bit types).
             if (is64Bit && wgslOp != null && identityExpr != null)
             {
                 Console.WriteLine($"[WGSL-DBG] GenerateGroupAllReduce: 64-bit shared-memory reduction, wgslType={wgslType}");
@@ -2509,14 +2514,50 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
                 // Step 1: all threads write their value to shared memory (2 u32 slots per thread)
                 string storeVal = needsBitcast ? $"bitcast<{wgslType}>({operand})" : $"{operand}";
-                codeGenerator.AppendLine($"_warp_shuffle_buf[local_index * 2u] = bitcast<u32>({storeVal}.x);");
-                codeGenerator.AppendLine($"_warp_shuffle_buf[local_index * 2u + 1u] = bitcast<u32>({storeVal}.y);");
+
+                bool isOzakiF64 = wgslType == "emu_f64" && backend.Options.UseOzakiF64Emulation;
+                if (isOzakiF64)
+                {
+                    // Ozaki emu_f64 = vec4<f32>: store all 4 components
+                    codeGenerator.AppendLine($"{{ _warp_shuffle_buf[local_index * 4u] = bitcast<u32>({storeVal}.x); _warp_shuffle_buf[local_index * 4u + 1u] = bitcast<u32>({storeVal}.y); _warp_shuffle_buf[local_index * 4u + 2u] = bitcast<u32>({storeVal}.z); _warp_shuffle_buf[local_index * 4u + 3u] = bitcast<u32>({storeVal}.w); }}");
+                }
+                else if (wgslType == "emu_f64")
+                {
+                    // Dekker emu_f64 = vec2<f32>: convert to IEEE-754 bits (2 u32 slots)
+                    codeGenerator.AppendLine($"{{ let _bits = f64_to_ieee754_bits({storeVal}); _warp_shuffle_buf[local_index * 2u] = _bits.x; _warp_shuffle_buf[local_index * 2u + 1u] = _bits.y; }}");
+                }
+                else
+                {
+                    codeGenerator.AppendLine($"_warp_shuffle_buf[local_index * 2u] = {storeVal}.x;");
+                    codeGenerator.AppendLine($"_warp_shuffle_buf[local_index * 2u + 1u] = {storeVal}.y;");
+                }
                 codeGenerator.AppendLine("workgroupBarrier();");
 
                 // Step 2: all threads cooperatively reduce across the workgroup
-                string componentType = wgslType == "emu_f64" ? "f32" : "u32";
-                string load0 = $"{wgslType}(bitcast<{componentType}>(_warp_shuffle_buf[0u]), bitcast<{componentType}>(_warp_shuffle_buf[1u]))";
-                string loadN = $"{wgslType}(bitcast<{componentType}>(_warp_shuffle_buf[_ri_{sfx64} * 2u]), bitcast<{componentType}>(_warp_shuffle_buf[_ri_{sfx64} * 2u + 1u]))";
+                string load0;
+                string loadN;
+                if (isOzakiF64)
+                {
+                    // Ozaki: reconstruct vec4<f32> from 4 u32 slots
+                    load0 = $"emu_f64(bitcast<f32>(_warp_shuffle_buf[0u]), bitcast<f32>(_warp_shuffle_buf[1u]), bitcast<f32>(_warp_shuffle_buf[2u]), bitcast<f32>(_warp_shuffle_buf[3u]))";
+                    loadN = $"emu_f64(bitcast<f32>(_warp_shuffle_buf[_ri_{sfx64} * 4u]), bitcast<f32>(_warp_shuffle_buf[_ri_{sfx64} * 4u + 1u]), bitcast<f32>(_warp_shuffle_buf[_ri_{sfx64} * 4u + 2u]), bitcast<f32>(_warp_shuffle_buf[_ri_{sfx64} * 4u + 3u]))";
+                }
+                else if (wgslType == "emu_f64")
+                {
+                    // Dekker: convert from IEEE-754 bits (2 u32 slots)
+                    load0 = $"f64_from_ieee754_bits(_warp_shuffle_buf[0u], _warp_shuffle_buf[1u])";
+                    loadN = $"f64_from_ieee754_bits(_warp_shuffle_buf[_ri_{sfx64} * 2u], _warp_shuffle_buf[_ri_{sfx64} * 2u + 1u])";
+                }
+                else if (wgslType.Contains("emu_"))
+                {
+                    load0 = $"{wgslType}(_warp_shuffle_buf[0u], _warp_shuffle_buf[1u])";
+                    loadN = $"{wgslType}(_warp_shuffle_buf[_ri_{sfx64} * 2u], _warp_shuffle_buf[_ri_{sfx64} * 2u + 1u])";
+                }
+                else
+                {
+                    load0 = $"{wgslType}(_warp_shuffle_buf[0u], _warp_shuffle_buf[1u])";
+                    loadN = $"{wgslType}(_warp_shuffle_buf[_ri_{sfx64} * 2u], _warp_shuffle_buf[_ri_{sfx64} * 2u + 1u])";
+                }
 
                 codeGenerator.AppendLine("{");
                 codeGenerator.AppendLine($"    var _reduce_accum_{sfx64} : {wgslType} = {load0};");

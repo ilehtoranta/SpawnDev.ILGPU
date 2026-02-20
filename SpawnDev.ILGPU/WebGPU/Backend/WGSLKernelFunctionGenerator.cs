@@ -574,13 +574,16 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
             // Emit WGSL enable directives at the very top of the module
             // These must appear before any other declarations
-            // Only enable subgroups if the shader actually uses subgroup operations
-            bool emitSubgroups = Backend.HasSubgroups && _usesSubgroups;
-            if (emitSubgroups)
-                builder.AppendLine("enable subgroups;");
+            // For subgroups: emit a placeholder that will be resolved after body generation.
+            // The IR pre-scan may flag subgroup usage for nodes that are later handled
+            // via shared-memory emulation (e.g., 64-bit reductions), so we defer the
+            // decision until we can inspect the generated body.
+            bool mayUseSubgroups = Backend.HasSubgroups && _usesSubgroups;
+            if (mayUseSubgroups)
+                builder.AppendLine("/*__WGSL_ENABLE_SUBGROUPS_PLACEHOLDER__*/");
             if (Backend.HasShaderF16)
                 builder.AppendLine("enable f16;");
-            if (emitSubgroups || Backend.HasShaderF16)
+            if (mayUseSubgroups || Backend.HasShaderF16)
                 builder.AppendLine();
 
             // Pre-scan parameters to detect if any actually use f64/i64 types.
@@ -603,6 +606,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 builder.AppendLine("// ============ 64-bit Emulation Library ============");
                 builder.AppendLine(WGSLEmulationLibrary.GetEmulationLibrary(
                     needsF64Emulation,
+                    Backend.Options.UseOzakiF64Emulation,
                     needsI64Emulation));
             }
 
@@ -763,14 +767,21 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                             bool fieldIsUnsignedAtomic = _bodyStructUnsignedAtomicFields.Contains((param.Index, fi));
 
                             string bindingWgslType = viewWgslType;
+                            bool is64Emu = (Backend.Options.EnableF64Emulation && viewWgslType == "emu_f64") ||
+                                           (Backend.Options.EnableI64Emulation && (viewWgslType == "emu_i64" || viewWgslType == "emu_u64"));
+
+                            if (is64Emu)
+                            {
+                                bindingWgslType = "u32";
+                            }
+
                             if (fieldIsAtomic)
                             {
-                                bool is64Emu = (viewWgslType == "emu_i64" || viewWgslType == "emu_u64" || viewWgslType == "emu_f64");
                                 if (is64Emu)
                                 {
-                                    // WGSL doesn't support atomic on vec2<u32>.
-                                    // Use plain storage; only thread 0 writes the final value.
-                                    bindingWgslType = viewWgslType;
+                                    // WGSL doesn't support atomic on 64-bit structs.
+                                    // Use plain storage (u32); only thread 0 writes the final value.
+                                    bindingWgslType = "u32";
                                     _bodyStructEmulated64AtomicFields.Add((param.Index, fi));
                                 }
                                 else if (fieldIsFloatAtomic || fieldIsUnsignedAtomic)
@@ -838,6 +849,17 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 // Check emulation
                 bool isEmulatedF64 = Backend.Options.EnableF64Emulation && wgslType == "emu_f64";
                 bool isEmulatedI64 = Backend.Options.EnableI64Emulation && (wgslType == "emu_i64" || wgslType == "emu_u64");
+
+                // If parameter is a view, check its element type for emulation tracking
+                if (isView)
+                {
+                    var paramElemType = GetBufferElementType(param.ParameterType);
+                    string elemWgslType = TypeGenerator[paramElemType];
+                    if (Backend.Options.EnableF64Emulation && elemWgslType == "emu_f64")
+                        isEmulatedF64 = true;
+                    if (Backend.Options.EnableI64Emulation && (elemWgslType == "emu_i64" || elemWgslType == "emu_u64"))
+                        isEmulatedI64 = true;
+                }
 
                 if (isEmulatedF64)
                     _emulatedF64Params.Add(param.Index);
@@ -1001,8 +1023,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             if ((_usesSubgroups && !Backend.HasSubgroups) || UsesWarpShuffleEmulation)
             {
                 builder.AppendLine();
-                builder.AppendLine("// Warp shuffle emulation shared memory (128 u32 slots = 2 per thread for 64-bit emulated types)");
-                builder.AppendLine("var<workgroup> _warp_shuffle_buf : array<u32, 128>;");
+                builder.AppendLine("// Warp shuffle emulation shared memory (256 u32 slots = 4 per thread for Ozaki vec4<f32> emulated types)");
+                builder.AppendLine("var<workgroup> _warp_shuffle_buf : array<u32, 256>;");
             }
 
             // Emit workgroup-level group-reduce atomic variable when GenerateGroupAllReduce is used.
@@ -1257,6 +1279,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             fullOutput = fullOutput.Replace(signatureSentinel, signature);
             Builder.Remove(signatureInsertPosition, Builder.Length - signatureInsertPosition);
             Builder.Append(fullOutput);
+            // NOTE: The enable subgroups placeholder is resolved in WebGPUBackend.CreateKernel()
+            // because the header is written to the upstream builder, not this.Builder.
         }
         private string GetPrefix(Value value)
         {
@@ -1598,7 +1622,12 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 {
                     // emu_f64 is emulated as vec2<f32> when emulation is enabled
                     if (wgslType == "emu_f64")
-                        init = " = emu_f64(0.0, 0.0)";
+                    {
+                        if (Backend.Options.UseOzakiF64Emulation)
+                            init = " = emu_f64(0.0, 0.0, 0.0, 0.0)";
+                        else
+                            init = " = emu_f64(0.0, 0.0)";
+                    }
                     else
                         init = " = 0.0";
                 }
@@ -1961,6 +1990,26 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 if (fieldIdx < bsFields.Count && bsFields[fieldIdx].IsView)
                 {
                     string bindingName = bsFields[fieldIdx].BindingName;
+                    var elemType = GetBufferElementType(bsFields[fieldIdx].FieldType);
+                    string fieldTypeStr = TypeGenerator[elemType];
+                    
+                    bool isEmuF64Field = Backend.Options.EnableF64Emulation && fieldTypeStr == "emu_f64";
+                    bool isEmuI64Field = Backend.Options.EnableI64Emulation && (fieldTypeStr == "emu_i64" || fieldTypeStr == "emu_u64");
+
+                    if (isEmuF64Field || isEmuI64Field)
+                    {
+                        _emulatedVarMappings[target.Name] = (bsParam.Index, isEmuF64Field);
+                        
+                        AppendIndent();
+                        Builder.Append($"let {target.Name}_base_idx = i32({offsetExpr}) * 2;");
+                        Builder.AppendLine();
+                        
+                        AppendIndent();
+                        Builder.Append($"let {target.Name} = &{bindingName};");
+                        Builder.AppendLine();
+                        return;
+                    }
+
                     if (_crossBlockPointers.Contains(value))
                     {
                         _crossBlockPointerExprs[target.Name] = $"{bindingName}[{offsetExpr}]";
@@ -1973,7 +2022,6 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     return;
                 }
             }
-
             if (ResolveToParameter(value.Source) is global::ILGPU.IR.Values.Parameter param)
             {
                 int paramOffset = KernelParamOffset;
@@ -2100,40 +2148,16 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 return;
             }
 
-            // Detect emu_f64 load: buffer contains IEEE-754 double bytes, need conversion.
-            bool isEmuF64Load = Backend.Options.EnableF64Emulation
-                && (target.Type == "emu_f64"
-                    || (loadVal.Source.Type is global::ILGPU.IR.Types.PointerType lptrType
-                        && TypeGenerator[lptrType.ElementType] == "emu_f64"));
-
             // Check if we already declared this at the top
             if (_hoistedPrimitives.Contains(loadVal))
             {
-                if (isEmuF64Load)
-                {
-                    string rawBitsVar2 = $"_raw_bits_{target.Name}";
-                    AppendLine($"let {rawBitsVar2} = bitcast<vec2<u32>>(*{source});");
-                    AppendLine($"{target} = f64_from_ieee754_bits({rawBitsVar2}.x, {rawBitsVar2}.y);");
-                }
-                else
-                {
-                    AppendLine($"{target} = *{source};");
-                }
+                AppendLine($"{target} = *{source};");
             }
             else
             {
                 // Fallback to your stable declaration logic
                 Declare(target);
-                if (isEmuF64Load)
-                {
-                    string rawBitsVar3 = $"_raw_bits_{target.Name}";
-                    AppendLine($"let {rawBitsVar3} = bitcast<vec2<u32>>(*{source});");
-                    AppendLine($"{target} = f64_from_ieee754_bits({rawBitsVar3}.x, {rawBitsVar3}.y);");
-                }
-                else
-                {
-                    AppendLine($"{target} = *{source};");
-                }
+                AppendLine($"{target} = *{source};");
             }
         }
 
@@ -2142,7 +2166,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             var address = Load(storeVal.Target);
             var val = Load(storeVal.Value);
 
-            // Check for emulated 64-bit buffer store
+            // Check for emulated 64-bit buffer store (Parameter arrays registered earlier)
             if (_emulatedVarMappings.TryGetValue(address.ToString(), out var emulInfo))
             {
                 string baseIdxVar = $"{address}_base_idx";
@@ -2169,21 +2193,90 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 return;
             }
 
-            // Detect emu_f64 store: need to convert Dekker format back to IEEE-754 bits.
-            bool isEmuF64Store = Backend.Options.EnableF64Emulation
-                && (storeVal.Target.Type is global::ILGPU.IR.Types.PointerType sptrType
-                    && TypeGenerator[sptrType.ElementType] == "emu_f64");
+            AppendLine($"*{address} = {val};");
+        }
 
-            if (isEmuF64Store)
+        public override void GenerateCode(global::ILGPU.IR.Values.GenericAtomic value)
+        {
+            string ptrStr = Load(value.Target).ToString();
+
+            if (_emulatedVarMappings.TryGetValue(ptrStr, out var emulInfo))
             {
-                string outBitsVarS = $"_out_bits_{val}";
-                AppendLine($"let {outBitsVarS} = f64_to_ieee754_bits({val});");
-                AppendLine($"*{address} = bitcast<emu_f64>({outBitsVarS});");
+                 var target = Load(value);
+                 var val = Load(value.Value);
+                 Declare(target);
+
+                 string valWgslType = TypeGenerator[value.Value.Type];
+                 
+                 string prefix = valWgslType switch
+                 {
+                     "emu_f64" => "f64",
+                     "emu_u64" => "u64",
+                     "emu_i64" => value.IsUnsigned ? "u64" : "i64",
+                     _ => value.IsUnsigned ? "u64" : "i64"
+                 };
+
+                 string emuOp = value.Kind switch
+                 {
+                     global::ILGPU.IR.Values.AtomicKind.Max => $"{prefix}_max",
+                     global::ILGPU.IR.Values.AtomicKind.Min => $"{prefix}_min",
+                     global::ILGPU.IR.Values.AtomicKind.Add => $"{prefix}_add",
+                     global::ILGPU.IR.Values.AtomicKind.Exchange => null,
+                     _ => $"{prefix}_add"
+                 };
+
+                 string baseIdxVar = $"{ptrStr}_base_idx";
+
+                 if (emuOp != null)
+                 {
+                     string oldVar = $"_emu64_old_{target.Name}";
+                     if (valWgslType == "emu_f64")
+                     {
+                         string rawOldVarX = $"_raw_old_x_{target.Name}";
+                         string rawOldVarY = $"_raw_old_y_{target.Name}";
+                         string resultVar = $"_result_{target.Name}";
+                         string ieeeBitsVar = $"_ieee_bits_{target.Name}";
+                         
+                         AppendLine($"let {rawOldVarX} = (*{ptrStr})[u32({baseIdxVar})];");
+                         AppendLine($"let {rawOldVarY} = (*{ptrStr})[u32({baseIdxVar}) + 1u];");
+                         AppendLine($"let {oldVar} = f64_from_ieee754_bits(bitcast<u32>({rawOldVarX}), bitcast<u32>({rawOldVarY}));");
+                         AppendLine($"let {resultVar} = {emuOp}({oldVar}, {val});");
+                         AppendLine($"let {ieeeBitsVar} = f64_to_ieee754_bits({resultVar});");
+                         AppendLine($"(*{ptrStr})[u32({baseIdxVar})] = {ieeeBitsVar}.x;");
+                         AppendLine($"(*{ptrStr})[u32({baseIdxVar}) + 1u] = {ieeeBitsVar}.y;");
+                         AppendLine($"{target} = {oldVar};");
+                     }
+                     else
+                     {
+                         // emu_i64 / emu_u64
+                         string resultVar = $"_result_{target.Name}";
+                         AppendLine($"let {oldVar} = {valWgslType}((*{ptrStr})[u32({baseIdxVar})], (*{ptrStr})[u32({baseIdxVar}) + 1u]);");
+                         AppendLine($"let {resultVar} = {emuOp}({oldVar}, {val});");
+                         AppendLine($"(*{ptrStr})[u32({baseIdxVar})] = {resultVar}.x;");
+                         AppendLine($"(*{ptrStr})[u32({baseIdxVar}) + 1u] = {resultVar}.y;");
+                         AppendLine($"{target} = {oldVar};");
+                     }
+                 }
+                 else
+                 {
+                     if (valWgslType == "emu_f64")
+                     {
+                         string ieeeBitsVar = $"_ieee_bits_{target.Name}";
+                         AppendLine($"let {ieeeBitsVar} = f64_to_ieee754_bits({val});");
+                         AppendLine($"(*{ptrStr})[u32({baseIdxVar})] = {ieeeBitsVar}.x;");
+                         AppendLine($"(*{ptrStr})[u32({baseIdxVar}) + 1u] = {ieeeBitsVar}.y;");
+                     }
+                     else
+                     {
+                         AppendLine($"(*{ptrStr})[u32({baseIdxVar})] = {val}.x;");
+                         AppendLine($"(*{ptrStr})[u32({baseIdxVar}) + 1u] = {val}.y;");
+                     }
+                     AppendLine($"{target} = {val};");
+                 }
+                 return;
             }
-            else
-            {
-                AppendLine($"*{address} = {val};");
-            }
+            
+            base.GenerateCode(value);
         }
 
 

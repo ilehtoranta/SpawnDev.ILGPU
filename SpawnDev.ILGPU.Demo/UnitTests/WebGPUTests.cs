@@ -16,7 +16,7 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
 
         protected override async Task<(Context context, Accelerator accelerator)> CreateAcceleratorAsync()
         {
-            return await CreateAcceleratorAsync(enableEmulation: false);
+            return await CreateAcceleratorAsync(enableEmulation: true);
         }
 
         private async Task<(Context context, Accelerator accelerator)> CreateAcceleratorAsync(bool enableEmulation)
@@ -31,6 +31,7 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
             var options = new WebGPUBackendOptions
             {
                 EnableF64Emulation = enableEmulation,
+                UseOzakiF64Emulation = enableEmulation,
                 EnableI64Emulation = enableEmulation
             };
             var accelerator = await device.CreateAcceleratorAsync(context, options);
@@ -95,7 +96,13 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
             await builder.WebGPU();
             using var context = builder.ToContext();
             var device = context.GetWebGPUDevices()[0];
-            using var accelerator = await device.CreateAcceleratorAsync(context);
+            var options = new WebGPUBackendOptions
+            {
+                EnableF64Emulation = true,
+                UseOzakiF64Emulation = true,
+                EnableI64Emulation = true
+            };
+            using var accelerator = await device.CreateAcceleratorAsync(context, options);
 
             var data = new double[] { 0.1, 0.2, 0.3, 0.1 + 0.2, 1.0 / 3.0, 2.0 / 3.0 };
             int len = data.Length;
@@ -122,6 +129,7 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
         [TestMethod]
         public async Task WebGPUDynamicSharedF64Test()
         {
+            SpawnDev.ILGPU.WebGPU.Backend.WebGPUBackend.VerboseLogging = true;
             // F64 emulation is enabled by default
             var builder = Context.Create();
             await builder.WebGPU();

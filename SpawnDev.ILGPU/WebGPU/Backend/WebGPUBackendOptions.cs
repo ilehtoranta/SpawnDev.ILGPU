@@ -25,6 +25,13 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         public bool EnableF64Emulation { get; init; } = true;
 
         /// <summary>
+        /// When true, and EnableF64Emulation is true, uses the Ozaki Scheme (vec4&lt;f32&gt;) for 64-bit emulation
+        /// to achieve strict IEEE 754 precision compliance at the cost of performance.
+        /// Defaults to false (uses the faster Dekker double-float vec2&lt;f32&gt; technique).
+        /// </summary>
+        public bool UseOzakiF64Emulation { get; init; } = false;
+
+        /// <summary>
         /// Enables emu_i64 (long) emulation using two u32 values (double-word technique).
         /// When enabled (default), emu_i64 operations use vec2&lt;u32&gt; with software emulation.
         /// When disabled, emu_i64 is promoted to i32 (loses range but improves performance).

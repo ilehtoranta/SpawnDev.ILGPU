@@ -539,19 +539,385 @@ fn i64_abs(a: emu_i64) -> emu_i64 {
 
         #endregion
 
+        #region emu_f64 Emulation (Ozaki Scheme using vec4<f32>)
+
+        /// <summary>
+        /// WGSL type alias for Ozaki emulated emu_f64.
+        /// </summary>
+        public const string OzakiF64TypeAlias = "alias emu_f64 = vec4<f32>;";
+
+        /// <summary>
+        /// WGSL helper functions for Ozaki emu_f64 emulation.
+        /// </summary>
+        public const string OzakiF64Functions = @"
+// ============================================================================
+// emu_f64 Emulation Functions (Ozaki Scheme: vec4<f32>)
+// Implementing Quad-Double arithmetic based on Hida, Li, and Bailey's qd library.
+// ============================================================================
+
+fn f32_two_sum(a: f32, b: f32) -> vec2<f32> {
+    let s = a + b;
+    let v = s - a;
+    let e = (a - (s - v)) + (b - v);
+    return vec2<f32>(s, e);
+}
+
+fn f32_quick_two_sum(a: f32, b: f32) -> vec2<f32> {
+    let s = a + b;
+    let e = b - (s - a);
+    return vec2<f32>(s, e);
+}
+
+fn f32_three_sum(a: f32, b: f32, c: f32) -> vec3<f32> {
+    let ts1 = f32_two_sum(a, b);
+    let t1 = ts1.x; let t2 = ts1.y;
+    
+    let ts2 = f32_two_sum(c, t1);
+    let out_a = ts2.x; let t3 = ts2.y;
+    
+    let ts3 = f32_two_sum(t2, t3);
+    let out_b = ts3.x; let out_c = ts3.y;
+    
+    return vec3<f32>(out_a, out_b, out_c);
+}
+
+fn f32_three_sum2(a: f32, b: f32, c: f32) -> vec3<f32> {
+    let ts1 = f32_two_sum(a, b);
+    let t1 = ts1.x; let t2 = ts1.y;
+    
+    let ts2 = f32_two_sum(c, t1);
+    let out_a = ts2.x; let t3 = ts2.y;
+    
+    let out_b = t2 + t3;
+    let out_c = ts2.y; 
+    return vec3<f32>(out_a, out_b, out_c);
+}
+
+fn f32_quick_renorm(c: vec4<f32>, e: f32) -> vec4<f32> {
+    var c0 = c.x; var c1 = c.y; var c2 = c.z; var c3 = c.w; var c4 = e;
+    
+    let ts1 = f32_quick_two_sum(c3, c4);
+    var s = ts1.x; var t3 = ts1.y;
+    
+    let ts2 = f32_quick_two_sum(c2, s);
+    s = ts2.x; var t2 = ts2.y;
+    
+    let ts3 = f32_quick_two_sum(c1, s);
+    s = ts3.x; var t1 = ts3.y;
+    
+    let ts4 = f32_quick_two_sum(c0, s);
+    c0 = ts4.x; var t0 = ts4.y;
+    
+    let ts5 = f32_quick_two_sum(t2, t3);
+    s = ts5.x; t2 = ts5.y;
+    
+    let ts6 = f32_quick_two_sum(t1, s);
+    s = ts6.x; t1 = ts6.y;
+    
+    let ts7 = f32_quick_two_sum(t0, s);
+    c1 = ts7.x; t0 = ts7.y;
+    
+    let ts8 = f32_quick_two_sum(t1, t2);
+    s = ts8.x; t1 = ts8.y;
+    
+    let ts9 = f32_quick_two_sum(t0, s);
+    c2 = ts9.x; t0 = ts9.y;
+    
+    c3 = t0 + t1;
+    
+    return vec4<f32>(c0, c1, c2, c3);
+}
+
+// --- IEEE 754 double bits to double-float conversion ---
+fn f64_from_ieee754_bits(lo: u32, hi: u32) -> emu_f64 {
+    let sign_bit = (hi >> 31u) & 1u;
+    let exponent = (hi >> 20u) & 0x7FFu;
+    let mantissa_hi20 = hi & 0xFFFFFu;
+    let mantissa_lo32 = lo;
+
+    if (exponent == 0u && mantissa_hi20 == 0u && mantissa_lo32 == 0u) {
+        return emu_f64(0.0, 0.0, 0.0, 0.0);
+    }
+    if (exponent == 0x7FFu) {
+        return emu_f64(0.0, 0.0, 0.0, 0.0);
+    }
+
+    let exp_bias: i32 = 1023;
+    let exp_val: i32 = i32(exponent) - exp_bias;
+    let f32_exp_bias: i32 = 127;
+    let f32_exp: i32 = exp_val + f32_exp_bias;
+
+    if (f32_exp <= 0 || f32_exp >= 255) {
+        let f32_bits_approx = (sign_bit << 31u) | (u32(clamp(f32_exp, 1, 254)) << 23u) | (mantissa_hi20 << 3u);
+        let val_approx = bitcast<f32>(f32_bits_approx);
+        return emu_f64(val_approx, 0.0, 0.0, 0.0);
+    }
+
+    let top23 = (mantissa_hi20 << 3u) | (mantissa_lo32 >> 29u);
+    let f32_bits_h = (sign_bit << 31u) | (u32(f32_exp) << 23u) | top23;
+    let val_hi = bitcast<f32>(f32_bits_h);
+
+    let remaining = mantissa_lo32 & 0x1FFFFFFFu;
+    if (remaining == 0u) {
+        return emu_f64(val_hi, 0.0, 0.0, 0.0);
+    }
+
+    let lo_exp: i32 = exp_val - 29 + f32_exp_bias;
+    var val_lo: f32 = 0.0;
+    if (lo_exp > 0 && lo_exp < 255) {
+        let rem_f = f32(remaining);
+        let scale_exp: i32 = exp_val - 23 + f32_exp_bias;
+        if (scale_exp > 0 && scale_exp < 255) {
+            let scale_bits = u32(scale_exp) << 23u;
+            let scale = bitcast<f32>(scale_bits);
+            val_lo = (rem_f / 536870912.0) * scale;
+        }
+    }
+
+    if (sign_bit != 0u) {
+        val_lo = -val_lo;
+    }
+
+    let ts = f32_quick_two_sum(val_hi, val_lo);
+    return f32_quick_renorm(vec4<f32>(ts.x, ts.y, 0.0, 0.0), 0.0);
+}
+
+// Store emu_f64 back to IEEE 754 bits for buffer write
+fn f64_to_ieee754_bits(v: emu_f64) -> vec2<u32> {
+    // Only uses the top 2 floats right now to map back to IEEE 754
+    let val_hi = v.x;
+    let val_lo = v.y;
+
+    if (val_hi == 0.0 && val_lo == 0.0) {
+        return vec2<u32>(0u, 0u);
+    }
+
+    let f32_bits_h = bitcast<u32>(val_hi);
+    let sign = (f32_bits_h >> 31u) & 1u;
+    let f32_exp = (f32_bits_h >> 23u) & 0xFFu;
+    let f32_mantissa = f32_bits_h & 0x7FFFFFu;
+
+    let f32_bias: i32 = 127;
+    let f64_bias: i32 = 1023;
+    let exp_val: i32 = i32(f32_exp) - f32_bias;
+    let f64_exp: u32 = u32(exp_val + f64_bias);
+
+    var mantissa_hi20 = f32_mantissa >> 3u;
+    var mantissa_lo32 = (f32_mantissa & 0x7u) << 29u;
+
+    if (val_lo != 0.0) {
+        let scale_exp: i32 = exp_val - 23 + f32_bias;
+        if (scale_exp > 0 && scale_exp < 255) {
+            let scale_bits = u32(scale_exp) << 23u;
+            let scale = bitcast<f32>(scale_bits);
+            let abs_lo = abs(val_lo);
+            let rem_f = (abs_lo / scale) * 536870912.0;
+            let remaining = u32(clamp(rem_f + 0.5, 0.0, 536870911.0));
+            mantissa_lo32 = mantissa_lo32 | (remaining & 0x1FFFFFFFu);
+        }
+    }
+
+    let out_hi = (sign << 31u) | (f64_exp << 20u) | mantissa_hi20;
+    let out_lo = mantissa_lo32;
+    return vec2<u32>(out_lo, out_hi);
+}
+
+fn f64_from_f32(v: f32) -> emu_f64 {
+    return emu_f64(v, 0.0, 0.0, 0.0);
+}
+
+fn f64_to_f32(v: emu_f64) -> f32 {
+    return v.x + v.y + v.z + v.w;
+}
+
+fn f64_new(hi: f32, lo: f32) -> emu_f64 {
+    return emu_f64(hi, lo, 0.0, 0.0);
+}
+
+fn f64_neg(a: emu_f64) -> emu_f64 {
+    return emu_f64(-a.x, -a.y, -a.z, -a.w);
+}
+
+fn f64_add(a: emu_f64, b: emu_f64) -> emu_f64 {
+    var s0 = a.x + b.x;
+    var s1 = a.y + b.y;
+    var s2 = a.z + b.z;
+    var s3 = a.w + b.w;
+
+    let v0 = s0 - a.x;
+    let v1 = s1 - a.y;
+    let v2 = s2 - a.z;
+    let v3 = s3 - a.w;
+
+    let u0 = s0 - v0;
+    let u1 = s1 - v1;
+    let u2 = s2 - v2;
+    let u3 = s3 - v3;
+
+    let w0 = a.x - u0;
+    let w1 = a.y - u1;
+    let w2 = a.z - u2;
+    let w3 = a.w - u3;
+
+    let uu0 = b.x - v0;
+    let uu1 = b.y - v1;
+    let uu2 = b.z - v2;
+    let uu3 = b.w - v3;
+
+    var t0 = w0 + uu0;
+    var t1 = w1 + uu1;
+    var t2 = w2 + uu2;
+    var t3 = w3 + uu3;
+
+    let ts1 = f32_two_sum(s1, t0);
+    s1 = ts1.x; t0 = ts1.y;
+    
+    let ts2 = f32_three_sum(s2, t0, t1);
+    s2 = ts2.x; t0 = ts2.y; t1 = ts2.z;
+    
+    let ts3 = f32_three_sum2(s3, t0, t2);
+    s3 = ts3.x; t0 = ts3.y; t2 = ts3.z;
+    
+    t0 = t0 + t1 + t3;
+
+    return f32_quick_renorm(vec4<f32>(s0, s1, s2, s3), t0);
+}
+
+fn f64_sub(a: emu_f64, b: emu_f64) -> emu_f64 {
+    return f64_add(a, f64_neg(b));
+}
+
+fn f64_split(a: f32) -> vec2<f32> {
+    let c = 4097.0 * a;
+    let a_hi = c - (c - a);
+    let a_lo = a - a_hi;
+    return vec2<f32>(a_hi, a_lo);
+}
+
+fn f64_two_prod(a: f32, b: f32) -> vec2<f32> {
+    let p = a * b;
+    let a_s = f64_split(a);
+    let b_s = f64_split(b);
+    let e = ((a_s.x * b_s.x - p) + a_s.x * b_s.y + a_s.y * b_s.x) + a_s.y * b_s.y;
+    return vec2<f32>(p, e);
+}
+
+fn f64_mul(a: emu_f64, b: emu_f64) -> emu_f64 {
+    let pt0 = f64_two_prod(a.x, b.x); let p0 = pt0.x; var q0 = pt0.y;
+    let pt1 = f64_two_prod(a.x, b.y); let p1 = pt1.x; var q1 = pt1.y;
+    let pt2 = f64_two_prod(a.y, b.x); var p2 = pt2.x; var q2 = pt2.y;
+    let pt3 = f64_two_prod(a.x, b.z); var p3 = pt3.x; var q3 = pt3.y;
+    let pt4 = f64_two_prod(a.y, b.y); var p4 = pt4.x; var q4 = pt4.y;
+    let pt5 = f64_two_prod(a.z, b.x); var p5 = pt5.x; var q5 = pt5.y;
+
+    var ts1 = f32_three_sum(p1, p2, q0);
+    var np1 = ts1.x; p2 = ts1.y; var nq0 = ts1.z;
+    
+    var ts2 = f32_three_sum(p2, q1, q2);
+    var np2 = ts2.x; q1 = ts2.y; q2 = ts2.z;
+    
+    var ts3 = f32_three_sum(p3, p4, p5);
+    p3 = ts3.x; p4 = ts3.y; p5 = ts3.z;
+    
+    var ts4 = f32_two_sum(np2, p3);
+    var s0 = ts4.x; var t0 = ts4.y;
+    
+    var ts5 = f32_two_sum(q1, p4);
+    var s1 = ts5.x; var t1 = ts5.y;
+    
+    var s2 = q2 + p5;
+    
+    var ts6 = f32_two_sum(s1, t0);
+    s1 = ts6.x; t0 = ts6.y;
+    
+    s2 += (t0 + t1);
+    
+    s1 += a.x*b.w + a.y*b.z + a.z*b.y + a.w*b.x + nq0 + q3 + q4 + q5;
+    
+    return f32_quick_renorm(vec4<f32>(p0, np1, s0, s1), s2);
+}
+
+fn f64_div(a: emu_f64, b: emu_f64) -> emu_f64 {
+    let q0 = a.x / b.x;
+    var r = f64_sub(a, f64_mul(b, f64_from_f32(q0)));
+    
+    let q1 = r.x / b.x;
+    r = f64_sub(r, f64_mul(b, f64_from_f32(q1)));
+    
+    let q2 = r.x / b.x;
+    r = f64_sub(r, f64_mul(b, f64_from_f32(q2)));
+    
+    let q3 = r.x / b.x;
+    let qs1 = f64_add(f64_from_f32(q0), f64_from_f32(q1));
+    let qs2 = f64_add(f64_from_f32(q2), f64_from_f32(q3));
+    return f64_add(qs1, qs2);
+}
+
+fn f64_lt(a: emu_f64, b: emu_f64) -> bool {
+    return (a.x < b.x) || (a.x == b.x && a.y < b.y);
+}
+
+fn f64_le(a: emu_f64, b: emu_f64) -> bool {
+    return (a.x < b.x) || (a.x == b.x && a.y <= b.y);
+}
+
+fn f64_gt(a: emu_f64, b: emu_f64) -> bool {
+    return (a.x > b.x) || (a.x == b.x && a.y > b.y);
+}
+
+fn f64_ge(a: emu_f64, b: emu_f64) -> bool {
+    return (a.x > b.x) || (a.x == b.x && a.y >= b.y);
+}
+
+fn f64_eq(a: emu_f64, b: emu_f64) -> bool {
+    return a.x == b.x && a.y == b.y;
+}
+
+fn f64_ne(a: emu_f64, b: emu_f64) -> bool {
+    return a.x != b.x || a.y != b.y;
+}
+
+fn f64_abs(a: emu_f64) -> emu_f64 {
+    if (a.x < 0.0 || (a.x == 0.0 && a.y < 0.0)) {
+        return f64_neg(a);
+    }
+    return a;
+}
+
+fn f64_min(a: emu_f64, b: emu_f64) -> emu_f64 {
+    if (f64_lt(a, b)) { return a; }
+    return b;
+}
+
+fn f64_max(a: emu_f64, b: emu_f64) -> emu_f64 {
+    if (f64_gt(a, b)) { return a; }
+    return b;
+}
+";
+
+        #endregion
+
         #region Combined Library
 
         /// <summary>
         /// Gets the full emulation library based on which features are enabled.
         /// </summary>
-        public static string GetEmulationLibrary(bool includeF64, bool includeI64)
+        public static string GetEmulationLibrary(bool includeF64, bool useOzakiF64, bool includeI64)
         {
             var sb = new System.Text.StringBuilder();
 
             if (includeF64)
             {
-                sb.AppendLine(F64TypeAlias);
-                sb.AppendLine(F64Functions);
+                if (useOzakiF64)
+                {
+                    sb.AppendLine(OzakiF64TypeAlias);
+                    sb.AppendLine(OzakiF64Functions);
+                }
+                else
+                {
+                    sb.AppendLine(F64TypeAlias);
+                    sb.AppendLine(F64Functions);
+                }
             }
 
             if (includeI64)

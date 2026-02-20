@@ -593,6 +593,34 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             WGSLCodeGenerator.GeneratorArgs data)
         {
             var wgslSource = builder.ToString();
+
+            // Resolve the deferred enable subgroups placeholder.
+            // The placeholder was emitted in GenerateHeader() because the IR pre-scan
+            // may flag subgroup usage for nodes that are later handled via shared-memory
+            // emulation (e.g., 64-bit reductions). Now that the full WGSL is assembled,
+            // check if there are actual subgroup builtins in the shader body.
+            if (wgslSource.Contains("/*__WGSL_ENABLE_SUBGROUPS_PLACEHOLDER__*/"))
+            {
+                bool needsSubgroups = wgslSource.Contains("subgroup_size") ||
+                                      wgslSource.Contains("subgroup_invocation_id") ||
+                                      wgslSource.Contains("subgroupShuffle") ||
+                                      wgslSource.Contains("subgroupAdd") ||
+                                      wgslSource.Contains("subgroupMax") ||
+                                      wgslSource.Contains("subgroupMin") ||
+                                      wgslSource.Contains("subgroupBroadcastFirst") ||
+                                      wgslSource.Contains("subgroup_id");
+                if (needsSubgroups)
+                {
+                    wgslSource = wgslSource.Replace("/*__WGSL_ENABLE_SUBGROUPS_PLACEHOLDER__*/", "enable subgroups;");
+                }
+                else
+                {
+                    wgslSource = wgslSource.Replace("/*__WGSL_ENABLE_SUBGROUPS_PLACEHOLDER__*/\r\n", "");
+                    wgslSource = wgslSource.Replace("/*__WGSL_ENABLE_SUBGROUPS_PLACEHOLDER__*/\n", "");
+                    wgslSource = wgslSource.Replace("/*__WGSL_ENABLE_SUBGROUPS_PLACEHOLDER__*/", "");
+                }
+            }
+
             LastGeneratedWGSL = wgslSource;
             WebGPUBackend.Log("--- GENERATED WGSL ---");
             WebGPUBackend.Log(wgslSource);
