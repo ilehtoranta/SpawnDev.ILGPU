@@ -58,7 +58,7 @@ The [Live Demo](https://lostbeard.github.io/SpawnDev.ILGPU/) source is located i
 - **WGSL transpilation** — C# kernels automatically compiled to WebGPU Shading Language
 - **GLSL transpilation** — C# kernels compiled to GLSL ES 3.0 vertex shaders with Transform Feedback for GPU compute
 - **Wasm compilation** — C# kernels compiled to native WebAssembly binary modules
-- **64-bit emulation** — Support for `double` (f64) and `long` (i64) via software emulation on both GPU backends
+- **64-bit emulation** — Support for `double` (f64) and `long` (i64) via software emulation on both GPU backends, with two f64 schemes: fast Dekker (`vec2<f32>`) and precise Ozaki (`vec4<f32>`)
 - **WebGPU extension auto-detection** — Probes adapter for `shader-f16`, `subgroups`, `timestamp-query`, and other features; conditionally enables them on the device
 - **Subgroup operations** — `Group.Broadcast` and `Warp.Shuffle` are supported on the WebGPU backend when the browser supports the `subgroups` extension
 - **Multi-worker dispatch** — Wasm backend distributes work across all available CPU cores via SharedArrayBuffer; falls back to a single off-thread worker when SAB is unavailable
@@ -221,6 +221,41 @@ _test.bat
 
 GPU hardware typically only supports 32-bit operations. Both GPU backends (WebGPU and WebGL) provide software emulation for 64-bit types (`double`/f64 and `long`/i64), **enabled by default** for full precision parity with the Wasm and CPU backends.
 
+#### `double` (f64) Emulation Schemes
+
+The WebGPU backend offers two emulation schemes for `double` precision:
+
+| | **Dekker** (Default) | **Ozaki** |
+|---|---|---|
+| **Representation** | `vec2<f32>` (high + low) | `vec4<f32>` (quad-float) |
+| **Precision** | ~48–53 bits of mantissa | Strict IEEE 754 double precision |
+| **Memory** | 8 bytes per value | 16 bytes per value |
+| **Performance** | ⚡ Faster | 🐢 Slower (~2× overhead) |
+| **Best for** | General compute, fractals, most workloads | Scientific computing, financial calculations |
+| **Option** | `UseOzakiF64Emulation = false` | `UseOzakiF64Emulation = true` |
+
+```csharp
+// Default: Dekker double-float emulation (good precision, better performance)
+var options = new WebGPUBackendOptions();
+using var accelerator = await device.CreateAcceleratorAsync(context, options);
+
+// Ozaki quad-float emulation (strict IEEE 754 precision)
+var options = new WebGPUBackendOptions { UseOzakiF64Emulation = true };
+using var accelerator = await device.CreateAcceleratorAsync(context, options);
+
+// Disable f64 emulation entirely (double promoted to float for max performance)
+var options = new WebGPUBackendOptions { EnableF64Emulation = false };
+using var accelerator = await device.CreateAcceleratorAsync(context, options);
+```
+
+#### Configuration Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `EnableF64Emulation` | `true` | 64-bit float (`double`) emulation. When disabled, `double` is promoted to `float`. |
+| `UseOzakiF64Emulation` | `false` | Use Ozaki `vec4<f32>` scheme instead of Dekker `vec2<f32>` for strict IEEE 754 compliance. |
+| `EnableI64Emulation` | `true` | 64-bit integer (`long`/`ulong`) emulation via `vec2<u32>` double-word technique. |
+
 To disable emulation for better performance (at the cost of precision):
 
 ```csharp
@@ -234,11 +269,6 @@ using SpawnDev.ILGPU.WebGL.Backend;
 var options = new WebGLBackendOptions { EnableF64Emulation = false, EnableI64Emulation = false };
 using var accelerator = await device.CreateAcceleratorAsync(context, options);
 ```
-
-| Option | Default | Description |
-|--------|---------|-------------|
-| `EnableF64Emulation` | `true` | 64-bit float (`double`) emulation via double-float technique |
-| `EnableI64Emulation` | `true` | 64-bit integer (`long`) emulation via double-word technique |
 
 ## Wasm Backend
 
