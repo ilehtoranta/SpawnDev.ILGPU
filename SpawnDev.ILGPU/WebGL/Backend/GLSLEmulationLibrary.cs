@@ -482,18 +482,374 @@ uvec2 i64_abs(uvec2 a) {
 
         #endregion
 
+        #region emu_f64 Emulation (Ozaki Scheme using vec4)
+
+        /// <summary>
+        /// GLSL ES 3.0 helper functions for Ozaki emu_f64 emulation.
+        /// Uses quad-double arithmetic (vec4 = 4x float) with u_one anti-optimization.
+        /// Ported from WGSLEmulationLibrary.OzakiF64Functions.
+        /// </summary>
+        public const string OzakiF64Functions = @"
+// ============================================================================
+// emu_f64 Emulation Functions (Ozaki Scheme: vec4)
+// Implementing Quad-Double arithmetic based on Hida, Li, and Bailey's qd library.
+// Uses u_one anti-optimization barrier to prevent ANGLE/D3D11 from collapsing
+// error terms in double-float arithmetic.
+// ============================================================================
+
+// Anti-optimization barrier: u_one is set to 1.0 at runtime but is opaque to the
+// compiler, preventing it from simplifying expressions like (s * u_one - a).
+uniform highp float u_one;
+
+vec2 f32_two_sum(float a, float b) {
+    float s = (a + b);
+    float v = (s * u_one - a) * u_one;
+    float e = (a - (s - v) * u_one) * u_one * u_one * u_one + (b - v);
+    return vec2(s, e);
+}
+
+vec2 f32_quick_two_sum(float a, float b) {
+    float s = (a + b) * u_one;
+    float e = b - (s - a) * u_one;
+    return vec2(s, e);
+}
+
+vec3 f32_three_sum(float a, float b, float c) {
+    vec2 ts1 = f32_two_sum(a, b);
+    float t1 = ts1.x; float t2 = ts1.y;
+
+    vec2 ts2 = f32_two_sum(c, t1);
+    float out_a = ts2.x; float t3 = ts2.y;
+
+    vec2 ts3 = f32_two_sum(t2, t3);
+    float out_b = ts3.x; float out_c = ts3.y;
+
+    return vec3(out_a, out_b, out_c);
+}
+
+vec3 f32_three_sum2(float a, float b, float c) {
+    vec2 ts1 = f32_two_sum(a, b);
+    float t1 = ts1.x; float t2 = ts1.y;
+
+    vec2 ts2 = f32_two_sum(c, t1);
+    float out_a = ts2.x; float t3 = ts2.y;
+
+    float out_b = t2 + t3;
+    return vec3(out_a, out_b, ts2.y);
+}
+
+vec4 f32_quick_renorm(vec4 c_in, float e) {
+    float c0 = c_in.x, c1 = c_in.y, c2 = c_in.z, c3 = c_in.w, c4 = e;
+
+    vec2 ts1 = f32_quick_two_sum(c3, c4);
+    float s = ts1.x; float t3 = ts1.y;
+
+    vec2 ts2 = f32_quick_two_sum(c2, s);
+    s = ts2.x; float t2 = ts2.y;
+
+    vec2 ts3 = f32_quick_two_sum(c1, s);
+    s = ts3.x; float t1 = ts3.y;
+
+    vec2 ts4 = f32_quick_two_sum(c0, s);
+    c0 = ts4.x; float t0 = ts4.y;
+
+    vec2 ts5 = f32_quick_two_sum(t2, t3);
+    s = ts5.x; t2 = ts5.y;
+
+    vec2 ts6 = f32_quick_two_sum(t1, s);
+    s = ts6.x; t1 = ts6.y;
+
+    vec2 ts7 = f32_quick_two_sum(t0, s);
+    c1 = ts7.x; t0 = ts7.y;
+
+    vec2 ts8 = f32_quick_two_sum(t1, t2);
+    s = ts8.x; t1 = ts8.y;
+
+    vec2 ts9 = f32_quick_two_sum(t0, s);
+    c2 = ts9.x; t0 = ts9.y;
+
+    c3 = t0 + t1;
+
+    return vec4(c0, c1, c2, c3);
+}
+
+// --- IEEE 754 double bits to quad-float conversion ---
+vec4 f64_from_ieee754_bits(uint lo, uint hi) {
+    uint sign_bit = (hi >> 31u) & 1u;
+    uint exponent = (hi >> 20u) & 0x7FFu;
+    uint mantissa_hi20 = hi & 0xFFFFFu;
+    uint mantissa_lo32 = lo;
+
+    if (exponent == 0u && mantissa_hi20 == 0u && mantissa_lo32 == 0u) {
+        return vec4(0.0, 0.0, 0.0, 0.0);
+    }
+    if (exponent == 0x7FFu) {
+        return vec4(0.0, 0.0, 0.0, 0.0);
+    }
+
+    int exp_bias = 1023;
+    int exp_val = int(exponent) - exp_bias;
+    int f32_exp_bias = 127;
+    int f32_exp = exp_val + f32_exp_bias;
+
+    if (f32_exp <= 0 || f32_exp >= 255) {
+        uint f32_bits_approx = (sign_bit << 31u) | (uint(clamp(f32_exp, 1, 254)) << 23u) | (mantissa_hi20 << 3u);
+        float val_approx = intBitsToFloat(int(f32_bits_approx));
+        return vec4(val_approx, 0.0, 0.0, 0.0);
+    }
+
+    uint top23 = (mantissa_hi20 << 3u) | (mantissa_lo32 >> 29u);
+    uint f32_bits_h = (sign_bit << 31u) | (uint(f32_exp) << 23u) | top23;
+    float val_hi = intBitsToFloat(int(f32_bits_h));
+
+    uint remaining = mantissa_lo32 & 0x1FFFFFFFu;
+    if (remaining == 0u) {
+        return vec4(val_hi, 0.0, 0.0, 0.0);
+    }
+
+    int lo_exp = exp_val - 29 + f32_exp_bias;
+    float val_lo = 0.0;
+    if (lo_exp > 0 && lo_exp < 255) {
+        float rem_f = float(remaining);
+        int scale_exp = exp_val - 23 + f32_exp_bias;
+        if (scale_exp > 0 && scale_exp < 255) {
+            uint scale_bits = uint(scale_exp) << 23u;
+            float scale = intBitsToFloat(int(scale_bits));
+            val_lo = (rem_f / 536870912.0) * scale;
+        }
+    }
+
+    if (sign_bit != 0u) {
+        val_lo = -val_lo;
+    }
+
+    vec2 ts = f32_quick_two_sum(val_hi, val_lo);
+    return f32_quick_renorm(vec4(ts.x, ts.y, 0.0, 0.0), 0.0);
+}
+
+// Store emu_f64 back to IEEE 754 bits for buffer write
+uvec2 f64_to_ieee754_bits(vec4 v) {
+    float val_hi = v.x;
+    float val_lo = v.y;
+
+    if (val_hi == 0.0 && val_lo == 0.0) {
+        return uvec2(0u, 0u);
+    }
+
+    uint f32_bits_h = uint(floatBitsToInt(val_hi));
+    uint sign = (f32_bits_h >> 31u) & 1u;
+    uint f32_exp = (f32_bits_h >> 23u) & 0xFFu;
+    uint f32_mantissa = f32_bits_h & 0x7FFFFFu;
+
+    int f32_bias = 127;
+    int f64_bias = 1023;
+    int exp_val = int(f32_exp) - f32_bias;
+    uint f64_exp = uint(exp_val + f64_bias);
+
+    uint mantissa_hi20 = f32_mantissa >> 3u;
+    uint mantissa_lo32 = (f32_mantissa & 0x7u) << 29u;
+
+    if (val_lo != 0.0) {
+        int scale_exp = exp_val - 23 + f32_bias;
+        if (scale_exp > 0 && scale_exp < 255) {
+            uint scale_bits = uint(scale_exp) << 23u;
+            float scale = intBitsToFloat(int(scale_bits));
+            float abs_lo = abs(val_lo);
+            float rem_f = (abs_lo / scale) * 536870912.0;
+            uint rem_u = uint(clamp(rem_f + 0.5, 0.0, 536870911.0));
+            mantissa_lo32 = mantissa_lo32 | (rem_u & 0x1FFFFFFFu);
+        }
+    }
+
+    uint out_hi = (sign << 31u) | (f64_exp << 20u) | mantissa_hi20;
+    uint out_lo = mantissa_lo32;
+    return uvec2(out_lo, out_hi);
+}
+
+vec4 f64_from_f32(float v) { return vec4(v, 0.0, 0.0, 0.0); }
+float f64_to_f32(vec4 v) { return v.x + v.y + v.z + v.w; }
+vec4 f64_new(float hi, float lo) { return vec4(hi, lo, 0.0, 0.0); }
+vec4 f64_neg(vec4 a) { return vec4(-a.x, -a.y, -a.z, -a.w); }
+
+vec4 f64_add(vec4 a, vec4 b) {
+    float s0 = a.x + b.x;
+    float s1 = a.y + b.y;
+    float s2 = a.z + b.z;
+    float s3 = a.w + b.w;
+
+    float v0 = s0 - a.x;
+    float v1 = s1 - a.y;
+    float v2 = s2 - a.z;
+    float v3 = s3 - a.w;
+
+    float u0 = s0 - v0;
+    float u1 = s1 - v1;
+    float u2 = s2 - v2;
+    float u3 = s3 - v3;
+
+    float w0 = a.x - u0;
+    float w1 = a.y - u1;
+    float w2 = a.z - u2;
+    float w3 = a.w - u3;
+
+    float uu0 = b.x - v0;
+    float uu1 = b.y - v1;
+    float uu2 = b.z - v2;
+    float uu3 = b.w - v3;
+
+    float t0 = w0 + uu0;
+    float t1 = w1 + uu1;
+    float t2 = w2 + uu2;
+    float t3 = w3 + uu3;
+
+    vec2 ts1 = f32_two_sum(s1, t0);
+    s1 = ts1.x; t0 = ts1.y;
+
+    vec3 ts2 = f32_three_sum(s2, t0, t1);
+    s2 = ts2.x; t0 = ts2.y; t1 = ts2.z;
+
+    vec3 ts3 = f32_three_sum2(s3, t0, t2);
+    s3 = ts3.x; t0 = ts3.y; t2 = ts3.z;
+
+    t0 = t0 + t1 + t3;
+
+    return f32_quick_renorm(vec4(s0, s1, s2, s3), t0);
+}
+
+vec4 f64_sub(vec4 a, vec4 b) {
+    return f64_add(a, f64_neg(b));
+}
+
+vec2 f64_split_oz(float a) {
+    float c = 4097.0 * a;
+    float a_hi = c * u_one - (c - a);
+    float a_lo = a * u_one - a_hi;
+    return vec2(a_hi, a_lo);
+}
+
+vec2 f64_two_prod_oz(float a, float b) {
+    float p = a * b;
+    vec2 a_s = f64_split_oz(a);
+    vec2 b_s = f64_split_oz(b);
+    float e = ((a_s.x * b_s.x - p) * u_one + a_s.x * b_s.y * u_one * u_one
+        + a_s.y * b_s.x) + a_s.y * b_s.y * u_one * u_one * u_one;
+    return vec2(p, e);
+}
+
+vec4 f64_mul(vec4 a, vec4 b) {
+    vec2 pt0 = f64_two_prod_oz(a.x, b.x); float p0 = pt0.x; float q0 = pt0.y;
+    vec2 pt1 = f64_two_prod_oz(a.x, b.y); float p1 = pt1.x; float q1 = pt1.y;
+    vec2 pt2 = f64_two_prod_oz(a.y, b.x); float p2 = pt2.x; float q2 = pt2.y;
+    vec2 pt3 = f64_two_prod_oz(a.x, b.z); float p3 = pt3.x; float q3 = pt3.y;
+    vec2 pt4 = f64_two_prod_oz(a.y, b.y); float p4 = pt4.x; float q4 = pt4.y;
+    vec2 pt5 = f64_two_prod_oz(a.z, b.x); float p5 = pt5.x; float q5 = pt5.y;
+
+    vec3 ts1 = f32_three_sum(p1, p2, q0);
+    float np1 = ts1.x; p2 = ts1.y; float nq0 = ts1.z;
+
+    vec3 ts2 = f32_three_sum(p2, q1, q2);
+    float np2 = ts2.x; q1 = ts2.y; q2 = ts2.z;
+
+    vec3 ts3 = f32_three_sum(p3, p4, p5);
+    p3 = ts3.x; p4 = ts3.y; p5 = ts3.z;
+
+    vec2 ts4 = f32_two_sum(np2, p3);
+    float s0 = ts4.x; float ot0 = ts4.y;
+
+    vec2 ts5 = f32_two_sum(q1, p4);
+    float s1 = ts5.x; float ot1 = ts5.y;
+
+    float s2 = q2 + p5;
+
+    vec2 ts6 = f32_two_sum(s1, ot0);
+    s1 = ts6.x; ot0 = ts6.y;
+
+    s2 += (ot0 + ot1);
+
+    s1 += a.x*b.w + a.y*b.z + a.z*b.y + a.w*b.x + nq0 + q3 + q4 + q5;
+
+    return f32_quick_renorm(vec4(p0, np1, s0, s1), s2);
+}
+
+vec4 f64_div(vec4 a, vec4 b) {
+    float q0_d = a.x / b.x;
+    vec4 r = f64_sub(a, f64_mul(b, f64_from_f32(q0_d)));
+
+    float q1_d = r.x / b.x;
+    r = f64_sub(r, f64_mul(b, f64_from_f32(q1_d)));
+
+    float q2_d = r.x / b.x;
+    r = f64_sub(r, f64_mul(b, f64_from_f32(q2_d)));
+
+    float q3_d = r.x / b.x;
+    vec4 qs1 = f64_add(f64_from_f32(q0_d), f64_from_f32(q1_d));
+    vec4 qs2 = f64_add(f64_from_f32(q2_d), f64_from_f32(q3_d));
+    return f64_add(qs1, qs2);
+}
+
+bool f64_lt(vec4 a, vec4 b) {
+    return (a.x < b.x) || (a.x == b.x && a.y < b.y);
+}
+
+bool f64_le(vec4 a, vec4 b) {
+    return (a.x < b.x) || (a.x == b.x && a.y <= b.y);
+}
+
+bool f64_gt(vec4 a, vec4 b) {
+    return (a.x > b.x) || (a.x == b.x && a.y > b.y);
+}
+
+bool f64_ge(vec4 a, vec4 b) {
+    return (a.x > b.x) || (a.x == b.x && a.y >= b.y);
+}
+
+bool f64_eq(vec4 a, vec4 b) {
+    return a.x == b.x && a.y == b.y;
+}
+
+bool f64_ne(vec4 a, vec4 b) {
+    return a.x != b.x || a.y != b.y;
+}
+
+vec4 f64_abs(vec4 a) {
+    if (a.x < 0.0 || (a.x == 0.0 && a.y < 0.0)) {
+        return f64_neg(a);
+    }
+    return a;
+}
+
+vec4 f64_min(vec4 a, vec4 b) {
+    if (f64_lt(a, b)) { return a; }
+    return b;
+}
+
+vec4 f64_max(vec4 a, vec4 b) {
+    if (f64_gt(a, b)) { return a; }
+    return b;
+}
+";
+
+        #endregion
+
         #region Combined Library
 
         /// <summary>
         /// Gets the full emulation library based on which features are enabled.
         /// </summary>
-        public static string GetEmulationLibrary(bool includeF64, bool includeI64)
+        public static string GetEmulationLibrary(bool includeF64, bool useOzakiF64, bool includeI64)
         {
             var sb = new System.Text.StringBuilder();
 
             if (includeF64)
             {
-                sb.AppendLine(F64Functions);
+                if (useOzakiF64)
+                {
+                    sb.AppendLine(OzakiF64Functions);
+                }
+                else
+                {
+                    sb.AppendLine(F64Functions);
+                }
             }
 
             if (includeI64)

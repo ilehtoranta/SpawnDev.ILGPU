@@ -46,6 +46,10 @@ namespace SpawnDev.ILGPU.WebGL.Backend
 
         // Output buffer detection: only params with Store targets get TF varyings
         private readonly HashSet<int> _outputParamIndices = new();
+        // Multi-store TF: count of Store operations per output buffer (detected in pre-analysis)
+        private readonly Dictionary<int, int> _outputStoreCount = new();
+        // Multi-store TF: runtime counter for assigning store slots during code generation
+        private readonly Dictionary<int, int> _currentStoreSlot = new();
 
         // Input buffer detection: params with Load sources get sampler uniforms
         private readonly HashSet<int> _inputParamIndices = new();
@@ -60,6 +64,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         private Loops<ReversePostOrder, Forwards> _loops;
         private HashSet<BasicBlock> _visitedBlocks = new();
         private readonly Stack<BasicBlock> _activeLoopHeaders = new();
+        private int _loopCounter = 0;
 
         // Parameter binding info for runtime
         private readonly List<KernelParameterBinding> _parameterBindings = new();
@@ -143,19 +148,49 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         private void AnalyzeOutputBuffers()
         {
             int paramOffset = KernelParamOffset;
+            // Track unique LEA source expressions (array[index]) per param.
+            // Multiple LEA IR nodes for the same buffer[index] in different code paths
+            // should count as 1 store. Only LEAs with distinct indices (e.g., data[i*6+0]
+            // vs data[i*6+1]) represent true multi-store patterns.
+            var uniqueLeaExprs = new Dictionary<int, HashSet<string>>();
             foreach (var block in Method.Blocks)
             {
                 foreach (var value in block)
                 {
                     if (value.Value is Store store)
                     {
-                        // Trace: Store.Target → LEA → ... → Parameter
-                        var param = ResolveToParameterStatic(store.Target.Resolve());
+                        var target = store.Target.Resolve();
+                        var param = ResolveToParameterStatic(target);
                         if (param != null && param.Index >= paramOffset)
+                        {
                             _outputParamIndices.Add(param.Index);
+                            if (!uniqueLeaExprs.TryGetValue(param.Index, out var exprSet))
+                            {
+                                exprSet = new HashSet<string>();
+                                uniqueLeaExprs[param.Index] = exprSet;
+                            }
+                            // Use the LEA's source expression (array+index) as key.
+                            // LEA nodes like lea._1433: output_1408[index_1406] and
+                            // lea._1442: output_1408[index_1406] share the same source expression
+                            // and should count as 1.
+                            if (target is LoadElementAddress lea)
+                            {
+                                // Extract the source expression (Source[index]) for deduplication
+                                string sourceExpr = $"{lea.Source}[{lea.Offset}]";
+                                exprSet.Add(sourceExpr);
+                            }
+                            else
+                            {
+                                // Non-LEA targets are unique per store
+                                exprSet.Add(target.ToString());
+                            }
+                        }
                     }
                 }
             }
+            // Populate store counts from unique source expression counts
+            foreach (var kvp in uniqueLeaExprs)
+                _outputStoreCount[kvp.Key] = kvp.Value.Count;
         }
 
         /// <summary>
@@ -241,6 +276,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 Builder.AppendLine("// ============ 64-bit Emulation Library ============");
                 Builder.AppendLine(GLSLEmulationLibrary.GetEmulationLibrary(
                     Backend.Options.EnableF64Emulation && kernelNeedsF64,
+                    Backend.Options.UseOzakiF64Emulation,
                     Backend.Options.EnableI64Emulation && kernelNeedsI64));
             }
 
@@ -657,10 +693,27 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                         string flatPrefix = needsFlat ? "flat " : "";
                         // GLSL ES 3.0: precision qualifiers are illegal on struct types
                         string precisionPrefix = glslType.StartsWith("struct_") ? "" : "highp ";
-                        Builder.AppendLine($"{flatPrefix}out {precisionPrefix}{glslType} tf_out_{param.Index}; // TF output for param[{param.Index}]");
-                        var varyingInfo = new OutputVaryingInfo(param.Index, outIndex++, $"tf_out_{param.Index}", glslType);
-                        _outputVaryings.Add(varyingInfo);
-                        _generatorArgs.OutputVaryings.Add(varyingInfo);
+
+                        int storeCount = _outputStoreCount.GetValueOrDefault(param.Index, 1);
+                        if (storeCount > 1)
+                        {
+                            // Multi-store TF: emit N varyings (one per store slot)
+                            for (int slot = 0; slot < storeCount; slot++)
+                            {
+                                string varyingName = $"tf_out_{param.Index}_s{slot}";
+                                Builder.AppendLine($"{flatPrefix}out {precisionPrefix}{glslType} {varyingName}; // TF output for param[{param.Index}] slot {slot}/{storeCount}");
+                                var varyingInfo = new OutputVaryingInfo(param.Index, outIndex++, varyingName, glslType, storeSlot: slot, storeCount: storeCount);
+                                _outputVaryings.Add(varyingInfo);
+                                _generatorArgs.OutputVaryings.Add(varyingInfo);
+                            }
+                        }
+                        else
+                        {
+                            Builder.AppendLine($"{flatPrefix}out {precisionPrefix}{glslType} tf_out_{param.Index}; // TF output for param[{param.Index}]");
+                            var varyingInfo = new OutputVaryingInfo(param.Index, outIndex++, $"tf_out_{param.Index}", glslType);
+                            _outputVaryings.Add(varyingInfo);
+                            _generatorArgs.OutputVaryings.Add(varyingInfo);
+                        }
                     }
                 }
             }
@@ -887,8 +940,10 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             var loop = FindLoopForHeader(current);
             if (loop != null)
             {
-                // Emit while(true) for the loop
-                AppendLine("while (true) {");
+                // ANGLE D3D11 crashes on while(true) — use bounded for loop instead.
+                // The loop body's own break/condition controls actual iteration.
+                var loopVarName = $"_loop{_loopCounter++}";
+                AppendLine($"for (int {loopVarName} = 0; {loopVarName} < 100000; {loopVarName}++) {{");
                 PushIndent();
 
                 _activeLoopHeaders.Push(current);
@@ -1107,6 +1162,15 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             // Case 4: Both sides stay in loop — use post-dominator for merge
             var merge = _postDominators?.GetImmediateDominator(source);
 
+            // FIX: Temporarily mark the merge block as visited so that neither
+            // branch can consume it. Without this, GenerateLoopBody from the
+            // false target can follow unconditional branches past the clamp
+            // block into the merge block, incorrectly nesting the entire
+            // drawing/continuation code inside the else branch.
+            bool mergeWasVisited = merge != null && _visitedBlocks.Contains(merge);
+            if (merge != null && !mergeWasVisited)
+                _visitedBlocks.Add(merge);
+
             PushPhiValues(trueTarget, source);
             AppendLine($"if ({cond}) {{");
             PushIndent();
@@ -1132,6 +1196,10 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             }
             PopIndent();
             AppendLine("}");
+
+            // Remove the temporary visited mark so the merge block can be emitted
+            if (merge != null && !mergeWasVisited)
+                _visitedBlocks.Remove(merge);
 
             // Continue with merge block if it's in the loop
             if (merge != null && loop.Contains(merge) && !_visitedBlocks.Contains(merge))
@@ -1584,7 +1652,22 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                     }
                 }
 
-                var output = _outputVaryings.FirstOrDefault(o => o.ParamIndex == leaParamIdx);
+                int storeCount = _outputStoreCount.GetValueOrDefault(leaParamIdx, 1);
+                if (storeCount > 1)
+                {
+                    // Multi-store TF: route this store to the next sequential slot
+                    int slot = _currentStoreSlot.GetValueOrDefault(leaParamIdx, 0);
+                    var slotOutput = _outputVaryings.FirstOrDefault(o => o.ParamIndex == leaParamIdx && o.StoreSlot == slot);
+                    if (slotOutput != null)
+                    {
+                        string tfValExpr = CastIfNeeded(val, slotOutput.GlslType ?? "float");
+                        AppendLine($"{slotOutput.VaryingName} = {tfValExpr};");
+                        _currentStoreSlot[leaParamIdx] = slot + 1;
+                        return;
+                    }
+                }
+
+                var output = _outputVaryings.FirstOrDefault(o => o.ParamIndex == leaParamIdx && o.StoreSlot < 0);
                 if (output != null)
                 {
                     // Single-element TF output (one value per vertex invocation)
@@ -1816,7 +1899,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
 
             var leftType = TypeGenerator[value.Left.Type];
             var rightType = TypeGenerator[value.Right.Type];
-            bool isEmulatedF64 = Backend.Options.EnableF64Emulation && (leftType == "vec2" || rightType == "vec2");
+            bool isEmulatedF64 = Backend.Options.EnableF64Emulation && (leftType == "vec2" || rightType == "vec2" || (Backend.Options.UseOzakiF64Emulation && (leftType == "vec4" || rightType == "vec4")));
             bool isEmulatedI64 = Backend.Options.EnableI64Emulation && (leftType == "uvec2" || rightType == "uvec2");
 
             if (isEmulatedF64)
@@ -1901,7 +1984,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             var operandType = TypeGenerator[value.Value.Type];
             string prefix = _hoistedPrimitives.Contains(value) ? "" : $"{TypeGenerator[value.Type]} ";
 
-            bool isEmulatedF64 = Backend.Options.EnableF64Emulation && operandType == "vec2";
+            bool isEmulatedF64 = Backend.Options.EnableF64Emulation && (operandType == "vec2" || (Backend.Options.UseOzakiF64Emulation && operandType == "vec4"));
             bool isEmulatedI64 = Backend.Options.EnableI64Emulation && operandType == "uvec2";
 
             if (isEmulatedF64)
@@ -1939,7 +2022,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             string prefix = _hoistedPrimitives.Contains(value) ? "" : $"{TypeGenerator[value.Type]} ";
 
             var firstType = TypeGenerator[value.First.Type];
-            bool isEmulatedF64 = Backend.Options.EnableF64Emulation && firstType == "vec2";
+            bool isEmulatedF64 = Backend.Options.EnableF64Emulation && (firstType == "vec2" || (Backend.Options.UseOzakiF64Emulation && firstType == "vec4"));
 
             if (isEmulatedF64)
             {
@@ -1960,7 +2043,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             string prefix = _hoistedPrimitives.Contains(value) ? "" : "bool ";
 
             var leftType = TypeGenerator[value.Left.Type];
-            bool isEmulatedF64 = Backend.Options.EnableF64Emulation && leftType == "vec2";
+            bool isEmulatedF64 = Backend.Options.EnableF64Emulation && (leftType == "vec2" || (Backend.Options.UseOzakiF64Emulation && leftType == "vec4"));
             bool isEmulatedI64 = Backend.Options.EnableI64Emulation && leftType == "uvec2";
 
             if (isEmulatedF64)
@@ -1997,9 +2080,9 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             var sourceType = TypeGenerator[value.Value.Type];
             string prefix = _hoistedPrimitives.Contains(value) ? "" : $"{targetType} ";
 
-            bool isEmulatedF64Target = Backend.Options.EnableF64Emulation && targetType == "vec2";
+            bool isEmulatedF64Target = Backend.Options.EnableF64Emulation && (targetType == "vec2" || (Backend.Options.UseOzakiF64Emulation && targetType == "vec4"));
             bool isEmulatedI64Target = Backend.Options.EnableI64Emulation && targetType == "uvec2";
-            bool isEmulatedF64Source = Backend.Options.EnableF64Emulation && sourceType == "vec2";
+            bool isEmulatedF64Source = Backend.Options.EnableF64Emulation && (sourceType == "vec2" || (Backend.Options.UseOzakiF64Emulation && sourceType == "vec4"));
             bool isEmulatedI64Source = Backend.Options.EnableI64Emulation && sourceType == "uvec2";
 
             if (isEmulatedF64Target)
@@ -2184,8 +2267,14 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         /// <summary>For struct field varyings: the field index within the struct. -1 for non-struct.</summary>
         public int FieldIndex { get; }
 
+        /// <summary>For multi-store buffers: the slot index (0-based). -1 for single-store.</summary>
+        public int StoreSlot { get; }
+        /// <summary>For multi-store buffers: total number of stores per vertex. 1 for single-store.</summary>
+        public int StoreCount { get; }
+
         public OutputVaryingInfo(int paramIndex, int outputIndex, string varyingName, string glslType,
-            bool isEmulated = false, string? emulatedSuffix = null, int fieldIndex = -1)
+            bool isEmulated = false, string? emulatedSuffix = null, int fieldIndex = -1,
+            int storeSlot = -1, int storeCount = 1)
         {
             ParamIndex = paramIndex;
             OutputIndex = outputIndex;
@@ -2194,6 +2283,8 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             IsEmulated = isEmulated;
             EmulatedSuffix = emulatedSuffix;
             FieldIndex = fieldIndex;
+            StoreSlot = storeSlot;
+            StoreCount = storeCount;
         }
     }
 

@@ -430,7 +430,7 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
         }
 
         // Double/Long kernels
-        static void DoublePrecisionKernel(Index1D index, ArrayView<double> input, ArrayView<double> output) { output[index] = input[index] * 2.0 + 1.0; }
+        protected static void DoublePrecisionKernel(Index1D index, ArrayView<double> input, ArrayView<double> output) { output[index] = input[index] * 2.0 + 1.0; }
         static void LongIntegerKernel(Index1D index, ArrayView<long> data) { data[index] = data[index] * 2 + 1; }
         static void LongArithmeticKernel(Index1D index, ArrayView<long> a, ArrayView<long> b, ArrayView<long> output) { output[index] = (a[index] + b[index]) - (a[index] * 2); }
         static void LongBitwiseKernel(Index1D index, ArrayView<long> input, ArrayView<long> output) { long val = input[index]; long mask = 0x0F0F0F0F0F0F0F0FL; output[index] = (val & mask) | ((val >> 4) & mask); }
@@ -447,10 +447,10 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
         static void LongLargeDatasetKernel(Index1D index, ArrayView<long> data) { data[index] = data[index] * 2L + 1L; }
         static void LongNegativeValuesKernel(Index1D index, ArrayView<long> data) { data[index] = data[index] * -1L + data[index]; }
         static void DoubleNegationKernel(Index1D index, ArrayView<double> data) { data[index] = -data[index]; }
-        static void DoubleDivisionKernel(Index1D index, ArrayView<double> numerator, ArrayView<double> divisor, ArrayView<double> output) { output[index] = numerator[index] / divisor[index]; }
-        static void DoubleChainedOpsKernel(Index1D index, ArrayView<double> input, ArrayView<double> output) { output[index] = (input[index] * 2.5 + 1.0) / 3.0; }
+        protected static void DoubleDivisionKernel(Index1D index, ArrayView<double> numerator, ArrayView<double> divisor, ArrayView<double> output) { output[index] = numerator[index] / divisor[index]; }
+        protected static void DoubleChainedOpsKernel(Index1D index, ArrayView<double> input, ArrayView<double> output) { output[index] = (input[index] * 2.5 + 1.0) / 3.0; }
         static void DoubleLargeDatasetKernel(Index1D index, ArrayView<double> data) { data[index] = data[index] * 2.0 + 1.0; }
-        static void DoubleMinMaxKernel(Index1D index, ArrayView<double> a, ArrayView<double> b, ArrayView<double> output) { double va = a[index], vb = b[index]; output[index] = (va > vb ? va : vb) - (va < vb ? va : vb); }
+        protected static void DoubleMinMaxKernel(Index1D index, ArrayView<double> a, ArrayView<double> b, ArrayView<double> output) { double va = a[index], vb = b[index]; output[index] = (va > vb ? va : vb) - (va < vb ? va : vb); }
         protected static void DoublePrecisionVerifyKernel(Index1D index, ArrayView<double> data) { data[index] = data[index] * 10.0 / 10.0; }
 
         // More kernels

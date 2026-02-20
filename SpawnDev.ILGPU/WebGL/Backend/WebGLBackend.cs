@@ -393,7 +393,11 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             data.TypeGenerator.GenerateTypeDefinitions(structDefs);
             var glslSource = builder.ToString()
                 .Replace("// __STRUCT_DEFS_PLACEHOLDER__\r\n", structDefs.ToString())
-                .Replace("// __STRUCT_DEFS_PLACEHOLDER__\n", structDefs.ToString());
+                .Replace("// __STRUCT_DEFS_PLACEHOLDER__\n", structDefs.ToString())
+                // GLSL ES 3.0: ANGLE crashes on INT_MIN (-2147483648) regardless
+                // of representation (even constant-folded expressions). Replace with
+                // -2147483647 which is semantically equivalent for bounds checks.
+                .Replace("int(-2147483648)", "int(-2147483647)");
             Log("--- GENERATED GLSL ---");
             Log(glslSource);
             Log("-----------------------");

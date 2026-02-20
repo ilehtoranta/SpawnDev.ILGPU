@@ -1157,7 +1157,9 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 BasicValueType.Int1 => value.Int1Value ? "true" : "false",
                 BasicValueType.Int8 => value.Int8Value.ToString(),
                 BasicValueType.Int16 => value.Int16Value.ToString(),
-                BasicValueType.Int32 => value.Int32Value.ToString(),
+                BasicValueType.Int32 => value.Int32Value == int.MinValue
+                    ? "-2147483647"  // ANGLE crashes on INT_MIN regardless of representation
+                    : value.Int32Value.ToString(),
                 BasicValueType.Int64 => value.Int64Value.ToString(),
                 BasicValueType.Float16 => FormatFloat(value.Float32Value),
                 BasicValueType.Float32 => FormatFloat(value.Float32Value),

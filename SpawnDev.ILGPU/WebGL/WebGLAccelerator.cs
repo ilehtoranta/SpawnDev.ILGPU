@@ -580,6 +580,8 @@ namespace SpawnDev.ILGPU.WebGL
                                 isEmulated = outputInfo.IsEmulated,
                                 emulatedSuffix = outputInfo.EmulatedSuffix ?? "",
                                 fieldIndex = outputInfo.FieldIndex,
+                                storeSlot = outputInfo.StoreSlot,
+                                storeCount = outputInfo.StoreCount,
                                 argIndex = argsIdx,
                                 writeByteOffset = (int)contiguous.Index,
                                 writeLengthBytes = (int)contiguous.LengthInBytes
