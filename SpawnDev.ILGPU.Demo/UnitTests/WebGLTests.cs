@@ -82,6 +82,26 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
         public new async Task ILGPUReduceTest() =>
             throw new UnsupportedTestException("WebGL: GroupExtensions.Reduce requires shared memory + barriers + atomics, unsupported in vertex shaders");
 
+        [TestMethod]
+        public new async Task ILGPUReduceFloatTest() =>
+            throw new UnsupportedTestException("WebGL: GroupExtensions.Reduce unsupported in vertex shaders");
+
+        [TestMethod]
+        public new async Task ILGPUReduceDoubleTest() =>
+            throw new UnsupportedTestException("WebGL: GroupExtensions.Reduce unsupported in vertex shaders");
+
+        [TestMethod]
+        public new async Task ILGPUReduceLongTest() =>
+            throw new UnsupportedTestException("WebGL: GroupExtensions.Reduce unsupported in vertex shaders");
+
+        [TestMethod]
+        public new async Task ILGPUReduceUIntTest() =>
+            throw new UnsupportedTestException("WebGL: GroupExtensions.Reduce unsupported in vertex shaders");
+
+        [TestMethod]
+        public new async Task ILGPUReduceULongTest() =>
+            throw new UnsupportedTestException("WebGL: GroupExtensions.Reduce unsupported in vertex shaders");
+
         // --- Atomics (WebGL vertex shader TF pipeline has no atomic operations) ---
         [TestMethod]
         public new async Task AtomicTest() =>

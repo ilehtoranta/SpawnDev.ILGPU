@@ -371,8 +371,6 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
         [TestMethod]
         public async Task ILGPUReduceTest() => await RunTest(async accelerator =>
         {
-            // TEMP: Enable verbose logging to capture WGSL source for debugging
-            SpawnDev.ILGPU.WebGPU.Backend.WebGPUBackend.VerboseLogging = true;
             // Use the output-buffer overload to avoid blocking (CopyToCPU would deadlock in WASM).
             const int count = 256;
             var data = new int[count];
@@ -407,6 +405,202 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
             int expectedSum2 = count * (count + 1) / 2; // 32896
             if (sumResult[0] != expectedSum2)
                 throw new Exception($"Reduce<AddInt32> expected {expectedSum2}, got {sumResult[0]}");
+        });
+
+        // ==================== Reduce<float> ====================
+        [TestMethod]
+        public async Task ILGPUReduceFloatTest() => await RunTest(async accelerator =>
+        {
+            const int count = 256;
+            var data = new float[count];
+            for (int i = 0; i < count; i++) data[i] = (float)(i + 1); // 1f..256f
+
+            using var inputBuf = accelerator.Allocate1D(data);
+
+            // Max
+            using var maxOut = accelerator.Allocate1D<float>(1);
+            accelerator.Reduce<float, global::ILGPU.Algorithms.ScanReduceOperations.MaxFloat>(
+                accelerator.DefaultStream, inputBuf.View, maxOut.View);
+            await accelerator.SynchronizeAsync();
+            var maxResult = await maxOut.CopyToHostAsync<float>();
+            if (maxResult[0] != 256f)
+                throw new Exception($"Reduce<MaxFloat> expected 256, got {maxResult[0]}");
+
+            // Min
+            using var minOut = accelerator.Allocate1D<float>(1);
+            accelerator.Reduce<float, global::ILGPU.Algorithms.ScanReduceOperations.MinFloat>(
+                accelerator.DefaultStream, inputBuf.View, minOut.View);
+            await accelerator.SynchronizeAsync();
+            var minResult = await minOut.CopyToHostAsync<float>();
+            if (minResult[0] != 1f)
+                throw new Exception($"Reduce<MinFloat> expected 1, got {minResult[0]}");
+
+            // Sum
+            using var sumOut = accelerator.Allocate1D<float>(1);
+            accelerator.Reduce<float, global::ILGPU.Algorithms.ScanReduceOperations.AddFloat>(
+                accelerator.DefaultStream, inputBuf.View, sumOut.View);
+            await accelerator.SynchronizeAsync();
+            var sumResult = await sumOut.CopyToHostAsync<float>();
+            float expectedSum = count * (count + 1) / 2f; // 32896
+            if (Math.Abs(sumResult[0] - expectedSum) > 1f)
+                throw new Exception($"Reduce<AddFloat> expected {expectedSum}, got {sumResult[0]}");
+        });
+
+        // ==================== Reduce<double> ====================
+        [TestMethod]
+        public async Task ILGPUReduceDoubleTest() => await RunEmulatedTest(async accelerator =>
+        {
+            const int count = 256;
+            var data = new double[count];
+            for (int i = 0; i < count; i++) data[i] = (double)(i + 1);
+
+            using var inputBuf = accelerator.Allocate1D(data);
+
+            // Max
+            using var maxOut = accelerator.Allocate1D<double>(1);
+            accelerator.Reduce<double, global::ILGPU.Algorithms.ScanReduceOperations.MaxDouble>(
+                accelerator.DefaultStream, inputBuf.View, maxOut.View);
+            await accelerator.SynchronizeAsync();
+            var maxResult = await maxOut.CopyToHostAsync<double>();
+            if (maxResult[0] != 256.0)
+                throw new Exception($"Reduce<MaxDouble> expected 256, got {maxResult[0]}");
+
+            // Min
+            using var minOut = accelerator.Allocate1D<double>(1);
+            accelerator.Reduce<double, global::ILGPU.Algorithms.ScanReduceOperations.MinDouble>(
+                accelerator.DefaultStream, inputBuf.View, minOut.View);
+            await accelerator.SynchronizeAsync();
+            var minResult = await minOut.CopyToHostAsync<double>();
+            if (minResult[0] != 1.0)
+                throw new Exception($"Reduce<MinDouble> expected 1, got {minResult[0]}");
+
+            // Sum
+            using var sumOut = accelerator.Allocate1D<double>(1);
+            accelerator.Reduce<double, global::ILGPU.Algorithms.ScanReduceOperations.AddDouble>(
+                accelerator.DefaultStream, inputBuf.View, sumOut.View);
+            await accelerator.SynchronizeAsync();
+            var sumResult = await sumOut.CopyToHostAsync<double>();
+            double expectedSum = count * (count + 1) / 2.0; // 32896
+            if (Math.Abs(sumResult[0] - expectedSum) > 1.0)
+                throw new Exception($"Reduce<AddDouble> expected {expectedSum}, got {sumResult[0]}");
+        });
+
+        // ==================== Reduce<long> ====================
+        [TestMethod]
+        public async Task ILGPUReduceLongTest() => await RunEmulatedTest(async accelerator =>
+        {
+            SpawnDev.ILGPU.WebGPU.Backend.WebGPUBackend.VerboseLogging = true;
+            const int count = 256;
+            var data = new long[count];
+            for (int i = 0; i < count; i++) data[i] = (long)(i + 1);
+
+            using var inputBuf = accelerator.Allocate1D(data);
+
+            // Max
+            using var maxOut = accelerator.Allocate1D<long>(1);
+            accelerator.Reduce<long, global::ILGPU.Algorithms.ScanReduceOperations.MaxInt64>(
+                accelerator.DefaultStream, inputBuf.View, maxOut.View);
+            await accelerator.SynchronizeAsync();
+            var maxResult = await maxOut.CopyToHostAsync<long>();
+            if (maxResult[0] != 256L)
+                throw new Exception($"Reduce<MaxInt64> expected 256, got {maxResult[0]}");
+
+            // Min
+            using var minOut = accelerator.Allocate1D<long>(1);
+            accelerator.Reduce<long, global::ILGPU.Algorithms.ScanReduceOperations.MinInt64>(
+                accelerator.DefaultStream, inputBuf.View, minOut.View);
+            await accelerator.SynchronizeAsync();
+            var minResult = await minOut.CopyToHostAsync<long>();
+            if (minResult[0] != 1L)
+                throw new Exception($"Reduce<MinInt64> expected 1, got {minResult[0]}");
+
+            // Sum
+            using var sumOut = accelerator.Allocate1D<long>(1);
+            accelerator.Reduce<long, global::ILGPU.Algorithms.ScanReduceOperations.AddInt64>(
+                accelerator.DefaultStream, inputBuf.View, sumOut.View);
+            await accelerator.SynchronizeAsync();
+            var sumResult = await sumOut.CopyToHostAsync<long>();
+            long expectedSum = count * (count + 1L) / 2; // 32896
+            if (sumResult[0] != expectedSum)
+                throw new Exception($"Reduce<AddInt64> expected {expectedSum}, got {sumResult[0]}");
+        });
+
+        // ==================== Reduce<uint> ====================
+        [TestMethod]
+        public async Task ILGPUReduceUIntTest() => await RunTest(async accelerator =>
+        {
+            const int count = 256;
+            var data = new uint[count];
+            for (int i = 0; i < count; i++) data[i] = (uint)(i + 1);
+
+            using var inputBuf = accelerator.Allocate1D(data);
+
+            // Max
+            using var maxOut = accelerator.Allocate1D<uint>(1);
+            accelerator.Reduce<uint, global::ILGPU.Algorithms.ScanReduceOperations.MaxUInt32>(
+                accelerator.DefaultStream, inputBuf.View, maxOut.View);
+            await accelerator.SynchronizeAsync();
+            var maxResult = await maxOut.CopyToHostAsync<uint>();
+            if (maxResult[0] != 256u)
+                throw new Exception($"Reduce<MaxUInt32> expected 256, got {maxResult[0]}");
+
+            // Min
+            using var minOut = accelerator.Allocate1D<uint>(1);
+            accelerator.Reduce<uint, global::ILGPU.Algorithms.ScanReduceOperations.MinUInt32>(
+                accelerator.DefaultStream, inputBuf.View, minOut.View);
+            await accelerator.SynchronizeAsync();
+            var minResult = await minOut.CopyToHostAsync<uint>();
+            if (minResult[0] != 1u)
+                throw new Exception($"Reduce<MinUInt32> expected 1, got {minResult[0]}");
+
+            // Sum
+            using var sumOut = accelerator.Allocate1D<uint>(1);
+            accelerator.Reduce<uint, global::ILGPU.Algorithms.ScanReduceOperations.AddUInt32>(
+                accelerator.DefaultStream, inputBuf.View, sumOut.View);
+            await accelerator.SynchronizeAsync();
+            var sumResult = await sumOut.CopyToHostAsync<uint>();
+            uint expectedSum = (uint)(count * (count + 1) / 2); // 32896
+            if (sumResult[0] != expectedSum)
+                throw new Exception($"Reduce<AddUInt32> expected {expectedSum}, got {sumResult[0]}");
+        });
+
+        // ==================== Reduce<ulong> ====================
+        [TestMethod]
+        public async Task ILGPUReduceULongTest() => await RunEmulatedTest(async accelerator =>
+        {
+            const int count = 256;
+            var data = new ulong[count];
+            for (int i = 0; i < count; i++) data[i] = (ulong)(i + 1);
+
+            using var inputBuf = accelerator.Allocate1D(data);
+
+            // Max
+            using var maxOut = accelerator.Allocate1D<ulong>(1);
+            accelerator.Reduce<ulong, global::ILGPU.Algorithms.ScanReduceOperations.MaxUInt64>(
+                accelerator.DefaultStream, inputBuf.View, maxOut.View);
+            await accelerator.SynchronizeAsync();
+            var maxResult = await maxOut.CopyToHostAsync<ulong>();
+            if (maxResult[0] != 256UL)
+                throw new Exception($"Reduce<MaxUInt64> expected 256, got {maxResult[0]}");
+
+            // Min
+            using var minOut = accelerator.Allocate1D<ulong>(1);
+            accelerator.Reduce<ulong, global::ILGPU.Algorithms.ScanReduceOperations.MinUInt64>(
+                accelerator.DefaultStream, inputBuf.View, minOut.View);
+            await accelerator.SynchronizeAsync();
+            var minResult = await minOut.CopyToHostAsync<ulong>();
+            if (minResult[0] != 1UL)
+                throw new Exception($"Reduce<MinUInt64> expected 1, got {minResult[0]}");
+
+            // Sum
+            using var sumOut = accelerator.Allocate1D<ulong>(1);
+            accelerator.Reduce<ulong, global::ILGPU.Algorithms.ScanReduceOperations.AddUInt64>(
+                accelerator.DefaultStream, inputBuf.View, sumOut.View);
+            await accelerator.SynchronizeAsync();
+            var sumResult = await sumOut.CopyToHostAsync<ulong>();
+            ulong expectedSum = (ulong)(count * (count + 1) / 2); // 32896
+            if (sumResult[0] != expectedSum)
+                throw new Exception($"Reduce<AddUInt64> expected {expectedSum}, got {sumResult[0]}");
         });
     }
 }

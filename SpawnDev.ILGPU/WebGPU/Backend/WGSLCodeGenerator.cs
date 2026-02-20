@@ -601,11 +601,6 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             }
 
             // Check for intrinsic implementation
-            if (value is MethodCall dbgCall)
-            {
-                bool dbgHit = ImplementationProvider.TryGetCodeGenerator(value, out var _);
-                Console.WriteLine($"[WGSL-MC] MethodCall: {dbgCall.Target?.Source?.Name ?? "?"}, HasIntrinsic={dbgHit}, MethodFlags={dbgCall.Target?.Flags}");
-            }
             if (ImplementationProvider.TryGetCodeGenerator(value, out var intrinsicCodeGenerator))
             {
                 intrinsicCodeGenerator(Backend, this, value);
@@ -871,7 +866,55 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
             if (value.Kind == BinaryArithmeticKind.Min || value.Kind == BinaryArithmeticKind.Max)
             {
-                AppendLine($"{target} = {op}({left}, {right});");
+                // Check for emulated 64-bit types first.
+                // WGSL's min()/max() are component-wise on vec2, which is WRONG for 64-bit values.
+                // Use the emulation functions (i64_max, u64_max, f64_max, etc.) instead.
+                //
+                // Two detection paths:
+                // 1. TypeGenerator lookup → "emu_i64" / "emu_u64" / "emu_f64"
+                // 2. BasicValueType fallback → Int64/Float64 when emulation is enabled
+                //    This catches cases where IR intermediate values may not map correctly via TypeGenerator.
+                var leftType = TypeGenerator[value.Left.Type];
+                bool isEmu64 = leftType == "emu_i64" || leftType == "emu_u64" || leftType == "emu_f64";
+                
+                // Fallback: check BasicValueType when emulation options are enabled
+                if (!isEmu64 && Backend.Options.EnableI64Emulation && 
+                    (value.BasicValueType == BasicValueType.Int64))
+                {
+                    isEmu64 = true;
+                    leftType = value.IsUnsigned ? "emu_u64" : "emu_i64";
+                }
+                else if (!isEmu64 && Backend.Options.EnableF64Emulation && 
+                    value.BasicValueType == BasicValueType.Float64)
+                {
+                    isEmu64 = true;
+                    leftType = "emu_f64";
+                }
+                
+                if (isEmu64)
+                {
+                    string prefix = leftType switch
+                    {
+                        "emu_f64" => "f64",
+                        "emu_u64" => "u64",
+                        "emu_i64" => "i64",
+                        _ => "i64"
+                    };
+                    string emuOp = value.Kind == BinaryArithmeticKind.Max ? "max" : "min";
+                    AppendLine($"{target} = {prefix}_{emuOp}({left}, {right});");
+                }
+                // For unsigned integer min/max, WGSL's min()/max() are type-overloaded:
+                // min(i32, i32) is signed, min(u32, u32) is unsigned.
+                // When ILGPU flags the operation as unsigned, bitcast operands to u32
+                // and the result back to i32.
+                else if (value.IsUnsigned && value.BasicValueType == BasicValueType.Int32)
+                {
+                    AppendLine($"{target} = bitcast<i32>({op}(bitcast<u32>({left}), bitcast<u32>({right})));");
+                }
+                else
+                {
+                    AppendLine($"{target} = {op}({left}, {right});");
+                }
             }
             else
             {
@@ -972,7 +1015,22 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 _ => "=="
             };
 
-            AppendLine($"{target} = {left} {op} {right};");
+            // For unsigned integer comparisons, WGSL operators are type-sensitive:
+            // i32 < i32 is signed, u32 < u32 is unsigned.
+            // When ILGPU flags the comparison as unsigned, bitcast operands to u32.
+            bool needsUnsignedCast = value.IsUnsignedOrUnordered
+                && value.Left.BasicValueType == BasicValueType.Int32
+                && value.Kind != CompareKind.Equal
+                && value.Kind != CompareKind.NotEqual;
+
+            if (needsUnsignedCast)
+            {
+                AppendLine($"{target} = bitcast<u32>({left}) {op} bitcast<u32>({right});");
+            }
+            else
+            {
+                AppendLine($"{target} = {left} {op} {right};");
+            }
         }
 
         // Conversions
@@ -1006,6 +1064,16 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             {
                 AppendLine($"{target} = atomicLoad({source});");
             }
+            else if (sourceType == "emu_f64" || targetType == "emu_f64")
+            {
+                // emu_f64 (Dekker vec2<f32>) is NOT bit-compatible with IEEE-754 double.
+                // Buffers contain IEEE-754 bytes written by the C# host.
+                // Reinterpret the raw f32 pair as u32 bits and convert to Dekker format.
+                string rawBitsVar = $"_raw_bits_{target.Name}";
+                AppendLine($"let {rawBitsVar} = bitcast<vec2<u32>>(*{source});");
+                AppendLine($"{target} = f64_from_ieee754_bits({rawBitsVar}.x, {rawBitsVar}.y);");
+            }
+
             else if (targetType != sourceType)
             {
                 AppendLine($"{target} = bitcast<{targetType}>(*{source});");
@@ -1023,9 +1091,21 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
             bool isAtomic = IsAtomicPointer(storeVal.Target);
 
+            // Detect emu_f64 store: buffer stores IEEE-754 bytes, must convert from Dekker.
+            string targetElemType = "";
+            if (storeVal.Target.Type is global::ILGPU.IR.Types.PointerType storePtrType)
+                targetElemType = TypeGenerator[storePtrType.ElementType];
+
             if (isAtomic)
             {
                 AppendLine($"atomicStore({address}, {val});");
+            }
+            else if (targetElemType == "emu_f64")
+            {
+                // Convert Dekker emu_f64 result back to IEEE-754 bits before writing to buffer.
+                string outBitsVar = $"_out_bits_{val}";
+                AppendLine($"let {outBitsVar} = f64_to_ieee754_bits({val});");
+                AppendLine($"*{address} = bitcast<emu_f64>({outBitsVar});");
             }
             else
             {
@@ -1612,7 +1692,14 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 sourceMethodInfo.IsGenericMethod)
             {
                 string? subgroupOp = GetSubgroupReduceOp(sourceMethodInfo);
-                if (subgroupOp != null && HasSubgroups)
+                // Early-compute wgslType to check if 64-bit emulated
+                string earlyIrType = TypeGenerator[methodCall.Type];
+                string earlyWgslType = GetReductionWgslType(sourceMethodInfo) ?? earlyIrType;
+                bool is64BitReduce = earlyWgslType.StartsWith("emu_");
+
+                // CRITICAL: subgroupMax/Min/Add do NOT work on vec2<u32> (emulated 64-bit types).
+                // Force 64-bit types to the no-subgroups shared-memory path.
+                if (subgroupOp != null && HasSubgroups && !is64BitReduce)
                 {
                     AppendLine($"// Reduce fallback (group-level): {methodCall.Target.Name} -> {subgroupOp}");
                     var reduceSrc = methodCall.Count > 0 ? Load(methodCall[0]) : null;
@@ -1621,30 +1708,29 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                         // Signal kernel generator to declare _grp_sg_results workgroup array
                         UsesGroupReduce = true;
 
+                        // Determine effective WGSL type from TReduction (handles u32, f32, emu_* correctly)
+                        string irType = earlyIrType;
+                        string wgslType = earlyWgslType;
+                        bool needsBitcast = wgslType != irType;
+
                         // Determine scalar accumulation op from subgroupOp name
-                        // e.g. "subgroupMax" -> "max", "subgroupMin" -> "min", "subgroupAdd" -> "+"
                         string wgslAccumOp;
-                        string wgslType = TypeGenerator[methodCall.Type];
                         if (subgroupOp.EndsWith("Max", StringComparison.Ordinal))
                             wgslAccumOp = "max";
                         else if (subgroupOp.EndsWith("Min", StringComparison.Ordinal))
                             wgslAccumOp = "min";
                         else
-                            wgslAccumOp = "+"; // Add / or
+                            wgslAccumOp = "+";
 
-                        // Step 1: intra-subgroup reduce
+                        // Step 1: intra-subgroup reduce (with correct type for subgroup op)
                         string warpResult = $"_warp_sg_result_{target.Name}";
-                        AppendLine($"var {warpResult} : {wgslType} = {subgroupOp}({reduceSrc});");
+                        string srcExpr = needsBitcast ? $"bitcast<{wgslType}>({reduceSrc})" : $"{reduceSrc}";
+                        AppendLine($"var {warpResult} : {wgslType} = {subgroupOp}({srcExpr});");
 
                         // Step 2: first lane of each subgroup stores to _grp_sg_results
-                        // Pre-compute cast expressions to avoid nested-quote issues in interpolation
-                        bool isI32 = wgslType == "i32";
-                        string storeExpr = isI32 ? warpResult : $"i32({warpResult})";
-                        string load0Expr = isI32 ? "_grp_sg_results[0u]" : $"{wgslType}(_grp_sg_results[0u])";
-                        string loadNExpr = isI32 ? "_grp_sg_results[_sgi]" : $"{wgslType}(_grp_sg_results[_sgi])";
                         AppendLine($"if (subgroup_invocation_id == 0u) {{");
                         PushIndent();
-                        AppendLine($"_grp_sg_results[subgroup_id] = {storeExpr};");
+                        AppendLine($"_grp_sg_results[subgroup_id] = bitcast<u32>({warpResult});");
                         PopIndent();
                         AppendLine("}");
 
@@ -1652,6 +1738,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                         AppendLine("workgroupBarrier();");
 
                         // Step 4: all threads cooperatively reduce across subgroups
+                        string load0Expr = $"bitcast<{wgslType}>(_grp_sg_results[0u])";
+                        string loadNExpr = $"bitcast<{wgslType}>(_grp_sg_results[_sgi])";
                         AppendLine("{");
                         PushIndent();
                         AppendLine($"var _grp_accum : {wgslType} = {load0Expr};");
@@ -1665,27 +1753,29 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                             AppendLine($"_grp_accum = {wgslAccumOp}(_grp_accum, {elemExpr});");
                         PopIndent();
                         AppendLine("}");
-                        AppendLine($"{target} = _grp_accum;");
+                        // Write back, bitcasting to IR type if needed
+                        if (needsBitcast)
+                            AppendLine($"{target} = bitcast<{irType}>(_grp_accum);");
+                        else
+                            AppendLine($"{target} = _grp_accum;");
                         PopIndent();
                         AppendLine("}");
                         return;
                     }
                 }
-                else if (subgroupOp != null)
+                else if (subgroupOp != null || (subgroupOp != null && is64BitReduce))
                 {
-                    // No subgroups: workgroup-level shared-memory reduction.
-                    // Without native subgroup ops, the entire workgroup is one "warp".
-                    // ILGroupExtensions.AllReduce calls Warp.Reduce, then only IsFirstLane
-                    // does atomicMax. A passthrough here would lose all threads' values
-                    // except thread 0's. Instead, we use _warp_shuffle_buf to collect all
-                    // threads' values and reduce across the workgroup in shared memory.
+                    // No subgroups (or 64-bit emulated type): workgroup-level shared-memory reduction.
                     var reduceSrc = methodCall.Count > 0 ? Load(methodCall[0]) : null;
                     if (reduceSrc != null)
                     {
-                        // Signal that we need the shared memory buffer
                         UsesWarpShuffleEmulation = true;
 
-                        string wgslType = TypeGenerator[methodCall.Type];
+                        // Determine effective WGSL type from TReduction
+                        string irType = earlyIrType;
+                        string wgslType = earlyWgslType;
+                        bool needsBitcast = wgslType != irType;
+
                         string wgslAccumOp;
                         if (subgroupOp.EndsWith("Max", StringComparison.Ordinal))
                             wgslAccumOp = "max";
@@ -1694,28 +1784,51 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                         else
                             wgslAccumOp = "+";
 
-                        AppendLine($"// Reduce via shared memory (subgroups unavailable): {methodCall.Target.Name}");
+                        AppendLine($"// Reduce via shared memory{(is64BitReduce ? " (64-bit emulated)" : " (subgroups unavailable)")}: {methodCall.Target.Name}");
+
+                        bool is64Bit = is64BitReduce;
 
                         // Step 1: all threads write their value to shared memory
-                        AppendLine($"_warp_shuffle_buf[local_index] = bitcast<u32>({reduceSrc});");
+                        string storeVal = needsBitcast ? $"bitcast<{wgslType}>({reduceSrc})" : $"{reduceSrc}";
+                        if (is64Bit)
+                        {
+                            AppendLine($"_warp_shuffle_buf[local_index * 2u] = bitcast<u32>({storeVal}.x);");
+                            AppendLine($"_warp_shuffle_buf[local_index * 2u + 1u] = bitcast<u32>({storeVal}.y);");
+                        }
+                        else
+                        {
+                            AppendLine($"_warp_shuffle_buf[local_index] = bitcast<u32>({storeVal});");
+                        }
                         AppendLine("workgroupBarrier();");
 
                         // Step 2: all threads cooperatively reduce across the workgroup
-                        bool isI32 = wgslType == "i32";
-                        string load0 = isI32 ? "bitcast<i32>(_warp_shuffle_buf[0u])" : $"{wgslType}(bitcast<i32>(_warp_shuffle_buf[0u]))";
-                        string loadN = isI32 ? "bitcast<i32>(_warp_shuffle_buf[_ri])" : $"{wgslType}(bitcast<i32>(_warp_shuffle_buf[_ri]))";
+                        string componentType = wgslType == "emu_f64" ? "f32" : "u32";
+                        string load0, loadN;
+                        if (is64Bit)
+                        {
+                            load0 = $"{wgslType}(bitcast<{componentType}>(_warp_shuffle_buf[0u]), bitcast<{componentType}>(_warp_shuffle_buf[1u]))";
+                            loadN = $"{wgslType}(bitcast<{componentType}>(_warp_shuffle_buf[_ri * 2u]), bitcast<{componentType}>(_warp_shuffle_buf[_ri * 2u + 1u]))";
+                        }
+                        else
+                        {
+                            load0 = $"bitcast<{wgslType}>(_warp_shuffle_buf[0u])";
+                            loadN = $"bitcast<{wgslType}>(_warp_shuffle_buf[_ri])";
+                        }
                         AppendLine("{");
                         PushIndent();
                         AppendLine($"var _reduce_accum : {wgslType} = {load0};");
                         AppendLine("for (var _ri : u32 = 1u; _ri < workgroup_size.x; _ri++) {");
                         PushIndent();
-                        if (wgslAccumOp == "+")
-                            AppendLine($"_reduce_accum = _reduce_accum + {loadN};");
-                        else
-                            AppendLine($"_reduce_accum = {wgslAccumOp}(_reduce_accum, {loadN});");
+                        // For 64-bit emulated types, use emulated math helpers instead of
+                        // WGSL built-ins (max/min do component-wise on vec2, + lacks carry propagation)
+                        string accumExpr = GetEmulated64BitAccumExpr(is64Bit, wgslType, wgslAccumOp, "_reduce_accum", loadN);
+                        AppendLine($"_reduce_accum = {accumExpr};");
                         PopIndent();
                         AppendLine("}");
-                        AppendLine($"{target} = _reduce_accum;");
+                        if (needsBitcast)
+                            AppendLine($"{target} = bitcast<{irType}>(_reduce_accum);");
+                        else
+                            AppendLine($"{target} = _reduce_accum;");
                         PopIndent();
                         AppendLine("}");
                         AppendLine("workgroupBarrier();");
@@ -1790,6 +1903,20 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         /// </summary>
         protected virtual bool IsFloatAtomicTarget(Value target) => false;
 
+        /// <summary>
+        /// Returns true if the atomic target pointer resolves to an unsigned-typed parameter.
+        /// WGSL's atomicMin/atomicMax on i32 do signed comparisons, so unsigned reductions need
+        /// atomic&lt;u32&gt; buffers and bitcast values to u32 for correct unsigned semantics.
+        /// </summary>
+        protected virtual bool IsUnsignedAtomicTarget(Value target) => false;
+
+        /// <summary>
+        /// Returns true if the atomic target pointer resolves to a buffer with emulated 64-bit
+        /// element type (emu_i64, emu_u64, emu_f64). WGSL doesn't support atomic operations on
+        /// vec2&lt;u32&gt;, so these use plain storage and direct stores.
+        /// </summary>
+        protected virtual bool IsEmulated64BitAtomicTarget(Value target) => false;
+
         public virtual void GenerateCode(GenericAtomic value)
         {
             var target = Load(value);
@@ -1798,6 +1925,76 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             Declare(target);
 
             // WGSL only supports atomicAdd/Min/Max/etc. on i32 and u32.
+            // Emulated 64-bit types (emu_i64, emu_u64, emu_f64 = vec2<u32>) cannot use WGSL atomics.
+            // The reduction algorithm already accumulates via shared memory; only thread 0 writes
+            // the final result, so a plain store is safe (no race condition).
+            //
+            // Detection: check both the explicit body-struct tracking AND the value's IR type.
+            // The IR value type for emulated 64-bit is vec2<u32> (BasicValueType.None for struct types),
+            // but we can also check via TypeGenerator which maps to emu_i64/emu_u64/emu_f64.
+            string valWgslType = TypeGenerator[value.Value.Type];
+            bool isEmu64 = IsEmulated64BitAtomicTarget(value.Target)
+                || valWgslType == "emu_i64" || valWgslType == "emu_u64" || valWgslType == "emu_f64";
+            if (isEmu64)
+            {
+                // For emulated 64-bit: read-compare-write using emulation functions.
+                // Only thread 0 writes, so no race, but we still emit a compare-and-store
+                // pattern since the output buffer may have the identity value.
+                string prefix = valWgslType switch
+                {
+                    "emu_f64" => "f64",
+                    "emu_u64" => "u64",
+                    // NOTE: TypeGenerator returns "emu_i64" for BOTH long AND ulong, because ILGPU's
+                    // BasicValueType enum has no UInt64 member. Must also check value.IsUnsigned.
+                    "emu_i64" => value.IsUnsigned ? "u64" : "i64",
+                    _ => value.IsUnsigned ? "u64" : "i64"
+                };
+
+                string emuOp = value.Kind switch
+                {
+                    AtomicKind.Max => $"{prefix}_max",
+                    AtomicKind.Min => $"{prefix}_min",
+                    AtomicKind.Add => $"{prefix}_add",
+                    AtomicKind.Exchange => null,  // plain store
+                    _ => $"{prefix}_add"
+                };
+                if (emuOp != null)
+                {
+                    // Read current value, apply op, write back
+                    string oldVar = $"_emu64_old_{target.Name}";
+                    if (valWgslType == "emu_f64")
+                    {
+                        // emu_f64 (Dekker vec2<f32>) is NOT bit-compatible with IEEE-754 double.
+                        // The output buffer stores IEEE-754 bytes written by the C# host.
+                        // Must: (1) read raw f32 pair, bitcast to u32, convert to Dekker for arithmetic,
+                        //        (2) after op, convert Dekker result back to IEEE-754 bits before storing.
+                        string rawOldVar = $"_raw_old_{target.Name}";
+                        string resultVar = $"_result_{target.Name}";
+                        string ieeeBitsVar = $"_ieee_bits_{target.Name}";
+                        AppendLine($"let {rawOldVar} = *{ptr};");
+                        AppendLine($"let {oldVar} = f64_from_ieee754_bits(bitcast<u32>({rawOldVar}.x), bitcast<u32>({rawOldVar}.y));");
+                        AppendLine($"let {resultVar} = {emuOp}({oldVar}, {val});");
+                        AppendLine($"let {ieeeBitsVar} = f64_to_ieee754_bits({resultVar});");
+                        AppendLine($"*{ptr} = emu_f64(bitcast<f32>({ieeeBitsVar}.x), bitcast<f32>({ieeeBitsVar}.y));");
+                        AppendLine($"{target} = {oldVar};");
+                    }
+                    else
+                    {
+                        AppendLine($"let {oldVar} = *{ptr};");
+                        AppendLine($"*{ptr} = {emuOp}({oldVar}, {val});");
+                        AppendLine($"{target} = {oldVar};");
+                    }
+                }
+
+                else
+                {
+                    // Exchange: plain store
+                    AppendLine($"*{ptr} = {val};");
+                    AppendLine($"{target} = {val};");
+                }
+                return;
+            }
+
             // Float atomics (f32/f16) must be emulated using a CAS loop on atomic<u32>.
             if (IsFloatAtomicTarget(value.Target))
             {
@@ -1828,6 +2025,24 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 PopIndent();
                 AppendLine($"}}");
                 AppendLine($"{target} = bitcast<{target.Type}>({casOld});");
+            }
+            else if (IsUnsignedAtomicTarget(value.Target))
+            {
+                // Buffer is atomic<u32>. Values from ILGPU IR are i32, need bitcast to u32.
+                string op = value.Kind switch
+                {
+                    AtomicKind.Add => "atomicAdd",
+                    AtomicKind.And => "atomicAnd",
+                    AtomicKind.Or => "atomicOr",
+                    AtomicKind.Xor => "atomicXor",
+                    AtomicKind.Max => "atomicMax",
+                    AtomicKind.Min => "atomicMin",
+                    AtomicKind.Exchange => "atomicExchange",
+                    _ => "atomicAdd"
+                };
+
+                // Bitcast value to u32 for unsigned atomic semantics
+                AppendLine($"{target} = bitcast<i32>({op}({ptr}, bitcast<u32>({val})));");
             }
             else
             {
@@ -2264,7 +2479,59 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             Console.WriteLine($"[WGSL-DBG] srcMethodInfo={srcMethodInfo?.Name}, isGeneric={srcMethodInfo?.IsGenericMethod}, genericArgs={string.Join(",", srcMethodInfo?.GetGenericArguments()?.Select(t => t.Name) ?? Array.Empty<string>())}");
             string? wgslOp = GetSubgroupReduceOp(srcMethodInfo);
             string? identityExpr = GetReductionIdentityExpr(srcMethodInfo);
+
+            // Determine the WGSL scalar type for this reduction early (needed for is64Bit check)
+            string irType = codeGenerator.TypeGenerator[methodCall.Type];
+            string wgslType = codeGenerator.GetReductionWgslType(srcMethodInfo) ?? irType;
+            bool needsBitcast = wgslType != irType;
+            bool is64Bit = wgslType.StartsWith("emu_"); // emu_i64, emu_u64, emu_f64 are vec2 types
+
             Console.WriteLine($"[WGSL-DBG] HasSubgroups={backend.HasSubgroups}, wgslOp={wgslOp}, identityExpr={identityExpr}");
+
+            // CRITICAL: subgroupMax/Min/Add do NOT work on vec2<u32> (emulated 64-bit types).
+            if (is64Bit && wgslOp != null && identityExpr != null)
+            {
+                Console.WriteLine($"[WGSL-DBG] GenerateGroupAllReduce: 64-bit shared-memory reduction, wgslType={wgslType}");
+                // For 64-bit emulated types, perform a complete shared-memory reduction
+                // since subgroup ops don't support vec2<u32>.
+                codeGenerator.UsesWarpShuffleEmulation = true;
+
+                // Determine accumulation op
+                string wgslAccumOp;
+                if (wgslOp.EndsWith("Max", StringComparison.Ordinal))
+                    wgslAccumOp = "max";
+                else if (wgslOp.EndsWith("Min", StringComparison.Ordinal))
+                    wgslAccumOp = "min";
+                else
+                    wgslAccumOp = "+";
+
+                string sfx64 = target.Name.Replace("v_", "_").TrimStart('_');
+
+                // Step 1: all threads write their value to shared memory (2 u32 slots per thread)
+                string storeVal = needsBitcast ? $"bitcast<{wgslType}>({operand})" : $"{operand}";
+                codeGenerator.AppendLine($"_warp_shuffle_buf[local_index * 2u] = bitcast<u32>({storeVal}.x);");
+                codeGenerator.AppendLine($"_warp_shuffle_buf[local_index * 2u + 1u] = bitcast<u32>({storeVal}.y);");
+                codeGenerator.AppendLine("workgroupBarrier();");
+
+                // Step 2: all threads cooperatively reduce across the workgroup
+                string componentType = wgslType == "emu_f64" ? "f32" : "u32";
+                string load0 = $"{wgslType}(bitcast<{componentType}>(_warp_shuffle_buf[0u]), bitcast<{componentType}>(_warp_shuffle_buf[1u]))";
+                string loadN = $"{wgslType}(bitcast<{componentType}>(_warp_shuffle_buf[_ri_{sfx64} * 2u]), bitcast<{componentType}>(_warp_shuffle_buf[_ri_{sfx64} * 2u + 1u]))";
+
+                codeGenerator.AppendLine("{");
+                codeGenerator.AppendLine($"    var _reduce_accum_{sfx64} : {wgslType} = {load0};");
+                codeGenerator.AppendLine($"    for (var _ri_{sfx64} : u32 = 1u; _ri_{sfx64} < workgroup_size.x; _ri_{sfx64}++) {{");
+                string accumExpr = GetEmulated64BitAccumExpr(true, wgslType, wgslAccumOp, $"_reduce_accum_{sfx64}", loadN);
+                codeGenerator.AppendLine($"        _reduce_accum_{sfx64} = {accumExpr};");
+                codeGenerator.AppendLine("    }");
+                if (needsBitcast)
+                    codeGenerator.AppendLine($"    {target} = bitcast<{irType}>(_reduce_accum_{sfx64});");
+                else
+                    codeGenerator.AppendLine($"    {target} = _reduce_accum_{sfx64};");
+                codeGenerator.AppendLine("}");
+                codeGenerator.AppendLine("workgroupBarrier();");
+                return;
+            }
 
             if (!backend.HasSubgroups || wgslOp == null || identityExpr == null)
             {
@@ -2277,12 +2544,25 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             // Generate unique variable names using target name as a suffix to avoid clashes in inlined code.
             string sfx = target.Name.Replace("v_", "_").TrimStart('_');
 
+            // Wrap operand in bitcast if needed (e.g., i32 -> u32 for unsigned reductions)
+            string operandExpr = needsBitcast ? $"bitcast<{wgslType}>({operand})" : $"{operand}";
+
             // === Step 1: Per-subgroup reduction ===
-            codeGenerator.AppendLine($"let _sg_part_{sfx} = {wgslOp}({operand}); // per-subgroup partial reduce");
+            codeGenerator.AppendLine($"let _sg_part_{sfx} = {wgslOp}({operandExpr}); // per-subgroup partial reduce");
 
             // === Step 2: Lane 0 of each subgroup stores partial result ===
             codeGenerator.AppendLine($"if (subgroup_invocation_id == 0u) {{");
-            codeGenerator.AppendLine($"    _grp_sg_results[subgroup_id] = _sg_part_{sfx};");
+            if (is64Bit)
+            {
+                // 64-bit emulated types need 2 consecutive u32 slots per subgroup
+                codeGenerator.AppendLine($"    _grp_sg_results[subgroup_id * 2u] = bitcast<u32>(_sg_part_{sfx}.x);");
+                codeGenerator.AppendLine($"    _grp_sg_results[subgroup_id * 2u + 1u] = bitcast<u32>(_sg_part_{sfx}.y);");
+            }
+            else
+            {
+                // 32-bit types: bitcast to u32 for storage (works for i32, u32, f32)
+                codeGenerator.AppendLine($"    _grp_sg_results[subgroup_id] = bitcast<u32>(_sg_part_{sfx});");
+            }
             codeGenerator.AppendLine($"}}");
 
             // === Step 3: Synchronise so all subgroup slots are visible ===
@@ -2292,18 +2572,45 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             // Number of subgroups = ceil(workgroup_size.x / subgroup_size)
             // Lane i of subgroup 0 reads slot i (padded with identity if i >= num_subgroups)
             codeGenerator.AppendLine($"let _num_sg_{sfx} = (workgroup_size.x + subgroup_size - 1u) / subgroup_size;");
-            codeGenerator.AppendLine($"let _sg0_val_{sfx} = select({identityExpr}, _grp_sg_results[subgroup_invocation_id],");
+            if (is64Bit)
+            {
+                string loadExpr = $"{wgslType}(bitcast<{(wgslType == "emu_f64" ? "f32" : "u32")}>(_grp_sg_results[subgroup_invocation_id * 2u]), bitcast<{(wgslType == "emu_f64" ? "f32" : "u32")}>(_grp_sg_results[subgroup_invocation_id * 2u + 1u]))";
+                codeGenerator.AppendLine($"let _sg0_val_{sfx} = select({identityExpr}, {loadExpr},");
+            }
+            else
+            {
+                string loadExpr = $"bitcast<{wgslType}>(_grp_sg_results[subgroup_invocation_id])";
+                codeGenerator.AppendLine($"let _sg0_val_{sfx} = select({identityExpr}, {loadExpr},");
+            }
             codeGenerator.AppendLine($"    subgroup_invocation_id < _num_sg_{sfx});");
             codeGenerator.AppendLine($"let _final_{sfx} = {wgslOp}(_sg0_val_{sfx}); // second-level reduce across subgroup slots");
 
             // === Step 5: Thread (0,0) writes final result back so all threads can read it ===
             codeGenerator.AppendLine($"if (subgroup_id == 0u && subgroup_invocation_id == 0u) {{");
-            codeGenerator.AppendLine($"    _grp_sg_results[0] = _final_{sfx};");
+            if (is64Bit)
+            {
+                codeGenerator.AppendLine($"    _grp_sg_results[0] = bitcast<u32>(_final_{sfx}.x);");
+                codeGenerator.AppendLine($"    _grp_sg_results[1] = bitcast<u32>(_final_{sfx}.y);");
+            }
+            else
+            {
+                codeGenerator.AppendLine($"    _grp_sg_results[0] = bitcast<u32>(_final_{sfx});");
+            }
             codeGenerator.AppendLine($"}}");
 
             // === Step 6: Sync and all threads read the final group-wide result ===
             codeGenerator.AppendLine($"workgroupBarrier();");
-            codeGenerator.AppendLine($"{target} = _grp_sg_results[0];");
+            if (is64Bit)
+            {
+                string comp = wgslType == "emu_f64" ? "f32" : "u32";
+                string readExpr = $"{wgslType}(bitcast<{comp}>(_grp_sg_results[0]), bitcast<{comp}>(_grp_sg_results[1]))";
+                codeGenerator.AppendLine($"{target} = {(needsBitcast ? $"bitcast<{irType}>({readExpr})" : readExpr)};");
+            }
+            else
+            {
+                string readExpr = $"bitcast<{wgslType}>(_grp_sg_results[0])";
+                codeGenerator.AppendLine($"{target} = {(needsBitcast ? $"bitcast<{irType}>({readExpr})" : readExpr)};");
+            };
         }
 
         /// <summary>
@@ -2335,8 +2642,14 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 {
                     int i => i.ToString(),
                     uint u => $"{u}u",
-                    float f => float.IsNegativeInfinity(f) ? "-3.40282347e+38f" : f.ToString("G9") + "f",
-                    long l => $"{(int)l}", // emu_i64 – just use low bits for identity (0 or MIN_INT)
+                    float f => float.IsNegativeInfinity(f)
+                        ? "-3.40282347e+38f"
+                        : float.IsPositiveInfinity(f)
+                            ? "3.40282347e+38f"
+                            : f.ToString("G9") + "f",
+                    long l => LongToEmuI64(l),
+                    ulong ul => ULongToEmuU64(ul),
+                    double d => DoubleToEmuF64(d),
                     _ => identity?.ToString() ?? "0",
                 };
             }
@@ -2346,6 +2659,42 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             }
         }
 
+
+        /// <summary>
+        /// Converts a long value to its WGSL emu_i64 (vec2&lt;u32&gt;) literal representation.
+        /// The low 32 bits go in .x, the high 32 bits in .y.
+        /// </summary>
+        private static string LongToEmuI64(long value)
+        {
+            ulong bits = unchecked((ulong)value);
+            uint lo = (uint)(bits & 0xFFFFFFFF);
+            uint hi = (uint)(bits >> 32);
+            return $"emu_i64({lo}u, {hi}u)";
+        }
+
+        /// <summary>
+        /// Converts a ulong value to its WGSL emu_u64 (vec2&lt;u32&gt;) literal representation.
+        /// The low 32 bits go in .x, the high 32 bits in .y.
+        /// </summary>
+        private static string ULongToEmuU64(ulong value)
+        {
+            uint lo = (uint)(value & 0xFFFFFFFF);
+            uint hi = (uint)(value >> 32);
+            return $"emu_u64({lo}u, {hi}u)";
+        }
+
+        /// <summary>
+        /// Converts a double value to its WGSL emu_f64 (vec2&lt;f32&gt;) literal representation.
+        /// Uses bitcast to split the 64-bit IEEE 754 double into two u32 words,
+        /// then bitcasts each to f32 for vec2&lt;f32&gt; storage.
+        /// </summary>
+        private static string DoubleToEmuF64(double value)
+        {
+            ulong bits = BitConverter.DoubleToUInt64Bits(value);
+            uint lo = (uint)(bits & 0xFFFFFFFF);
+            uint hi = (uint)(bits >> 32);
+            return $"emu_f64(bitcast<f32>({lo}u), bitcast<f32>({hi}u))";
+        }
 
         /// <summary>
         /// Extracts the WGSL subgroup operation name from an open or specialized generic
@@ -2389,6 +2738,76 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             {
                 return null;
             }
+        }
+
+        /// <summary>
+        /// Determines the effective WGSL element type for a reduction based on the TReduction
+        /// generic type argument (e.g., MaxUInt32 → "u32", MaxFloat32 → "f32").
+        /// ILGPU's IR doesn't distinguish i32/u32, so we must inspect TReduction to get
+        /// the correct WGSL type for subgroup and atomic operations that are type-sensitive.
+        /// Returns null if the type cannot be determined (caller should fall back to TypeGenerator).
+        /// </summary>
+        private string? GetReductionWgslType(MethodInfo? sourceMethod)
+        {
+            if (sourceMethod == null || !sourceMethod.IsGenericMethod) return null;
+            try
+            {
+                var genericArgs = sourceMethod.GetGenericArguments();
+                if (genericArgs.Length < 2) return null;
+                var tReductionName = genericArgs[1].Name; // e.g. "MaxUInt32", "MinFloat32", "AddInt64"
+
+                if (tReductionName.Contains("UInt32")) return "u32";
+                if (tReductionName.Contains("Int32")) return "i32";
+                if (tReductionName.Contains("Float32")) return "f32";
+                if (tReductionName.Contains("UInt64"))
+                    return Backend.Options.EnableI64Emulation ? "emu_u64" : "u32";
+                if (tReductionName.Contains("Int64"))
+                    return Backend.Options.EnableI64Emulation ? "emu_i64" : "i32";
+                if (tReductionName.Contains("Float64") || tReductionName.Contains("Double"))
+                    return Backend.Options.EnableF64Emulation ? "emu_f64" : "f32";
+
+                return null;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Returns the correct accumulation expression for reduce operations.
+        /// For 64-bit emulated types, uses emulated math helpers (i64_max, f64_add, etc.)
+        /// instead of WGSL built-ins which would do incorrect component-wise operations on vec2.
+        /// </summary>
+        private static string GetEmulated64BitAccumExpr(bool is64Bit, string wgslType, string wgslAccumOp, string accumVar, string elemExpr)
+        {
+            if (!is64Bit)
+            {
+                // Standard 32-bit path
+                if (wgslAccumOp == "+")
+                    return $"{accumVar} + {elemExpr}";
+                else
+                    return $"{wgslAccumOp}({accumVar}, {elemExpr})";
+            }
+
+            // 64-bit emulated path: use the emulated helper functions
+            // wgslType is one of: emu_i64, emu_u64, emu_f64
+            string prefix = wgslType switch
+            {
+                "emu_f64" => "f64",
+                "emu_u64" => "u64",
+                "emu_i64" => "i64",
+                _ => "i64"
+            };
+
+            if (wgslAccumOp == "+")
+                return $"{prefix}_add({accumVar}, {elemExpr})";
+            else if (wgslAccumOp == "max")
+                return $"{prefix}_max({accumVar}, {elemExpr})";
+            else if (wgslAccumOp == "min")
+                return $"{prefix}_min({accumVar}, {elemExpr})";
+            else
+                return $"{prefix}_add({accumVar}, {elemExpr})"; // fallback to add
         }
 
         #endregion

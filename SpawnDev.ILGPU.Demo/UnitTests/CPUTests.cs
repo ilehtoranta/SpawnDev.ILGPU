@@ -104,5 +104,25 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
         public new async Task ILGPUReduceTest() =>
             throw new UnsupportedTestException("CPU: GroupExtensions.Reduce requires warp shuffles + barriers, unsupported in WASM");
 
+        [TestMethod]
+        public new async Task ILGPUReduceFloatTest() =>
+            throw new UnsupportedTestException("CPU: GroupExtensions.Reduce unsupported in WASM");
+
+        [TestMethod]
+        public new async Task ILGPUReduceDoubleTest() =>
+            throw new UnsupportedTestException("CPU: GroupExtensions.Reduce unsupported in WASM");
+
+        [TestMethod]
+        public new async Task ILGPUReduceLongTest() =>
+            throw new UnsupportedTestException("CPU: GroupExtensions.Reduce unsupported in WASM");
+
+        [TestMethod]
+        public new async Task ILGPUReduceUIntTest() =>
+            throw new UnsupportedTestException("CPU: GroupExtensions.Reduce unsupported in WASM");
+
+        [TestMethod]
+        public new async Task ILGPUReduceULongTest() =>
+            throw new UnsupportedTestException("CPU: GroupExtensions.Reduce unsupported in WASM");
+
     }
 }

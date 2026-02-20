@@ -31,5 +31,25 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
         public new async Task ILGPUReduceTest() =>
             throw new UnsupportedTestException("Wasm: GroupExtensions.Reduce requires warp shuffles, unsupported in browser environment");
 
+        [TestMethod]
+        public new async Task ILGPUReduceFloatTest() =>
+            throw new UnsupportedTestException("Wasm: GroupExtensions.Reduce unsupported in browser environment");
+
+        [TestMethod]
+        public new async Task ILGPUReduceDoubleTest() =>
+            throw new UnsupportedTestException("Wasm: GroupExtensions.Reduce unsupported in browser environment");
+
+        [TestMethod]
+        public new async Task ILGPUReduceLongTest() =>
+            throw new UnsupportedTestException("Wasm: GroupExtensions.Reduce unsupported in browser environment");
+
+        [TestMethod]
+        public new async Task ILGPUReduceUIntTest() =>
+            throw new UnsupportedTestException("Wasm: GroupExtensions.Reduce unsupported in browser environment");
+
+        [TestMethod]
+        public new async Task ILGPUReduceULongTest() =>
+            throw new UnsupportedTestException("Wasm: GroupExtensions.Reduce unsupported in browser environment");
+
     }
 }

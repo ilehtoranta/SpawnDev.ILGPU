@@ -322,6 +322,11 @@ fn i64_add(a: emu_i64, b: emu_i64) -> emu_i64 {
     return emu_i64(lo, hi);
 }
 
+// emu_u64 addition (same as i64_add for two's complement)
+fn u64_add(a: emu_u64, b: emu_u64) -> emu_u64 {
+    return i64_add(a, b);
+}
+
 // emu_i64/emu_u64 subtraction with borrow
 fn i64_sub(a: emu_i64, b: emu_i64) -> emu_i64 {
     let borrow = select(0u, 1u, a.x < b.x);
@@ -497,6 +502,30 @@ fn u64_gt(a: emu_u64, b: emu_u64) -> bool {
 // Unsigned comparison: greater than or equal
 fn u64_ge(a: emu_u64, b: emu_u64) -> bool {
     return !u64_lt(a, b);
+}
+
+// Signed i64 minimum
+fn i64_min(a: emu_i64, b: emu_i64) -> emu_i64 {
+    if (i64_lt(a, b)) { return a; }
+    return b;
+}
+
+// Signed i64 maximum
+fn i64_max(a: emu_i64, b: emu_i64) -> emu_i64 {
+    if (i64_gt(a, b)) { return a; }
+    return b;
+}
+
+// Unsigned u64 minimum
+fn u64_min(a: emu_u64, b: emu_u64) -> emu_u64 {
+    if (u64_lt(a, b)) { return a; }
+    return b;
+}
+
+// Unsigned u64 maximum
+fn u64_max(a: emu_u64, b: emu_u64) -> emu_u64 {
+    if (u64_gt(a, b)) { return a; }
+    return b;
 }
 
 // emu_i64 absolute value

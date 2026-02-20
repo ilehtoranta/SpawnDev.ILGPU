@@ -27,6 +27,10 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         // WGSL does not support atomic<f32>, so these are declared as atomic<u32> (raw bits)
         // and emulated via a CAS loop in WGSLCodeGenerator.GenerateCode(GenericAtomic).
         private HashSet<int> _floatAtomicParameters = new HashSet<int>();
+        // Subset of _atomicParameters where the atomic has unsigned semantics.
+        // WGSL's atomicMin/atomicMax on i32 do signed comparisons, so unsigned
+        // reductions need atomic<u32> buffers and u32 values.
+        private HashSet<int> _unsignedAtomicParameters = new HashSet<int>();
         private HashSet<Value> _hoistedPrimitives = new HashSet<Value>();
         // Tracks WGSL variable names that hold pointer aliases (e.g., "v_27_f0" which is 'let v_27_f0 = &param1_f0;').
         // The post-processor checks this to avoid converting 'let v_28 = v_27_f0;' to 'v_28 = v_27_f0;'
@@ -69,6 +73,11 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         private Dictionary<int, List<BodyStructFieldInfo>> _bodyStructParams = new Dictionary<int, List<BodyStructFieldInfo>>();
         private HashSet<(int paramIdx, int fieldIdx)> _bodyStructAtomicFields = new HashSet<(int, int)>();
         private HashSet<(int paramIdx, int fieldIdx)> _bodyStructAtomicFloatFields = new HashSet<(int, int)>();
+        private HashSet<(int paramIdx, int fieldIdx)> _bodyStructUnsignedAtomicFields = new HashSet<(int, int)>();
+        // Subset of _bodyStructAtomicFields where the element type is emulated 64-bit (emu_i64, emu_u64, emu_f64).
+        // WGSL doesn't support atomic on vec2<u32>, so these buffers use plain storage and
+        // the reduction's final write uses a plain store instead of an atomic operation.
+        private HashSet<(int paramIdx, int fieldIdx)> _bodyStructEmulated64AtomicFields = new HashSet<(int, int)>();
 
         /// <summary>
         /// Describes one field of a decomposed body struct parameter.
@@ -153,6 +162,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                                     (pt.BasicValueType == global::ILGPU.BasicValueType.Float32 ||
                                      pt.BasicValueType == global::ILGPU.BasicValueType.Float16))
                                     _bodyStructAtomicFloatFields.Add((param.Index, fieldIdx));
+                                if (atomic.IsUnsigned)
+                                    _bodyStructUnsignedAtomicFields.Add((param.Index, fieldIdx));
                             }
                             else
                             {
@@ -163,6 +174,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                                     (pt.BasicValueType == global::ILGPU.BasicValueType.Float32 ||
                                      pt.BasicValueType == global::ILGPU.BasicValueType.Float16))
                                     _floatAtomicParameters.Add(param.Index);
+                                if (atomic.IsUnsigned)
+                                    _unsignedAtomicParameters.Add(param.Index);
                             }
                         }
                     }
@@ -218,25 +231,61 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 {
                     var fieldInfos = new List<BodyStructFieldInfo>();
                     string lastViewBindingName = "";
+                    int viewMetadataPhase = 0; // 0=idle, 1=after view ptr, 2=after Int64 (expect optional Int8)
 
                     for (int fi = 0; fi < bodyStructType.NumFields; fi++)
                     {
                         var fieldType = bodyStructType.Fields[fi];
                         bool fieldIsView = IsViewFieldType(fieldType);
+                        // Capture before any reset
+                        string capturedViewBindingName = lastViewBindingName;
 
-                        // Detect view metadata: Int64 or Int8 fields immediately following a view field
+                        // State machine for view metadata detection (see GenerateHeader for full comments)
                         bool isViewMetadata = false;
                         bool isLengthField = false;
-                        if (!fieldIsView && lastViewBindingName != "")
+                        if (fieldIsView)
+                        {
+                            viewMetadataPhase = 1;
+                        }
+                        else if (viewMetadataPhase == 1)
                         {
                             string typeStr = fieldType.ToString();
-                            if (typeStr.Contains("Int64") || typeStr.Contains("Int8"))
+                            // Only mark as view-length metadata if:
+                            // 1. The type is Int64 (view lengths are always Int64), AND
+                            // 2. This is NOT the last field in the struct.
+                            // Reason: ILGPU's DCE can remove the Output view's Length field when it's
+                            // never accessed (e.g., Finish() only writes to Output[0], never reads Output.Length).
+                            // When DCE removes Output.Length, the ReducedValue field (e.g., long/ulong) becomes
+                            // the field immediately after the Output view ptr — and ReducedValue can also be
+                            // Int64! With no next field following it, we can reliably distinguish:
+                            // - If last field: it's ReducedValue (user scalar), NOT Output.length
+                            // - If not last field: it's the view length (some field follows it)
+                            bool isLastField = (fi == bodyStructType.NumFields - 1);
+                            if (typeStr.Contains("Int64") && !isLastField)
                             {
                                 isViewMetadata = true;
-                                isLengthField = typeStr.Contains("Int64");
+                                isLengthField = true;
+                                viewMetadataPhase = 2;
                             }
                             else
                             {
+                                viewMetadataPhase = 0;
+                                lastViewBindingName = "";
+                            }
+                        }
+                        else if (viewMetadataPhase == 2)
+                        {
+                            string typeStr = fieldType.ToString();
+                            if (typeStr.Contains("Int8"))
+                            {
+                                isViewMetadata = true;
+                                isLengthField = false;
+                                viewMetadataPhase = 0;
+                                lastViewBindingName = "";
+                            }
+                            else
+                            {
+                                viewMetadataPhase = 0;
                                 lastViewBindingName = "";
                             }
                         }
@@ -250,7 +299,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                             IsViewMetadata = isViewMetadata,
                             IsLengthField = isLengthField,
                             BindingName = fieldIsView ? $"param{param.Index}_f{fi}" : "",
-                            AssociatedViewBindingName = isViewMetadata ? lastViewBindingName : "",
+                            AssociatedViewBindingName = isViewMetadata ? capturedViewBindingName : "",
                         };
                         fieldInfos.Add(info);
 
@@ -435,8 +484,60 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         /// </summary>
         protected override bool IsFloatAtomicTarget(global::ILGPU.IR.Value target)
         {
-            if (ResolveToParameter(target) is global::ILGPU.IR.Values.Parameter param)
-                return _floatAtomicParameters.Contains(param.Index);
+            // Check direct parameter float atomics
+            if (ResolveToParameter(target) is global::ILGPU.IR.Values.Parameter param
+                && _floatAtomicParameters.Contains(param.Index))
+                return true;
+
+            // Check body struct float atomic fields (e.g. ReductionImplementation.Output view)
+            if (ResolveToParameterWithFieldChain(target, out var bsParam, out var fieldIdx)
+                && fieldIdx >= 0
+                && _bodyStructAtomicFloatFields.Contains((bsParam!.Index, fieldIdx)))
+                return true;
+
+            return false;
+        }
+
+        /// <summary>
+        /// Returns true if the atomic target pointer resolves to a parameter that was
+        /// detected as unsigned during ScanForAtomicUsage. Used by the base class
+        /// GenerateCode(GenericAtomic) to use atomic&lt;u32&gt; operations for unsigned semantics.
+        /// </summary>
+        protected override bool IsUnsignedAtomicTarget(global::ILGPU.IR.Value target)
+        {
+            // Check direct parameter unsigned atomics
+            if (ResolveToParameter(target) is global::ILGPU.IR.Values.Parameter param
+                && _unsignedAtomicParameters.Contains(param.Index))
+                return true;
+
+            // Check body struct unsigned atomic fields
+            if (ResolveToParameterWithFieldChain(target, out var bsParam, out var fieldIdx)
+                && fieldIdx >= 0
+                && _bodyStructUnsignedAtomicFields.Contains((bsParam!.Index, fieldIdx)))
+                return true;
+
+            return false;
+        }
+
+        /// <summary>
+        /// Returns true if the atomic target pointer resolves to a parameter with an emulated
+        /// 64-bit element type (emu_i64, emu_u64, emu_f64). WGSL doesn't support atomic
+        /// operations on vec2&lt;u32&gt;, so these must use plain storage and a direct store.
+        /// </summary>
+        protected override bool IsEmulated64BitAtomicTarget(global::ILGPU.IR.Value target)
+        {
+            // Check direct parameter emulated 64-bit atomics
+            if (ResolveToParameter(target) is global::ILGPU.IR.Values.Parameter param
+                && (_emulatedI64Params.Contains(param.Index) || _emulatedF64Params.Contains(param.Index))
+                && _atomicParameters.Contains(param.Index))
+                return true;
+
+            // Check body struct emulated 64-bit atomic fields
+            if (ResolveToParameterWithFieldChain(target, out var bsParam, out var fieldIdx)
+                && fieldIdx >= 0
+                && _bodyStructEmulated64AtomicFields.Contains((bsParam!.Index, fieldIdx)))
+                return true;
+
             return false;
         }
 
@@ -551,30 +652,86 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 {
                     var fieldInfos = new List<BodyStructFieldInfo>();
                     string lastViewBindingName = "";
+                    int viewMetadataPhase = 0; // 0=idle, 1=after view ptr (expect Int64), 2=after Int64 (expect optional Int8)
 
                     for (int fi = 0; fi < earlyBodyStructType.NumFields; fi++)
                     {
                         var fieldType = earlyBodyStructType.Fields[fi];
                         bool fieldIsView = IsViewFieldType(fieldType);
+                        Console.WriteLine($"[WGSL-Field] param.Index={param.Index} fi={fi} type={fieldType} IsView={fieldIsView} phase={viewMetadataPhase} lastViewName='{lastViewBindingName}'");
+                        // Capture lastViewBindingName BEFORE any potential reset in the state machine below,
+                        // so AssociatedViewBindingName is correctly set for metadata fields.
+                        string capturedViewBindingName = lastViewBindingName;
 
                         // Detect view metadata: Int64 or Int8 fields immediately following a view field
                         // These are internal fields of ArrayView1D (Length, flag) — not user scalars
+                        //
+                        // ArrayView1D<T, Dense> IR structure: [ptr(ViewType), Int64(length), Int8(valid_flag)]
+                        // ArrayView<T>          IR structure: [ptr(ViewType), Int64(length)] (no flag)
+                        //
+                        // We use a state machine (viewMetadataPhase) to track position in this sequence:
+                        //   0 = no view being tracked (reset state)
+                        //   1 = saw a view ptr; expecting Int64 length next
+                        //   2 = saw the Int64 length; expecting optional Int8 flag next
+                        // Any field outside expected sequence → reset to 0.
+                        //
+                        // CRITICAL: This prevents ReducedValue:long (Int64) from being misclassified
+                        // as a second view's length metadata when it immediately follows a view's
+                        // Int64 length field (which occurs in ArrayView<T> with no Int8 flag).
                         bool isViewMetadata = false;
                         bool isLengthField = false;
-                        if (!fieldIsView && lastViewBindingName != "")
+                        if (fieldIsView)
                         {
-                            // Check if this is an Int64 (length) or Int8 (flag) following a view
+                            // View pointer encountered — next field should be Int64 length
+                            viewMetadataPhase = 1;
+                        }
+                        else if (viewMetadataPhase == 1)
+                        {
                             string typeStr = fieldType.ToString();
-                            if (typeStr.Contains("Int64") || typeStr.Contains("Int8"))
+                            // Only mark as view-length metadata if:
+                            // 1. The type is Int64 (view lengths are always Int64), AND
+                            // 2. This is NOT the last field in the struct.
+                            // Reason: ILGPU's DCE can remove the Output view's Length field when it's
+                            // never accessed. When DCE removes Output.Length, ReducedValue (e.g., long/ulong)
+                            // becomes the field immediately after the Output view ptr — and it's also Int64!
+                            // If there's no next field, this must be ReducedValue, not a view length.
+                            bool isLastField = (fi == earlyBodyStructType.NumFields - 1);
+                            if (typeStr.Contains("Int64") && !isLastField)
                             {
                                 isViewMetadata = true;
-                                isLengthField = typeStr.Contains("Int64");
+                                isLengthField = true;
+                                viewMetadataPhase = 2; // Now expecting optional Int8 flag
                             }
                             else
                             {
-                                // Not a metadata field — reset the view tracking
+                                // Unexpected type where length should be, OR last field — reset
+                                viewMetadataPhase = 0;
                                 lastViewBindingName = "";
                             }
+                        }
+                        else if (viewMetadataPhase == 2)
+                        {
+                            // Just after Int64 length: expecting optional Int8 flag
+                            string typeStr = fieldType.ToString();
+                            if (typeStr.Contains("Int8"))
+                            {
+                                isViewMetadata = true;
+                                isLengthField = false;
+                                viewMetadataPhase = 0; // Int8 is the last metadata field — reset
+                                lastViewBindingName = "";
+                            }
+                            else
+                            {
+                                // No Int8 flag (e.g., ArrayView<T> vs ArrayView1D) — this is a user scalar
+                                // Reset phase and treat this field normally (user scalar)
+                                viewMetadataPhase = 0;
+                                lastViewBindingName = "";
+                            }
+                        }
+                        else
+                        {
+                            // Not in metadata tracking (viewMetadataPhase == 0) — user scalar or another view
+                            // lastViewBindingName is already "" here; no action needed
                         }
 
                         var info = new BodyStructFieldInfo
@@ -585,7 +742,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                             IsScalar = !fieldIsView,
                             IsViewMetadata = isViewMetadata,
                             IsLengthField = isLengthField,
-                            AssociatedViewBindingName = isViewMetadata ? lastViewBindingName : "",
+                            AssociatedViewBindingName = isViewMetadata ? capturedViewBindingName : "",
                         };
                         fieldInfos.Add(info);
 
@@ -603,11 +760,23 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                             // Check if this view field is atomic
                             bool fieldIsAtomic = _bodyStructAtomicFields.Contains((param.Index, fi));
                             bool fieldIsFloatAtomic = _bodyStructAtomicFloatFields.Contains((param.Index, fi));
+                            bool fieldIsUnsignedAtomic = _bodyStructUnsignedAtomicFields.Contains((param.Index, fi));
 
                             string bindingWgslType = viewWgslType;
                             if (fieldIsAtomic)
                             {
-                                bindingWgslType = fieldIsFloatAtomic ? "atomic<u32>" : $"atomic<{viewWgslType}>";
+                                bool is64Emu = (viewWgslType == "emu_i64" || viewWgslType == "emu_u64" || viewWgslType == "emu_f64");
+                                if (is64Emu)
+                                {
+                                    // WGSL doesn't support atomic on vec2<u32>.
+                                    // Use plain storage; only thread 0 writes the final value.
+                                    bindingWgslType = viewWgslType;
+                                    _bodyStructEmulated64AtomicFields.Add((param.Index, fi));
+                                }
+                                else if (fieldIsFloatAtomic || fieldIsUnsignedAtomic)
+                                    bindingWgslType = "atomic<u32>";
+                                else
+                                    bindingWgslType = $"atomic<{viewWgslType}>";
                             }
 
                             builder.AppendLine($"// Body struct field {fi}: {fieldType} (view)");
@@ -635,8 +804,12 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                             info.ScalarSlot = scalarSlotOffset;
 
                             // Use a synthetic param index for the scalar manifest entry
-                            // We encode it as paramIndex * 1000 + fieldIndex to make it unique
-                            int syntheticParamIdx = param.Index * 1000 + fi;
+                            // We encode it as (paramIndex + 1) * 1000 + fieldIndex to make it unique
+                            // IMPORTANT: use (param.Index + 1) so that grid-stride kernels with
+                            // param.Index == 0 still produce a synthetic >= 1000, which is how the
+                            // runtime decoder distinguishes body-struct scalars from real params.
+                            int syntheticParamIdx = (param.Index + 1) * 1000 + fi;
+                            Console.WriteLine($"[WGSL-BodyStruct] param.Index={param.Index}, fi={fi}, syntheticParamIdx={syntheticParamIdx}, paramOffset={paramOffset}, wgslType={scalarWgslType}");
                             var entry = new ScalarPackingEntry
                             {
                                 ParamIndex = syntheticParamIdx,
@@ -690,7 +863,9 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                         // WGSL only supports atomic<i32> and atomic<u32>.
                         // Float atomics (f32/f16) must be stored as atomic<u32> (raw bits)
                         // and emulated via a CAS loop.
-                        if (_floatAtomicParameters.Contains(param.Index))
+                        // Unsigned atomics also need atomic<u32> for correct min/max semantics.
+                        if (_floatAtomicParameters.Contains(param.Index) ||
+                            _unsignedAtomicParameters.Contains(param.Index))
                             bindingWgslType = "atomic<u32>";
                         else
                             bindingWgslType = $"atomic<{bindingWgslType}>";
@@ -756,6 +931,10 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 // Store manifest in generator args for the compiled kernel
                 foreach (var entry in scalarManifest)
                     _generatorArgs.ScalarPackingManifest.Add(entry);
+
+                // DIAGNOSTIC: dump manifest entries so we can verify ParamIndex values
+                foreach (var entry in scalarManifest)
+                    Console.WriteLine($"[WGSL-Manifest] ParamIndex={entry.ParamIndex}, ByteOffset={entry.ByteOffset}, ByteSize={entry.ByteSize}, WgslType={entry.WgslType}");
             }
 
             // Store manifest locally for SetupParameterBindings()
@@ -816,14 +995,14 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 builder.AppendLine("var<workgroup> _broadcast_temp : i32;");
             }
 
-            // Emit warp shuffle shared memory buffer when subgroups are NOT available
-            // but the kernel uses shuffle/lane/warpsize operations (shared-memory emulation path)
-            // OR when the Reduce handler needs shared memory for workgroup-level reduction
-            if ((_usesSubgroups || UsesWarpShuffleEmulation) && !Backend.HasSubgroups)
+            // Emit warp shuffle shared memory buffer when:
+            // 1. Subgroups are NOT available but shuffle ops are used (shared-memory emulation path), OR
+            // 2. UsesWarpShuffleEmulation is explicitly set (e.g., 64-bit reduce via shared memory)
+            if ((_usesSubgroups && !Backend.HasSubgroups) || UsesWarpShuffleEmulation)
             {
                 builder.AppendLine();
-                builder.AppendLine("// Warp shuffle emulation shared memory (64 u32 slots = 1 slot per thread at workgroup_size 64)");
-                builder.AppendLine("var<workgroup> _warp_shuffle_buf : array<u32, 64>;");
+                builder.AppendLine("// Warp shuffle emulation shared memory (128 u32 slots = 2 per thread for 64-bit emulated types)");
+                builder.AppendLine("var<workgroup> _warp_shuffle_buf : array<u32, 128>;");
             }
 
             // Emit workgroup-level group-reduce atomic variable when GenerateGroupAllReduce is used.
@@ -835,7 +1014,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 builder.AppendLine("// Group-level reduction shared memory (for GenerateGroupAllReduce)");
                 builder.AppendLine("var<workgroup> _grp_reduce_i32 : atomic<i32>;");
                 builder.AppendLine("var<workgroup> _grp_reduce_u32 : atomic<u32>;");
-                builder.AppendLine("var<workgroup> _grp_sg_results : array<i32, 32>; // per-subgroup partial results");
+                builder.AppendLine("var<workgroup> _grp_sg_results : array<u32, 64>; // per-subgroup partial results (2 slots per sg for 64-bit types)");
             }
 
             builder.AppendLine();
@@ -1595,7 +1774,11 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                             if (isEmuF64)
                                 AppendLine($"var {fieldVarName} = f64_from_ieee754_bits(_scalar_params[{slot}], _scalar_params[{slot + 1}]);");
                             else if (isEmuI64)
-                                AppendLine($"var {fieldVarName} = emu_i64(_scalar_params[{slot}], _scalar_params[{slot + 1}]);");
+                                // Use the correct type constructor (emu_i64 or emu_u64) so the WGSL type
+                                // tracker assigns the right signedness for subsequent comparisons.
+                                // Using emu_i64 for ulong would cause unsigned comparisons (u64_lt) to fall
+                                // back to signed (i64_lt), breaking MinUInt64 (0xFFFF... as signed = -1).
+                                AppendLine($"var {fieldVarName} = {scalarWgslType}(_scalar_params[{slot}], _scalar_params[{slot + 1}]);");
                             else if (scalarWgslType == "u32")
                                 AppendLine($"var {fieldVarName} = _scalar_params[{slot}];");
                             else if (scalarWgslType == "i32")
@@ -1917,16 +2100,40 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 return;
             }
 
+            // Detect emu_f64 load: buffer contains IEEE-754 double bytes, need conversion.
+            bool isEmuF64Load = Backend.Options.EnableF64Emulation
+                && (target.Type == "emu_f64"
+                    || (loadVal.Source.Type is global::ILGPU.IR.Types.PointerType lptrType
+                        && TypeGenerator[lptrType.ElementType] == "emu_f64"));
+
             // Check if we already declared this at the top
             if (_hoistedPrimitives.Contains(loadVal))
             {
-                AppendLine($"{target} = *{source};");
+                if (isEmuF64Load)
+                {
+                    string rawBitsVar2 = $"_raw_bits_{target.Name}";
+                    AppendLine($"let {rawBitsVar2} = bitcast<vec2<u32>>(*{source});");
+                    AppendLine($"{target} = f64_from_ieee754_bits({rawBitsVar2}.x, {rawBitsVar2}.y);");
+                }
+                else
+                {
+                    AppendLine($"{target} = *{source};");
+                }
             }
             else
             {
                 // Fallback to your stable declaration logic
                 Declare(target);
-                AppendLine($"{target} = *{source};");
+                if (isEmuF64Load)
+                {
+                    string rawBitsVar3 = $"_raw_bits_{target.Name}";
+                    AppendLine($"let {rawBitsVar3} = bitcast<vec2<u32>>(*{source});");
+                    AppendLine($"{target} = f64_from_ieee754_bits({rawBitsVar3}.x, {rawBitsVar3}.y);");
+                }
+                else
+                {
+                    AppendLine($"{target} = *{source};");
+                }
             }
         }
 
@@ -1962,7 +2169,21 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 return;
             }
 
-            AppendLine($"*{address} = {val};");
+            // Detect emu_f64 store: need to convert Dekker format back to IEEE-754 bits.
+            bool isEmuF64Store = Backend.Options.EnableF64Emulation
+                && (storeVal.Target.Type is global::ILGPU.IR.Types.PointerType sptrType
+                    && TypeGenerator[sptrType.ElementType] == "emu_f64");
+
+            if (isEmuF64Store)
+            {
+                string outBitsVarS = $"_out_bits_{val}";
+                AppendLine($"let {outBitsVarS} = f64_to_ieee754_bits({val});");
+                AppendLine($"*{address} = bitcast<emu_f64>({outBitsVarS});");
+            }
+            else
+            {
+                AppendLine($"*{address} = {val};");
+            }
         }
 
 
@@ -1979,6 +2200,28 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             var rightType = TypeGenerator[value.Right.Type];
             bool isEmulatedF64 = Backend.Options.EnableF64Emulation && (leftType == "emu_f64" || rightType == "emu_f64");
             bool isEmulatedI64 = Backend.Options.EnableI64Emulation && (leftType == "emu_i64" || leftType == "emu_u64" || rightType == "emu_i64" || rightType == "emu_u64");
+            
+            // Fallback: check BasicValueType when emulation options are enabled.
+            // TypeGenerator may not return "emu_i64" for IR intermediate values (e.g., reduce accumulators).
+            if (!isEmulatedF64 && !isEmulatedI64)
+            {
+                if (Backend.Options.EnableI64Emulation && value.BasicValueType == BasicValueType.Int64)
+                {
+                    isEmulatedI64 = true;
+                    leftType = value.IsUnsigned ? "emu_u64" : "emu_i64";
+                }
+                else if (Backend.Options.EnableF64Emulation && value.BasicValueType == BasicValueType.Float64)
+                {
+                    isEmulatedF64 = true;
+                    leftType = "emu_f64";
+                }
+            }
+            
+            // DIAGNOSTIC: Log all Max/Min operations to trace 64-bit detection
+            if (value.Kind == BinaryArithmeticKind.Max || value.Kind == BinaryArithmeticKind.Min)
+            {
+                Console.WriteLine($"[DIAG-BinaryArith] Kind={value.Kind} BVT={value.BasicValueType} leftType={leftType} rightType={rightType} isEmuI64={isEmulatedI64} isEmuF64={isEmulatedF64} I64Emu={Backend.Options.EnableI64Emulation} LeftIRType={value.Left.Type} IsUnsigned={value.IsUnsigned}");
+            }
 
             if (isEmulatedF64)
             {
@@ -2005,7 +2248,10 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             if (isEmulatedI64)
             {
                 // Use emu_i64 emulation functions
-                bool isUnsigned = leftType == "emu_u64" || rightType == "emu_u64";
+                // NOTE: TypeGenerator returns "emu_i64" for BOTH long AND ulong, because ILGPU's
+                // BasicValueType enum has no UInt64 member (only Int64). Signedness is tracked
+                // by the arithmetic type, so we must also check value.IsUnsigned.
+                bool isUnsigned = leftType == "emu_u64" || rightType == "emu_u64" || value.IsUnsigned;
                 string? emulFunc = value.Kind switch
                 {
                     BinaryArithmeticKind.Add => "i64_add",
@@ -2016,6 +2262,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     BinaryArithmeticKind.Xor => "i64_xor",
                     BinaryArithmeticKind.Shl => "i64_shl",
                     BinaryArithmeticKind.Shr => isUnsigned ? "u64_shr" : "i64_shr",
+                    BinaryArithmeticKind.Min => isUnsigned ? "u64_min" : "i64_min",
+                    BinaryArithmeticKind.Max => isUnsigned ? "u64_max" : "i64_max",
                     _ => null
                 };
 
@@ -2045,7 +2293,19 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     BinaryArithmeticKind.PowF => "pow",
                     _ => "min"
                 };
-                AppendLine($"{prefix}{target} = {func}({left}, {right});");
+                // For unsigned integer min/max, WGSL's min()/max() are type-overloaded:
+                // min(i32, i32) is signed, min(u32, u32) is unsigned.
+                // When ILGPU flags the operation as unsigned, bitcast operands to u32
+                // and the result back to i32.
+                if (value.IsUnsigned && value.BasicValueType == BasicValueType.Int32
+                    && (value.Kind == BinaryArithmeticKind.Min || value.Kind == BinaryArithmeticKind.Max))
+                {
+                    AppendLine($"{prefix}{target} = bitcast<i32>({func}(bitcast<u32>({left}), bitcast<u32>({right})));");
+                }
+                else
+                {
+                    AppendLine($"{prefix}{target} = {func}({left}, {right});");
+                }
                 return;
             }
 
@@ -2395,7 +2655,9 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
             if (isEmulatedI64)
             {
-                bool isUnsigned = leftType == "emu_u64" || rightType == "emu_u64";
+                // NOTE: TypeGenerator returns "emu_i64" for BOTH long AND ulong, because ILGPU's
+                // BasicValueType enum has no UInt64 member. Must also check value.IsUnsignedOrUnordered.
+                bool isUnsigned = leftType == "emu_u64" || rightType == "emu_u64" || value.IsUnsignedOrUnordered;
                 string? emulFunc = value.Kind switch
                 {
                     CompareKind.LessThan => isUnsigned ? "u64_lt" : "i64_lt",
@@ -2418,7 +2680,20 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             bool leftIsVec = leftType.StartsWith("vec");
             bool rightIsVec = rightType.StartsWith("vec");
 
-            if (leftIsVec && !rightIsVec)
+            // For unsigned integer comparisons, WGSL operators are type-sensitive:
+            // i32 < i32 is signed, u32 < u32 is unsigned.
+            // When ILGPU flags the comparison as unsigned, bitcast operands to u32.
+            bool needsUnsignedCast = value.IsUnsignedOrUnordered
+                && value.Left.BasicValueType == BasicValueType.Int32
+                && !leftIsVec && !rightIsVec
+                && value.Kind != CompareKind.Equal
+                && value.Kind != CompareKind.NotEqual;
+
+            if (needsUnsignedCast)
+            {
+                AppendLine($"{prefix}{target} = bitcast<u32>({left}) {op} bitcast<u32>({right});");
+            }
+            else if (leftIsVec && !rightIsVec)
             {
                 // vec op scalar -> all(vec op vec(scalar))
                 // Use vector type of the vector operand to splat the scalar

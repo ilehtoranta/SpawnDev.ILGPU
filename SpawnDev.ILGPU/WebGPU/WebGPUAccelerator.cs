@@ -612,39 +612,82 @@ namespace SpawnDev.ILGPU.WebGPU
                     }
                 }
 
+                // Pre-build a set of ALL body-struct non-view effectiveArgs indices.
+                // Body-struct scalar fields that have NO manifest entry (e.g., ReducedValue in
+                // ReductionImplementation — a shader-local variable) must still be SKIPPED
+                // during Phase 1 (view binding). Without this, they'd create spurious bindings,
+                // offsetting the scalar pack binding index and breaking the WGSL binding layout.
+                var allBodyStructScalarEffectiveIdxSet = new HashSet<int>();
+                foreach (var kvp in bodyStructScalarEffectiveIdxMap)
+                    foreach (var idx in kvp.Value)
+                        allBodyStructScalarEffectiveIdxSet.Add(idx);
+
                 var packedScalarLookup = new Dictionary<int, ScalarPackingEntry>();
                 if (compiledKernel.HasScalarPacking)
                 {
+                    // Pre-compute total manifest entry count per body-struct param index.
+                    // The WGSL generator may add scalar manifest entries for IR-level fields that
+                    // live *inside* an IArrayView (e.g. Extent from ArrayView1D<long, Dense>).
+                    // Those do NOT have corresponding C# runtime args — they are derived from
+                    // arrayLength() in the WGSL itself. We must skip the leading "IR-only" entries
+                    // and only map the trailing entries (actual user scalar fields) to runtime slots.
+                    //
+                    // IMPORTANT: The WGSL generator encodes the body-struct param index as
+                    //   (param.Index + 1) * 1000 + fieldIndex
+                    // so that grid-stride kernels with param.Index = 0 still produce synthetic
+                    // values >= 1000 (distinguishable from real param indices).
+                    // Decoding: bodyStructIRParamIdx = (entry.ParamIndex / 1000) - 1
+                    var manifestCountPerBodyStructParam = new Dictionary<int, int>();
+                    foreach (var e in compiledKernel.ScalarPackingManifest)
+                    {
+                        if (e.ParamIndex >= 1000)
+                        {
+                            int bsIdx = (e.ParamIndex / 1000) - 1; // true IR param index
+                            manifestCountPerBodyStructParam.TryGetValue(bsIdx, out int c);
+                            manifestCountPerBodyStructParam[bsIdx] = c + 1;
+                        }
+                    }
+
                     foreach (var entry in compiledKernel.ScalarPackingManifest)
                     {
                         if (entry.ParamIndex >= 1000)
                         {
                             // Synthetic param index: body struct scalar field
-                            // Decode: bodyStructParamIndex = entry.ParamIndex / 1000
-                            // Find the args index for this body struct
-                            int bodyStructIRParamIdx = entry.ParamIndex / 1000;
+                            // Decoded: bodyStructIRParamIdx = (entry.ParamIndex / 1000) - 1
+                            int bodyStructIRParamIdx = (entry.ParamIndex / 1000) - 1;
                             int bodyStructArgsIdx = bodyStructIRParamIdx - kernelParamOffset;
 
-                            // Find the nth non-view field in the body struct
-                            // We need to determine which non-view field this is
-                            // The scalar manifest entries for a body struct are in order of non-view fields
-                            // Count how many scalar manifest entries have the same bodyStructIRParamIdx and come before this one
-                            int nthScalarField = 0;
+                            // Count how many scalar manifest entries for this body struct come before this one.
+                            int nthManifestEntry = 0;
                             foreach (var e2 in compiledKernel.ScalarPackingManifest)
                             {
-                                if (e2.ParamIndex >= 1000 && e2.ParamIndex / 1000 == bodyStructIRParamIdx)
+                                if (e2.ParamIndex >= 1000 && (e2.ParamIndex / 1000) - 1 == bodyStructIRParamIdx)
                                 {
                                     if (e2.ByteOffset < entry.ByteOffset)
-                                        nthScalarField++;
+                                        nthManifestEntry++;
                                 }
                             }
 
-                            if (bodyStructScalarEffectiveIdxMap.TryGetValue(bodyStructArgsIdx, out var nonViewIdxList)
-                                && nthScalarField < nonViewIdxList.Count)
+                            if (bodyStructScalarEffectiveIdxMap.TryGetValue(bodyStructArgsIdx, out var nonViewIdxList))
                             {
-                                int effectiveArgsIdx = nonViewIdxList[nthScalarField];
-                                packedScalarLookup[effectiveArgsIdx] = entry;
-                                WebGPUBackend.Log($"[WebGPU-Debug] Body struct scalar: ParamIndex={entry.ParamIndex}, effectiveArgsIdx={effectiveArgsIdx}, nthScalarField={nthScalarField}");
+                                // Total manifest entries may exceed C# non-view fields because the WGSL
+                                // generator also emits manifest entries for IR-level fields inside IArrayView
+                                // (e.g., the Extent i32 from ArrayView1D<long, Dense>). These leading
+                                // entries don't correspond to any runtime arg — skip them.
+                                int totalManifest = manifestCountPerBodyStructParam.TryGetValue(bodyStructIRParamIdx, out int tc) ? tc : 0;
+                                int extraIROnlyEntries = totalManifest - nonViewIdxList.Count;
+                                int nthCSharpScalarField = nthManifestEntry - extraIROnlyEntries;
+
+                                if (nthCSharpScalarField >= 0 && nthCSharpScalarField < nonViewIdxList.Count)
+                                {
+                                    int effectiveArgsIdx = nonViewIdxList[nthCSharpScalarField];
+                                    packedScalarLookup[effectiveArgsIdx] = entry;
+                                    WebGPUBackend.Log($"[WebGPU-Debug] Body struct scalar: ParamIndex={entry.ParamIndex}, effectiveArgsIdx={effectiveArgsIdx}, nthManifest={nthManifestEntry}, nthCSharp={nthCSharpScalarField}");
+                                }
+                                else
+                                {
+                                    WebGPUBackend.Log($"[WebGPU-Debug] Body struct scalar: ParamIndex={entry.ParamIndex}, SKIPPED (IR-only, nthManifest={nthManifestEntry}, extra={extraIROnlyEntries})");
+                                }
                             }
                         }
                         else
@@ -668,6 +711,14 @@ namespace SpawnDev.ILGPU.WebGPU
 
                     // Skip packed scalars — they'll be handled in Phase 2
                     if (packedScalarLookup.ContainsKey(i))
+                        continue;
+
+                    // Skip body-struct non-view scalar fields that have no manifest entry.
+                    // These are shader-local variables (e.g., ReducedValue in ReductionImplementation)
+                    // that the WGSL handles internally — they don't correspond to GPU buffer bindings.
+                    // Without this check, they'd create spurious bindings and shift the scalar
+                    // pack buffer to the wrong binding index.
+                    if (allBodyStructScalarEffectiveIdxSet.Contains(i))
                         continue;
 
                     var arg = effectiveArgs[i];
