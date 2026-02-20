@@ -965,8 +965,8 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 }
                 else if (!loop.Contains(ub.Target))
                 {
-                    // Exit the loop
-                    AppendLine("break;");
+                    // Exit the loop — trace through intermediate blocks first
+                    EmitBreakWithIntermediateCode(ub.Target, current);
                 }
                 else
                 {
@@ -1000,7 +1000,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 AppendLine($"if (!{cond}) {{");
                 PushIndent();
                 PushPhiValues(falseTarget, source);
-                AppendLine("break;");
+                EmitBreakWithIntermediateCode(falseTarget, source);
                 PopIndent();
                 AppendLine("}");
                 PushPhiValues(trueTarget, source);
@@ -1012,7 +1012,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 AppendLine($"if ({cond}) {{");
                 PushIndent();
                 PushPhiValues(trueTarget, source);
-                AppendLine("break;");
+                EmitBreakWithIntermediateCode(trueTarget, source);
                 PopIndent();
                 AppendLine("}");
                 PushPhiValues(falseTarget, source);
@@ -1031,7 +1031,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 AppendLine("}");
                 PushPhiValues(falseTarget, source);
                 if (falseIsExit)
-                    AppendLine("break;");
+                    EmitBreakWithIntermediateCode(falseTarget, source);
                 else
                     GenerateLoopBody(falseTarget, loop, outerStop);
                 return;
@@ -1046,7 +1046,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 AppendLine("}");
                 PushPhiValues(trueTarget, source);
                 if (trueIsExit)
-                    AppendLine("break;");
+                    EmitBreakWithIntermediateCode(trueTarget, source);
                 else
                     GenerateLoopBody(trueTarget, loop, outerStop);
                 return;
@@ -1058,7 +1058,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 AppendLine($"if ({cond}) {{");
                 PushIndent();
                 PushPhiValues(trueTarget, source);
-                AppendLine("break;");
+                EmitBreakWithIntermediateCode(trueTarget, source);
                 PopIndent();
                 AppendLine("}");
                 PushPhiValues(falseTarget, source);
@@ -1070,7 +1070,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 AppendLine($"if (!{cond}) {{");
                 PushIndent();
                 PushPhiValues(falseTarget, source);
-                AppendLine("break;");
+                EmitBreakWithIntermediateCode(falseTarget, source);
                 PopIndent();
                 AppendLine("}");
                 PushPhiValues(trueTarget, source);
@@ -1175,6 +1175,38 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                     }
                 }
             }
+        }
+
+        /// <summary>
+        /// Emits code for intermediate blocks between a break source and the loop exit,
+        /// then emits the break statement. When ILGPU generates IR for `hitT = t; steps = i; break;`,
+        /// the assignments end up in intermediate blocks between the break source and the
+        /// merge/exit block. These blocks must have their code emitted before the GLSL break.
+        /// 
+        /// CRITICAL: Does NOT add intermediate blocks to _visitedBlocks — they may need
+        /// to be re-entered by the post-loop code generator.
+        /// </summary>
+        private void EmitBreakWithIntermediateCode(BasicBlock exitTarget, BasicBlock sourceBlock)
+        {
+            // Trace through intermediate blocks that have unconditional branches
+            var current = exitTarget;
+            int maxDepth = 8; // Safety limit
+            for (int depth = 0; depth < maxDepth; depth++)
+            {
+                if (current.Terminator is UnconditionalBranch uBranch)
+                {
+                    // Emit this intermediate block's code (assignments like hitT = t)
+                    GenerateBlockCode(current);
+                    // Push PHI values to the next block
+                    PushPhiValues(uBranch.Target, current);
+                    current = uBranch.Target;
+                }
+                else
+                {
+                    break; // Not an unconditional branch, stop tracing
+                }
+            }
+            AppendLine("break;");
         }
 
         /// <summary>

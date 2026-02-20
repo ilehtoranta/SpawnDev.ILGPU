@@ -306,6 +306,40 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
             output[index] = acc;
         }
 
+        /// <summary>
+        /// Test kernel for the break-PHI bug: assignments before `break` in a loop
+        /// must be visible after the loop exits. This is the exact pattern the WGSL
+        /// transpiler was dropping — intermediate basic blocks between the break point
+        /// and the merge block contain the assignment IR instructions.
+        /// 
+        /// Expected output[i]: hitStep * 100 + hitValue
+        ///   For index 0: searches for val >= 5 in [0..9], finds at i=5 → 5*100+5 = 505
+        ///   For index 1: searches for val >= 5 in [1..10], finds at i=4 → 4*100+5 = 405
+        ///   etc.
+        /// </summary>
+        static void LoopBreakAssignmentKernel(Index1D index, ArrayView<int> output)
+        {
+            int hitStep = -1;
+            int hitValue = -1;
+
+            for (int i = 0; i < 10; i++)
+            {
+                int val = i + (int)index;
+                if (val >= 5)
+                {
+                    hitStep = i;
+                    hitValue = val;
+                    break;
+                }
+            }
+
+            // These values must reflect the assignments BEFORE the break
+            if (hitStep >= 0)
+                output[index] = hitStep * 100 + hitValue;
+            else
+                output[index] = -1;
+        }
+
         static void HyperbolicKernel(Index1D index, ArrayView<float> input, ArrayView<float> output)
         {
             float val = input[index];

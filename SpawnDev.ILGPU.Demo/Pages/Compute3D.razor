@@ -1,0 +1,749 @@
+@page "/compute3d"
+@implements IAsyncDisposable
+@using SpawnDev.ILGPU.WebGPU
+@using SpawnDev.ILGPU.WebGPU.Backend
+@using SpawnDev.ILGPU.WebGL
+@using SpawnDev.ILGPU.WebGL.Backend
+@using SpawnDev.ILGPU.Wasm
+@using SpawnDev.ILGPU.WebGPU.Backend
+@using SpawnDev.BlazorJS
+@using SpawnDev.BlazorJS.JSObjects
+@using ILGPU
+@using System.Diagnostics
+@using global::ILGPU
+@using global::ILGPU.Runtime
+@using global::ILGPU.Runtime.CPU
+
+<PageTitle>3D Explorer</PageTitle>
+
+<h1>3D Raymarching Explorer</h1>
+
+<div class="row">
+    <div class="col-md-3">
+        <div class="card mb-3">
+            <div class="card-header">Controls</div>
+            <div class="card-body">
+                <div class="mb-3">
+                    <label class="form-label fw-bold">Backend Engine</label>
+                    <select class="form-select" value="@_selectedBackend" @onchange="OnBackendChanged" disabled="@(_isInitializing)">
+                        @foreach (var backend in _availableBackends)
+                        {
+                            <option value="@backend.Key">@backend.Value</option>
+                        }
+                    </select>
+                    @if (_isInitializing)
+                    {
+                        <small class="text-muted mt-1 d-block">
+                            <span class="spinner-border spinner-border-sm" role="status"></span>
+                            Initializing @_selectedBackend...
+                        </small>
+                    }
+                    else if (!string.IsNullOrEmpty(_backendStatus))
+                    {
+                        <small class="text-success mt-1 d-block">✓ @_backendStatus</small>
+                    }
+                </div>
+
+                <div class="mb-3">
+                    <label class="form-label fw-bold">Scene</label>
+                    <select class="form-select" @bind="_sceneType">
+                        <option value="0">Geometric Blend</option>
+                        <option value="1">Boolean Operations</option>
+                        <option value="2">Infinite Repeat</option>
+                        <option value="3">Organic Shapes</option>
+                    </select>
+                </div>
+
+                <div class="mb-3">
+                    <label class="form-label">Quality: <strong>@(_qualityLevel switch { 0 => "Fast", 1 => "Medium", _ => "High" })</strong></label>
+                    <input type="range" class="form-range" min="0" max="2" step="1" @bind="_qualityLevel" @bind:event="oninput" />
+                </div>
+
+                <div class="mb-3">
+                    <label class="form-label">Animation Speed: <strong>@_animationSpeed.ToString("F1")x</strong></label>
+                    <input type="range" class="form-range" min="0" max="3" step="0.1" @bind="_animationSpeed" @bind:event="oninput" />
+                </div>
+
+                <div class="mb-3">
+                    <label class="form-label">Camera Distance: <strong>@_cameraDist.ToString("F1")</strong></label>
+                    <input type="range" class="form-range" min="2" max="15" step="0.5" @bind="_cameraDist" @bind:event="oninput" />
+                </div>
+            </div>
+        </div>
+
+        <div class="card mb-3">
+            <div class="card-header">Performance</div>
+            <div class="card-body">
+                <canvas @ref="_fpsCanvas" width="220" height="80" style="width:100%; border:1px solid #444; border-radius:4px; background:#1a1a2e;"></canvas>
+                <div class="mt-2">
+                    <small>
+                        <div><strong>Backend:</strong> @_selectedBackend</div>
+                        <div><strong>FPS:</strong> @_currentFps.ToString("F1")</div>
+                        <div><strong>Total:</strong> @_lastRenderMs.ToString("F1") ms</div>
+                        <div><strong>Kernel:</strong> @_lastKernelMs.ToString("F1") ms</div>
+                        <div><strong>Readback:</strong> @_lastReadbackMs.ToString("F1") ms</div>
+                    </small>
+                </div>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="card-header">Instructions</div>
+            <div class="card-body">
+                <ul class="mb-0 small">
+                    <li><strong>Orbit:</strong> Click & drag</li>
+                    <li><strong>Zoom:</strong> Mouse wheel</li>
+                    <li><strong>Reset:</strong> Double-click</li>
+                </ul>
+            </div>
+        </div>
+    </div>
+
+    <div class="col-md-9">
+        <div class="text-center">
+            <canvas @ref="_mainCanvas"
+                    width="@_width"
+                    height="@_height"
+                    style="border: 1px solid #444; cursor: grab; border-radius: 4px; max-width: 100%;"
+                    tabindex="0"
+                    @onwheel="OnWheel"
+                    @onwheel:preventDefault
+                    @onmousedown="OnMouseDown"
+                    @onmousemove="OnMouseMove"
+                    @onmouseup="OnMouseUp"
+                    @onmouseleave="OnMouseUp"
+                    @ondblclick="OnDoubleClick"></canvas>
+        </div>
+        @if (!string.IsNullOrEmpty(_shaderSource))
+        {
+            <details class="mt-3">
+                <summary class="small"><strong>Compiled Shader Source (@_shaderLanguage, @_shaderSource.Length chars)</strong></summary>
+                <textarea class="form-control mt-1" rows="20" readonly style="font-family: monospace; font-size: 11px; background: #1a1a2e; color: #e0e0e0; white-space: pre; overflow-x: auto;">@_shaderSource</textarea>
+            </details>
+        }
+    </div>
+</div>
+
+@code {
+    [Inject]
+    BlazorJSRuntime JS { get; set; } = default!;
+
+    ElementReference _mainCanvas;
+    ElementReference _fpsCanvas;
+
+    // Canvas size
+    private int _width = 800;
+    private int _height = 600;
+
+    // Backend selection
+    private string _selectedBackend = "";
+    private string _backendStatus = "";
+    private bool _isInitializing = false;
+    private bool _pendingBackendSwitch = false;
+    private List<KeyValuePair<string, string>> _availableBackends = new();
+
+    // Scene parameters
+    private int _sceneType = 0;
+    private int _qualityLevel = 1; // 0=fast, 1=medium, 2=high
+    private float _animationSpeed = 1.0f;
+
+    // Camera (spherical coords)
+    private float _cameraTheta = 0.5f;   // azimuth
+    private float _cameraPhi = 1.2f;     // elevation from pole (0=top, pi/2=horizon)
+    private float _cameraDist = 8.0f;    // distance from origin
+
+    // State
+    private bool _isRunning = false;
+    private bool _disposed = false;
+    private double _lastRenderMs = 0;
+    private double _lastKernelMs = 0;
+    private double _lastReadbackMs = 0;
+    private double _currentFps = 0;
+    private float _time = 0;
+    private string _shaderSource = "";
+    private string _shaderLanguage = "";
+
+    // FPS tracking
+    private double[] _fpsHistory = new double[120];
+    private int _fpsIndex = 0;
+    private DateTime _lastFrameTime = DateTime.UtcNow;
+
+    // UI throttling
+    private DateTime _lastUiUpdate = DateTime.MinValue;
+    private const int UI_UPDATE_INTERVAL_MS = 100;
+
+    // Mouse drag
+    private bool _isDragging = false;
+    private double _lastMouseX;
+    private double _lastMouseY;
+
+    // Cached ILGPU resources
+    private Context? _ilgpuContext;
+    private Accelerator? _ilgpuAccelerator;
+    private Action<Index2D, ArrayView2D<uint, Stride2D.DenseX>,
+        int, int, int,
+        float, float, float, float, float>? _kernel;
+    private MemoryBuffer2D<uint, Stride2D.DenseX>? _outputBuffer;
+
+    // Cached rendering resources
+    private uint[]? _cachedResult;
+    private CanvasRenderingContext2D? _cachedMainCtx;
+    private CanvasRenderingContext2D? _cachedFpsCtx;
+    private ImageData? _cachedImageData;
+    private Uint8ClampedArray? _cachedDestPixels;
+    private int _cachedResultWidth;
+    private int _cachedResultHeight;
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender)
+        {
+            await DetectAvailableBackends();
+            _ = RenderLoop();
+        }
+    }
+
+    private async Task DetectAvailableBackends()
+    {
+        var backends = new List<KeyValuePair<string, string>>();
+        try
+        {
+            using var probeContext = await Context.CreateAsync(builder => builder.WebGPU());
+            var devices = probeContext.GetWebGPUDevices();
+            if (devices.Count > 0) backends.Add(new("WebGPU", "⚡⚡⚡ WebGPU (GPU)"));
+        }
+        catch { }
+        try
+        {
+            using var glProbeContext = await Context.CreateAsync(builder => builder.WebGL());
+            var glDevices = glProbeContext.GetWebGLDevices();
+            if (glDevices.Count > 0) backends.Add(new("WebGL", "⚡⚡ WebGL2 (GPU Compute)"));
+        }
+        catch { }
+        backends.Add(new("Wasm", "⚡ Wasm (Multi-core Wasm)"));
+        backends.Add(new("CPU", "🐢 CPU (Single-thread)"));
+        _availableBackends = backends;
+        _selectedBackend = backends[0].Key;
+        StateHasChanged();
+    }
+
+    // ========== Backend Switching ==========
+
+    private async Task OnBackendChanged(ChangeEventArgs e)
+    {
+        var newBackend = e.Value?.ToString() ?? "WebGPU";
+        if (newBackend == _selectedBackend) return;
+        _selectedBackend = newBackend;
+        _pendingBackendSwitch = true;
+        StateHasChanged();
+    }
+
+    private async Task SwitchBackend()
+    {
+        _isInitializing = true;
+        _backendStatus = "";
+        StateHasChanged();
+        await Task.Yield();
+        try
+        {
+            DisposeAcceleratorResources();
+            await InitializeBackend(_selectedBackend);
+            _backendStatus = $"{_ilgpuAccelerator!.Name}";
+            _fpsHistory = new double[120];
+            _fpsIndex = 0;
+            _lastKernelMs = 0; _lastReadbackMs = 0; _lastRenderMs = 0; _currentFps = 0;
+        }
+        catch (Exception ex)
+        {
+            _backendStatus = $"Error: {ex.Message}";
+            Console.WriteLine($"Backend switch error: {ex}");
+        }
+        finally
+        {
+            _isInitializing = false;
+            _pendingBackendSwitch = false;
+            StateHasChanged();
+        }
+    }
+
+    private void DisposeAcceleratorResources()
+    {
+        _kernel = null;
+        _outputBuffer?.Dispose(); _outputBuffer = null;
+        _ilgpuAccelerator?.Dispose(); _ilgpuAccelerator = null;
+        _ilgpuContext?.Dispose(); _ilgpuContext = null;
+    }
+
+    private void DisposeRenderingCaches()
+    {
+        _cachedDestPixels?.Dispose(); _cachedDestPixels = null;
+        _cachedImageData?.Dispose(); _cachedImageData = null;
+        _cachedMainCtx?.Dispose(); _cachedMainCtx = null;
+        _cachedFpsCtx?.Dispose(); _cachedFpsCtx = null;
+        _cachedResult = null;
+        _cachedResultWidth = 0; _cachedResultHeight = 0;
+    }
+
+    // ========== Initialization ==========
+
+    private async Task InitializeBackend(string backendName)
+    {
+        switch (backendName)
+        {
+            case "WebGPU":
+                _ilgpuContext = await Context.CreateAsync(builder => builder.WebGPU());
+                var gpuDevices = _ilgpuContext.GetWebGPUDevices();
+                if (gpuDevices.Count == 0) throw new Exception("No WebGPU device found");
+                _ilgpuAccelerator = await gpuDevices[0].CreateAcceleratorAsync(_ilgpuContext);
+                break;
+            case "WebGL":
+                _ilgpuContext = await Context.CreateAsync(builder => builder.WebGL());
+                var glDevices = _ilgpuContext.GetWebGLDevices();
+                if (glDevices.Count == 0) throw new Exception("No WebGL2 device found");
+                var glOptions = new WebGLBackendOptions { EnableF64Emulation = false, EnableI64Emulation = false };
+                _ilgpuAccelerator = glDevices[0].CreateAccelerator(_ilgpuContext, glOptions);
+                break;
+            case "Wasm":
+                _ilgpuContext = await Context.CreateAsync(builder => builder.Wasm());
+                var wasmDevices = _ilgpuContext.GetDevices<WasmILGPUDevice>();
+                if (wasmDevices.Count == 0) throw new Exception("No Wasm device found");
+                _ilgpuAccelerator = await wasmDevices[0].CreateAcceleratorAsync(_ilgpuContext);
+                break;
+            case "CPU":
+                var cpuDevice = new CPUDevice(numThreadsPerWarp: 4, numWarpsPerMultiprocessor: 16, numMultiprocessors: 1);
+                _ilgpuContext = Context.Create().CPU(cpuDevice).ToContext();
+                _ilgpuAccelerator = _ilgpuContext.CreateCPUAccelerator(0);
+                break;
+            default:
+                throw new ArgumentException($"Unknown backend: {backendName}");
+        }
+        _kernel = _ilgpuAccelerator!.LoadAutoGroupedStreamKernel<
+            Index2D, ArrayView2D<uint, Stride2D.DenseX>,
+            int, int, int,
+            float, float, float, float, float>(RaymarchKernel);
+        _outputBuffer = _ilgpuAccelerator.Allocate2DDenseX<uint>(new Index2D(_width, _height));
+
+        // Capture compiled shader source for display
+        try
+        {
+            if (backendName == "WebGPU")
+            {
+                _shaderLanguage = "WGSL";
+                _shaderSource = JS.Get<string>("wgslDebug") ?? "";
+            }
+            else if (backendName == "WebGL")
+            {
+                _shaderLanguage = "GLSL";
+                _shaderSource = JS.Get<string>("glslDebug") ?? "";
+            }
+            else
+            {
+                _shaderLanguage = backendName;
+                _shaderSource = "(shader source only available for GPU backends)";
+            }
+        }
+        catch { _shaderSource = "(unable to read shader source)"; }
+    }
+
+    // ========== Render Loop ==========
+
+    private async Task RenderLoop()
+    {
+        try
+        {
+            await InitializeBackend(_selectedBackend);
+            _backendStatus = $"{_ilgpuAccelerator!.Name}";
+            StateHasChanged();
+
+            while (!_disposed)
+            {
+                if (_pendingBackendSwitch) { await SwitchBackend(); continue; }
+                if (_isRunning || _isInitializing) { await Task.Delay(10); continue; }
+                await RenderFrame();
+                ThrottledStateHasChanged();
+                await Task.Yield();
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Render loop error: {ex}");
+            _backendStatus = $"Error: {ex.Message}";
+            StateHasChanged();
+        }
+    }
+
+    private void ThrottledStateHasChanged()
+    {
+        var now = DateTime.UtcNow;
+        if ((now - _lastUiUpdate).TotalMilliseconds >= UI_UPDATE_INTERVAL_MS)
+        {
+            _lastUiUpdate = now;
+            StateHasChanged();
+        }
+    }
+
+    // ========== Mouse Interaction ==========
+
+    private void OnWheel(WheelEventArgs e)
+    {
+        float zoomFactor = e.DeltaY < 0 ? 0.9f : 1.1f;
+        _cameraDist *= zoomFactor;
+        if (_cameraDist < 2.0f) _cameraDist = 2.0f;
+        if (_cameraDist > 20.0f) _cameraDist = 20.0f;
+    }
+
+    private void OnMouseDown(MouseEventArgs e)
+    {
+        _isDragging = true;
+        _lastMouseX = e.OffsetX;
+        _lastMouseY = e.OffsetY;
+    }
+
+    private void OnMouseMove(MouseEventArgs e)
+    {
+        if (!_isDragging) return;
+        double dx = e.OffsetX - _lastMouseX;
+        double dy = e.OffsetY - _lastMouseY;
+        _cameraTheta += (float)(dx * 0.005);
+        _cameraPhi -= (float)(dy * 0.005);
+        // Clamp elevation
+        if (_cameraPhi < 0.05f) _cameraPhi = 0.05f;
+        if (_cameraPhi > 3.1f) _cameraPhi = 3.1f;
+        _lastMouseX = e.OffsetX;
+        _lastMouseY = e.OffsetY;
+    }
+
+    private void OnMouseUp(MouseEventArgs e) => _isDragging = false;
+
+    private void OnDoubleClick(MouseEventArgs e)
+    {
+        _cameraTheta = 0.5f;
+        _cameraPhi = 1.2f;
+        _cameraDist = 8.0f;
+    }
+
+    // ========== Rendering ==========
+
+    private async Task RenderFrame()
+    {
+        if (_kernel == null || _outputBuffer == null || _ilgpuAccelerator == null) return;
+        _isRunning = true;
+        try
+        {
+            var sw = Stopwatch.StartNew();
+
+            // Update time for animation
+            var now = DateTime.UtcNow;
+            var dt = (float)(now - _lastFrameTime).TotalSeconds;
+            _time += dt * _animationSpeed;
+
+            // Pack: width*65536+height, scene*256+quality
+            int packedSize = _width * 65536 + _height;
+            int packedConfig = _sceneType * 256 + _qualityLevel;
+
+            _kernel(
+                _outputBuffer.IntExtent, _outputBuffer.View,
+                packedSize, packedConfig, 0,
+                _cameraTheta, _cameraPhi, _cameraDist, _time, 0f);
+
+            await _ilgpuAccelerator.SynchronizeAsync();
+            var kernelTime = sw.Elapsed.TotalMilliseconds;
+            _lastKernelMs = kernelTime;
+
+            // Canvas blit
+            var swReadback = Stopwatch.StartNew();
+            var internalBuffer = ((IArrayView)_outputBuffer).Buffer;
+            int pixelCount = _width * _height;
+            int byteCount = pixelCount * 4;
+
+            if (_cachedMainCtx == null)
+            {
+                using var canvas = new HTMLCanvasElement(_mainCanvas);
+                _cachedMainCtx = canvas.GetContext<CanvasRenderingContext2D>("2d");
+            }
+
+            if (_cachedImageData == null || _cachedResultWidth != _width || _cachedResultHeight != _height)
+            {
+                _cachedDestPixels?.Dispose();
+                _cachedImageData?.Dispose();
+                _cachedImageData = _cachedMainCtx!.CreateImageData(_width, _height);
+                _cachedDestPixels = _cachedImageData.Data;
+                _cachedResultWidth = _width;
+                _cachedResultHeight = _height;
+                _cachedResult = new uint[pixelCount];
+            }
+
+            var destPixels = _cachedDestPixels!;
+            if (internalBuffer is IBrowserMemoryBuffer browserMemoryBuffer)
+            {
+                using var srcView = await browserMemoryBuffer.CopyToHostUint8ArrayAsync(0, byteCount);
+                destPixels.Set(srcView);
+            }
+            else if (internalBuffer is WasmMemoryBuffer wasmBuf)
+            {
+                using var srcView = await wasmBuf.CopyToHostUint8ArrayAsync(0, byteCount);
+                destPixels.Set(srcView);
+            }
+            else if (internalBuffer is WebGLMemoryBuffer webGlBuf)
+            {
+                using var srcView = await webGlBuf.CopyToHostUint8ArrayAsync(0, byteCount);
+                destPixels.Set(srcView);
+            }
+            else if (internalBuffer is WebGPUMemoryBuffer webGpuBuf)
+            {
+                using var srcView = await webGpuBuf.CopyToHostUint8ArrayAsync(0, byteCount);
+                destPixels.Set(srcView);
+            }
+            else
+            {
+                _outputBuffer.View.BaseView.CopyToCPU(_cachedResult!);
+                destPixels.Write(_cachedResult!);
+            }
+
+            _cachedMainCtx!.PutImageData(_cachedImageData, 0, 0);
+
+            swReadback.Stop();
+            _lastReadbackMs = swReadback.Elapsed.TotalMilliseconds;
+            sw.Stop();
+            _lastRenderMs = sw.Elapsed.TotalMilliseconds;
+
+            // Update FPS
+            _lastFrameTime = now;
+            if (dt > 0)
+            {
+                _fpsHistory[_fpsIndex % _fpsHistory.Length] = 1.0 / dt;
+                _fpsIndex++;
+                _currentFps = 1.0 / dt;
+            }
+            await DrawFpsGraph();
+        }
+        finally
+        {
+            _isRunning = false;
+        }
+    }
+
+    private async Task DrawFpsGraph()
+    {
+        try
+        {
+            if (_cachedFpsCtx == null)
+            {
+                using var canvas = new HTMLCanvasElement(_fpsCanvas);
+                _cachedFpsCtx = canvas.GetContext<CanvasRenderingContext2D>("2d");
+                if (_cachedFpsCtx == null) return;
+            }
+            var ctx = _cachedFpsCtx;
+            int w = 220, h = 80;
+            ctx.ClearRect(0, 0, w, h);
+            double maxFps = 10;
+            int count = _fpsIndex < _fpsHistory.Length ? _fpsIndex : _fpsHistory.Length;
+            for (int i = 0; i < count; i++)
+                maxFps = maxFps > _fpsHistory[i] ? maxFps : _fpsHistory[i];
+            double barWidth = (double)w / _fpsHistory.Length;
+            for (int i = 0; i < count; i++)
+            {
+                int idx = (_fpsIndex - count + i + _fpsHistory.Length) % _fpsHistory.Length;
+                double fps = _fpsHistory[idx];
+                double barHeight = (fps / maxFps) * (h - 15);
+                double ratio = fps / maxFps;
+                int r = (int)(255 * (1 - ratio));
+                int g = (int)(255 * ratio);
+                ctx.FillStyle = $"rgb({r},{g},80)";
+                ctx.FillRect(i * barWidth, h - barHeight - 10, barWidth > 1 ? barWidth - 1 : 1, barHeight);
+            }
+            ctx.FillStyle = "#e0e0e0";
+            ctx.Font = "11px monospace";
+            ctx.FillText($"{_currentFps:F0} FPS  |  {maxFps:F0} max", 5, 10);
+        }
+        catch { }
+    }
+
+    // ========== RAYMARCHING KERNEL ==========
+    // Minimal inline SDF: sphere + ground. No helper functions, no loops for normals.
+    // Uses float (f32) since double precision is unnecessary for 3D rendering
+    // (both GPU backends support f64 emulation if needed).
+
+    static void RaymarchKernel(
+        Index2D index,
+        ArrayView2D<uint, Stride2D.DenseX> output,
+        int packedSize, int packedConfig, int unused,
+        float camTheta, float camPhi, float camDist, float time, float unused2)
+    {
+        int width = packedSize / 65536;
+        int height = packedSize - width * 65536;
+
+        int px = index.X;
+        int py = index.Y;
+        if (px >= width || py >= height) return;
+
+        float aspect = (float)width / (float)height;
+        float u = (2.0f * px / width - 1.0f) * aspect;
+        float v = 2.0f * py / height - 1.0f;
+
+        // Camera
+        float sp = MathF.Sin(camPhi);
+        float cp = MathF.Cos(camPhi);
+        float sth = MathF.Sin(camTheta);
+        float cth = MathF.Cos(camTheta);
+
+        float camX = camDist * sp * cth;
+        float camY = camDist * cp;
+        float camZ = camDist * sp * sth;
+
+        // Forward
+        float fLen = MathF.Sqrt(camX * camX + camY * camY + camZ * camZ);
+        float fx = -camX / fLen;
+        float fy = -camY / fLen;
+        float fz = -camZ / fLen;
+
+        // Right = normalize(cross(fwd, (0,1,0)))
+        float rx = fz;
+        float rz = -fx;
+        float rLen = MathF.Sqrt(rx * rx + rz * rz);
+        if (rLen < 0.001f) { rx = 1.0f; rz = 0.0f; rLen = 1.0f; }
+        rx = rx / rLen;
+        rz = rz / rLen;
+
+        // Up = cross(right, fwd)
+        float ux = -rz * fy;
+        float uy = rz * fx - rx * fz;
+        float uz = rx * fy;
+
+        // Ray direction
+        float rdx = fx + u * rx + v * ux;
+        float rdy = fy + v * uy;
+        float rdz = fz + u * rz + v * uz;
+        float rdLen = MathF.Sqrt(rdx * rdx + rdy * rdy + rdz * rdz);
+        rdx = rdx / rdLen;
+        rdy = rdy / rdLen;
+        rdz = rdz / rdLen;
+
+        // Raymarch — just sphere + ground
+        float bounce = MathF.Sin(time * 1.5f) * 0.8f;
+        float t = 0.0f;
+        float hitT = -1.0f;
+        int steps = 0;
+
+        for (int i = 0; i < 64; i++)
+        {
+            float qx = camX + t * rdx;
+            float qy = camY + t * rdy;
+            float qz = camZ + t * rdz;
+
+            // Sphere at origin with bounce
+            float dSphere = MathF.Sqrt(qx * qx + (qy - bounce) * (qy - bounce) + qz * qz) - 1.0f;
+            // Ground at y=-1.5
+            float dGround = qy + 1.5f;
+            // Min
+            float d = dSphere < dGround ? dSphere : dGround;
+
+            if (d < 0.002f)
+            {
+                hitT = t;
+                steps = i;
+                break;
+            }
+
+            t = t + d;
+
+            if (t > 30.0f)
+            {
+                break;
+            }
+        }
+
+        // Color
+        float oR, oG, oB;
+        float bgR = 0.03f + 0.05f * (v * 0.5f + 0.5f);
+        float bgG = 0.03f + 0.07f * (v * 0.5f + 0.5f);
+        float bgB = 0.06f + 0.12f * (v * 0.5f + 0.5f);
+
+        if (hitT > 0.0f)
+        {
+            float hx = camX + hitT * rdx;
+            float hy = camY + hitT * rdy;
+            float hz = camZ + hitT * rdz;
+
+            // Normal — explicit 6 calls (no loop)
+            float eps = 0.003f;
+
+            float dxp = MathF.Sqrt((hx + eps) * (hx + eps) + (hy - bounce) * (hy - bounce) + hz * hz) - 1.0f;
+            float gxp = hy + 1.5f;
+            float sxp = dxp < gxp ? dxp : gxp;
+
+            float dxn = MathF.Sqrt((hx - eps) * (hx - eps) + (hy - bounce) * (hy - bounce) + hz * hz) - 1.0f;
+            float gxn = hy + 1.5f;
+            float sxn = dxn < gxn ? dxn : gxn;
+
+            float dyp = MathF.Sqrt(hx * hx + (hy + eps - bounce) * (hy + eps - bounce) + hz * hz) - 1.0f;
+            float gyp = hy + eps + 1.5f;
+            float syp = dyp < gyp ? dyp : gyp;
+
+            float dyn = MathF.Sqrt(hx * hx + (hy - eps - bounce) * (hy - eps - bounce) + hz * hz) - 1.0f;
+            float gyn = hy - eps + 1.5f;
+            float syn = dyn < gyn ? dyn : gyn;
+
+            float dzp = MathF.Sqrt(hx * hx + (hy - bounce) * (hy - bounce) + (hz + eps) * (hz + eps)) - 1.0f;
+            float gzp = hy + 1.5f;
+            float szp = dzp < gzp ? dzp : gzp;
+
+            float dzn = MathF.Sqrt(hx * hx + (hy - bounce) * (hy - bounce) + (hz - eps) * (hz - eps)) - 1.0f;
+            float gzn = hy + 1.5f;
+            float szn = dzn < gzn ? dzn : gzn;
+
+            float nx = sxp - sxn;
+            float ny = syp - syn;
+            float nz = szp - szn;
+            float nLen = MathF.Sqrt(nx * nx + ny * ny + nz * nz);
+            if (nLen > 0.0001f) { nx = nx / nLen; ny = ny / nLen; nz = nz / nLen; }
+
+            // Diffuse
+            float diff = nx * 0.577f + ny * 0.577f - nz * 0.577f;
+            if (diff < 0.0f) diff = 0.0f;
+
+            // Material: sphere vs ground
+            float mR, mG, mB;
+            if (hy > -1.4f)
+            {
+                mR = 0.6f; mG = 0.3f; mB = 0.8f;
+            }
+            else
+            {
+                float chk = MathF.Floor(hx) + MathF.Floor(hz);
+                chk = chk - 2.0f * MathF.Floor(chk * 0.5f);
+                if (chk < 0.0f) chk = -chk;
+                float c = chk > 0.5f ? 0.3f : 0.15f;
+                mR = c; mG = c; mB = c;
+            }
+
+            float ao = 1.0f - (float)steps / 64.0f;
+            oR = mR * (0.15f + diff * 0.85f) * ao;
+            oG = mG * (0.15f + diff * 0.85f) * ao;
+            oB = mB * (0.15f + diff * 0.85f) * ao;
+        }
+        else
+        {
+            oR = bgR; oG = bgG; oB = bgB;
+        }
+
+        // Gamma
+        oR = MathF.Sqrt(oR);
+        oG = MathF.Sqrt(oG);
+        oB = MathF.Sqrt(oB);
+
+        int cr = (int)(oR * 255.0f); if (cr > 255) cr = 255; if (cr < 0) cr = 0;
+        int cg = (int)(oG * 255.0f); if (cg > 255) cg = 255; if (cg < 0) cg = 0;
+        int cb = (int)(oB * 255.0f); if (cb > 255) cb = 255; if (cb < 0) cb = 0;
+        output[index] = (uint)(cr | (cg << 8) | (cb << 16) | (255 << 24));
+    }
+
+    // ========== Disposal ==========
+
+    public async ValueTask DisposeAsync()
+    {
+        _disposed = true;
+        DisposeAcceleratorResources();
+        DisposeRenderingCaches();
+    }
+}

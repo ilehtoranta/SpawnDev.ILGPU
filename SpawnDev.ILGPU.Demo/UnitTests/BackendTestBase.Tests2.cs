@@ -116,6 +116,34 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
                 if (result[i] != 9) throw new Exception($"Nested loop break failed at {i}. Expected 9, got {result[i]}");
         });
 
+        /// <summary>
+        /// Tests that assignments made before a `break` in a for-loop are visible
+        /// after the loop exits. This reproduces the transpiler break-PHI bug where
+        /// intermediate basic blocks between break and merge are skipped.
+        /// </summary>
+        [TestMethod]
+        public async Task LoopBreakAssignmentTest() => await RunTest(async accelerator =>
+        {
+            int len = 8;
+            using var buf = accelerator.Allocate1D<int>(len);
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<int>>(LoopBreakAssignmentKernel);
+            kernel((Index1D)len, buf.View);
+            await accelerator.SynchronizeAsync();
+            var result = await buf.CopyToHostAsync<int>();
+            // Expected: hitStep * 100 + hitValue
+            // index 0: i=5, val=5 → 505
+            // index 1: i=4, val=5 → 405
+            // index 2: i=3, val=5 → 305
+            // index 3: i=2, val=5 → 205
+            // index 4: i=1, val=5 → 105
+            // index 5: i=0, val=5 → 5  (hitStep=0, 0*100+5=5)
+            // index 6: i=0, val=6 → 6
+            // index 7: i=0, val=7 → 7
+            int[] expected = { 505, 405, 305, 205, 105, 5, 6, 7 };
+            for (int i = 0; i < len; i++)
+                if (result[i] != expected[i]) throw new Exception($"Break-PHI assignment failed at index {i}. Expected {expected[i]}, got {result[i]}");
+        });
+
         [TestMethod]
         public async Task HyperbolicTest() => await RunTest(async accelerator =>
         {

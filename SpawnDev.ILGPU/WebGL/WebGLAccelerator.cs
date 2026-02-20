@@ -227,6 +227,7 @@ namespace SpawnDev.ILGPU.WebGL
             Log("\n[WebGL-Debug] ---- GENERATED GLSL ----");
             Log(compiledKernel.GLSLSource);
             Log("[WebGL-Debug] ------------------------\n");
+            try { BlazorJS.BlazorJSRuntime.JS.Set("glslDebug", compiledKernel.GLSLSource); } catch { }
 
             // Determine dispatch size
             int totalVertices = 1;

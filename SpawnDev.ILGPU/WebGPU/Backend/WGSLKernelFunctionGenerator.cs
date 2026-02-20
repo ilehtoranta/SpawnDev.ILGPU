@@ -2430,6 +2430,46 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 }
             }
         }
+
+        /// <summary>
+        /// Pushes PHI values transitively through intermediate blocks that sit between
+        /// a loop break point and the final merge/exit block.
+        ///
+        /// When ILGPU generates IR for a loop body break (e.g., from C# `hitT = t; steps = i; break;`),
+        /// it may insert intermediate basic blocks between the break source and the final merge
+        /// block. These intermediate blocks have unconditional branches and PHI nodes that
+        /// carry the assigned values forward.
+        ///
+        /// CRITICAL: This method must NOT add blocks to the visited set or emit code for them.
+        /// The exit/merge blocks will be emitted by GenerateStructuredCodeRecursive AFTER the
+        /// loop construct. If we mark them visited here, the post-loop code (conditionals, stores)
+        /// will never be generated, causing the "grey screen" bug.
+        /// </summary>
+        private void PushPhiValuesTransitive(BasicBlock exitTarget, BasicBlock sourceBlock, 
+            Loops<ReversePostOrder, Forwards>.Node currentLoop, HashSet<BasicBlock> visited)
+        {
+            // Push any PHIs in the immediate exit target 
+            PushPhiValues(exitTarget, sourceBlock);
+
+            // Follow the chain of unconditional branches through intermediate blocks.
+            // Only push PHI values — do NOT emit code or mark blocks as visited.
+            // The post-loop blocks will be emitted naturally after the loop construct.
+            var current = exitTarget;
+            int maxDepth = 8; // Safety limit
+            for (int depth = 0; depth < maxDepth; depth++)
+            {
+                if (current.Terminator is global::ILGPU.IR.Values.UnconditionalBranch uBranch)
+                {
+                    var nextBlock = uBranch.Target;
+                    PushPhiValues(nextBlock, current);
+                    current = nextBlock;
+                }
+                else
+                {
+                    break; // Not an unconditional branch, stop tracing
+                }
+            }
+        }
         public override void GenerateCode(UnaryArithmeticValue value)
         {
             var target = Load(value);
@@ -3395,7 +3435,9 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                         {
                             AppendLine($"if ({Load(branch.Condition)}) {{");
                             PushIndent();
-                            PushPhiValues(trueTarget, block);
+                            // Use transitive push to chase through pass-through blocks
+                            // to the final merge block with PHI nodes
+                            PushPhiValuesTransitive(trueTarget, block, currentLoop, visited);
                             AppendLine("break;");
                             PopIndent();
                             AppendLine("}");
@@ -3408,7 +3450,9 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                         {
                             AppendLine($"if (!{Load(branch.Condition)}) {{");
                             PushIndent();
-                            PushPhiValues(falseTarget, block);
+                            // Use transitive push to chase through pass-through blocks
+                            // to the final merge block with PHI nodes
+                            PushPhiValuesTransitive(falseTarget, block, currentLoop, visited);
                             AppendLine("break;");
                             PopIndent();
                             AppendLine("}");
