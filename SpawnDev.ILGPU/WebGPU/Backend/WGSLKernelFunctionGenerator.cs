@@ -3383,10 +3383,32 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     visited.Add(block);
                     GenerateLoopConstruct(block, loopNode, stopBlock, pd, visited);
 
-                    // After the loop, continue with the exit block
+                    // After the loop, continue with the exit block.
+                    // DEBUG IL FIX: The loop's break paths already pushed PHI values
+                    // for all post-loop blocks via EmitIntermediateBlocksToExit /
+                    // PushPhiValuesTransitive. Skip through any exit chain blocks
+                    // that are just pass-through (UnconditionalBranch only) since
+                    // re-processing them would call PushPhiValues again and overwrite
+                    // the break-path values with stale "normal exit" values.
                     if (loopNode.Exits.Length > 0)
                     {
                         block = loopNode.Exits[0];
+                        // Skip pass-through blocks in the exit chain
+                        int skipLimit = 10;
+                        while (block != null && skipLimit-- > 0)
+                        {
+                            if (block.Terminator is global::ILGPU.IR.Values.UnconditionalBranch exitUBranch
+                                && !HasNonPhiInstructions(block))
+                            {
+                                // Pure pass-through block — mark visited and skip
+                                visited.Add(block);
+                                block = exitUBranch.Target;
+                            }
+                            else
+                            {
+                                break; // Found a block with real code or conditional branch
+                            }
+                        }
                     }
                     else
                     {
@@ -3425,19 +3447,22 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     // Check if we're inside a loop and one target exits the loop
                     if (currentLoop != null)
                     {
-                        bool trueExitsLoop = !currentLoop.Contains(trueTarget);
-                        bool falseExitsLoop = !currentLoop.Contains(falseTarget);
+                        // DEBUG IL FIX: Use transitive exit detection.
+                        // In Debug builds, Roslyn inserts intermediate blocks between
+                        // branches and the actual loop exit. We follow unconditional
+                        // branch chains to detect indirect exits.
+                        bool trueExitsLoop = ExitsLoopTransitively(trueTarget, currentLoop, out var trueExitBlock);
+                        bool falseExitsLoop = ExitsLoopTransitively(falseTarget, currentLoop, out var falseExitBlock);
                         bool trueIsBackEdge = IsLoopHeader(trueTarget, currentLoop);
                         bool falseIsBackEdge = IsLoopHeader(falseTarget, currentLoop);
 
-                        // Case: if (cond) break; — true exits loop
+                        // Case: if (cond) break; — true exits loop (directly or transitively)
                         if (trueExitsLoop && !falseExitsLoop)
                         {
                             AppendLine($"if ({Load(branch.Condition)}) {{");
                             PushIndent();
-                            // Use transitive push to chase through pass-through blocks
-                            // to the final merge block with PHI nodes
-                            PushPhiValuesTransitive(trueTarget, block, currentLoop, visited);
+                            // Emit intermediate blocks' code and PHI values before break
+                            EmitIntermediateBlocksToExit(trueTarget, trueExitBlock, block, currentLoop, visited);
                             AppendLine("break;");
                             PopIndent();
                             AppendLine("}");
@@ -3445,14 +3470,13 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                             block = falseTarget;
                             continue;
                         }
-                        // Case: if (!cond) break; — false exits loop (i.e., condition is true → continue)
+                        // Case: if (!cond) break; — false exits loop (directly or transitively)
                         else if (falseExitsLoop && !trueExitsLoop)
                         {
                             AppendLine($"if (!{Load(branch.Condition)}) {{");
                             PushIndent();
-                            // Use transitive push to chase through pass-through blocks
-                            // to the final merge block with PHI nodes
-                            PushPhiValuesTransitive(falseTarget, block, currentLoop, visited);
+                            // Emit intermediate blocks' code and PHI values before break
+                            EmitIntermediateBlocksToExit(falseTarget, falseExitBlock, block, currentLoop, visited);
                             AppendLine("break;");
                             PopIndent();
                             AppendLine("}");
@@ -3652,6 +3676,135 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         }
 
         /// <summary>
+        /// DEBUG IL FIX: Checks if a block contains any non-PHI, non-terminator instructions.
+        /// Pure pass-through blocks (containing only PHI values and a terminator) can be
+        /// skipped in post-loop exit chain processing since their PHI values were already
+        /// handled by the loop's break paths.
+        /// </summary>
+        private static bool HasNonPhiInstructions(BasicBlock block)
+        {
+            foreach (var value in block)
+            {
+                if (value.Value is global::ILGPU.IR.Values.TerminatorValue) continue;
+                if (value.Value is PhiValue) continue;
+                return true; // Found a real instruction
+            }
+            return false;
+        }
+
+        /// <summary>
+        /// DEBUG IL FIX: Checks whether a block exits the loop, either directly
+        /// or transitively through a chain of unconditional branches.
+        /// 
+        /// In Debug builds, Roslyn inserts intermediate basic blocks between
+        /// control flow decisions and their actual targets. These blocks contain
+        /// only unconditional branches (and sometimes PHI assignments). This
+        /// method follows such chains to determine if the eventual destination
+        /// is outside the loop.
+        /// </summary>
+        /// <param name="target">The immediate branch target to check.</param>
+        /// <param name="loop">The current loop node.</param>
+        /// <param name="exitBlock">The actual exit block (outside the loop), or the target itself if it directly exits.</param>
+        /// <returns>True if the target eventually exits the loop.</returns>
+        private static bool ExitsLoopTransitively(
+            BasicBlock target,
+            Loops<ReversePostOrder, Forwards>.Node loop,
+            out BasicBlock exitBlock)
+        {
+            // Fast path: direct exit
+            if (!loop.Contains(target))
+            {
+                exitBlock = target;
+                return true;
+            }
+
+            // Follow unconditional branch chains through intermediate blocks
+            var current = target;
+            int maxDepth = 10; // Safety limit to prevent infinite loops
+            for (int i = 0; i < maxDepth; i++)
+            {
+                // Only follow unconditional branches (intermediate pass-through blocks)
+                if (current.Terminator is global::ILGPU.IR.Values.UnconditionalBranch uBranch)
+                {
+                    var next = uBranch.Target;
+                    if (!loop.Contains(next))
+                    {
+                        // Found the exit!
+                        exitBlock = next;
+                        return true;
+                    }
+                    current = next;
+                }
+                else
+                {
+                    // Hit a conditional branch or other terminator — not a simple chain
+                    break;
+                }
+            }
+
+            exitBlock = target;
+            return false;
+        }
+
+        /// <summary>
+        /// DEBUG IL FIX: Emits intermediate blocks' instructions and PHI values
+        /// along the chain from startBlock to exitBlock.
+        /// 
+        /// When Debug IL inserts intermediate blocks between a branch and the
+        /// loop exit, those blocks may contain PHI assignments that carry values
+        /// (like hitT, steps) forward. This method walks the chain, emitting
+        /// each block's instructions and pushing PHI values, then finally pushes
+        /// PHI values for the exit block itself.
+        /// </summary>
+        private void EmitIntermediateBlocksToExit(
+            BasicBlock startBlock,
+            BasicBlock exitBlock,
+            BasicBlock sourceBlock,
+            Loops<ReversePostOrder, Forwards>.Node currentLoop,
+            HashSet<BasicBlock> visited)
+        {
+            if (!currentLoop.Contains(startBlock))
+            {
+                // startBlock IS the exit — no intermediate blocks.
+                // Use transitive push for the exit chain.
+                PushPhiValuesTransitive(startBlock, sourceBlock, currentLoop, visited);
+                return;
+            }
+
+            // Walk through intermediate blocks, emitting their code and PHI values
+            var current = startBlock;
+            var prevBlock = sourceBlock;
+            int maxDepth = 10;
+            for (int i = 0; i < maxDepth; i++)
+            {
+                // Push PHI values from the previous block into this one
+                PushPhiValues(current, prevBlock);
+                // Mark visited so we don't re-emit
+                visited.Add(current);
+                // Emit the block's instructions (excluding terminator)
+                GenerateBasicBlockCode(current);
+
+                if (current.Terminator is global::ILGPU.IR.Values.UnconditionalBranch uBranch)
+                {
+                    var next = uBranch.Target;
+                    if (!currentLoop.Contains(next))
+                    {
+                        // Reached the exit — push PHI values transitively
+                        PushPhiValuesTransitive(next, current, currentLoop, visited);
+                        return;
+                    }
+                    prevBlock = current;
+                    current = next;
+                }
+                else
+                {
+                    // Shouldn't happen given ExitsLoopTransitively passed, but be safe
+                    break;
+                }
+            }
+        }
+
+        /// <summary>
         /// Generates a WGSL loop {} construct for a natural loop detected by ILGPU's loop analysis.
         /// The loop header block is emitted first, followed by a break condition check,
         /// then the loop body blocks. This ensures barriers are in uniform control flow.
@@ -3676,16 +3829,16 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 var trueTarget = headerBranch.TrueTarget;
                 var falseTarget = headerBranch.FalseTarget;
 
-                // Determine which branch exits the loop and which continues
-                bool trueIsExit = !loopNode.Contains(trueTarget);
-                bool falseIsExit = !loopNode.Contains(falseTarget);
+                // DEBUG IL FIX: Use transitive exit detection for loop headers too.
+                bool trueIsExit = ExitsLoopTransitively(trueTarget, loopNode, out var trueHeaderExit);
+                bool falseIsExit = ExitsLoopTransitively(falseTarget, loopNode, out var falseHeaderExit);
 
                 if (trueIsExit)
                 {
                     // True branch exits → break when condition is true
                     AppendLine($"if ({Load(headerBranch.Condition)}) {{");
                     PushIndent();
-                    PushPhiValues(trueTarget, headerBlock);
+                    EmitIntermediateBlocksToExit(trueTarget, trueHeaderExit, headerBlock, loopNode, visited);
                     AppendLine("break;");
                     PopIndent();
                     AppendLine("}");
@@ -3699,7 +3852,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     // False branch exits → break when condition is false
                     AppendLine($"if (!{Load(headerBranch.Condition)}) {{");
                     PushIndent();
-                    PushPhiValues(falseTarget, headerBlock);
+                    EmitIntermediateBlocksToExit(falseTarget, falseHeaderExit, headerBlock, loopNode, visited);
                     AppendLine("break;");
                     PopIndent();
                     AppendLine("}");

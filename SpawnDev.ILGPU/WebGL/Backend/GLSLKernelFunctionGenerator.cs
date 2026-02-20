@@ -905,11 +905,33 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 AppendLine("}");
 
                 // Continue with exit blocks after the loop
+                // DEBUG IL FIX: Skip through pure pass-through exit blocks
+                // (only PHI values + unconditional branch) since the loop's break
+                // paths already pushed their PHI values. Re-processing would call
+                // PushPhiValues again and overwrite break-path values.
                 foreach (var exit in loop.Exits)
                 {
-                    if (exit != stop && !_visitedBlocks.Contains(exit))
+                    var exitBlock = exit;
+                    // Skip pass-through blocks
+                    int skipLimit = 10;
+                    while (exitBlock != null && exitBlock != stop
+                        && !_visitedBlocks.Contains(exitBlock)
+                        && skipLimit-- > 0)
                     {
-                        GenerateStructuredCode(exit, stop);
+                        if (exitBlock.Terminator is UnconditionalBranch exitUBranch
+                            && !HasNonPhiInstructions(exitBlock))
+                        {
+                            _visitedBlocks.Add(exitBlock);
+                            exitBlock = exitUBranch.Target;
+                        }
+                        else
+                        {
+                            break;
+                        }
+                    }
+                    if (exitBlock != null && exitBlock != stop && !_visitedBlocks.Contains(exitBlock))
+                    {
+                        GenerateStructuredCode(exitBlock, stop);
                         break; // Only one exit continuation in structured flow
                     }
                 }
@@ -963,7 +985,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 {
                     AppendLine("continue;");
                 }
-                else if (!loop.Contains(ub.Target))
+                else if (ExitsLoopTransitively(ub.Target, loop))
                 {
                     // Exit the loop — trace through intermediate blocks first
                     EmitBreakWithIntermediateCode(ub.Target, current);
@@ -990,8 +1012,12 @@ namespace SpawnDev.ILGPU.WebGL.Backend
 
             bool trueIsBackEdge = IsBackEdgeToActiveLoop(trueTarget);
             bool falseIsBackEdge = IsBackEdgeToActiveLoop(falseTarget);
-            bool trueIsExit = !loop.Contains(trueTarget);
-            bool falseIsExit = !loop.Contains(falseTarget);
+            // DEBUG IL FIX: Use transitive exit detection.
+            // In Debug builds, Roslyn inserts intermediate blocks between
+            // branches and the actual loop exit. Follow unconditional branch
+            // chains to detect indirect exits.
+            bool trueIsExit = ExitsLoopTransitively(trueTarget, loop);
+            bool falseIsExit = ExitsLoopTransitively(falseTarget, loop);
 
             // Case 1: Loop condition check — one side continues, other exits
             if (trueIsBackEdge && falseIsExit)
@@ -1207,6 +1233,57 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 }
             }
             AppendLine("break;");
+        }
+
+        /// <summary>
+        /// DEBUG IL FIX: Checks whether a block exits the loop, either directly
+        /// or transitively through a chain of unconditional branches.
+        /// 
+        /// In Debug builds, Roslyn inserts intermediate basic blocks between
+        /// control flow decisions and their actual targets. This method follows
+        /// such chains to determine if the eventual destination is outside the loop.
+        /// </summary>
+        private static bool ExitsLoopTransitively(
+            BasicBlock target,
+            Loops<ReversePostOrder, Forwards>.Node loop)
+        {
+            // Fast path: direct exit
+            if (!loop.Contains(target))
+                return true;
+
+            // Follow unconditional branch chains through intermediate blocks
+            var current = target;
+            int maxDepth = 10; // Safety limit
+            for (int i = 0; i < maxDepth; i++)
+            {
+                if (current.Terminator is UnconditionalBranch uBranch)
+                {
+                    if (!loop.Contains(uBranch.Target))
+                        return true;
+                    current = uBranch.Target;
+                }
+                else
+                {
+                    break;
+                }
+            }
+            return false;
+        }
+
+        /// <summary>
+        /// DEBUG IL FIX: Checks if a block contains any non-PHI, non-terminator instructions.
+        /// Pure pass-through blocks can be skipped in post-loop exit chain processing
+        /// since their PHI values were already handled by the loop's break paths.
+        /// </summary>
+        private static bool HasNonPhiInstructions(BasicBlock block)
+        {
+            foreach (var value in block)
+            {
+                if (value.Value is TerminatorValue) continue;
+                if (value.Value is PhiValue) continue;
+                return true;
+            }
+            return false;
         }
 
         /// <summary>

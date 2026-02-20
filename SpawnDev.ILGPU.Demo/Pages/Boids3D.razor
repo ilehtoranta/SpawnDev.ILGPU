@@ -384,6 +384,7 @@
         {
             await InitializeBackend(_selectedBackend);
             _backendStatus = $"{_ilgpuAccelerator!.Name}";
+            _lastFrameTime = DateTime.UtcNow; // Reset so first frame dt is not stale
             StateHasChanged();
 
             while (!_disposed)
@@ -540,8 +541,9 @@
             sw.Stop();
             _lastRenderMs = sw.Elapsed.TotalMilliseconds;
 
+            // Update FPS based on actual measured frame time
             _lastFrameTime = now;
-            if (dt > 0) { _fpsHistory[_fpsIndex % _fpsHistory.Length] = 1.0 / dt; _fpsIndex++; _currentFps = 1.0 / dt; }
+            if (_lastRenderMs > 0) { double measuredFps = 1000.0 / _lastRenderMs; _fpsHistory[_fpsIndex % _fpsHistory.Length] = measuredFps; _fpsIndex++; _currentFps = measuredFps; }
             await DrawFpsGraph();
         }
         finally
