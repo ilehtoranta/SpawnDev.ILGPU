@@ -11,7 +11,6 @@ namespace SpawnDev.ILGPU.WpfDemo
         private FractalExplorerPage? _fractalPage;
         private RaymarchingPage? _raymarchPage;
         private BoidsPage? _boidsPage;
-        private TestsPage? _testsPage;
 
         public MainWindow()
         {
@@ -48,10 +47,7 @@ namespace SpawnDev.ILGPU.WpfDemo
                     _boidsPage ??= new BoidsPage();
                     ContentArea.Content = _boidsPage;
                     break;
-                case "Tests":
-                    _testsPage ??= new TestsPage();
-                    ContentArea.Content = _testsPage;
-                    break;
+
             }
         }
 

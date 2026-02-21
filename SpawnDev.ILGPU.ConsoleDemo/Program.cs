@@ -404,6 +404,15 @@ public class OpenCLTests : BackendTestBase
         var accelerator = clDevices[0].CreateAccelerator(context);
         return Task.FromResult<(Context, Accelerator)>((context, accelerator));
     }
+
+    protected override void RequireFeature(Accelerator accelerator, string featureName, string? reason = null)
+    {
+        if (featureName == "subgroups" && accelerator is ILGPU.Runtime.OpenCL.CLAccelerator clAccel)
+        {
+            if (!clAccel.Capabilities.SubGroups)
+                throw new UnsupportedTestException(reason ?? "Subgroup support not available on this OpenCL device");
+        }
+    }
 }
 
 public class CPUTests : BackendTestBase

@@ -373,6 +373,9 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
         [TestMethod]
         public async Task ReduceMinMaxTest() => await RunTest(async accelerator =>
         {
+            // This kernel uses Warp.Shuffle directly — requires subgroup support
+            RequireFeature(accelerator, "subgroups", "Warp shuffle reduction requires 'subgroups' feature");
+
             // Tests warp shuffle emulation (or native subgroups) and float atomic add emulation.
             // Uses 64 elements to match the default WebGPU workgroup size so the butterfly
             // reduction reads from valid lanes. Expected sum = 1+2+...+64 = 2080.

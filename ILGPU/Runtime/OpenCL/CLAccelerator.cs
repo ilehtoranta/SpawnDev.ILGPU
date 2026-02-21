@@ -107,8 +107,10 @@ namespace ILGPU.Runtime.OpenCL
             : base(context, description)
         {
             Backends.Backend.EnsureRunningOnNativePlatform();
-            if (!description.Capabilities.GenericAddressSpace)
-                throw CLCapabilityContext.GetNotSupportedGenericAddressSpaceException();
+            // Note: GenericAddressSpace is optional in OpenCL 3.0.
+            // The code generator uses explicit address space qualifiers
+            // (__global, __local, __private) so generic address space
+            // is not required for kernel compilation.
 
             // Create new context
             CLException.ThrowIfFailed(
