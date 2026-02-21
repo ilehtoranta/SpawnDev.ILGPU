@@ -74,12 +74,12 @@ SpawnDev.ILGPU bundles ILGPU's native backends, so the same NuGet package works 
 | **64-bit** | ✅ Native | ✅ Native | ✅ Native |
 | **Requirement** | NVIDIA GPU + driver | OpenCL 2.0+ GPU | None |
 
-**Auto-selection:** Cuda → OpenCL → CPU (via `GetPreferredDevice`)
+**Auto-selection:** Cuda → OpenCL → CPU (via `CreatePreferredAcceleratorAsync`)
 
 ## Features
 
 - **Cross-platform** — Same kernel code runs in browser (WebGPU, WebGL, Wasm) and desktop (Cuda, OpenCL, CPU) from one NuGet package
-- **Automatic backend selection** — `CreatePreferredAcceleratorAsync()` (browser) or `GetPreferredDevice()` (desktop) picks the best available
+- **Automatic backend selection** — `CreatePreferredAcceleratorAsync()` picks the best backend on any platform (browser or desktop)
 - **Unified async API** — `SynchronizeAsync()` and `CopyToHostAsync()` work everywhere, falling back to synchronous calls on desktop
 - **ILGPU-compatible** — Use familiar APIs (`ArrayView`, `Index1D/2D/3D`, math intrinsics, etc.)
 - **WGSL transpilation** — C# kernels automatically compiled to WebGPU Shading Language

@@ -244,16 +244,13 @@ When running outside the browser (console apps, WPF, ASP.NET, etc.), SpawnDev.IL
 ### Setup
 
 ```csharp
-// Standard ILGPU context creation — works in any .NET app
-using var context = Context.Create(builder => builder.AllAccelerators());
+// Recommended: use the unified async pattern (same as Blazor WASM)
+using var context = await Context.CreateAsync(builder => builder.AllAcceleratorsAsync());
+using var accelerator = await context.CreatePreferredAcceleratorAsync();
 
 // Lists all detected devices
 foreach (var device in context)
     Console.WriteLine($"{device.Name} ({device.AcceleratorType})");
-
-// Pick the best GPU
-using var accelerator = context.GetPreferredDevice(preferCPU: false)
-    .CreateAccelerator(context);
 ```
 
 ### Cuda
