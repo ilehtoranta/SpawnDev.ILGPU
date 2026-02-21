@@ -74,6 +74,7 @@
     int generation = 0;
     int targetFps = 15;
     bool isMouseDown = false;
+    bool isModifyingGrid = false;
 
     // ILGPU
     global::ILGPU.Context? context;
@@ -90,6 +91,9 @@
 
     // Animation loop cancellation
     CancellationTokenSource? animCts;
+
+    // Cache the last host copy for mouse interaction (avoids mapping GPU buffer during submit)
+    int[]? cachedCells;
 
     protected override async Task OnAfterRenderAsync(bool firstRender)
     {
@@ -176,6 +180,7 @@
 
         pingPong = !pingPong;
         generation++;
+        cachedCells = null; // invalidate cache after step
     }
 
     async Task RenderFrame()
@@ -184,6 +189,7 @@
 
         var currentBuf = pingPong ? bufB! : bufA!;
         var cells = await currentBuf.CopyToHostAsync<int>();
+        cachedCells = cells; // cache for mouse interaction
 
         // Create ImageData if needed
         if (imageData == null)
@@ -247,9 +253,12 @@
         {
             while (!ct.IsCancellationRequested && isRunning)
             {
-                await StepGPU();
-                await RenderFrame();
-                StateHasChanged();
+                if (!isModifyingGrid)
+                {
+                    await StepGPU();
+                    await RenderFrame();
+                    StateHasChanged();
+                }
                 int delayMs = Math.Max(16, 1000 / targetFps);
                 await Task.Delay(delayMs, ct);
             }
@@ -282,15 +291,16 @@
 
         // Re-create BOTH buffers with random data
         var rng = new Random();
-        var data = new int[GridWidth * GridHeight];
-        for (int i = 0; i < data.Length; i++)
-            data[i] = rng.Next(4) == 0 ? 1 : 0; // ~25% alive
+        var newData = new int[GridWidth * GridHeight];
+        for (int i = 0; i < newData.Length; i++)
+            newData[i] = rng.Next(4) == 0 ? 1 : 0; // ~25% alive
 
         bufA?.Dispose();
         bufB?.Dispose();
-        bufA = accelerator.Allocate1D(data);
+        bufA = accelerator.Allocate1D(newData);
         bufB = accelerator.Allocate1D(new int[GridWidth * GridHeight]);
         pingPong = false;
+        cachedCells = null;
 
         generation = 0;
         await RenderFrame();
@@ -311,21 +321,22 @@
         bufA = accelerator.Allocate1D(new int[GridWidth * GridHeight]);
         bufB = accelerator.Allocate1D(new int[GridWidth * GridHeight]);
         pingPong = false;
+        cachedCells = null;
 
         generation = 0;
         await RenderFrame();
         StateHasChanged();
     }
 
-    void OnMouseDown(MouseEventArgs e)
+    async Task OnMouseDown(MouseEventArgs e)
     {
         isMouseDown = true;
-        _ = ToggleCellAsync(e);
+        await ToggleCellAsync(e);
     }
 
-    void OnMouseMove(MouseEventArgs e)
+    async Task OnMouseMove(MouseEventArgs e)
     {
-        if (isMouseDown) _ = ToggleCellAsync(e);
+        if (isMouseDown) await ToggleCellAsync(e);
     }
 
     void OnMouseUp(MouseEventArgs e)
@@ -340,24 +351,40 @@
 
     async Task ToggleCellAsync(MouseEventArgs e)
     {
-        if (accelerator == null) return;
+        if (accelerator == null || isModifyingGrid) return;
 
         int cx = (int)(e.OffsetX / CellSize);
         int cy = (int)(e.OffsetY / CellSize);
         if (cx < 0 || cx >= GridWidth || cy < 0 || cy >= GridHeight) return;
 
-        var targetBuf = pingPong ? bufB! : bufA!;
-        var data = await targetBuf.CopyToHostAsync<int>();
-        int idx = cy * GridWidth + cx;
-        data[idx] = 1; // Always set to alive when drawing
-        targetBuf.Dispose();
-        var newBuf = accelerator.Allocate1D(data);
-        if (pingPong)
-            bufB = newBuf;
-        else
-            bufA = newBuf;
-        await RenderFrame();
-        StateHasChanged();
+        isModifyingGrid = true;
+        try
+        {
+            // Ensure GPU is idle before touching buffers
+            await accelerator.SynchronizeAsync();
+
+            var targetBuf = pingPong ? bufB! : bufA!;
+
+            // Use cached cells if available to avoid re-mapping the buffer
+            var cellData = cachedCells ?? await targetBuf.CopyToHostAsync<int>();
+
+            int idx = cy * GridWidth + cx;
+            cellData[idx] = 1; // Always set to alive when drawing
+            cachedCells = cellData;
+
+            targetBuf.Dispose();
+            var newBuf = accelerator.Allocate1D(cellData);
+            if (pingPong)
+                bufB = newBuf;
+            else
+                bufA = newBuf;
+            await RenderFrame();
+            StateHasChanged();
+        }
+        finally
+        {
+            isModifyingGrid = false;
+        }
     }
 
     public void Dispose()
