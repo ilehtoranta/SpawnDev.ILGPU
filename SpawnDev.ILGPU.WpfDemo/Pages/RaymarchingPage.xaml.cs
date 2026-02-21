@@ -428,7 +428,17 @@ namespace SpawnDev.ILGPU.WpfDemo.Pages
         public void Dispose()
         {
             _disposed = true;
-            _renderThread?.Join(2000);
+            if (_renderThread != null && _renderThread.IsAlive)
+            {
+                var sw = Stopwatch.StartNew();
+                while (_renderThread.IsAlive && sw.ElapsedMilliseconds < 3000)
+                {
+                    var frame = new DispatcherFrame();
+                    Dispatcher.BeginInvoke(DispatcherPriority.Background,
+                        new Action(() => frame.Continue = false));
+                    Dispatcher.PushFrame(frame);
+                }
+            }
         }
     }
 }

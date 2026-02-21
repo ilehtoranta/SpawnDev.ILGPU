@@ -1,6 +1,6 @@
 # Limitations & Constraints
 
-SpawnDev.ILGPU runs ILGPU in Blazor WebAssembly, which introduces platform-specific constraints. This page documents all known limitations and their workarounds.
+SpawnDev.ILGPU runs ILGPU across both Blazor WebAssembly and desktop environments. Each platform introduces specific constraints. This page documents all known limitations and their workarounds.
 
 ## Critical: No Blocking Calls
 
@@ -135,24 +135,25 @@ Without `SharedArrayBuffer`, the Wasm backend still works but falls back to a si
 
 Not all ILGPU features work on all backends:
 
-| Feature | WebGPU | WebGL | Wasm | CPU |
-|---------|--------|-------|------|-----|
-| Basic kernels | ✅ | ✅ | ✅ | ✅ |
-| 1D/2D/3D index | ✅ | ✅ | ✅ | ✅ |
-| Scalar params | ✅ | ✅ | ✅ | ✅ |
-| Struct params | ✅ | ✅ | ✅ | ✅ |
-| SharedMemory | ✅ | ❌ | ✅ | ⚠️ |
-| Group.Barrier() | ✅ | ❌ | ✅ | ❌ |
-| Dynamic SharedMemory | ✅ | ❌ | ✅ | ❌ |
-| Group.Broadcast | ✅ | ❌ | ✅ | ❌ |
-| Atomics | ✅ | ❌ | ✅ | ⚠️ |
-| Warp/Subgroup ops | ✅¹ | ❌ | ❌ | ❌ |
-| f64 emulation | ✅ | ✅ | N/A (native) | N/A (native) |
-| i64 emulation | ✅ | ✅ | N/A (native) | N/A (native) |
-| ILGPU Algorithms | ✅ | ❌² | ✅ | ⚠️ |
+| Feature | WebGPU | WebGL | Wasm | CPU (Browser) | Cuda | OpenCL | CPU (Desktop) |
+|---------|--------|-------|------|---------------|------|--------|---------------|
+| Basic kernels | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| 1D/2D/3D index | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Scalar params | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Struct params | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| SharedMemory | ✅ | ❌ | ✅ | ⚠️ | ✅ | ✅ | ✅ |
+| Group.Barrier() | ✅ | ❌ | ✅ | ❌ | ✅ | ✅ | ✅ |
+| Dynamic SharedMemory | ✅ | ❌ | ✅ | ❌ | ✅ | ✅ | ✅ |
+| Group.Broadcast | ✅ | ❌ | ✅ | ❌ | ✅ | ✅¹ | ✅ |
+| Atomics | ✅ | ❌ | ✅ | ⚠️ | ✅ | ✅ | ✅ |
+| Warp/Subgroup ops | ✅² | ❌ | ❌ | ❌ | ✅ | ✅¹ | ✅ |
+| f64 emulation | ✅ | ✅ | N/A (native) | N/A (native) | N/A (native) | N/A (native) | N/A (native) |
+| i64 emulation | ✅ | ✅ | N/A (native) | N/A (native) | N/A (native) | N/A (native) | N/A (native) |
+| ILGPU Algorithms | ✅ | ❌³ | ✅ | ⚠️ | ✅ | ✅ | ✅ |
 
-¹ Requires `subgroups` WebGPU extension  
-² Most algorithms require shared memory or atomics  
+¹ Requires device subgroup support (dynamically detected; some OpenCL 3.0 devices like NVIDIA may lack subgroups)  
+² Requires `subgroups` WebGPU extension  
+³ Most algorithms require shared memory or atomics  
 ⚠️ CPU backend works in theory but may crash or have limitations in Blazor WASM single-threaded environment
 
 ## Browser Compatibility

@@ -624,9 +624,23 @@ namespace SpawnDev.ILGPU.WpfDemo.Pages
         public void Dispose()
         {
             _disposed = true;
-            // Wait for the render thread to exit (it checks _disposed each iteration)
-            _renderThread?.Join(2000);
-            // Resources are disposed in the RenderLoop finally block
+            // Don't use _renderThread.Join() — that deadlocks because the render
+            // thread may be blocked inside Dispatcher.Invoke, waiting for this thread.
+            // Instead, pump the dispatcher to process those Invoke calls while
+            // waiting for the render thread to exit naturally.
+            if (_renderThread != null && _renderThread.IsAlive)
+            {
+                var sw = Stopwatch.StartNew();
+                while (_renderThread.IsAlive && sw.ElapsedMilliseconds < 3000)
+                {
+                    // Process one batch of pending dispatcher work
+                    var frame = new DispatcherFrame();
+                    Dispatcher.BeginInvoke(DispatcherPriority.Background,
+                        new Action(() => frame.Continue = false));
+                    Dispatcher.PushFrame(frame);
+                }
+            }
+            // GPU resources are disposed in the RenderLoop's finally block
         }
     }
 }

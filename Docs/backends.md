@@ -23,12 +23,12 @@ SpawnDev.ILGPU supports multiple backends for running ILGPU kernels. In the brow
 
 | | 🚀 **Cuda** | 🔧 **OpenCL** | 🐢 **CPU** |
 |---|---|---|---|
-| **Executes on** | NVIDIA GPU | AMD/Intel GPU | CPU cores |
+| **Executes on** | NVIDIA GPU | NVIDIA/AMD/Intel GPU | CPU cores |
 | **Transpiles to** | PTX | OpenCL C | — (interpreted) |
 | **Shared Memory** | ✅ | ✅ | ✅ |
 | **Atomics** | ✅ | ✅ | ✅ |
 | **64-bit** | ✅ Native | ✅ Native | ✅ Native |
-| **Requirement** | NVIDIA GPU + driver | OpenCL 2.0+ GPU | None |
+| **Requirement** | NVIDIA GPU + driver | OpenCL 2.0+ or 3.0 GPU | None |
 
 **Auto-selection priority (browser):** WebGPU → WebGL → Wasm
 **Auto-selection priority (desktop):** Cuda → OpenCL → CPU
@@ -267,9 +267,11 @@ foreach (var device in context)
 
 ### OpenCL
 
-- Supports AMD and Intel GPUs (OpenCL 2.0+)
+- Supports NVIDIA, AMD, and Intel GPUs
 - Uses OpenCL C kernel language
-- NVIDIA GPUs are limited to OpenCL 1.2 (not supported by ILGPU)
+- OpenCL 2.0+ and OpenCL 3.0 devices are supported
+- NVIDIA GPUs with OpenCL 3.0 drivers are now compatible — the `GenericAddressSpace` requirement that previously blocked these devices has been relaxed
+- Subgroup-dependent tests (e.g., `Warp.Shuffle`) are dynamically skipped on devices that don't report subgroup support
 
 > **Note:** Cuda and OpenCL are not available in Blazor WebAssembly — they fail silently when the context builder tries to register them in the browser.
 

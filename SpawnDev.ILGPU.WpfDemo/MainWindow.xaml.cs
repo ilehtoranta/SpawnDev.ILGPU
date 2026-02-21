@@ -8,14 +8,10 @@ namespace SpawnDev.ILGPU.WpfDemo
     public partial class MainWindow : Window
     {
         private HomePage? _homePage;
-        private FractalExplorerPage? _fractalPage;
-        private RaymarchingPage? _raymarchPage;
-        private BoidsPage? _boidsPage;
 
         public MainWindow()
         {
             InitializeComponent();
-            // Show home page on startup
             ShowPage("Home");
         }
 
@@ -27,8 +23,20 @@ namespace SpawnDev.ILGPU.WpfDemo
             }
         }
 
+        /// <summary>
+        /// Disposes the current GPU page (if any) before showing the next.
+        /// GPU pages own render threads and GPU contexts — running multiple
+        /// simultaneously causes resource conflicts and crashes.
+        /// </summary>
         private void ShowPage(string page)
         {
+            // Dispose current GPU page before switching
+            if (ContentArea.Content is IDisposable disposable && ContentArea.Content is not HomePage)
+            {
+                ContentArea.Content = null;
+                disposable.Dispose();
+            }
+
             switch (page)
             {
                 case "Home":
@@ -36,18 +44,14 @@ namespace SpawnDev.ILGPU.WpfDemo
                     ContentArea.Content = _homePage;
                     break;
                 case "Fractal":
-                    _fractalPage ??= new FractalExplorerPage();
-                    ContentArea.Content = _fractalPage;
+                    ContentArea.Content = new FractalExplorerPage();
                     break;
                 case "Raymarch":
-                    _raymarchPage ??= new RaymarchingPage();
-                    ContentArea.Content = _raymarchPage;
+                    ContentArea.Content = new RaymarchingPage();
                     break;
                 case "Boids":
-                    _boidsPage ??= new BoidsPage();
-                    ContentArea.Content = _boidsPage;
+                    ContentArea.Content = new BoidsPage();
                     break;
-
             }
         }
 
@@ -63,9 +67,8 @@ namespace SpawnDev.ILGPU.WpfDemo
 
         protected override void OnClosed(EventArgs e)
         {
-            (_fractalPage as IDisposable)?.Dispose();
-            (_raymarchPage as IDisposable)?.Dispose();
-            (_boidsPage as IDisposable)?.Dispose();
+            if (ContentArea.Content is IDisposable disposable)
+                disposable.Dispose();
             base.OnClosed(e);
         }
     }

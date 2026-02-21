@@ -7,11 +7,11 @@
         <h1 class="hero-title">
             <span class="gradient-text">Massive Parallelism in Blazor Wasm</span>
         </h1>
-        <p class="hero-subtitle">Running C# ILGPU kernels on WebGPU, WebGL, and Wasm</p>
+        <p class="hero-subtitle">Running C# ILGPU kernels on WebGPU, WebGL, Wasm, CUDA, OpenCL, and CPU</p>
         <p class="hero-description">
-            Run ILGPU kernels in Blazor WebAssembly across three parallel backends.
-            WebGPU and WebGL dispatch to the GPU for maximum throughput, while the Wasm backend compiles kernels to native WebAssembly and distributes them across Web Workers —
-            all backends run off the main thread, keeping your UI responsive.
+            Run ILGPU kernels across six backends from a single codebase.
+            In the browser, WebGPU and WebGL dispatch to the GPU while Wasm compiles to native WebAssembly for Web Workers.
+            On desktop, the same kernels run on CUDA, OpenCL, and CPU — all backends run off the main thread, keeping your UI responsive.
         </p>
         <div class="hero-buttons">
             <a href="fractals" class="btn btn-primary btn-lg">
@@ -43,9 +43,14 @@
             <p>Kernels compiled to native WebAssembly binary and dispatched to Web Workers for near-native parallel execution. Compatible with every browser that runs Blazor WASM — even with a single worker if SharedArrayBuffer is unavailable.</p>
         </div>
         <div class="feature-card">
-            <div class="feature-icon">�</div>
+            <div class="feature-icon">🐢</div>
             <h3>CPU Backend <span style="font-size:0.75em; opacity:0.7;">(Debug)</span></h3>
             <p>Standard ILGPU CPU accelerator — useful for debugging and performance comparison. Runs on the main thread.</p>
+        </div>
+        <div class="feature-card feature-highlight">
+            <div class="feature-icon">🚀</div>
+            <h3>Desktop Backends</h3>
+            <p>CUDA, OpenCL, and CPU backends for desktop &amp; server apps. NVIDIA GPUs work with both CUDA and OpenCL 3.0. Same kernels, same API — console, WPF, and ASP.NET.</p>
         </div>
         <div class="feature-card">
             <div class="feature-icon">⚡</div>
@@ -55,7 +60,7 @@
         <div class="feature-card">
             <div class="feature-icon">🔀</div>
             <h3>Auto Backend Selection</h3>
-            <p>CreatePreferredAcceleratorAsync() picks the best backend: WebGPU → WebGL → Wasm.</p>
+            <p>CreatePreferredAcceleratorAsync() picks the best backend: WebGPU → WebGL → Wasm (browser) or CUDA → OpenCL → CPU (desktop).</p>
         </div>
         <div class="feature-card">
             <div class="feature-icon">🌐</div>

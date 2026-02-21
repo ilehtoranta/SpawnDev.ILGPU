@@ -22,12 +22,27 @@ Write parallel compute code in C# and let the library pick the best available ba
   Browser backends: WebGPU, WebGL, Wasm    Desktop backends: Cuda, OpenCL, CPU
 ```
 
-## Demo Application
+## Demo Applications
 
-The [Live Demo](https://lostbeard.github.io/SpawnDev.ILGPU/) source is located in [SpawnDev.ILGPU.Demo](SpawnDev.ILGPU.Demo) and showcases:
-- [Fractal Explorer](https://lostbeard.github.io/SpawnDev.ILGPU/fractals) - Interactive Mandelbrot / Fractal Explorer
-- [Run Benchmarks](https://lostbeard.github.io/SpawnDev.ILGPU/benchmarks) - Benchmark suite comparing performance across all backends
-- [Unit Tests](https://lostbeard.github.io/SpawnDev.ILGPU/tests) - Comprehensive unit tests for all backends
+### Browser Demo (Blazor WebAssembly)
+
+The [Live Demo](https://lostbeard.github.io/SpawnDev.ILGPU/) source is in [SpawnDev.ILGPU.Demo](SpawnDev.ILGPU.Demo):
+- [Fractal Explorer](https://lostbeard.github.io/SpawnDev.ILGPU/fractals) — Interactive Mandelbrot / Multi-fractal Explorer with double-precision zoom
+- [3D Raymarching](https://lostbeard.github.io/SpawnDev.ILGPU/3d) — Real-time GPU raymarched scenes
+- [GPU Boids](https://lostbeard.github.io/SpawnDev.ILGPU/boids) — 3D flocking simulation with GPU physics
+- [Game of Life](https://lostbeard.github.io/SpawnDev.ILGPU/gameoflife) — Conway's Game of Life on the GPU
+- [Benchmarks](https://lostbeard.github.io/SpawnDev.ILGPU/benchmarks) — Performance comparison across all backends
+- [Unit Tests](https://lostbeard.github.io/SpawnDev.ILGPU/tests) — Comprehensive test suite for all backends
+
+### Desktop Demo (WPF)
+
+The [WPF Demo](SpawnDev.ILGPU.WpfDemo) runs the same shared kernels on CUDA, OpenCL, and CPU:
+- Fractal Explorer, 3D Raymarching, and GPU Boids — with live backend switching
+- All demos share kernels via [SpawnDev.ILGPU.Demo.Shared](SpawnDev.ILGPU.Demo.Shared)
+
+### Console Demo
+
+The [Console Demo](SpawnDev.ILGPU.ConsoleDemo) runs the full unit test suite on desktop backends (CUDA, OpenCL, CPU).
 
 [![Benchmarks Screenshot](https://raw.githubusercontent.com/LostBeard/SpawnDev.ILGPU/master/SpawnDev.ILGPU.Demo/wwwroot/screenshots/benchmark-3.jpg)](https://lostbeard.github.io/SpawnDev.ILGPU/benchmarks)  
 [![Fractal Explorer Screenshot](https://raw.githubusercontent.com/LostBeard/SpawnDev.ILGPU/master/SpawnDev.ILGPU.Demo/wwwroot/screenshots/spawndev-ilgpu-fractal-explorer-3.jpg)](https://lostbeard.github.io/SpawnDev.ILGPU/fractals)
@@ -69,12 +84,14 @@ SpawnDev.ILGPU bundles ILGPU's native backends, so the same NuGet package works 
 
 | | 🚀 **Cuda** | 🔧 **OpenCL** | 🐢 **CPU** |
 |---|---|---|---|
-| **Executes on** | NVIDIA GPU | AMD/Intel GPU | CPU cores |
+| **Executes on** | NVIDIA GPU | NVIDIA/AMD/Intel GPU | CPU cores |
 | **Transpiles to** | PTX | OpenCL C | — (interpreted) |
 | **Shared Memory** | ✅ | ✅ | ✅ |
 | **Atomics** | ✅ | ✅ | ✅ |
 | **64-bit** | ✅ Native | ✅ Native | ✅ Native |
-| **Requirement** | NVIDIA GPU + driver | OpenCL 2.0+ GPU | None |
+| **Requirement** | NVIDIA GPU + driver | OpenCL 2.0+ or 3.0 GPU | None |
+
+> **OpenCL 3.0 support:** NVIDIA GPUs with OpenCL 3.0 drivers are now supported. The `GenericAddressSpace` requirement that previously blocked these devices has been relaxed, significantly increasing OpenCL device compatibility.
 
 **Auto-selection:** Cuda → OpenCL → CPU (via `CreatePreferredAcceleratorAsync`)
 
@@ -236,9 +253,11 @@ _test.bat
 
 ## Test Coverage
 
-**600+ tests** across five test suites covering all core features.
+**600+ tests** across eight test suites covering all core features on both browser and desktop.
 
 ### Test Suites
+
+#### Browser (Blazor WebAssembly)
 
 | Suite | Backend | What's Tested |
 |-------|---------|---------------|
@@ -247,6 +266,14 @@ _test.bat
 | **WasmTests** | Wasm | Native WebAssembly binary dispatch to workers, shared memory, barriers |
 | **CPUTests** | CPU | ILGPU CPU accelerator as reference (barriers/atomics excluded) |
 | **DefaultTests** | Auto | Device enumeration, preferred backend, kernel execution |
+
+#### Desktop (Console Runner)
+
+| Suite | Backend | What's Tested |
+|-------|---------|---------------|
+| **CudaTests** | CUDA | Full ILGPU feature set on NVIDIA GPU |
+| **OpenCLTests** | OpenCL | GPU compute on NVIDIA/AMD/Intel, dynamic subgroup feature detection |
+| **DesktopCPUTests** | CPU | Multi-threaded CPU accelerator with parallel mode |
 
 ### Coverage by Area
 
