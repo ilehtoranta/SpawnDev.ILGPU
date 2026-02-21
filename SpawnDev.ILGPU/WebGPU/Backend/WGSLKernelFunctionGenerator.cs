@@ -662,7 +662,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     {
                         var fieldType = earlyBodyStructType.Fields[fi];
                         bool fieldIsView = IsViewFieldType(fieldType);
-                        Console.WriteLine($"[WGSL-Field] param.Index={param.Index} fi={fi} type={fieldType} IsView={fieldIsView} phase={viewMetadataPhase} lastViewName='{lastViewBindingName}'");
+                        WebGPUBackend.Log($"[WGSL-Field] param.Index={param.Index} fi={fi} type={fieldType} IsView={fieldIsView} phase={viewMetadataPhase} lastViewName='{lastViewBindingName}'");
                         // Capture lastViewBindingName BEFORE any potential reset in the state machine below,
                         // so AssociatedViewBindingName is correctly set for metadata fields.
                         string capturedViewBindingName = lastViewBindingName;
@@ -820,7 +820,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                             // param.Index == 0 still produce a synthetic >= 1000, which is how the
                             // runtime decoder distinguishes body-struct scalars from real params.
                             int syntheticParamIdx = (param.Index + 1) * 1000 + fi;
-                            Console.WriteLine($"[WGSL-BodyStruct] param.Index={param.Index}, fi={fi}, syntheticParamIdx={syntheticParamIdx}, paramOffset={paramOffset}, wgslType={scalarWgslType}");
+                            WebGPUBackend.Log($"[WGSL-BodyStruct] param.Index={param.Index}, fi={fi}, syntheticParamIdx={syntheticParamIdx}, paramOffset={paramOffset}, wgslType={scalarWgslType}");
                             var entry = new ScalarPackingEntry
                             {
                                 ParamIndex = syntheticParamIdx,
@@ -956,7 +956,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
                 // DIAGNOSTIC: dump manifest entries so we can verify ParamIndex values
                 foreach (var entry in scalarManifest)
-                    Console.WriteLine($"[WGSL-Manifest] ParamIndex={entry.ParamIndex}, ByteOffset={entry.ByteOffset}, ByteSize={entry.ByteSize}, WgslType={entry.WgslType}");
+                    WebGPUBackend.Log($"[WGSL-Manifest] ParamIndex={entry.ParamIndex}, ByteOffset={entry.ByteOffset}, ByteSize={entry.ByteSize}, WgslType={entry.WgslType}");
             }
 
             // Store manifest locally for SetupParameterBindings()
@@ -2313,7 +2313,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             // DIAGNOSTIC: Log all Max/Min operations to trace 64-bit detection
             if (value.Kind == BinaryArithmeticKind.Max || value.Kind == BinaryArithmeticKind.Min)
             {
-                Console.WriteLine($"[DIAG-BinaryArith] Kind={value.Kind} BVT={value.BasicValueType} leftType={leftType} rightType={rightType} isEmuI64={isEmulatedI64} isEmuF64={isEmulatedF64} I64Emu={Backend.Options.EnableI64Emulation} LeftIRType={value.Left.Type} IsUnsigned={value.IsUnsigned}");
+                WebGPUBackend.Log($"[DIAG-BinaryArith] Kind={value.Kind} BVT={value.BasicValueType} leftType={leftType} rightType={rightType} isEmuI64={isEmulatedI64} isEmuF64={isEmulatedF64} I64Emu={Backend.Options.EnableI64Emulation} LeftIRType={value.Left.Type} IsUnsigned={value.IsUnsigned}");
             }
 
             if (isEmulatedF64)

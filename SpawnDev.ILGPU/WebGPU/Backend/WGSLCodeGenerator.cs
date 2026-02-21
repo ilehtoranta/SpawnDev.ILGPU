@@ -2466,10 +2466,10 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         /// </summary>
         public static void GenerateGroupAllReduce(WebGPUBackend backend, WGSLCodeGenerator codeGenerator, Value value)
         {
-            Console.WriteLine($"[WGSL-DBG] GenerateGroupAllReduce called, value type={value?.GetType().Name}, isMethodCall={value is MethodCall}");
+            WebGPUBackend.Log($"[WGSL-DBG] GenerateGroupAllReduce called, value type={value?.GetType().Name}, isMethodCall={value is MethodCall}");
             if (value is not MethodCall methodCall)
             {
-                Console.WriteLine("[WGSL-DBG] GenerateGroupAllReduce: early exit - not a MethodCall");
+                WebGPUBackend.Log("[WGSL-DBG] GenerateGroupAllReduce: early exit - not a MethodCall");
                 return;
             }
 
@@ -2482,7 +2482,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
             // Determine the WGSL subgroup operation and identity value from TReduction type argument.
             var srcMethodInfo = methodCall.Target.Source as MethodInfo;
-            Console.WriteLine($"[WGSL-DBG] srcMethodInfo={srcMethodInfo?.Name}, isGeneric={srcMethodInfo?.IsGenericMethod}, genericArgs={string.Join(",", srcMethodInfo?.GetGenericArguments()?.Select(t => t.Name) ?? Array.Empty<string>())}");
+            WebGPUBackend.Log($"[WGSL-DBG] srcMethodInfo={srcMethodInfo?.Name}, isGeneric={srcMethodInfo?.IsGenericMethod}, genericArgs={string.Join(",", srcMethodInfo?.GetGenericArguments()?.Select(t => t.Name) ?? Array.Empty<string>())}");
             string? wgslOp = GetSubgroupReduceOp(srcMethodInfo);
             string? identityExpr = GetReductionIdentityExpr(srcMethodInfo);
 
@@ -2492,11 +2492,11 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             bool needsBitcast = wgslType != irType;
             bool is64Bit = wgslType.StartsWith("emu_"); // emu_i64, emu_u64, emu_f64 are vec2 types
 
-            Console.WriteLine($"[WGSL-DBG] HasSubgroups={backend.HasSubgroups}, wgslOp={wgslOp}, identityExpr={identityExpr}");
+            WebGPUBackend.Log($"[WGSL-DBG] HasSubgroups={backend.HasSubgroups}, wgslOp={wgslOp}, identityExpr={identityExpr}");
 
             if (is64Bit && wgslOp != null && identityExpr != null)
             {
-                Console.WriteLine($"[WGSL-DBG] GenerateGroupAllReduce: 64-bit shared-memory reduction, wgslType={wgslType}");
+                WebGPUBackend.Log($"[WGSL-DBG] GenerateGroupAllReduce: 64-bit shared-memory reduction, wgslType={wgslType}");
                 // For 64-bit emulated types, perform a complete shared-memory reduction
                 // since subgroup ops don't support vec2<u32>.
                 codeGenerator.UsesWarpShuffleEmulation = true;
@@ -2576,7 +2576,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
             if (!backend.HasSubgroups || wgslOp == null || identityExpr == null)
             {
-                Console.WriteLine($"[WGSL-DBG] GenerateGroupAllReduce: fallback, reason: HasSubgroups={backend.HasSubgroups}, wgslOp={wgslOp}, identityExpr={identityExpr}");
+                WebGPUBackend.Log($"[WGSL-DBG] GenerateGroupAllReduce: fallback, reason: HasSubgroups={backend.HasSubgroups}, wgslOp={wgslOp}, identityExpr={identityExpr}");
                 // Fallback: can't do cross-subgroup reduce without subgroups — emit identity.
                 codeGenerator.AppendLine($"{target} = {identityExpr ?? "0"}; // group reduce (subgroups unavailable)");
                 return;

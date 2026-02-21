@@ -339,7 +339,7 @@ namespace SpawnDev.ILGPU.WebGL
                 var diagInfo = data.JSRef!.Get<string?>("diag");
                 if (diagInfo != null && diagInfo.Contains("ERR@"))
                 {
-                    Console.WriteLine($"[WebGL] GL errors detected (dispatch {dispatchId}): {diagInfo}");
+                    Console.Error.WriteLine($"[WebGL] GL errors detected (dispatch {dispatchId}): {diagInfo}");
                 }
 
                 // Receive transferred ArrayBuffers back

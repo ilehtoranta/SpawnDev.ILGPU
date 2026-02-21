@@ -89,7 +89,7 @@ namespace SpawnDev.ILGPU.WebGPU
             // Listen for uncaptured GPU errors
             _gpuDevice.OnUncapturedError += OnGPUUncapturedError;
 
-            Console.WriteLine("[WebGPU] Accelerator created from external GPUDevice (shared with ORT)");
+            WebGPUBackend.Log("[WebGPU] Accelerator created from external GPUDevice (shared with ORT)");
         }
 
         /// <summary>
@@ -116,7 +116,7 @@ namespace SpawnDev.ILGPU.WebGPU
             {
                 // Limits query failed — use fallback
             }
-            Console.WriteLine($"[WebGPU] Adapter maxStorageBuffersPerShaderStage: {maxStorageBuffers}");
+            WebGPUBackend.Log($"[WebGPU] Adapter maxStorageBuffersPerShaderStage: {maxStorageBuffers}");
 
             // Use Dictionary for RequiredLimits to ensure reliable JS interop serialization.
             // Anonymous objects may not serialize correctly through BlazorJS's interop layer.
@@ -134,11 +134,11 @@ namespace SpawnDev.ILGPU.WebGPU
                     RequiredLimits = requiredLimits
                 };
                 _gpuDevice = await adapter.RequestDevice(descriptor);
-                Console.WriteLine($"[WebGPU] Device created with features + limits (maxStorage={maxStorageBuffers})");
+                WebGPUBackend.Log($"[WebGPU] Device created with features + limits (maxStorage={maxStorageBuffers})");
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"[WebGPU] Device creation with features failed: {ex.Message}");
+                WebGPUBackend.Log($"[WebGPU] Device creation with features failed: {ex.Message}");
                 // Fall back: try without features but with limits
                 try
                 {
@@ -147,16 +147,16 @@ namespace SpawnDev.ILGPU.WebGPU
                         RequiredLimits = requiredLimits
                     };
                     _gpuDevice = await adapter.RequestDevice(descriptor);
-                    Console.WriteLine($"[WebGPU] Device created with limits only (maxStorage={maxStorageBuffers})");
+                    WebGPUBackend.Log($"[WebGPU] Device created with limits only (maxStorage={maxStorageBuffers})");
                     // Clear features since we couldn't request them
                     requestedFeatures.Clear();
                 }
                 catch (Exception ex2)
                 {
-                    Console.WriteLine($"[WebGPU] Device creation with limits failed: {ex2.Message}");
+                    WebGPUBackend.Log($"[WebGPU] Device creation with limits failed: {ex2.Message}");
                     // Fall back to fully default device
                     _gpuDevice = await adapter.RequestDevice();
-                    Console.WriteLine("[WebGPU] Device created with defaults (no limits override)");
+                    WebGPUBackend.Log("[WebGPU] Device created with defaults (no limits override)");
                     requestedFeatures.Clear();
                 }
             }

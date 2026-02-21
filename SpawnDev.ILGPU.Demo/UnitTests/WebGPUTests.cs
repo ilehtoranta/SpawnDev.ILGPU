@@ -223,11 +223,6 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
                 await accelerator.SynchronizeAsync();
 
                 var result = await bufOutput.CopyToHostAsync<float>();
-                Console.WriteLine($"[REDUCE-DEBUG] numGroups={numGroups} result.Length={result.Length}");
-                for (int g = 0; g < numGroups; g++)
-                {
-                    Console.WriteLine($"[REDUCE-DEBUG] Group {g}: min={result[g * 2]}, max={result[g * 2 + 1]}");
-                }
                 // Reduce per-group results on CPU
                 float globalMin = float.MaxValue, globalMax = float.MinValue;
                 for (int g = 0; g < numGroups; g++)

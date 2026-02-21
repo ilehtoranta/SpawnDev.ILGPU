@@ -440,7 +440,6 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
                 catch (Exception ex)
                 {
                     // Shader compile may fail — that's OK, we just want the GLSL
-                    Console.WriteLine($"[DIAG] Kernel load error (expected if fix not applied): {ex.Message}");
                 }
 
                 // The accelerator sets window.glslDebug during kernel load
@@ -452,23 +451,14 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
 
                 if (string.IsNullOrEmpty(glslSource))
                 {
-                    Console.WriteLine("[DIAG] No GLSL source captured. The backend may not have reached CreateKernel.");
                     throw new Exception("GLSL source not captured - backend CreateKernel may not have been called");
                 }
 
                 bool hasBadLiteral = glslSource.Contains("int(-2147483648)");
                 bool hasFix = glslSource.Contains("-2147483647 - 1");
 
-                Console.WriteLine($"[DIAG] GLSL length: {glslSource.Length}");
-                Console.WriteLine($"[DIAG] Has bad INT_MIN literal: {hasBadLiteral}");
-                Console.WriteLine($"[DIAG] Has INT_MIN fix: {hasFix}");
-                Console.WriteLine($"[DIAG] First 300 chars: {glslSource.Substring(0, Math.Min(300, glslSource.Length))}");
-
                 if (hasBadLiteral)
                     throw new Exception($"GLSL still contains int(-2147483648)! Fix not applied. GLSL length={glslSource.Length}");
-
-                if (!hasFix && glslSource.Contains("2147483647"))
-                    Console.WriteLine("[DIAG] Fix applied but using different format");
             }
             finally
             {
