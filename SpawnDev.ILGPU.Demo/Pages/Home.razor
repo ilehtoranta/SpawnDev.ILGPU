@@ -7,11 +7,11 @@
         <h1 class="hero-title">
             <span class="gradient-text">Massive Parallelism in Blazor Wasm</span>
         </h1>
-        <p class="hero-subtitle">Running C# ILGPU kernels on WebGPU, WebGL, Wasm, CUDA, OpenCL, and CPU</p>
+        <p class="hero-subtitle">Run multithreaded C# ILGPU kernels on WebGPU, WebGL, Wasm, CUDA, OpenCL, and CPU</p>
         <p class="hero-description">
-            Run ILGPU kernels across six backends from a single codebase.
-            In the browser, WebGPU and WebGL dispatch to the GPU while Wasm compiles to native WebAssembly for Web Workers.
-            On desktop, the same kernels run on CUDA, OpenCL, and CPU — all backends run off the main thread, keeping your UI responsive.
+            Run ILGPU kernels across six parallel backends from a single codebase.
+            In the browser, WebGPU and WebGL dispatch to the GPU while Wasm compiles to multithreaded WebAssembly.
+            On desktop, the same kernels run on CUDA, OpenCL, and multithreaded CPU — all backends run off the main thread, keeping your UI responsive.
         </p>
         <div class="hero-buttons">
             <a href="fractals" class="btn btn-primary btn-lg">
@@ -25,7 +25,7 @@
 </div>
 
 <div class="features-section">
-    <h2 class="section-title">Three Parallel Backends, One API</h2>
+    <h2 class="section-title">Six Parallel Backends, One API</h2>
     <div class="features-grid">
         <div class="feature-card feature-highlight">
             <div class="feature-icon">🎮</div>
