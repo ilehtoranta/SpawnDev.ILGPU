@@ -61,6 +61,9 @@
 
 	<ItemGroup>
 		<SupportedPlatform Include="browser" />
+		<SupportedPlatform Include="windows" />
+		<SupportedPlatform Include="linux" />
+		<SupportedPlatform Include="macos" />
 	</ItemGroup>
 
 </Project>
