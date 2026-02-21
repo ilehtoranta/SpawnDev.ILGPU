@@ -95,6 +95,12 @@
                     <RadioButton x:Name="NavFractal" Content="🎨  Fractal Explorer"
                                  Style="{StaticResource NavButtonStyle}"
                                  Checked="OnNavChanged" Tag="Fractal" />
+                    <RadioButton x:Name="NavRaymarch" Content="🌐  3D Explorer"
+                                 Style="{StaticResource NavButtonStyle}"
+                                 Checked="OnNavChanged" Tag="Raymarch" />
+                    <RadioButton x:Name="NavBoids" Content="🐦  GPU Boids"
+                                 Style="{StaticResource NavButtonStyle}"
+                                 Checked="OnNavChanged" Tag="Boids" />
                 </StackPanel>
             </DockPanel>
         </Border>

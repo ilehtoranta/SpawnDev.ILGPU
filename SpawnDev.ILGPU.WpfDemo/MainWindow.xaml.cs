@@ -9,6 +9,8 @@ namespace SpawnDev.ILGPU.WpfDemo
     {
         private HomePage? _homePage;
         private FractalExplorerPage? _fractalPage;
+        private RaymarchingPage? _raymarchPage;
+        private BoidsPage? _boidsPage;
 
         public MainWindow()
         {
@@ -37,6 +39,14 @@ namespace SpawnDev.ILGPU.WpfDemo
                     _fractalPage ??= new FractalExplorerPage();
                     ContentArea.Content = _fractalPage;
                     break;
+                case "Raymarch":
+                    _raymarchPage ??= new RaymarchingPage();
+                    ContentArea.Content = _raymarchPage;
+                    break;
+                case "Boids":
+                    _boidsPage ??= new BoidsPage();
+                    ContentArea.Content = _boidsPage;
+                    break;
             }
         }
 
@@ -53,6 +63,8 @@ namespace SpawnDev.ILGPU.WpfDemo
         protected override void OnClosed(EventArgs e)
         {
             (_fractalPage as IDisposable)?.Dispose();
+            (_raymarchPage as IDisposable)?.Dispose();
+            (_boidsPage as IDisposable)?.Dispose();
             base.OnClosed(e);
         }
     }

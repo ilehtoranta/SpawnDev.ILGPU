@@ -1,0 +1,102 @@
+<UserControl x:Class="SpawnDev.ILGPU.WpfDemo.Pages.RaymarchingPage"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             Loaded="OnLoaded">
+    <Grid Background="{StaticResource BgMainBrush}">
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="280" />
+            <ColumnDefinition Width="*" />
+        </Grid.ColumnDefinitions>
+
+        <!-- Sidebar -->
+        <ScrollViewer Grid.Column="0" VerticalScrollBarVisibility="Auto">
+            <StackPanel Margin="16">
+                <!-- Backend -->
+                <Border Background="{StaticResource BgCardBrush}" CornerRadius="8" Padding="16" Margin="0,0,0,12">
+                    <StackPanel>
+                        <TextBlock Text="Backend" FontWeight="SemiBold" FontSize="13"
+                                   Foreground="{StaticResource TextPrimaryBrush}" Margin="0,0,0,8" />
+                        <ComboBox x:Name="BackendCombo" FontSize="12.5"
+                                  SelectionChanged="OnBackendChanged" />
+                        <TextBlock x:Name="BackendStatus" Text="Detecting..." FontSize="11"
+                                   Foreground="{StaticResource TextMutedBrush}" Margin="0,6,0,0" />
+                    </StackPanel>
+                </Border>
+
+                <!-- Scene -->
+                <Border Background="{StaticResource BgCardBrush}" CornerRadius="8" Padding="16" Margin="0,0,0,12">
+                    <StackPanel>
+                        <TextBlock Text="Scene" FontWeight="SemiBold" FontSize="13"
+                                   Foreground="{StaticResource TextPrimaryBrush}" Margin="0,0,0,8" />
+                        <ComboBox x:Name="SceneCombo" SelectedIndex="0" FontSize="12.5"
+                                  SelectionChanged="OnSceneChanged">
+                            <ComboBoxItem Content="Geometric Blend" />
+                            <ComboBoxItem Content="Boolean Operations" />
+                            <ComboBoxItem Content="Infinite Repeat" />
+                            <ComboBoxItem Content="Organic Metaballs" />
+                        </ComboBox>
+
+                        <TextBlock Text="Quality" FontWeight="SemiBold" FontSize="13"
+                                   Foreground="{StaticResource TextPrimaryBrush}" Margin="0,12,0,8" />
+                        <ComboBox x:Name="QualityCombo" SelectedIndex="1" FontSize="12.5"
+                                  SelectionChanged="OnQualityChanged">
+                            <ComboBoxItem Content="Low (32 steps)" />
+                            <ComboBoxItem Content="Medium (64 steps)" />
+                            <ComboBoxItem Content="High (128 steps)" />
+                        </ComboBox>
+
+                        <TextBlock Text="Camera Distance" FontWeight="SemiBold" FontSize="13"
+                                   Foreground="{StaticResource TextPrimaryBrush}" Margin="0,12,0,4" />
+                        <StackPanel Orientation="Horizontal">
+                            <Slider x:Name="CamDistSlider" Minimum="2" Maximum="15" Value="5" Width="180"
+                                    ValueChanged="OnCamDistChanged" />
+                            <TextBlock x:Name="CamDistLabel" Text="5.0" Foreground="{StaticResource TextSecondaryBrush}"
+                                       FontSize="12" Margin="8,0,0,0" VerticalAlignment="Center" />
+                        </StackPanel>
+                    </StackPanel>
+                </Border>
+
+                <!-- Performance -->
+                <Border Background="{StaticResource BgCardBrush}" CornerRadius="8" Padding="16" Margin="0,0,0,12">
+                    <StackPanel>
+                        <TextBlock Text="Performance" FontWeight="SemiBold" FontSize="13"
+                                   Foreground="{StaticResource TextPrimaryBrush}" Margin="0,0,0,8" />
+                        <Image x:Name="FpsGraphImage" Width="200" Height="50" Margin="0,0,0,8" />
+                        <StackPanel>
+                            <TextBlock Foreground="{StaticResource TextSecondaryBrush}" FontSize="11">
+                                <Run Text="Backend: " /><Run x:Name="PerfBackend" Text="-" />
+                            </TextBlock>
+                            <TextBlock Foreground="{StaticResource TextSecondaryBrush}" FontSize="11">
+                                <Run Text="FPS: " /><Run x:Name="PerfFps" Text="0" />
+                            </TextBlock>
+                            <TextBlock Foreground="{StaticResource TextSecondaryBrush}" FontSize="11">
+                                <Run Text="Kernel: " /><Run x:Name="PerfKernel" Text="0" /><Run Text=" ms" />
+                            </TextBlock>
+                        </StackPanel>
+                    </StackPanel>
+                </Border>
+
+                <!-- Instructions -->
+                <Border Background="{StaticResource BgCardBrush}" CornerRadius="8" Padding="16">
+                    <StackPanel>
+                        <TextBlock Text="Instructions" FontWeight="SemiBold" FontSize="13"
+                                   Foreground="{StaticResource TextPrimaryBrush}" Margin="0,0,0,8" />
+                        <TextBlock Text="• Orbit: Click &amp; drag" Foreground="{StaticResource TextSecondaryBrush}" FontSize="11" />
+                        <TextBlock Text="• Zoom: Mouse wheel" Foreground="{StaticResource TextSecondaryBrush}" FontSize="11" />
+                        <TextBlock Text="• Reset: Double-click" Foreground="{StaticResource TextSecondaryBrush}" FontSize="11" />
+                    </StackPanel>
+                </Border>
+            </StackPanel>
+        </ScrollViewer>
+
+        <!-- Canvas -->
+        <Border Grid.Column="1" Background="{StaticResource BgDeepBrush}" Margin="8"
+                CornerRadius="8" ClipToBounds="True">
+            <Image x:Name="SceneImage" Stretch="Uniform"
+                   MouseWheel="OnMouseWheel"
+                   MouseDown="OnMouseDown"
+                   MouseMove="OnMouseMove"
+                   MouseUp="OnMouseUp" />
+        </Border>
+    </Grid>
+</UserControl>
