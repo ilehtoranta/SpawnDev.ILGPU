@@ -5,6 +5,8 @@
 **Massive Parallelism in Blazor Wasm — Run [ILGPU](https://github.com/m4rs-mt/ILGPU) C# kernels on WebGPU, WebGL, and Wasm.**  
 Write parallel compute code in C# and let the library pick the best available backend automatically. Two GPU backends bring GPU-accelerated compute to virtually every modern browser and device, while the Wasm backend provides near-native multi-threaded execution on any browser that supports Blazor WebAssembly.
 
+> **Your existing ILGPU kernels run in the browser with zero changes to the kernel code.**
+
 ## Architecture
 
 ```
@@ -29,6 +31,18 @@ The [Live Demo](https://lostbeard.github.io/SpawnDev.ILGPU/) source is located i
 
 [![Benchmarks Screenshot](https://raw.githubusercontent.com/LostBeard/SpawnDev.ILGPU/master/SpawnDev.ILGPU.Demo/wwwroot/screenshots/benchmark-3.jpg)](https://lostbeard.github.io/SpawnDev.ILGPU/benchmarks)  
 [![Fractal Explorer Screenshot](https://raw.githubusercontent.com/LostBeard/SpawnDev.ILGPU/master/SpawnDev.ILGPU.Demo/wwwroot/screenshots/spawndev-ilgpu-fractal-explorer-3.jpg)](https://lostbeard.github.io/SpawnDev.ILGPU/fractals)
+
+## 📚 Documentation
+
+Comprehensive documentation is available in the [Docs](Docs/) folder:
+
+- **[Getting Started](Docs/getting-started.md)** — Installation, setup, first kernel
+- **[Backends](Docs/backends.md)** — WebGPU, WebGL, Wasm, CPU setup & configuration
+- **[Writing Kernels](Docs/kernels.md)** — Kernel rules, index types, math functions, shared memory
+- **[Memory & Buffers](Docs/memory-and-buffers.md)** — Allocation, async readback, zero-allocation patterns
+- **[Advanced Patterns](Docs/advanced-patterns.md)** — Device sharing, external buffers, GPU intrinsics, rendering
+- **[Limitations](Docs/limitations.md)** — Blazor WASM constraints, browser compatibility
+- **[API Reference](Docs/api-reference.md)** — Public API surface by namespace
 
 ## Backends at a Glance
 
