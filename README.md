@@ -44,16 +44,15 @@ Comprehensive documentation is available in the [Docs](Docs/) folder:
 - **[Limitations](Docs/limitations.md)** — Blazor WASM constraints, browser compatibility
 - **[API Reference](Docs/api-reference.md)** — Public API surface by namespace
 
-## Backends at a Glance
+## Browser Backends (Blazor WebAssembly)
 
-| | 🎮 **WebGPU** | 🖼️ **WebGL** | 🧊 **Wasm** | � **CPU** (Debug) |
+| | 🎮 **WebGPU** | 🖼️ **WebGL** | 🧊 **Wasm** | 🐢 **CPU** (Debug) |
 |---|---|---|---|---|
 | **Executes on** | GPU | GPU | Web Workers | Main (UI) thread |
 | **Transpiles to** | WGSL | GLSL ES 3.0 | WebAssembly binary | — (interpreted) |
 | **Technique** | Compute shader | Transform Feedback | Multi-worker | Single-threaded |
 | **Blocking** | Non-blocking | Non-blocking | Non-blocking | ⚠️ Blocks UI thread |
 | **SharedArrayBuffer** | Not required | Not required | Required for multi-worker | Not required |
-| **Performance** | ⚡⚡⚡ Fastest | ⚡⚡ Fast | ⚡⚡ Fast | 🐢 Slowest |
 | **Shared Memory** | ✅ | ❌ | ✅ | ⚠️ Barriers broken in WASM |
 | **Atomics** | ✅ | ❌ | ✅ | ⚠️ Crashes in WASM |
 | **64-bit (f64/i64)** | ✅ Emulated | ✅ Emulated | ✅ Native | ✅ Native |
@@ -62,22 +61,36 @@ Comprehensive documentation is available in the [Docs](Docs/) folder:
 
 **Auto-selection priority:** WebGPU → WebGL → Wasm
 
+## Desktop Backends (Console, WPF, ASP.NET, etc.)
+
+SpawnDev.ILGPU bundles ILGPU's native backends, so the same NuGet package works on desktop and server too.
+
+| | 🚀 **Cuda** | 🔧 **OpenCL** | 🐢 **CPU** |
+|---|---|---|---|
+| **Executes on** | NVIDIA GPU | AMD/Intel GPU | CPU cores |
+| **Transpiles to** | PTX | OpenCL C | — (interpreted) |
+| **Shared Memory** | ✅ | ✅ | ✅ |
+| **Atomics** | ✅ | ✅ | ✅ |
+| **64-bit** | ✅ Native | ✅ Native | ✅ Native |
+| **Requirement** | NVIDIA GPU + driver | OpenCL 2.0+ GPU | None |
+
+**Auto-selection:** Cuda → OpenCL → CPU (via `GetPreferredDevice`)
+
 ## Features
 
-- **Three parallel backends** — WebGPU (GPU compute via WGSL), WebGL (GPU via Transform Feedback), and Wasm (native WebAssembly on Web Workers)
-- **CPU backend** — Standard ILGPU CPU accelerator included for debugging and performance comparison
-- **Two GPU backends** — WebGPU for modern browsers, WebGL for universal GPU access on virtually every device
-- **Automatic backend selection** — `CreatePreferredAcceleratorAsync()` picks the best available
+- **Cross-platform** — Same kernel code runs in browser (WebGPU, WebGL, Wasm) and desktop (Cuda, OpenCL, CPU) from one NuGet package
+- **Automatic backend selection** — `CreatePreferredAcceleratorAsync()` (browser) or `GetPreferredDevice()` (desktop) picks the best available
+- **Unified async API** — `SynchronizeAsync()` and `CopyToHostAsync()` work everywhere, falling back to synchronous calls on desktop
 - **ILGPU-compatible** — Use familiar APIs (`ArrayView`, `Index1D/2D/3D`, math intrinsics, etc.)
 - **WGSL transpilation** — C# kernels automatically compiled to WebGPU Shading Language
 - **GLSL transpilation** — C# kernels compiled to GLSL ES 3.0 vertex shaders with Transform Feedback for GPU compute
 - **Wasm compilation** — C# kernels compiled to native WebAssembly binary modules
-- **64-bit emulation** — Support for `double` (f64) and `long` (i64) via software emulation on both GPU backends, with two f64 schemes: fast Dekker (`vec2<f32>`) and precise Ozaki (`vec4<f32>`)
+- **64-bit emulation** — Support for `double` (f64) and `long` (i64) via software emulation on browser GPU backends, with two f64 schemes: fast Dekker (`vec2<f32>`) and precise Ozaki (`vec4<f32>`)
 - **WebGPU extension auto-detection** — Probes adapter for `shader-f16`, `subgroups`, `timestamp-query`, and other features; conditionally enables them on the device
 - **Subgroup operations** — `Group.Broadcast` and `Warp.Shuffle` are supported on the WebGPU backend when the browser supports the `subgroups` extension
 - **Multi-worker dispatch** — Wasm backend distributes work across all available CPU cores via SharedArrayBuffer; falls back to a single off-thread worker when SAB is unavailable
 - **Blazor WebAssembly** — Seamless integration via [SpawnDev.BlazorJS](https://github.com/LostBeard/SpawnDev.BlazorJS)
-- **Shared memory & atomics** — Supports workgroup memory, barriers, and atomic operations (WebGPU, Wasm)
+- **Shared memory & atomics** — Supports workgroup memory, barriers, and atomic operations (WebGPU, Wasm, Cuda, OpenCL)
 - **No native dependencies** — Entirely written in C#
 
 ## Installation
@@ -85,6 +98,8 @@ Comprehensive documentation is available in the [Docs](Docs/) folder:
 ```bash
 dotnet add package SpawnDev.ILGPU
 ```
+
+## Quick Start — Blazor WebAssembly
 
 ### 1. Configure Program.cs
 
@@ -103,13 +118,13 @@ builder.Services.AddBlazorJSRuntime();
 await builder.Build().BlazorJSRunAsync();
 ```
 
-### 2. Quick Start — Automatic Backend Selection
+### 2. Automatic Backend Selection
 
-The simplest way to use SpawnDev.ILGPU is with automatic backend selection. The library discovers all available backends and picks the best one (WebGPU → WebGL → Wasm):
+The library discovers all available browser backends and picks the best one (WebGPU → WebGL → Wasm):
 
 ```csharp
-using ILGPU;
-using ILGPU.Runtime;
+using global::ILGPU;
+using global::ILGPU.Runtime;
 using SpawnDev.ILGPU;
 
 // Initialize context with all available backends
@@ -137,9 +152,7 @@ static void VectorAddKernel(Index1D index, ArrayView<float> a, ArrayView<float> 
 }
 ```
 
-### 3. Using a Specific Backend
-
-You can also target a specific backend directly using `Context.CreateAsync`:
+### 3. Using a Specific Browser Backend
 
 ```csharp
 // WebGPU — GPU compute via WGSL
@@ -162,11 +175,46 @@ var device = context.GetDevices<WasmILGPUDevice>()[0];
 using var accelerator = await device.CreateAcceleratorAsync(context);
 ```
 
+## Quick Start — Desktop / Server
+
+SpawnDev.ILGPU also works in console, WPF, ASP.NET, and other .NET apps. No Blazor or browser required — ILGPU's native Cuda, OpenCL, and CPU backends are available automatically.
+
 ```csharp
-// CPU — single-threaded fallback for debugging and comparison (runs on main thread)
-using var context = Context.Create().CPU().ToContext();
-using var accelerator = context.CreateCPUAccelerator(0);
+using global::ILGPU;
+using global::ILGPU.Runtime;
+using SpawnDev.ILGPU;
+
+// Register native backends (Cuda, OpenCL, CPU)
+using var context = Context.Create(builder => builder.AllAccelerators());
+
+// Pick the best device (Cuda > OpenCL > CPU)
+using var accelerator = context.GetPreferredDevice(preferCPU: false)
+    .CreateAccelerator(context);
+
+Console.WriteLine($"Using: {accelerator.Name} ({accelerator.AcceleratorType})");
+
+// Same kernel code, same async extensions
+int length = 256;
+using var bufA = accelerator.Allocate1D(Enumerable.Range(0, length).Select(i => (float)i).ToArray());
+using var bufB = accelerator.Allocate1D(Enumerable.Range(0, length).Select(i => (float)i * 2f).ToArray());
+using var bufC = accelerator.Allocate1D<float>(length);
+
+var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<float>, ArrayView<float>, ArrayView<float>>(VectorAddKernel);
+kernel((Index1D)length, bufA.View, bufB.View, bufC.View);
+
+// SynchronizeAsync/CopyToHostAsync fall back to synchronous calls on desktop
+await accelerator.SynchronizeAsync();
+var results = await bufC.CopyToHostAsync<float>();
+
+Console.WriteLine($"result[0]={results[0]}, result[255]={results[255]}");
+
+static void VectorAddKernel(Index1D index, ArrayView<float> a, ArrayView<float> b, ArrayView<float> c)
+{
+    c[index] = a[index] + b[index];
+}
 ```
+
+> **Same kernel, any platform.** The `VectorAddKernel` above is identical in both examples. Write once, run on WebGPU, WebGL, Wasm, Cuda, OpenCL, or CPU.
 
 ## Testing
 
