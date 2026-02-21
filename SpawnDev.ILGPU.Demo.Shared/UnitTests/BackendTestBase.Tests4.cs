@@ -201,6 +201,19 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             output[index] = normalized;
         }
 
+        // --- CopySign (verifies upstream #1361 fix — argument order was swapped) ---
+        static void CopySignKernel(Index1D index, ArrayView<float> magnitudes, ArrayView<float> signs, ArrayView<float> output)
+        {
+            output[index] = IntrinsicMath.CopySign(magnitudes[index], signs[index]);
+        }
+
+        // --- UInt to Float cast (verifies upstream #1309 fix — was going through double) ---
+        static void UintToFloatCastKernel(Index1D index, ArrayView<uint> input, ArrayView<float> output)
+        {
+            uint val = input[index];
+            output[index] = (float)val;
+        }
+
         #endregion
 
         #region Part 4 Tests
@@ -535,6 +548,56 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                 int expected = (i % stride == 0) ? 42 : 0;
                 if (result[i] != expected)
                     throw new Exception($"Array fill pattern failed at {i}. Expected {expected}, got {result[i]}");
+            }
+        });
+
+        [TestMethod]
+        public async Task CopySignTest() => await RunTest(async accelerator =>
+        {
+            // Test CopySign(magnitude, sign) — verifies upstream #1361 fix
+            var magnitudes = new float[] { 5f, 5f, -5f, -5f, 0f, 3.14f, 100f, 1f };
+            var signs =      new float[] { 1f, -1f, 1f, -1f, -1f, -1f, 1f, 0f };
+            int len = magnitudes.Length;
+
+            using var bufMag = accelerator.Allocate1D(magnitudes);
+            using var bufSign = accelerator.Allocate1D(signs);
+            using var bufOut = accelerator.Allocate1D<float>(len);
+
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<
+                Index1D, ArrayView<float>, ArrayView<float>, ArrayView<float>>(CopySignKernel);
+            kernel((Index1D)len, bufMag.View, bufSign.View, bufOut.View);
+            await accelerator.SynchronizeAsync();
+            var result = await bufOut.CopyToHostAsync<float>();
+
+            for (int i = 0; i < len; i++)
+            {
+                float expected = MathF.CopySign(magnitudes[i], signs[i]);
+                if (result[i] != expected)
+                    throw new Exception($"CopySign failed at {i}. CopySign({magnitudes[i]}, {signs[i]}) expected {expected}, got {result[i]}");
+            }
+        });
+
+        [TestMethod]
+        public async Task UintToFloatCastTest() => await RunTest(async accelerator =>
+        {
+            // Test uint to float cast — verifies upstream #1309 fix
+            var input = new uint[] { 0, 1, 42, 255, 1000, 65535, 100000, 4294967295 };
+            int len = input.Length;
+
+            using var bufIn = accelerator.Allocate1D(input);
+            using var bufOut = accelerator.Allocate1D<float>(len);
+
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<
+                Index1D, ArrayView<uint>, ArrayView<float>>(UintToFloatCastKernel);
+            kernel((Index1D)len, bufIn.View, bufOut.View);
+            await accelerator.SynchronizeAsync();
+            var result = await bufOut.CopyToHostAsync<float>();
+
+            for (int i = 0; i < len; i++)
+            {
+                float expected = (float)input[i];
+                if (result[i] != expected)
+                    throw new Exception($"UInt to float cast failed at {i}. (float){input[i]}u expected {expected}, got {result[i]}");
             }
         });
 

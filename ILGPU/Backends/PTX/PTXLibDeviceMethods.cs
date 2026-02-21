@@ -188,12 +188,14 @@ namespace ILGPU.Backends.PTX
         [External("__ilgpu__nv_copysign")]
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         internal static ulong __nv_copysign(
-            ulong x) => default;
+            ulong x,
+            ulong y) => default;
 
         [External("__ilgpu__nv_copysignf")]
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         internal static uint __nv_copysignf(
-            uint x) => default;
+            uint x,
+            uint y) => default;
 
         [External("__ilgpu__nv_cos")]
         [MethodImpl(MethodImplOptions.AggressiveInlining)]

@@ -128,11 +128,13 @@
               DisplayName="CopySign"
               ReturnType="double">
         <Parameter Name="x" Type="double" />
+        <Parameter Name="y" Type="double" />
     </Function>
     <Function Name="__nv_copysignf"
               DisplayName="CopySign"
               ReturnType="float">
         <Parameter Name="x" Type="float" />
+        <Parameter Name="y" Type="float" />
     </Function>
     <Function Name="__nv_cos"
               DisplayName="Cos"

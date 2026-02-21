@@ -289,20 +289,24 @@ namespace ILGPU.Backends.PTX
             }";
 
         private const string __nv_copysign = @"
-            declare double @__nv_copysign(double %x)
+            declare double @__nv_copysign(double %x,
+            double %y)
 
-            define double @__ilgpu__nv_copysign(double %x) {
+            define double @__ilgpu__nv_copysign(double %x,
+            double %y) {
             entry:
-                %call = call double @__nv_copysign(double %x)
+                %call = call double @__nv_copysign(double %x,double %y)
                 ret double %call
             }";
 
         private const string __nv_copysignf = @"
-            declare float @__nv_copysignf(float %x)
+            declare float @__nv_copysignf(float %x,
+            float %y)
 
-            define float @__ilgpu__nv_copysignf(float %x) {
+            define float @__ilgpu__nv_copysignf(float %x,
+            float %y) {
             entry:
-                %call = call float @__nv_copysignf(float %x)
+                %call = call float @__nv_copysignf(float %x,float %y)
                 ret float %call
             }";
 

@@ -364,24 +364,30 @@ namespace ILGPU.Runtime.Cuda
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static double CopySign(
-            double x)
+            double x,
+            double y)
         {
             var arg0 = Interop.FloatAsInt(x);
+            var arg1 = Interop.FloatAsInt(y);
 
             var result = PTXLibDeviceMethods.__nv_copysign(
-                arg0);
+                arg0,
+                arg1);
 
             return Interop.IntAsFloat(result);
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static float CopySign(
-            float x)
+            float x,
+            float y)
         {
             var arg0 = Interop.FloatAsInt(x);
+            var arg1 = Interop.FloatAsInt(y);
 
             var result = PTXLibDeviceMethods.__nv_copysignf(
-                arg0);
+                arg0,
+                arg1);
 
             return Interop.IntAsFloat(result);
         }

@@ -151,6 +151,16 @@ namespace ILGPU.IR.Construction
                         innerBasicType > sourceBasicType &&
                         targetBasicType < sourceBasicType;
                 }
+                else if (convert.Value.BasicValueType.IsInt() &&
+                    sourceBasicType.IsFloat() && targetBasicType.IsFloat() &&
+                    targetBasicType < sourceBasicType)
+                {
+                    // Collapse int → float64 → float32 (and similar) into a direct
+                    // int → float32 conversion. This avoids introducing an
+                    // unnecessary fp64 dependency that breaks on devices without
+                    // double-precision support (upstream fix for #1309).
+                    canSimplify = true;
+                }
 
                 // If the existing conversion produces an unsigned result, mark that
                 // the source of the new conversion is unsigned.

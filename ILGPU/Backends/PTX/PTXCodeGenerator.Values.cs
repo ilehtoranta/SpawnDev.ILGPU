@@ -135,8 +135,19 @@ namespace ILGPU.Backends.PTX
                     Backend.Capabilities,
                     FastMath));
             command.AppendArgument(targetRegister);
-            command.AppendArgument(left);
-            command.AppendArgument(right);
+            // PTX copysign.type d, a, b copies sign of 'a' to magnitude of 'b'.
+            // The IR stores Left=magnitude, Right=sign (matching C convention),
+            // so we must swap for PTX's reversed convention.
+            if (value.Kind == BinaryArithmeticKind.CopySignF)
+            {
+                command.AppendArgument(right);  // sign source (PTX 'a')
+                command.AppendArgument(left);   // magnitude source (PTX 'b')
+            }
+            else
+            {
+                command.AppendArgument(left);
+                command.AppendArgument(right);
+            }
         }
 
         /// <summary cref="IBackendCodeGenerator.GenerateCode(TernaryArithmeticValue)"/>
