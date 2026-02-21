@@ -1,0 +1,527 @@
+@page "/gameoflife"
+@using SpawnDev.BlazorJS
+@using SpawnDev.BlazorJS.JSObjects
+@using global::ILGPU
+@using global::ILGPU.Runtime
+@using global::SpawnDev.ILGPU
+
+<PageTitle>Game of Life — GPU Cellular Automaton</PageTitle>
+
+<div class="gol-container">
+    <div class="gol-header">
+        <h1 class="gol-title">
+            <span class="gradient-text">🧬 Game of Life</span>
+        </h1>
+        <p class="gol-subtitle">Conway's cellular automaton running on the GPU via ILGPU</p>
+    </div>
+
+    <div class="gol-controls">
+        <div class="control-group">
+            <button class="gol-btn @(isRunning ? "active" : "")" @onclick="ToggleRunning" disabled="@(!isReady)">
+                @(isRunning ? "⏸ Pause" : "▶ Play")
+            </button>
+            <button class="gol-btn" @onclick="Step" disabled="@(!isReady || isRunning)">
+                ⏭ Step
+            </button>
+            <button class="gol-btn" @onclick="RandomizeAsync" disabled="@(!isReady)">
+                🎲 Randomize
+            </button>
+            <button class="gol-btn" @onclick="ClearAsync" disabled="@(!isReady)">
+                🗑 Clear
+            </button>
+        </div>
+        <div class="control-group">
+            <label class="speed-label">
+                Speed:
+                <input type="range" min="1" max="60" @bind="targetFps" @bind:event="oninput" />
+                <span>@targetFps fps</span>
+            </label>
+            <span class="gen-counter">Gen: @generation</span>
+            <span class="backend-label">@backendName</span>
+        </div>
+    </div>
+
+    <div class="gol-canvas-wrap" @onclick="OnCanvasClick" @onmousedown="OnMouseDown"
+         @onmousemove="OnMouseMove" @onmouseup="OnMouseUp">
+        <canvas id="golCanvas" width="@canvasWidth" height="@canvasHeight"></canvas>
+    </div>
+
+    @if (!string.IsNullOrEmpty(statusMessage))
+    {
+        <div class="gol-status @(hasError ? "error" : "")">@statusMessage</div>
+    }
+
+    <div class="gol-info">
+        <p>Click or drag on the grid to toggle cells. Use Play/Pause to animate, or Step to advance one generation at a time.</p>
+        <p>The kernel reads 8 neighbors for each cell and applies the classic B3/S23 rule set — all computed in parallel on the GPU.</p>
+    </div>
+</div>
+
+@code {
+    // Grid dimensions
+    const int GridWidth = 128;
+    const int GridHeight = 128;
+    const int CellSize = 4;
+    const int canvasWidth = GridWidth * CellSize;
+    const int canvasHeight = GridHeight * CellSize;
+
+    // State
+    bool isReady = false;
+    bool isRunning = false;
+    bool hasError = false;
+    string statusMessage = "Initializing GPU...";
+    string backendName = "";
+    int generation = 0;
+    int targetFps = 15;
+    bool isMouseDown = false;
+
+    // ILGPU
+    global::ILGPU.Context? context;
+    global::ILGPU.Runtime.Accelerator? accelerator;
+    global::ILGPU.Runtime.MemoryBuffer1D<int, global::ILGPU.Stride1D.Dense>? bufA;
+    global::ILGPU.Runtime.MemoryBuffer1D<int, global::ILGPU.Stride1D.Dense>? bufB;
+    Action<global::ILGPU.Index1D, global::ILGPU.ArrayView<int>, global::ILGPU.ArrayView<int>, int>? golKernel;
+    bool pingPong = false;
+
+    // JS interop for canvas
+    CanvasRenderingContext2D? ctx2d;
+    HTMLCanvasElement? canvasEl;
+    ImageData? imageData;
+
+    // Animation loop cancellation
+    CancellationTokenSource? animCts;
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!firstRender) return;
+        try
+        {
+            await InitializeGPU();
+            await RandomizeAsync();
+            isReady = true;
+            statusMessage = "";
+            StateHasChanged();
+        }
+        catch (Exception ex)
+        {
+            hasError = true;
+            statusMessage = $"Error: {ex.Message}";
+            Console.WriteLine($"[GoL] Init error: {ex}");
+            StateHasChanged();
+        }
+    }
+
+    async Task InitializeGPU()
+    {
+        var builder = global::ILGPU.Context.Create();
+        await builder.AllAcceleratorsAsync();
+        context = builder.ToContext();
+        accelerator = await context.CreatePreferredAcceleratorAsync();
+        backendName = accelerator.AcceleratorType.ToString();
+
+        int totalCells = GridWidth * GridHeight;
+        bufA = accelerator.Allocate1D(new int[totalCells]);
+        bufB = accelerator.Allocate1D(new int[totalCells]);
+
+        golKernel = accelerator.LoadAutoGroupedStreamKernel<
+            global::ILGPU.Index1D, global::ILGPU.ArrayView<int>, global::ILGPU.ArrayView<int>, int>(GameOfLifeKernel);
+
+        // Get the canvas
+        using var document = BlazorJSRuntime.JS.Get<Document>("document");
+        canvasEl = document.GetElementById<HTMLCanvasElement>("golCanvas");
+        ctx2d = canvasEl!.GetContext<CanvasRenderingContext2D>("2d");
+    }
+
+    // === ILGPU Kernel ===
+
+    static void GameOfLifeKernel(global::ILGPU.Index1D index, global::ILGPU.ArrayView<int> input, global::ILGPU.ArrayView<int> output, int width)
+    {
+        int total = (int)input.Length;
+        int height = total / width;
+        int x = index % width;
+        int y = index / width;
+
+        // Count live neighbors (toroidal wrapping)
+        int neighbors = 0;
+        for (int dy = -1; dy <= 1; dy++)
+        {
+            for (int dx = -1; dx <= 1; dx++)
+            {
+                if (dx == 0 && dy == 0) continue;
+                int nx = (x + dx + width) % width;
+                int ny = (y + dy + height) % height;
+                neighbors += input[ny * width + nx];
+            }
+        }
+
+        int alive = input[index];
+        // B3/S23 rules
+        if (alive == 1)
+            output[index] = (neighbors == 2 || neighbors == 3) ? 1 : 0;
+        else
+            output[index] = (neighbors == 3) ? 1 : 0;
+    }
+
+    // === Simulation ===
+
+    async Task StepGPU()
+    {
+        if (accelerator == null || golKernel == null) return;
+
+        var src = pingPong ? bufB! : bufA!;
+        var dst = pingPong ? bufA! : bufB!;
+
+        golKernel((global::ILGPU.Index1D)(GridWidth * GridHeight), src.View, dst.View, GridWidth);
+        await accelerator.SynchronizeAsync();
+
+        pingPong = !pingPong;
+        generation++;
+    }
+
+    async Task RenderFrame()
+    {
+        if (accelerator == null || ctx2d == null) return;
+
+        var currentBuf = pingPong ? bufB! : bufA!;
+        var cells = await currentBuf.CopyToHostAsync<int>();
+
+        // Create ImageData if needed
+        if (imageData == null)
+        {
+            imageData = new ImageData(canvasWidth, canvasHeight);
+        }
+
+        // Build pixel array (RGBA byte order for ImageData)
+        var pixelArray = new byte[canvasWidth * canvasHeight * 4];
+
+        // Live cell: turquoise #40E0D0, Dead cell: dark navy #1A1A2E
+        for (int cy = 0; cy < GridHeight; cy++)
+        {
+            for (int cx = 0; cx < GridWidth; cx++)
+            {
+                bool alive = cells[cy * GridWidth + cx] == 1;
+                byte r = alive ? (byte)0x40 : (byte)0x1A;
+                byte g = alive ? (byte)0xE0 : (byte)0x1A;
+                byte b = alive ? (byte)0xD0 : (byte)0x2E;
+
+                // Fill CellSize x CellSize block
+                for (int py = 0; py < CellSize; py++)
+                {
+                    for (int px = 0; px < CellSize; px++)
+                    {
+                        int offset = ((cy * CellSize + py) * canvasWidth + (cx * CellSize + px)) * 4;
+                        pixelArray[offset] = r;
+                        pixelArray[offset + 1] = g;
+                        pixelArray[offset + 2] = b;
+                        pixelArray[offset + 3] = 255;
+                    }
+                }
+            }
+        }
+
+        using var data = imageData.Data;
+        data.Set(pixelArray);
+        ctx2d!.PutImageData(imageData, 0, 0);
+    }
+
+    // === Controls ===
+
+    async Task ToggleRunning()
+    {
+        isRunning = !isRunning;
+        if (isRunning)
+        {
+            animCts = new CancellationTokenSource();
+            _ = RunAnimationLoop(animCts.Token);
+        }
+        else
+        {
+            animCts?.Cancel();
+            animCts = null;
+        }
+    }
+
+    async Task RunAnimationLoop(CancellationToken ct)
+    {
+        try
+        {
+            while (!ct.IsCancellationRequested && isRunning)
+            {
+                await StepGPU();
+                await RenderFrame();
+                StateHasChanged();
+                int delayMs = Math.Max(16, 1000 / targetFps);
+                await Task.Delay(delayMs, ct);
+            }
+        }
+        catch (TaskCanceledException) { }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[GoL] Animation error: {ex.Message}");
+            isRunning = false;
+            StateHasChanged();
+        }
+    }
+
+    async Task Step()
+    {
+        if (!isReady || isRunning) return;
+        await StepGPU();
+        await RenderFrame();
+        StateHasChanged();
+    }
+
+    async Task RandomizeAsync()
+    {
+        if (accelerator == null) return;
+
+        // Stop animation
+        isRunning = false;
+        animCts?.Cancel();
+        animCts = null;
+
+        // Re-create BOTH buffers with random data
+        var rng = new Random();
+        var data = new int[GridWidth * GridHeight];
+        for (int i = 0; i < data.Length; i++)
+            data[i] = rng.Next(4) == 0 ? 1 : 0; // ~25% alive
+
+        bufA?.Dispose();
+        bufB?.Dispose();
+        bufA = accelerator.Allocate1D(data);
+        bufB = accelerator.Allocate1D(new int[GridWidth * GridHeight]);
+        pingPong = false;
+
+        generation = 0;
+        await RenderFrame();
+        StateHasChanged();
+    }
+
+    async Task ClearAsync()
+    {
+        if (accelerator == null) return;
+
+        // Stop animation
+        isRunning = false;
+        animCts?.Cancel();
+        animCts = null;
+
+        bufA?.Dispose();
+        bufB?.Dispose();
+        bufA = accelerator.Allocate1D(new int[GridWidth * GridHeight]);
+        bufB = accelerator.Allocate1D(new int[GridWidth * GridHeight]);
+        pingPong = false;
+
+        generation = 0;
+        await RenderFrame();
+        StateHasChanged();
+    }
+
+    void OnMouseDown(MouseEventArgs e)
+    {
+        isMouseDown = true;
+        _ = ToggleCellAsync(e);
+    }
+
+    void OnMouseMove(MouseEventArgs e)
+    {
+        if (isMouseDown) _ = ToggleCellAsync(e);
+    }
+
+    void OnMouseUp(MouseEventArgs e)
+    {
+        isMouseDown = false;
+    }
+
+    async Task OnCanvasClick(MouseEventArgs e)
+    {
+        // Handled by mousedown/up
+    }
+
+    async Task ToggleCellAsync(MouseEventArgs e)
+    {
+        if (accelerator == null) return;
+
+        int cx = (int)(e.OffsetX / CellSize);
+        int cy = (int)(e.OffsetY / CellSize);
+        if (cx < 0 || cx >= GridWidth || cy < 0 || cy >= GridHeight) return;
+
+        var targetBuf = pingPong ? bufB! : bufA!;
+        var data = await targetBuf.CopyToHostAsync<int>();
+        int idx = cy * GridWidth + cx;
+        data[idx] = 1; // Always set to alive when drawing
+        targetBuf.Dispose();
+        var newBuf = accelerator.Allocate1D(data);
+        if (pingPong)
+            bufB = newBuf;
+        else
+            bufA = newBuf;
+        await RenderFrame();
+        StateHasChanged();
+    }
+
+    public void Dispose()
+    {
+        isRunning = false;
+        animCts?.Cancel();
+        imageData?.Dispose();
+        ctx2d?.Dispose();
+        canvasEl?.Dispose();
+        bufB?.Dispose();
+        bufA?.Dispose();
+        accelerator?.Dispose();
+        context?.Dispose();
+    }
+}
+
+<style>
+    .gol-container {
+        max-width: 900px;
+        margin: 0 auto;
+        padding: 1rem;
+    }
+
+    .gol-header {
+        text-align: center;
+        margin-bottom: 1.5rem;
+    }
+
+    .gol-title {
+        font-size: 2rem;
+        font-weight: 800;
+        margin-bottom: 0.25rem;
+    }
+
+    .gradient-text {
+        background: linear-gradient(135deg, #40E0D0 0%, #7c3aed 50%, #f472b6 100%);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        background-clip: text;
+    }
+
+    .gol-subtitle {
+        color: #94a3b8;
+        font-size: 1rem;
+        margin: 0;
+    }
+
+    .gol-controls {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 1rem;
+        justify-content: center;
+        align-items: center;
+        margin-bottom: 1rem;
+    }
+
+    .control-group {
+        display: flex;
+        gap: 0.5rem;
+        align-items: center;
+        flex-wrap: wrap;
+        justify-content: center;
+    }
+
+    .gol-btn {
+        background: rgba(255, 255, 255, 0.08);
+        border: 1px solid rgba(255, 255, 255, 0.15);
+        color: #e2e8f0;
+        padding: 0.5rem 1rem;
+        border-radius: 8px;
+        cursor: pointer;
+        font-size: 0.9rem;
+        font-weight: 500;
+        transition: all 0.2s ease;
+    }
+
+    .gol-btn:hover:not(:disabled) {
+        background: rgba(255, 255, 255, 0.15);
+        border-color: rgba(64, 224, 208, 0.4);
+        transform: translateY(-1px);
+    }
+
+    .gol-btn.active {
+        background: rgba(64, 224, 208, 0.2);
+        border-color: rgba(64, 224, 208, 0.5);
+        color: #40E0D0;
+    }
+
+    .gol-btn:disabled {
+        opacity: 0.4;
+        cursor: not-allowed;
+    }
+
+    .speed-label {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        color: #94a3b8;
+        font-size: 0.85rem;
+    }
+
+    .speed-label input[type="range"] {
+        width: 80px;
+        accent-color: #40E0D0;
+    }
+
+    .gen-counter {
+        color: #e2e8f0;
+        font-family: 'JetBrains Mono', 'Fira Code', monospace;
+        font-size: 0.85rem;
+        background: rgba(255, 255, 255, 0.08);
+        padding: 0.35rem 0.75rem;
+        border-radius: 6px;
+        border: 1px solid rgba(255, 255, 255, 0.1);
+    }
+
+    .backend-label {
+        color: #40E0D0;
+        font-size: 0.8rem;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+    }
+
+    .gol-canvas-wrap {
+        display: flex;
+        justify-content: center;
+        margin-bottom: 1rem;
+    }
+
+    .gol-canvas-wrap canvas {
+        border: 2px solid rgba(64, 224, 208, 0.2);
+        border-radius: 8px;
+        cursor: crosshair;
+        image-rendering: pixelated;
+        background: #1A1A2E;
+        box-shadow: 0 0 30px rgba(64, 224, 208, 0.08);
+    }
+
+    .gol-status {
+        text-align: center;
+        padding: 0.75rem;
+        border-radius: 8px;
+        margin-bottom: 1rem;
+        background: rgba(64, 224, 208, 0.1);
+        color: #40E0D0;
+        font-size: 0.9rem;
+    }
+
+    .gol-status.error {
+        background: rgba(239, 68, 68, 0.1);
+        color: #ef4444;
+    }
+
+    .gol-info {
+        text-align: center;
+        color: #64748b;
+        font-size: 0.85rem;
+        line-height: 1.6;
+        max-width: 600px;
+        margin: 0 auto;
+    }
+
+    .gol-info p {
+        margin-bottom: 0.5rem;
+    }
+</style>

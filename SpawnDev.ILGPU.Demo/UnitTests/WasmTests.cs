@@ -51,5 +51,26 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
         public new async Task ILGPUReduceULongTest() =>
             throw new UnsupportedTestException("Wasm: GroupExtensions.Reduce unsupported in browser environment");
 
+        // --- Part 4: Wasm limitations ---
+        [TestMethod]
+        public new async Task AtomicAndOrXorTest() =>
+            throw new UnsupportedTestException("Wasm: atomic RMW alignment unsupported for And/Or/Xor");
+
+        [TestMethod]
+        public new async Task ExplicitGroupKernelTest() =>
+            throw new UnsupportedTestException("Wasm: Grid.GlobalIndex not supported (no workgroup semantics)");
+
+        [TestMethod]
+        public new async Task PrefixSumTest() =>
+            throw new UnsupportedTestException("Wasm: prefix sum requires barriers/shared memory (unsupported)");
+
+        [TestMethod]
+        public new async Task DotProductTest() =>
+            throw new UnsupportedTestException("Wasm: dot product requires barriers/shared memory (unsupported)");
+
+        [TestMethod]
+        public new async Task MapReduceTest() =>
+            throw new UnsupportedTestException("Wasm: reduce kernel requires barriers/shared memory (unsupported)");
+
     }
 }

@@ -995,6 +995,8 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 UnaryArithmeticKind.RcpF => $"1.0 / {operand}",
                 UnaryArithmeticKind.FloorF => $"floor({operand})",
                 UnaryArithmeticKind.CeilingF => $"ceil({operand})",
+                UnaryArithmeticKind.IsNaNF => $"(isnan({operand}) ? 1 : 0)",
+                UnaryArithmeticKind.IsInfF => $"(isinf({operand}) ? 1 : 0)",
                 _ => "DEBUG_MISSING"
             };
 

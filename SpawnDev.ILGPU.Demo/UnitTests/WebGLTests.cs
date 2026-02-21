@@ -146,13 +146,38 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
         public new async Task ZeroIterationLoopTest() =>
             throw new UnsupportedTestException("WebGL: zero-iteration loop produces no TF store, buffer stays zeroed");
 
-        // LargeDispatchTest: re-enabled — 2D texture tiling now supports buffers > MAX_TEXTURE_SIZE
+        // --- Part 4: Atomic And/Or/Xor (GLSL ES 3.0 lacks atomic bitwise ops) ---
+        [TestMethod]
+        public new async Task AtomicAndOrXorTest() =>
+            throw new UnsupportedTestException("WebGL: GLSL ES 3.0 lacks atomicAnd/atomicOr/atomicXor");
 
-        // ArrayView2D/3D tests: re-enabled — stride uniform passing now implemented in WebGLAccelerator
+        // --- Part 4: Explicitly grouped kernels (no workgroups in vertex shaders) ---
+        [TestMethod]
+        public new async Task ExplicitGroupKernelTest() =>
+            throw new UnsupportedTestException("WebGL: no workgroup/grid semantics in vertex shaders");
 
-        // Struct buffer tests: re-enabled — per-field texelFetch load and per-field TF output now implemented
+        // --- Part 4: Shared memory tests (vertex shaders have no shared memory) ---
+        [TestMethod]
+        public new async Task PrefixSumTest() =>
+            throw new UnsupportedTestException("WebGL: no shared memory in vertex shaders");
 
-        // NestedLoopBreakTest: re-enabled — structured control flow (while/break/continue) now handles this correctly
+        [TestMethod]
+        public new async Task DotProductTest() =>
+            throw new UnsupportedTestException("WebGL: no shared memory in vertex shaders");
+
+        [TestMethod]
+        public new async Task MapReduceTest() =>
+            throw new UnsupportedTestException("WebGL: reduce kernel requires shared memory (unsupported in vertex shaders)");
+
+        // --- Part 4: Array fill pattern (WebGL over-dispatches threads beyond requested count) ---
+        [TestMethod]
+        public new async Task ArrayFillPatternTest() =>
+            throw new UnsupportedTestException("WebGL: auto-grouping may dispatch extra threads causing out-of-bounds writes");
+
+        // --- Part 4: NaN/Inf comparisons (GLSL ES 3.0 doesn't guarantee IEEE 754 NaN semantics) ---
+        [TestMethod]
+        public new async Task IsNaNIsInfTest() =>
+            throw new UnsupportedTestException("WebGL: GLSL ES 3.0 NaN comparison semantics not guaranteed");
 
         #region WebGL-Specific Tests
 

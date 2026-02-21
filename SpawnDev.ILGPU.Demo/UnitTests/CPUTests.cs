@@ -124,5 +124,18 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
         public new async Task ILGPUReduceULongTest() =>
             throw new UnsupportedTestException("CPU: GroupExtensions.Reduce unsupported in WASM");
 
+        // --- Part 4: Shared memory / barrier tests (same limitation as above) ---
+        [TestMethod]
+        public new async Task PrefixSumTest() =>
+            throw new UnsupportedTestException("CPU: prefix sum requires barriers (single-threaded WASM)");
+
+        [TestMethod]
+        public new async Task DotProductTest() =>
+            throw new UnsupportedTestException("CPU: dot product requires barriers (single-threaded WASM)");
+
+        [TestMethod]
+        public new async Task MapReduceTest() =>
+            throw new UnsupportedTestException("CPU: reduce kernel requires barriers (single-threaded WASM)");
+
     }
 }

@@ -1961,6 +1961,13 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 return;
             }
 
+            // Float remainder — GLSL ES 3.0 does not support % for floats
+            if (value.Kind == BinaryArithmeticKind.Rem && (leftType == "float" || leftType.StartsWith("float")))
+            {
+                AppendLine($"{prefix}{target} = {left} - {right} * floor({left} / {right});");
+                return;
+            }
+
             // Check if this is a boolean operation. GLSL requires logical operators
             // (&&, ||) for booleans, not bitwise (&, |).
             string op;
