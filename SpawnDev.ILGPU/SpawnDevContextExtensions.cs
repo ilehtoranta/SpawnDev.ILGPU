@@ -41,29 +41,41 @@ namespace SpawnDev.ILGPU
         public static async Task<Context.Builder> AllAcceleratorsAsync(
             this Context.Builder builder)
         {
-            // Synchronous backends first
-            builder.AllAccelerators(); // CPU, OpenCL, Cuda (latter two will fail silently in WASM)
+            // Synchronous backends first (CPU, OpenCL, Cuda — latter two fail silently in WASM)
+            builder.AllAccelerators();
 
-            builder.Wasm();            // Always available in WASM
+            // Browser backends — only available in Blazor WebAssembly
+            if (OperatingSystem.IsBrowser())
+            {
+                // Wasm backend — always available in WASM
+                try
+                {
+                    builder.Wasm();
+                }
+                catch
+                {
+                    // Wasm registration failed
+                }
 
-            // WebGPU requires async probing — may not be available
-            try
-            {
-                await builder.WebGPU();
-            }
-            catch
-            {
-                // WebGPU not available in this environment
-            }
+                // WebGPU requires async probing — may not be available
+                try
+                {
+                    await builder.WebGPU();
+                }
+                catch
+                {
+                    // WebGPU not available in this environment
+                }
 
-            // WebGL2 requires async probing — may not be available
-            try
-            {
-                await builder.WebGL();
-            }
-            catch
-            {
-                // WebGL2 not available in this environment
+                // WebGL2 requires async probing — may not be available
+                try
+                {
+                    await builder.WebGL();
+                }
+                catch
+                {
+                    // WebGL2 not available in this environment
+                }
             }
 
             return builder;
@@ -76,39 +88,41 @@ namespace SpawnDev.ILGPU
         #region Preferred Accelerator
 
         /// <summary>
-        /// Creates the preferred accelerator for WASM environments.
-        /// Priority: WebGPU (GPU compute) > WebGL (GPU compute) > Wasm (native Wasm) > CPU (fallback).
+        /// Creates the preferred accelerator.
+        /// Browser priority: WebGPU > WebGL > Wasm > CPU.
+        /// Desktop priority: Cuda > OpenCL > CPU (via GetPreferredDevice).
         /// </summary>
         /// <param name="context">The ILGPU context (must have devices registered).</param>
         /// <returns>The best available accelerator.</returns>
         public static async Task<Accelerator> CreatePreferredAcceleratorAsync(
             this Context context)
         {
-            // Try WebGPU first (true GPU compute)
-            var webGpuDevices = context.GetDevices<WebGPUILGPUDevice>();
-            if (webGpuDevices.Count > 0)
+            if (OperatingSystem.IsBrowser())
             {
-                return await webGpuDevices[0].CreateAcceleratorAsync(context, null);
+                // Try WebGPU first (true GPU compute)
+                var webGpuDevices = context.GetDevices<WebGPUILGPUDevice>();
+                if (webGpuDevices.Count > 0)
+                {
+                    return await webGpuDevices[0].CreateAcceleratorAsync(context, null);
+                }
+
+                // Try WebGL2 (GPU compute via Transform Feedback)
+                var webGlDevices = context.GetDevices<WebGLILGPUDevice>();
+                if (webGlDevices.Count > 0)
+                {
+                    return webGlDevices[0].CreateAccelerator(context);
+                }
+
+                // Try Wasm (near-native WebAssembly compute)
+                var wasmDevices = context.GetDevices<WasmILGPUDevice>();
+                if (wasmDevices.Count > 0)
+                {
+                    return await WasmAccelerator.Create(context);
+                }
             }
 
-            // Try WebGL2 (GPU compute via Transform Feedback)
-            var webGlDevices = context.GetDevices<WebGLILGPUDevice>();
-            if (webGlDevices.Count > 0)
-            {
-                return webGlDevices[0].CreateAccelerator(context);
-            }
-
-            // Try Wasm (near-native WebAssembly compute)
-            var wasmDevices = context.GetDevices<WasmILGPUDevice>();
-            if (wasmDevices.Count > 0)
-            {
-                return await WasmAccelerator.Create(context);
-            }
-
-
-
-            // Fall back to CPU
-            return context.GetPreferredDevice(preferCPU: true).CreateAccelerator(context);
+            // Desktop: Cuda > OpenCL > CPU  |  Browser fallback: CPU
+            return context.GetPreferredDevice(preferCPU: false).CreateAccelerator(context);
         }
 
         /// <summary>
