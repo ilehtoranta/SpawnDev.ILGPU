@@ -142,9 +142,11 @@ Not all ILGPU features work on all backends:
 | Scalar params | ✅ | ✅ | ✅ | ✅ |
 | Struct params | ✅ | ✅ | ✅ | ✅ |
 | SharedMemory | ✅ | ❌ | ✅ | ⚠️ |
-| Group.Barrier() | ✅ | ❌ | ✅ | ⚠️ |
+| Group.Barrier() | ✅ | ❌ | ✅ | ❌ |
+| Dynamic SharedMemory | ✅ | ❌ | ✅ | ❌ |
+| Group.Broadcast | ✅ | ❌ | ✅ | ❌ |
 | Atomics | ✅ | ❌ | ✅ | ⚠️ |
-| Warp/Subgroup ops | ✅¹ | ❌ | ✅ | ❌ |
+| Warp/Subgroup ops | ✅¹ | ❌ | ❌ | ❌ |
 | f64 emulation | ✅ | ✅ | N/A (native) | N/A (native) |
 | i64 emulation | ✅ | ✅ | N/A (native) | N/A (native) |
 | ILGPU Algorithms | ✅ | ❌² | ✅ | ⚠️ |

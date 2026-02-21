@@ -12,7 +12,9 @@ SpawnDev.ILGPU supports multiple backends for running ILGPU kernels. In the brow
 | **Transpiles to** | WGSL | GLSL ES 3.0 | WebAssembly binary | — (interpreted) |
 | **Technique** | Compute shader | Transform Feedback | Multi-worker | Single-threaded |
 | **Blocking** | Non-blocking | Non-blocking | Non-blocking | ⚠️ Blocks UI |
-| **Shared Memory** | ✅ | ❌ | ✅ | ⚠️ Barriers broken |
+| **Shared Memory** | ✅ | ❌ | ✅ | ⚠️ Single-threaded |
+| **Group.Barrier()** | ✅ | ❌ | ✅ | ❌ |
+| **Dynamic Shared Memory** | ✅ | ❌ | ✅ | ❌ |
 | **Atomics** | ✅ | ❌ | ✅ | ⚠️ Crashes in WASM |
 | **64-bit (f64/i64)** | ✅ Emulated | ✅ Emulated | ✅ Native | ✅ Native |
 | **Browser support** | Chrome/Edge 113+ | All modern browsers | All modern browsers | All modern browsers |
@@ -202,6 +204,9 @@ if (devices.Count > 0)
 - **Multi-worker dispatch** — distributes work across all available CPU cores
 - **Native 64-bit** — `double` and `long` work natively (no emulation needed)
 - **Shared memory** — uses `SharedArrayBuffer` for zero-copy data sharing
+- **Group.Barrier()** — full workgroup barrier synchronization across Web Workers
+- **Dynamic shared memory** — runtime-sized workgroup memory via `SharedMemory.GetDynamic()`
+- **Group.Broadcast** — intra-group value sharing
 - **Atomics** — supported via `SharedArrayBuffer`
 
 ### SharedArrayBuffer Requirement

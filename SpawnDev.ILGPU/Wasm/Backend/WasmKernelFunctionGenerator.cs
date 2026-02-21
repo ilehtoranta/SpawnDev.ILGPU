@@ -251,11 +251,19 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             FuncParamTypes.Add(WasmOpCodes.I32); // param 7: barrierBase
             FuncParamTypes.Add(WasmOpCodes.I32); // param 8: dynamicSharedLength
 
-            // CRITICAL: Use IndexType to determine if param 0 is the implicit index.
-            // ILGPU sets IsExplicitlyGrouped=true when SharedMemory is used, but the kernel
-            // still has an implicit Index1D parameter at position 0 that maps to globalIdx.
-            // Match WebGPU backend: KernelParamOffset = IndexType != None ? 1 : 0
-            int startIdx = entryPoint.IndexType != IndexType.None ? 1 : 0;
+            // CRITICAL: Determine if param 0 is the implicit index parameter.
+            // IndexType is unreliable: ILGPU overrides it to KernelConfig for ALL kernels
+            // using SharedMemory, even those with an actual Index1D first parameter.
+            // Instead, we check: (1) IndexType != None (kernel expects some index), AND
+            // (2) parameters[0] is NOT an ArrayView type (views are always user params).
+            // This correctly handles:
+            //   SharedMemoryKernel(Index1D, ArrayView) → param[0]=PrimitiveType → startIdx=1
+            //   PrefixSumKernel(ArrayView)             → param[0]=View → startIdx=0
+            //   Kernel2D(Index2D, ArrayView2D)          → param[0]=StructureType(non-view) → startIdx=1
+            bool hasImplicitIndex = entryPoint.IndexType != IndexType.None
+                && parameters.Count > 0
+                && !IsViewType(parameters[0].Type);
+            int startIdx = hasImplicitIndex ? 1 : 0;
 
             // Map the implicit index param to globalIdx
             if (startIdx == 1 && parameters.Count > 0)
@@ -1532,21 +1540,73 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         }
 
         /// <summary>
-        /// Emits the Wasm instructions for a sense-reversing barrier at the given index.
+        /// Per-barrier local sense variables. Each barrier instruction gets a Wasm local
+        /// that tracks this thread's expected sense value (0 or 1). This is essential for
+        /// barriers inside loops — without per-thread sense tracking, a fast thread can
+        /// re-enter the barrier before slow threads exit, causing stale sense reads.
+        /// </summary>
+        private readonly Dictionary<int, uint> _barrierSenseLocals = new();
+
+        /// <summary>
+        /// Emits a loop-safe sense-reversing barrier using Wasm atomic instructions.
+        /// 
+        /// Each barrier uses 8 bytes at barrierBase + (barrierIdx * 8):
+        ///   - offset +0: arrival counter (i32)
+        ///   - offset +4: sense flag (i32)
+        /// 
+        /// Each barrier also has a per-thread local variable (mySense) that starts at 0
+        /// and flips after each use. This makes the barrier safe for re-entry in loops.
+        /// 
+        /// Algorithm:
+        ///   atomic.fence                                    // flush prior stores
+        ///   mySense = 1 - mySense                          // flip local sense
+        ///   old = i32.atomic.rmw.add(arrivalAddr, 1)
+        ///   if (old + 1 == groupDimX):                      // last thread
+        ///     i32.atomic.store(arrivalAddr, 0)              // reset counter
+        ///     i32.atomic.store(senseAddr, mySense)          // publish release sense
+        ///     memory.atomic.notify(senseAddr, MAX)          // wake all waiters
+        ///   else:
+        ///     loop:                                         // spin-wait
+        ///       cur = i32.atomic.load(senseAddr)
+        ///       if (cur == mySense) break                   // released
+        ///       memory.atomic.wait32(senseAddr, cur, -1)    // block until change
+        ///   atomic.fence                                    // acquire: see others' stores
         /// </summary>
         private void EmitBarrier(int barrierIdx)
         {
             int byteOffset = barrierIdx * 8;
 
-            // Calculate barrier addresses:
-            // arrivalAddr = barrierBase + byteOffset
-            // senseAddr = barrierBase + byteOffset + 4
+            // Get or create the per-thread local sense variable for this barrier.
+            // The local persists across loop iterations, giving each thread its own
+            // sense tracking for this specific barrier instruction.
+            if (!_barrierSenseLocals.TryGetValue(barrierIdx, out uint mySenseLocal))
+            {
+                mySenseLocal = AllocateNewLocal(WasmOpCodes.I32);
+                _barrierSenseLocals[barrierIdx] = mySenseLocal;
+            }
 
-            // We need temp locals for addresses and the arrival count
+            // Temp locals for addresses and arrival count
             var arrivalAddrLocal = AllocateNewLocal(WasmOpCodes.I32);
             var senseAddrLocal = AllocateNewLocal(WasmOpCodes.I32);
             var arrivedLocal = AllocateNewLocal(WasmOpCodes.I32);
 
+            // === Step 0: Fence — flush all prior non-atomic stores ===
+            // Regular i32.store to shared memory is NOT ordered across workers.
+            // atomic.fence ensures that all stores made before the barrier
+            // (e.g., shared[tid] = value) are visible in the SharedArrayBuffer
+            // before we announce our arrival.
+            Code.Add(WasmOpCodes.AtomicPrefix);
+            WasmModuleBuilder.EmitU32Leb128(Code, 0x03); // atomic.fence
+            Code.Add(0x00); // memory index 0
+
+            // === Step 1: Flip local sense (0→1 or 1→0) ===
+            // mySense = 1 - mySense
+            WasmModuleBuilder.EmitI32Const(Code, 1);
+            WasmModuleBuilder.EmitLocalGet(Code, mySenseLocal);
+            Code.Add(WasmOpCodes.I32Sub);
+            WasmModuleBuilder.EmitLocalSet(Code, mySenseLocal);
+
+            // === Step 2: Compute barrier addresses ===
             // arrivalAddr = barrierBase + byteOffset
             WasmModuleBuilder.EmitLocalGet(Code, _barrierBaseLocal);
             WasmModuleBuilder.EmitI32Const(Code, byteOffset);
@@ -1559,6 +1619,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             Code.Add(WasmOpCodes.I32Add);
             WasmModuleBuilder.EmitLocalSet(Code, senseAddrLocal);
 
+            // === Step 3: Atomically increment arrival counter ===
             // arrived = i32.atomic.rmw.add(arrivalAddr, 1) + 1
             WasmModuleBuilder.EmitLocalGet(Code, arrivalAddrLocal);
             WasmModuleBuilder.EmitI32Const(Code, 1);
@@ -1566,12 +1627,12 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             WasmModuleBuilder.EmitU32Leb128(Code, WasmOpCodes.I32AtomicRmwAdd);
             Code.Add(0x02); // alignment = 4 bytes (2^2)
             Code.Add(0x00); // offset = 0
-            // Stack now has old value; add 1 to get arrived count
             WasmModuleBuilder.EmitI32Const(Code, 1);
             Code.Add(WasmOpCodes.I32Add);
             WasmModuleBuilder.EmitLocalSet(Code, arrivedLocal);
 
-            // if (arrived == groupDimX) — last thread to arrive
+            // === Step 4: Branch on last thread ===
+            // if (arrived == groupDimX)
             WasmModuleBuilder.EmitLocalGet(Code, arrivedLocal);
             WasmModuleBuilder.EmitLocalGet(Code, _groupDimXLocal);
             Code.Add(WasmOpCodes.I32Eq);
@@ -1579,72 +1640,90 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             Code.Add(WasmOpCodes.If);
             Code.Add(WasmOpCodes.Void);
 
-            // === LAST THREAD: reset counter, flip sense, notify ===
+            // === LAST THREAD: reset counter, publish sense, notify ===
 
             // i32.atomic.store(arrivalAddr, 0) — reset counter
             WasmModuleBuilder.EmitLocalGet(Code, arrivalAddrLocal);
             WasmModuleBuilder.EmitI32Const(Code, 0);
             Code.Add(WasmOpCodes.AtomicPrefix);
             WasmModuleBuilder.EmitU32Leb128(Code, WasmOpCodes.I32AtomicStore);
-            Code.Add(0x02); // alignment
-            Code.Add(0x00); // offset
+            Code.Add(0x02);
+            Code.Add(0x00);
 
-            // new_sense = 1 - i32.atomic.load(senseAddr)
-            WasmModuleBuilder.EmitI32Const(Code, 1);
+            // i32.atomic.store(senseAddr, mySense) — publish the target sense
             WasmModuleBuilder.EmitLocalGet(Code, senseAddrLocal);
-            Code.Add(WasmOpCodes.AtomicPrefix);
-            WasmModuleBuilder.EmitU32Leb128(Code, WasmOpCodes.I32AtomicLoad);
-            Code.Add(0x02); // alignment
-            Code.Add(0x00); // offset
-            Code.Add(WasmOpCodes.I32Sub); // 1 - old_sense
-
-            // Store into a temp so we can use it for the store
-            var newSenseLocal = AllocateNewLocal(WasmOpCodes.I32);
-            WasmModuleBuilder.EmitLocalSet(Code, newSenseLocal);
-
-            // i32.atomic.store(senseAddr, new_sense)
-            WasmModuleBuilder.EmitLocalGet(Code, senseAddrLocal);
-            WasmModuleBuilder.EmitLocalGet(Code, newSenseLocal);
+            WasmModuleBuilder.EmitLocalGet(Code, mySenseLocal);
             Code.Add(WasmOpCodes.AtomicPrefix);
             WasmModuleBuilder.EmitU32Leb128(Code, WasmOpCodes.I32AtomicStore);
-            Code.Add(0x02); // alignment
-            Code.Add(0x00); // offset
+            Code.Add(0x02);
+            Code.Add(0x00);
 
             // memory.atomic.notify(senseAddr, MAX_WAITERS)
             WasmModuleBuilder.EmitLocalGet(Code, senseAddrLocal);
-            WasmModuleBuilder.EmitI32Const(Code, int.MaxValue); // wake all
+            WasmModuleBuilder.EmitI32Const(Code, int.MaxValue);
             Code.Add(WasmOpCodes.AtomicPrefix);
             WasmModuleBuilder.EmitU32Leb128(Code, WasmOpCodes.MemoryAtomicNotify);
-            Code.Add(0x02); // alignment
-            Code.Add(0x00); // offset
-            Code.Add(WasmOpCodes.Drop); // drop the return value (number of waiters woken)
+            Code.Add(0x02);
+            Code.Add(0x00);
+            Code.Add(WasmOpCodes.Drop);
 
             Code.Add(WasmOpCodes.Else);
 
-            // === NOT LAST: wait for sense to flip ===
+            // === NOT LAST: spin-wait until global sense matches local sense ===
+            // This is a spin-wait loop: we must keep checking because wait32 may
+            // return spuriously or with not-equal if another iteration's release
+            // changed the sense before we entered the wait.
 
-            // sense = i32.atomic.load(senseAddr)
-            var senseLocal = AllocateNewLocal(WasmOpCodes.I32);
+            // block $exit
+            Code.Add(WasmOpCodes.Block);
+            Code.Add(WasmOpCodes.Void);
+
+            // loop $spin
+            Code.Add(WasmOpCodes.Loop);
+            Code.Add(WasmOpCodes.Void);
+
+            // cur = i32.atomic.load(senseAddr)
+            var curSenseLocal = AllocateNewLocal(WasmOpCodes.I32);
             WasmModuleBuilder.EmitLocalGet(Code, senseAddrLocal);
             Code.Add(WasmOpCodes.AtomicPrefix);
             WasmModuleBuilder.EmitU32Leb128(Code, WasmOpCodes.I32AtomicLoad);
-            Code.Add(0x02); // alignment
-            Code.Add(0x00); // offset
-            WasmModuleBuilder.EmitLocalSet(Code, senseLocal);
+            Code.Add(0x02);
+            Code.Add(0x00);
+            WasmModuleBuilder.EmitLocalSet(Code, curSenseLocal);
 
-            // memory.atomic.wait32(senseAddr, sense, -1) — infinite timeout
+            // if (cur == mySense) break out of spin loop
+            WasmModuleBuilder.EmitLocalGet(Code, curSenseLocal);
+            WasmModuleBuilder.EmitLocalGet(Code, mySenseLocal);
+            Code.Add(WasmOpCodes.I32Eq);
+            Code.Add(WasmOpCodes.BrIf);
+            WasmModuleBuilder.EmitU32Leb128(Code, 1); // br_if $exit (depth 1 from loop)
+
+            // memory.atomic.wait32(senseAddr, cur, -1) — block until sense changes
             WasmModuleBuilder.EmitLocalGet(Code, senseAddrLocal);
-            WasmModuleBuilder.EmitLocalGet(Code, senseLocal);
-            WasmModuleBuilder.EmitI64Const(Code, -1); // timeout = infinite
+            WasmModuleBuilder.EmitLocalGet(Code, curSenseLocal);
+            WasmModuleBuilder.EmitI64Const(Code, -1);
             Code.Add(WasmOpCodes.AtomicPrefix);
             WasmModuleBuilder.EmitU32Leb128(Code, WasmOpCodes.MemoryAtomicWait32);
-            Code.Add(0x02); // alignment
-            Code.Add(0x00); // offset
-            Code.Add(WasmOpCodes.Drop); // drop result (0=ok, 1=not-equal, 2=timed-out)
+            Code.Add(0x02);
+            Code.Add(0x00);
+            Code.Add(WasmOpCodes.Drop);
+
+            // br $spin — go back and re-check
+            Code.Add(WasmOpCodes.Br);
+            WasmModuleBuilder.EmitU32Leb128(Code, 0); // br $spin (depth 0 = innermost loop)
+
+            Code.Add(WasmOpCodes.End); // end loop $spin
+            Code.Add(WasmOpCodes.End); // end block $exit
 
             Code.Add(WasmOpCodes.End); // end if/else
 
-            WasmBackend.Log($"[Wasm-Barrier] Emitted barrier #{barrierIdx} at byteOffset={byteOffset}");
+            // === Step 5: Fence — acquire: ensure loads after the barrier
+            // see all stores made by other threads before the barrier.
+            Code.Add(WasmOpCodes.AtomicPrefix);
+            WasmModuleBuilder.EmitU32Leb128(Code, 0x03); // atomic.fence
+            Code.Add(0x00); // memory index 0
+
+            WasmBackend.Log($"[Wasm-Barrier] Emitted loop-safe barrier #{barrierIdx} at byteOffset={byteOffset}");
         }
 
         #endregion

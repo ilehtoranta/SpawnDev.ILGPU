@@ -217,11 +217,13 @@ namespace SpawnDev.ILGPU.Wasm
                 // Determine isView flags from compiled kernel metadata
                 var paramInfos = compiledKernel.ParamInfos;
 
-                // Skip the implicit extent argument (args[0]) only for LoadStreamKernel launches.
-                // When dimension is KernelConfig (from LoadStreamKernel), args[0] is the extent value
-                // and args[1+] are user params. For LoadAutoGroupedStreamKernel, dimension is the extent 
-                // itself and args[0] is already the first user param.
-                int argOffset = dimension is KernelConfig ? 1 : 0;
+                // Skip the implicit extent argument (args[0]) only when it's an Index value.
+                // ILGPU overrides IndexType to KernelConfig for ALL explicitly grouped kernels
+                // (including ones with Index1D + SharedMemory), making IndexType unreliable.
+                // Instead, check the actual type of args[0] to determine if it's an Index extent.
+                bool hasImplicitIndex = dimension is KernelConfig && args.Length > 0
+                    && (args[0] is Index1D || args[0] is Index2D || args[0] is Index3D);
+                int argOffset = hasImplicitIndex ? 1 : 0;
 
                 // Collect all SharedArrayBuffers from buffer arguments
                 var bufferInfos = new List<(WasmMemoryBuffer buffer, int byteOffset)>();

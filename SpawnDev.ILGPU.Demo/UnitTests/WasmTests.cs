@@ -60,17 +60,10 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
         public new async Task ExplicitGroupKernelTest() =>
             throw new UnsupportedTestException("Wasm: Grid.GlobalIndex not supported (no workgroup semantics)");
 
-        [TestMethod]
-        public new async Task PrefixSumTest() =>
-            throw new UnsupportedTestException("Wasm: prefix sum requires barriers/shared memory (unsupported)");
-
-        [TestMethod]
-        public new async Task DotProductTest() =>
-            throw new UnsupportedTestException("Wasm: dot product requires barriers/shared memory (unsupported)");
-
-        [TestMethod]
-        public new async Task MapReduceTest() =>
-            throw new UnsupportedTestException("Wasm: reduce kernel requires barriers/shared memory (unsupported)");
+        // --- Shared memory + barrier tests ---
+        // PrefixSumTest, MapReduceTest, DotProductTest: Now working after fixing the
+        // KernelConfig/IndexType parameter offset bug and improving barrier robustness
+        // (per-thread local sense tracking + atomic.fence).
 
     }
 }

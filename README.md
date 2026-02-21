@@ -53,7 +53,9 @@ Comprehensive documentation is available in the [Docs](Docs/) folder:
 | **Technique** | Compute shader | Transform Feedback | Multi-worker | Single-threaded |
 | **Blocking** | Non-blocking | Non-blocking | Non-blocking | ⚠️ Blocks UI thread |
 | **SharedArrayBuffer** | Not required | Not required | Required for multi-worker | Not required |
-| **Shared Memory** | ✅ | ❌ | ✅ | ⚠️ Barriers broken in WASM |
+| **Shared Memory** | ✅ | ❌ | ✅ | ⚠️ Single-threaded |
+| **Group.Barrier()** | ✅ | ❌ | ✅ | ❌ |
+| **Dynamic Shared Memory** | ✅ | ❌ | ✅ | ❌ |
 | **Atomics** | ✅ | ❌ | ✅ | ⚠️ Crashes in WASM |
 | **64-bit (f64/i64)** | ✅ Emulated | ✅ Emulated | ✅ Native | ✅ Native |
 | **Browser support** | Chrome/Edge 113+ | All modern browsers | All modern browsers | All modern browsers |
@@ -90,7 +92,8 @@ SpawnDev.ILGPU bundles ILGPU's native backends, so the same NuGet package works 
 - **Subgroup operations** — `Group.Broadcast` and `Warp.Shuffle` are supported on the WebGPU backend when the browser supports the `subgroups` extension
 - **Multi-worker dispatch** — Wasm backend distributes work across all available CPU cores via SharedArrayBuffer; falls back to a single off-thread worker when SAB is unavailable
 - **Blazor WebAssembly** — Seamless integration via [SpawnDev.BlazorJS](https://github.com/LostBeard/SpawnDev.BlazorJS)
-- **Shared memory & atomics** — Supports workgroup memory, barriers, and atomic operations (WebGPU, Wasm, Cuda, OpenCL)
+- **Shared memory & barriers** — Static and dynamic workgroup memory with `Group.Barrier()` synchronization (WebGPU, Wasm, Cuda, OpenCL)
+- **Broadcast** — `Group.Broadcast` for intra-group value sharing (WebGPU, Wasm)
 - **No native dependencies** — Entirely written in C#
 
 ## Installation
@@ -233,7 +236,7 @@ _test.bat
 
 ## Test Coverage
 
-**400+ tests** across four test suites covering all core features.
+**600+ tests** across five test suites covering all core features.
 
 ### Test Suites
 
@@ -241,7 +244,7 @@ _test.bat
 |-------|---------|---------------|
 | **WebGPUTests** | WebGPU | Full ILGPU feature set on GPU via WGSL |
 | **WebGLTests** | WebGL | GPU compute via GLSL ES 3.0, f64/i64 emulation |
-| **WasmTests** | Wasm | Native WebAssembly binary dispatch to workers |
+| **WasmTests** | Wasm | Native WebAssembly binary dispatch to workers, shared memory, barriers |
 | **CPUTests** | CPU | ILGPU CPU accelerator as reference (barriers/atomics excluded) |
 | **DefaultTests** | Auto | Device enumeration, preferred backend, kernel execution |
 
@@ -260,8 +263,9 @@ _test.bat
 | **Type Casting** | float↔int, uint, mixed precision | ✅ |
 | **64-bit Emulation** | `double` and `long` via software emulation (WebGPU, WebGL) | ✅ |
 | **GPU Patterns** | Stencil, reduction, matrix multiply, lerp, smoothstep | ✅ |
-| **Shared Memory** | Static and dynamic workgroup memory | ✅ |
+| **Shared Memory** | Static and dynamic workgroup memory with `Group.Barrier()` | ✅ |
 | **Broadcast & Subgroups** | `Group.Broadcast`, `Warp.Shuffle` (WebGPU with subgroups extension) | ✅ |
+| **Dynamic Shared Memory** | Runtime-sized workgroup memory via `SharedMemory.GetDynamic()` | ✅ |
 | **Special Values** | NaN, Infinity detection | ✅ |
 | **Backend Selection** | Auto-discovery, priority, cross-backend kernel execution | ✅ |
 
