@@ -17,11 +17,13 @@ Console.WriteLine("=== SpawnDev.ILGPU Console Demo ===");
 Console.WriteLine();
 
 // ──────────────────────────────────────────────
-// 1. Create Context with native backends
+// 1. Create Context — SAME async code as Blazor WASM
 // ──────────────────────────────────────────────
-// In a console app, use the standard Context.Create with AllAccelerators().
-// This registers CPU, Cuda, and OpenCL (browser backends are not available).
-using var context = Context.Create(builder => builder.AllAccelerators());
+// This is the EXACT same initialization code used in Blazor WASM.
+// AllAcceleratorsAsync() registers browser backends (WebGPU, WebGL, Wasm)
+// AND native backends (Cuda, OpenCL, CPU). Browser backends fail silently
+// on desktop since BlazorJSRuntime isn't available.
+using var context = await Context.CreateAsync(builder => builder.AllAcceleratorsAsync());
 
 Console.WriteLine("Registered devices:");
 foreach (var device in context)
@@ -31,11 +33,12 @@ foreach (var device in context)
 Console.WriteLine();
 
 // ──────────────────────────────────────────────
-// 2. Pick the best accelerator
-//    (Cuda > OpenCL > CPU)
+// 2. Pick the best accelerator — SAME async code as Blazor WASM
 // ──────────────────────────────────────────────
-using var accelerator = context.GetPreferredDevice(preferCPU: false)
-    .CreateAccelerator(context);
+// CreatePreferredAcceleratorAsync() checks for WebGPU > WebGL > Wasm > CPU.
+// On desktop, browser backends aren't registered, so it falls through to
+// Cuda > OpenCL > CPU automatically.
+using var accelerator = await context.CreatePreferredAcceleratorAsync();
 
 Console.WriteLine($"Using accelerator: {accelerator.Name} ({accelerator.AcceleratorType})");
 Console.WriteLine();

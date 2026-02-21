@@ -33,42 +33,48 @@ SpawnDev.ILGPU supports multiple backends for running ILGPU kernels. In the brow
 
 ## Automatic Backend Selection
 
-### Browser (Blazor WASM)
+### Recommended: Unified Async Pattern
+
+The async pattern works on **all platforms** — both browser and desktop. This is the recommended approach for cross-platform code:
 
 ```csharp
 using global::ILGPU;
 using global::ILGPU.Runtime;
 using SpawnDev.ILGPU;
 
-// Register all available backends (browser + native)
+// Works in Blazor WASM, Console, WPF, ASP.NET — everywhere
 using var context = await Context.CreateAsync(builder => builder.AllAcceleratorsAsync());
-
-// Create the best available accelerator
 using var accelerator = await context.CreatePreferredAcceleratorAsync();
+
+// ... load kernel, dispatch ...
+
+await accelerator.SynchronizeAsync();
+var results = await bufC.CopyToHostAsync<float>();
 ```
 
-### Desktop / Server (Console, WPF, etc.)
+`AllAcceleratorsAsync()` automatically detects the environment:
+- **Browser:** Registers WebGPU, WebGL, Wasm, and CPU
+- **Desktop:** Registers Cuda, OpenCL, and CPU (browser backends are skipped)
+
+`CreatePreferredAcceleratorAsync()` picks the best available backend on either platform.
+
+> **Why async?** Browser backends (Blazor WASM) **require** async — the single-threaded environment will deadlock on synchronous calls. Desktop backends **support both** sync and async, with async extensions gracefully falling back to synchronous ILGPU calls. Therefore, **async is always recommended** for maximum portability.
+
+### Desktop-Only: Synchronous Pattern
+
+If you're certain your code will **never** run in a browser, you can use ILGPU's standard synchronous API:
 
 ```csharp
-using global::ILGPU;
-using global::ILGPU.Runtime;
-using SpawnDev.ILGPU;
-
-// Register native backends (Cuda, OpenCL, CPU)
+// Desktop only — will deadlock in Blazor WASM
 using var context = Context.Create(builder => builder.AllAccelerators());
-
-// Pick the best device (Cuda > OpenCL > CPU)
 using var accelerator = context.GetPreferredDevice(preferCPU: false)
     .CreateAccelerator(context);
 
-// SpawnDev.ILGPU's async extensions work here too!
-var kernel = accelerator.LoadAutoGroupedStreamKernel<...>(MyKernel);
-kernel(extent, bufA.View, bufB.View, bufC.View);
-await accelerator.SynchronizeAsync();  // Falls back to synchronous Synchronize()
-var results = await bufC.CopyToHostAsync<float>();  // Falls back to CopyToCPU()
-```
+// ... load kernel, dispatch ...
 
-> **Cross-platform tip:** Use `SynchronizeAsync()` and `CopyToHostAsync()` everywhere. In the browser, they're truly async. On desktop, they gracefully fall back to synchronous ILGPU calls. Same code, both platforms.
+accelerator.Synchronize();  // Blocking — safe on desktop, deadlocks in browser
+var results = bufC.GetAsArray1D();  // Synchronous readback
+```
 
 ## WebGPU Backend
 

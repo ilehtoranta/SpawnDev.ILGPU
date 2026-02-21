@@ -177,19 +177,18 @@ using var accelerator = await device.CreateAcceleratorAsync(context);
 
 ## Quick Start — Desktop / Server
 
-SpawnDev.ILGPU also works in console, WPF, ASP.NET, and other .NET apps. No Blazor or browser required — ILGPU's native Cuda, OpenCL, and CPU backends are available automatically.
+SpawnDev.ILGPU also works in console, WPF, ASP.NET, and other .NET apps. The **same async pattern** used in Blazor WASM works on desktop too:
 
 ```csharp
 using global::ILGPU;
 using global::ILGPU.Runtime;
 using SpawnDev.ILGPU;
 
-// Register native backends (Cuda, OpenCL, CPU)
-using var context = Context.Create(builder => builder.AllAccelerators());
-
-// Pick the best device (Cuda > OpenCL > CPU)
-using var accelerator = context.GetPreferredDevice(preferCPU: false)
-    .CreateAccelerator(context);
+// SAME code as Blazor WASM — AllAcceleratorsAsync auto-detects the environment
+// Browser: registers WebGPU, WebGL, Wasm, CPU
+// Desktop: registers Cuda, OpenCL, CPU (browser backends are skipped)
+using var context = await Context.CreateAsync(builder => builder.AllAcceleratorsAsync());
+using var accelerator = await context.CreatePreferredAcceleratorAsync();
 
 Console.WriteLine($"Using: {accelerator.Name} ({accelerator.AcceleratorType})");
 
@@ -215,6 +214,8 @@ static void VectorAddKernel(Index1D index, ArrayView<float> a, ArrayView<float> 
 ```
 
 > **Same kernel, any platform.** The `VectorAddKernel` above is identical in both examples. Write once, run on WebGPU, WebGL, Wasm, Cuda, OpenCL, or CPU.
+
+> **Why async?** Browser backends **require** async — Blazor WASM's single-threaded environment will deadlock on synchronous calls. Desktop backends **support both** sync and async, with async extensions gracefully falling back to synchronous ILGPU calls. Therefore, the **async pattern is always recommended** for maximum portability.
 
 ## Testing
 
