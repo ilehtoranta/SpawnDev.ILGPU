@@ -11,14 +11,14 @@
 		<DebugType>Embedded</DebugType>
 		<Title>SpawnDev.ILGPU</Title>
 		<Authors>LostBeard</Authors>
-		<Description>Massive Parallelism in Blazor Wasm: Running C# ILGPU kernels on WebGPU, WebGL, and Wasm.</Description>
+		<Description>Run ILGPU C# GPU kernels on WebGPU, WebGL, Wasm, Cuda, and OpenCL from a single codebase. Write parallel compute code in C# and target both Blazor WebAssembly and desktop/server environments with automatic backend selection. Browser backends transpile kernels to WGSL, GLSL, or native Wasm. Desktop backends use ILGPU's native Cuda and OpenCL support. Unified async extensions (SynchronizeAsync, CopyToHostAsync) work everywhere.</Description>
 		<PackageProjectUrl>https://github.com/LostBeard/SpawnDev.ILGPU</PackageProjectUrl>
 		<PackageReadmeFile>README.md</PackageReadmeFile>
 		<PackageLicenseFile>LICENSE.txt</PackageLicenseFile>
 		<PackageIcon>icon-128.png</PackageIcon>
 		<RepositoryUrl>https://github.com/LostBeard/SpawnDev.ILGPU.git</RepositoryUrl>
 		<RepositoryType>git</RepositoryType>
-		<PackageTags>Blazor;BlazorWebAssembly;WebGPU;WebGL;WebAssembly;WebWorkers;GPGPU;ILGPU;ParallelProcessing</PackageTags>
+		<PackageTags>Blazor;BlazorWebAssembly;WebGPU;WebGL;WebAssembly;WebWorkers;GPGPU;ILGPU;ParallelProcessing;Cuda;OpenCL;ComputeShader;CrossPlatform</PackageTags>
 		<NoPackageAnalysis>true</NoPackageAnalysis>
 		<EnableDefaultCompileItems>true</EnableDefaultCompileItems>
 		<IsPackable>true</IsPackable>
