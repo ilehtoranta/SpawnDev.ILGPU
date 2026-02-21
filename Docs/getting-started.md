@@ -2,6 +2,8 @@
 
 This guide walks you through installing SpawnDev.ILGPU, configuring your Blazor WebAssembly project, and running your first GPU kernel in the browser.
 
+SpawnDev.ILGPU brings the power of [ILGPU](https://github.com/m4rs-mt/ILGPU) — a high-performance .NET GPU computing framework originally developed by [Marcel Koester](https://github.com/m4rs-mt) — to Blazor WebAssembly. If you're already familiar with ILGPU from desktop/server development, most of your knowledge applies here. Your existing ILGPU kernels run in the browser with zero changes to the kernel code.
+
 ## Prerequisites
 
 - **.NET 10 SDK** (or later)

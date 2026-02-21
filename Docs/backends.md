@@ -1,8 +1,10 @@
 # Backends
 
-SpawnDev.ILGPU provides four backends for running ILGPU kernels in Blazor WebAssembly. Each backend compiles your C# kernel code into a format the target platform can execute.
+SpawnDev.ILGPU supports multiple backends for running ILGPU kernels. In the browser, three backends (WebGPU, WebGL, Wasm) bring GPU compute to Blazor WebAssembly. On desktop and server, ILGPU's native Cuda and OpenCL backends are available. The CPU backend works everywhere. The same kernel code and async extensions work across all backends.
 
 ## Overview
+
+### Browser Backends
 
 | | 🎮 **WebGPU** | 🖼️ **WebGL** | 🧊 **Wasm** | 🐢 **CPU** |
 |---|---|---|---|---|
@@ -10,31 +12,63 @@ SpawnDev.ILGPU provides four backends for running ILGPU kernels in Blazor WebAss
 | **Transpiles to** | WGSL | GLSL ES 3.0 | WebAssembly binary | — (interpreted) |
 | **Technique** | Compute shader | Transform Feedback | Multi-worker | Single-threaded |
 | **Blocking** | Non-blocking | Non-blocking | Non-blocking | ⚠️ Blocks UI |
-| **SharedArrayBuffer** | Not required | Not required | Required for multi-worker | Not required |
-| **Performance** | ⚡⚡⚡ Fastest | ⚡⚡ Fast | ⚡⚡ Fast | 🐢 Slowest |
 | **Shared Memory** | ✅ | ❌ | ✅ | ⚠️ Barriers broken |
 | **Atomics** | ✅ | ❌ | ✅ | ⚠️ Crashes in WASM |
 | **64-bit (f64/i64)** | ✅ Emulated | ✅ Emulated | ✅ Native | ✅ Native |
 | **Browser support** | Chrome/Edge 113+ | All modern browsers | All modern browsers | All modern browsers |
 
-**Auto-selection priority:** WebGPU → WebGL → Wasm
+### Desktop/Server Backends
+
+| | 🚀 **Cuda** | 🔧 **OpenCL** | 🐢 **CPU** |
+|---|---|---|---|
+| **Executes on** | NVIDIA GPU | AMD/Intel GPU | CPU cores |
+| **Transpiles to** | PTX | OpenCL C | — (interpreted) |
+| **Shared Memory** | ✅ | ✅ | ✅ |
+| **Atomics** | ✅ | ✅ | ✅ |
+| **64-bit** | ✅ Native | ✅ Native | ✅ Native |
+| **Requirement** | NVIDIA GPU + driver | OpenCL 2.0+ GPU | None |
+
+**Auto-selection priority (browser):** WebGPU → WebGL → Wasm
+**Auto-selection priority (desktop):** Cuda → OpenCL → CPU
 
 ## Automatic Backend Selection
 
-The simplest approach — let SpawnDev.ILGPU pick the best available backend:
+### Browser (Blazor WASM)
 
 ```csharp
-using ILGPU;
-using ILGPU.Runtime;
+using global::ILGPU;
+using global::ILGPU.Runtime;
 using SpawnDev.ILGPU;
 
-// Register all available backends
+// Register all available backends (browser + native)
 using var context = await Context.CreateAsync(builder => builder.AllAcceleratorsAsync());
 
 // Create the best available accelerator
 using var accelerator = await context.CreatePreferredAcceleratorAsync();
-// accelerator.Name tells you which backend was chosen
 ```
+
+### Desktop / Server (Console, WPF, etc.)
+
+```csharp
+using global::ILGPU;
+using global::ILGPU.Runtime;
+using SpawnDev.ILGPU;
+
+// Register native backends (Cuda, OpenCL, CPU)
+using var context = Context.Create(builder => builder.AllAccelerators());
+
+// Pick the best device (Cuda > OpenCL > CPU)
+using var accelerator = context.GetPreferredDevice(preferCPU: false)
+    .CreateAccelerator(context);
+
+// SpawnDev.ILGPU's async extensions work here too!
+var kernel = accelerator.LoadAutoGroupedStreamKernel<...>(MyKernel);
+kernel(extent, bufA.View, bufB.View, bufC.View);
+await accelerator.SynchronizeAsync();  // Falls back to synchronous Synchronize()
+var results = await bufC.CopyToHostAsync<float>();  // Falls back to CopyToCPU()
+```
+
+> **Cross-platform tip:** Use `SynchronizeAsync()` and `CopyToHostAsync()` everywhere. In the browser, they're truly async. On desktop, they gracefully fall back to synchronous ILGPU calls. Same code, both platforms.
 
 ## WebGPU Backend
 
@@ -195,7 +229,41 @@ using var accelerator = context.CreateCPUAccelerator(0);
 - **Atomics crash** in Blazor WASM
 - **Slowest backend** — single-threaded execution
 
-Best used for debugging kernel logic only.
+Best used for debugging kernel logic.
+
+## Desktop Backends (Cuda & OpenCL)
+
+When running outside the browser (console apps, WPF, ASP.NET, etc.), SpawnDev.ILGPU uses ILGPU's native Cuda and OpenCL backends automatically. These are registered by the standard `builder.AllAccelerators()` call.
+
+### Setup
+
+```csharp
+// Standard ILGPU context creation — works in any .NET app
+using var context = Context.Create(builder => builder.AllAccelerators());
+
+// Lists all detected devices
+foreach (var device in context)
+    Console.WriteLine($"{device.Name} ({device.AcceleratorType})");
+
+// Pick the best GPU
+using var accelerator = context.GetPreferredDevice(preferCPU: false)
+    .CreateAccelerator(context);
+```
+
+### Cuda
+
+- Requires an NVIDIA GPU with a supported driver
+- Uses PTX intermediate representation
+- Best performance for NVIDIA hardware
+- Full ILGPU feature support (shared memory, atomics, warp ops)
+
+### OpenCL
+
+- Supports AMD and Intel GPUs (OpenCL 2.0+)
+- Uses OpenCL C kernel language
+- NVIDIA GPUs are limited to OpenCL 1.2 (not supported by ILGPU)
+
+> **Note:** Cuda and OpenCL are not available in Blazor WebAssembly — they fail silently when the context builder tries to register them in the browser.
 
 ## 64-bit Emulation
 
