@@ -1,0 +1,81 @@
+<UserControl x:Class="SpawnDev.ILGPU.WpfDemo.Pages.HomePage"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             Background="{StaticResource BgDeepBrush}">
+    <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+        <StackPanel MaxWidth="900" Margin="40,30" HorizontalAlignment="Center">
+            
+            <!-- Hero Section -->
+            <TextBlock TextAlignment="Center" FontSize="36" FontWeight="ExtraBold" Margin="0,20,0,8">
+                <TextBlock.Foreground>
+                    <LinearGradientBrush StartPoint="0,0" EndPoint="1,0">
+                        <GradientStop Color="#00D4FF" Offset="0" />
+                        <GradientStop Color="#8B5CF6" Offset="0.5" />
+                        <GradientStop Color="#F472B6" Offset="1" />
+                    </LinearGradientBrush>
+                </TextBlock.Foreground>
+                Massive Parallelism on Desktop
+            </TextBlock>
+            <TextBlock Text="Running C# ILGPU kernels on CUDA, OpenCL, and CPU"
+                       TextAlignment="Center" FontSize="18" Foreground="{StaticResource TextSecondaryBrush}" Margin="0,0,0,12" />
+            <TextBlock TextAlignment="Center" FontSize="14" Foreground="{StaticResource TextMutedBrush}"
+                       TextWrapping="Wrap" MaxWidth="600" Margin="0,0,0,30" HorizontalAlignment="Center">
+                This desktop demo uses the same ILGPU kernels as the Blazor WebAssembly version.
+                CUDA and OpenCL dispatch to the GPU, while the CPU backend provides a debug fallback.
+                Same kernel code, different platforms.
+            </TextBlock>
+
+            <!-- Feature Cards -->
+            <TextBlock Text="Desktop Backends" TextAlignment="Center" FontSize="22" FontWeight="Bold"
+                       Foreground="{StaticResource TextPrimaryBrush}" Margin="0,0,0,20" />
+            
+            <UniformGrid Columns="3" Margin="0,0,0,30">
+                <!-- CUDA -->
+                <Border Background="#1C2B4A" BorderBrush="#2B4B8B" BorderThickness="1" CornerRadius="10" Margin="6" Padding="20">
+                    <StackPanel>
+                        <TextBlock Text="🚀" FontSize="28" Margin="0,0,0,10" />
+                        <TextBlock Text="CUDA Backend" FontSize="15" FontWeight="SemiBold" Foreground="{StaticResource TextPrimaryBrush}" Margin="0,0,0,6" />
+                        <TextBlock Text="Native GPU compute on NVIDIA GPUs. Maximum throughput with full CUDA feature support." 
+                                   FontSize="12.5" Foreground="{StaticResource TextSecondaryBrush}" TextWrapping="Wrap" />
+                    </StackPanel>
+                </Border>
+                <!-- OpenCL -->
+                <Border Background="#1C2B4A" BorderBrush="#2B4B8B" BorderThickness="1" CornerRadius="10" Margin="6" Padding="20">
+                    <StackPanel>
+                        <TextBlock Text="⚡" FontSize="28" Margin="0,0,0,10" />
+                        <TextBlock Text="OpenCL Backend" FontSize="15" FontWeight="SemiBold" Foreground="{StaticResource TextPrimaryBrush}" Margin="0,0,0,6" />
+                        <TextBlock Text="Cross-vendor GPU compute. Works on NVIDIA, AMD, and Intel GPUs and integrated graphics."
+                                   FontSize="12.5" Foreground="{StaticResource TextSecondaryBrush}" TextWrapping="Wrap" />
+                    </StackPanel>
+                </Border>
+                <!-- CPU -->
+                <Border Background="#1E293B" BorderBrush="{StaticResource BorderSubtleBrush}" BorderThickness="1" CornerRadius="10" Margin="6" Padding="20">
+                    <StackPanel>
+                        <TextBlock Text="🐢" FontSize="28" Margin="0,0,0,10" />
+                        <TextBlock Text="CPU Backend" FontSize="15" FontWeight="SemiBold" Foreground="{StaticResource TextPrimaryBrush}" Margin="0,0,0,6" />
+                        <TextBlock Text="Multi-threaded CPU execution. Useful for debugging, testing, and systems without GPU support."
+                                   FontSize="12.5" Foreground="{StaticResource TextSecondaryBrush}" TextWrapping="Wrap" />
+                    </StackPanel>
+                </Border>
+            </UniformGrid>
+
+            <!-- Shared Kernel Note -->
+            <Border Background="#1E293B" BorderBrush="{StaticResource BorderSubtleBrush}" BorderThickness="1" CornerRadius="10" Padding="24" Margin="0,0,0,20">
+                <StackPanel>
+                    <TextBlock Text="⚡ Shared Kernel Library" FontSize="15" FontWeight="SemiBold" Foreground="{StaticResource TextPrimaryBrush}" Margin="0,0,0,6" />
+                    <TextBlock FontSize="13" Foreground="{StaticResource TextSecondaryBrush}" TextWrapping="Wrap">
+                        All kernels in this demo are shared with the Blazor WASM version via 
+                        <Run FontFamily="Consolas" Foreground="{StaticResource AccentBlueBrush}">SpawnDev.ILGPU.Demo.Shared</Run>.
+                        Write once, run on GPU (CUDA/OpenCL), CPU, WebGPU, WebGL, and Wasm.
+                    </TextBlock>
+                </StackPanel>
+            </Border>
+
+            <!-- Footer -->
+            <TextBlock TextAlignment="Center" FontSize="12" Foreground="{StaticResource TextMutedBrush}" Margin="0,20,0,30" TextWrapping="Wrap">
+                Built upon the excellent ILGPU library by Marcel Koester and contributors.
+                © 2024-2026 SpawnDev.ILGPU Authors. Licensed under MIT / University of Illinois Open Source License.
+            </TextBlock>
+        </StackPanel>
+    </ScrollViewer>
+</UserControl>
