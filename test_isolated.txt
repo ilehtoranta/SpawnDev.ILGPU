@@ -1,0 +1,151 @@
+=== SpawnDev.ILGPU Console Test Runner (Process-Isolated) ===
+
+Running tests for: CudaTests
+Found 120 tests (each in own process)
+ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+  [Γ£ô] CudaTests.KernelTest (473ms)
+  [Γ£ô] CudaTests.KernelFloatTest (453ms)
+  [Γ£ô] CudaTests.MultiScalarKernelTest (438ms)
+  [Γ£ô] CudaTests.Kernel2DTest (506ms)
+  [Γ£ô] CudaTests.Kernel3DTest (469ms)
+  [Γ£ô] CudaTests.VectorAddTest (420ms)
+  [Γ£ô] CudaTests.StructTest (409ms)
+  [Γ£ô] CudaTests.MathTest (424ms)
+  [Γ£ô] CudaTests.ControlFlowTest (446ms)
+  [Γ£ô] CudaTests.AtomicTest (436ms)
+  [Γ£ù] CudaTests.IntrinsicMathTest (439ms) - ILGPU.Runtime.Cuda.CudaException: a PTX JIT compilation failed at kernelLoaded
+  [Γ£ô] CudaTests.ConversionTest (419ms)
+  [Γ£ù] CudaTests.SharedMemoryTest (451ms) - System.Exception: Shared memory failed at 0. Expected 10, got 0
+  [Γ£ô] CudaTests.NestedControlFlowTest (455ms)
+  [Γ£ô] CudaTests.FunctionCallTest (425ms)
+  [Γ£ù] CudaTests.CSharpSharedMemoryTest (658ms) - ILGPU.Runtime.Cuda.CudaException: an illegal memory access was encountered at cudaStatus
+  [Γ£ô] CudaTests.ComplexStructTest (440ms)
+  [Γ£ô] CudaTests.AtomicCASTest (431ms)
+  [Γ£ù] CudaTests.FMATest (437ms) - ILGPU.Runtime.Cuda.CudaException: a PTX JIT compilation failed at kernelLoaded
+  [Γ£ô] CudaTests.StructScalarArgTest (452ms)
+  [Γ£ô] CudaTests.NestedStructScalarArgTest (443ms)
+  [Γ£ù] CudaTests.DynamicSharedMemoryTest (656ms) - ILGPU.Runtime.Cuda.CudaException: an illegal memory access was encountered at cudaStatus
+  [Γ£ô] CudaTests.IntMathTest (463ms)
+  [Γ£ô] CudaTests.MatrixMulTest (460ms)
+  [Γ£ô] CudaTests.SpecializedIntrinsicsTest (457ms)
+  [Γ£ô] CudaTests.BitManipulationTest (443ms)
+  [Γ£ô] CudaTests.HistogramTest (427ms)
+  [Γ£ô] CudaTests.NestedLoopBreakTest (435ms)
+  [Γ£ô] CudaTests.LoopBreakAssignmentTest (432ms)
+  [Γ£ù] CudaTests.HyperbolicTest (456ms) - System.AggregateException: One or more errors occurred. (The function 'SinhF' does not have an intrinsic implementation for this backend. 'EnableAlgorithms' from the Algorithms library not invoked?)
+  [Γ£ô] CudaTests.SharedMemoryBarrierTest (459ms)
+  [Γ£ô] CudaTests.SelectTest (440ms)
+  [Γ£ô] CudaTests.LinearBarrierTest (438ms)
+  [Γ£ù] CudaTests.AdvancedMathTest (415ms) - System.AggregateException: One or more errors occurred. (The function 'TanF' does not have an intrinsic implementation for this backend. 'EnableAlgorithms' from the Algorithms library not invoked?)
+  [Γ£ô] CudaTests.BitwiseTest (430ms)
+  [Γ£ù] CudaTests.InverseTrigTest (424ms) - System.AggregateException: One or more errors occurred. (The function 'AsinF' does not have an intrinsic implementation for this backend. 'EnableAlgorithms' from the Algorithms library not invoked?)
+  [Γ£ô] CudaTests.LargeBufferTest (430ms)
+  [Γ£ô] CudaTests.SequentialKernelTest (441ms)
+  [Γ£ô] CudaTests.UnsignedIntTest (446ms)
+  [Γ£ô] CudaTests.AtomicMinMaxTest (424ms)
+  [Γ£ô] CudaTests.BufferReuseTest (427ms)
+  [Γ£ô] CudaTests.GridGroupDimensionTest (449ms)
+  [Γ£ô] CudaTests.ReduceMinMaxTest (466ms)
+  [Γ£ù] CudaTests.ILGPUReduceTest (492ms) - ILGPU.Backends.NotSupportedIntrinsicException: The function 'Reduce' does not have an intrinsic implementation for this backend. 'EnableAlgorithms' from the Algorithms library not invoked?
+  [Γ£ù] CudaTests.ILGPUReduceFloatTest (484ms) - ILGPU.Backends.NotSupportedIntrinsicException: The function 'Reduce' does not have an intrinsic implementation for this backend. 'EnableAlgorithms' from the Algorithms library not invoked?
+  [Γ£ù] CudaTests.ILGPUReduceDoubleTest (486ms) - ILGPU.Backends.NotSupportedIntrinsicException: The function 'Reduce' does not have an intrinsic implementation for this backend. 'EnableAlgorithms' from the Algorithms library not invoked?
+  [Γ£ù] CudaTests.ILGPUReduceLongTest (482ms) - ILGPU.Backends.NotSupportedIntrinsicException: The function 'Reduce' does not have an intrinsic implementation for this backend. 'EnableAlgorithms' from the Algorithms library not invoked?
+  [Γ£ù] CudaTests.ILGPUReduceUIntTest (476ms) - ILGPU.Backends.NotSupportedIntrinsicException: The function 'Reduce' does not have an intrinsic implementation for this backend. 'EnableAlgorithms' from the Algorithms library not invoked?
+  [Γ£ù] CudaTests.ILGPUReduceULongTest (473ms) - ILGPU.Backends.NotSupportedIntrinsicException: The function 'Reduce' does not have an intrinsic implementation for this backend. 'EnableAlgorithms' from the Algorithms library not invoked?
+  [Γ£ô] CudaTests.LongIntegerTest (423ms)
+  [Γ£ô] CudaTests.LongArithmeticTest (436ms)
+  [Γ£ô] CudaTests.LongBitwiseTest (440ms)
+  [Γ£ô] CudaTests.LongComparisonTest (433ms)
+  [Γ£ô] CudaTests.LongEdgeCasesTest (428ms)
+  [Γ£ô] CudaTests.LongMultiBufferTest (433ms)
+  [Γ£ô] CudaTests.LongNegationTest (426ms)
+  [Γ£ô] CudaTests.LongShiftTest (433ms)
+  [Γ£ô] CudaTests.LongSignedCompareTest (426ms)
+  [Γ£ô] CudaTests.LongChainedOpsTest (434ms)
+  [Γ£ô] CudaTests.LongNegativeValuesTest (428ms)
+  [Γ£ô] CudaTests.DoublePrecisionTest (439ms)
+  [Γ£ô] CudaTests.DoubleMathTest (427ms)
+  [Γ£ô] CudaTests.DoubleEdgeCasesTest (432ms)
+  [Γ£ô] CudaTests.DoubleMultiBufferTest (420ms)
+  [Γ£ô] CudaTests.DoubleNegationTest (420ms)
+  [Γ£ô] CudaTests.DoubleDivisionTest (442ms)
+  [Γ£ô] CudaTests.DoubleMinMaxTest (483ms)
+  [Γ£ô] CudaTests.MixedTypeBuffersTest (435ms)
+  [Γ£ô] CudaTests.EmptyBufferTest (422ms)
+  [Γ£ô] CudaTests.LargeDispatchTest (428ms)
+  [Γ£ô] CudaTests.ComparisonOperatorsTest (440ms)
+  [Γ£ô] CudaTests.ShortCircuitTest (438ms)
+  [Γ£ô] CudaTests.NaNInfinityTest (439ms)
+  [Γ£ô] CudaTests.ReductionTest (422ms)
+  [Γ£ô] CudaTests.ScatterGatherTest (432ms)
+  [Γ£ô] CudaTests.DeepNestingTest (431ms)
+  [Γ£ô] CudaTests.ZeroIterationLoopTest (435ms)
+  [Γ£ô] CudaTests.MultipleOutputsTest (432ms)
+  [Γ£ô] CudaTests.MatrixMultiplyTest (460ms)
+  [Γ£ô] CudaTests.KernelReuseTest (425ms)
+  [Γ£ô] CudaTests.ChainedKernelsTest (437ms)
+  [Γ£ô] CudaTests.BoundaryConditionsTest (440ms)
+  [Γ£ô] CudaTests.FloatSpecialOpsTest (429ms)
+  [Γ£ô] CudaTests.ModuloOperationsTest (425ms)
+  [Γ£ô] CudaTests.MillionElementsTest (421ms)
+  [Γ£ô] CudaTests.StencilOperationTest (434ms)
+  [Γ£ô] CudaTests.ParallelSumTest (419ms)
+  [Γ£ô] CudaTests.TypeConversionTest (429ms)
+  [Γ£ô] CudaTests.ShiftOperationsTest (447ms)
+  [Γ£ô] CudaTests.NestedStructTest (427ms)
+  [Γ£ô] CudaTests.BufferCopyTest (423ms)
+  [Γ£ô] CudaTests.UnaryOperationsTest (449ms)
+  [Γ£ô] CudaTests.SmoothstepTest (430ms)
+  [Γ£ô] CudaTests.LerpTest (432ms)
+  [Γ£ô] CudaTests.MixedTypesTest (432ms)
+  [Γ£ô] CudaTests.ComplexExpressionTest (439ms)
+  [Γ£ô] CudaTests.LongLargeDatasetTest (436ms)
+  [Γ£ô] CudaTests.DoubleChainedOpsTest (429ms)
+  [Γ£ô] CudaTests.DoubleLargeDatasetTest (430ms)
+  [Γ£ô] CudaTests.DoublePrecisionVerifyTest (425ms)
+  [Γ£ù] CudaTests.DynamicSharedF64Test (658ms) - ILGPU.Runtime.Cuda.CudaException: an illegal memory access was encountered at cudaStatus
+  [Γ£ù] CudaTests.BroadcastTest (477ms) - System.Exception: BroadcastTest failed at [1]: Expected 10, got 11
+  [Γ£ù] CudaTests.SubgroupShuffleTest (447ms) - System.Exception: SubgroupShuffleTest failed at [1]: Expected 10, got 11
+  [Γ£ô] CudaTests.ManyScalarKernelTest (426ms)
+  [Γ£ô] CudaTests.ColormapKernelTest (438ms)
+  [Γ£ô] CudaTests.AtomicAndOrXorTest (427ms)
+  [Γ£ù] CudaTests.XMathFunctionsTest (413ms) - System.AggregateException: One or more errors occurred. (The function 'SinhF' does not have an intrinsic implementation for this backend. 'EnableAlgorithms' from the Algorithms library not invoked?)
+  [Γ£ô] CudaTests.IntrinsicMathClampTest (427ms)
+  [Γ£ô] CudaTests.ExplicitGroupKernelTest (445ms)
+  [Γ£ô] CudaTests.PrefixSumTest (453ms)
+  [Γ£ô] CudaTests.DotProductTest (446ms)
+  [Γ£ô] CudaTests.WhileLoopTest (449ms)
+  [Γ£ô] CudaTests.MultiBufferInputTest (425ms)
+  [Γ£ô] CudaTests.ConditionalExpressionTest (446ms)
+  [Γ£ù] CudaTests.FloatRemTest (430ms) - System.AggregateException: One or more errors occurred. (The function 'Rem' does not have an intrinsic implementation for this backend. 'EnableAlgorithms' from the Algorithms library not invoked?)
+  [Γ£ô] CudaTests.IsNaNIsInfTest (435ms)
+  [Γ£ô] CudaTests.BitwiseRotateTest (431ms)
+  [Γ£ô] CudaTests.MapReduceTest (478ms)
+  [Γ£ô] CudaTests.SaturatingArithmeticTest (472ms)
+  [Γ£ô] CudaTests.ArrayFillPatternTest (439ms)
+ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+
+  FAILURES DETECTED
+  Total: 120 | Passed: 101 | Failed: 19 | Skipped: 0 | Crashed: 0 | Duration: 53472ms
+
+  Failed tests:
+    CudaTests.IntrinsicMathTest: ILGPU.Runtime.Cuda.CudaException: a PTX JIT compilation failed at kernelLoaded
+    CudaTests.SharedMemoryTest: System.Exception: Shared memory failed at 0. Expected 10, got 0
+    CudaTests.CSharpSharedMemoryTest: ILGPU.Runtime.Cuda.CudaException: an illegal memory access was encountered at cudaStatus
+    CudaTests.FMATest: ILGPU.Runtime.Cuda.CudaException: a PTX JIT compilation failed at kernelLoaded
+    CudaTests.DynamicSharedMemoryTest: ILGPU.Runtime.Cuda.CudaException: an illegal memory access was encountered at cudaStatus
+    CudaTests.HyperbolicTest: System.AggregateException: One or more errors occurred. (The function 'SinhF' does not have an intrinsic implementation for this backend. 'EnableAlgorithms' from the Algorithms library not invoked?)
+    CudaTests.AdvancedMathTest: System.AggregateException: One or more errors occurred. (The function 'TanF' does not have an intrinsic implementation for this backend. 'EnableAlgorithms' from the Algorithms library not invoked?)
+    CudaTests.InverseTrigTest: System.AggregateException: One or more errors occurred. (The function 'AsinF' does not have an intrinsic implementation for this backend. 'EnableAlgorithms' from the Algorithms library not invoked?)
+    CudaTests.ILGPUReduceTest: ILGPU.Backends.NotSupportedIntrinsicException: The function 'Reduce' does not have an intrinsic implementation for this backend. 'EnableAlgorithms' from the Algorithms library not invoked?
+    CudaTests.ILGPUReduceFloatTest: ILGPU.Backends.NotSupportedIntrinsicException: The function 'Reduce' does not have an intrinsic implementation for this backend. 'EnableAlgorithms' from the Algorithms library not invoked?
+    CudaTests.ILGPUReduceDoubleTest: ILGPU.Backends.NotSupportedIntrinsicException: The function 'Reduce' does not have an intrinsic implementation for this backend. 'EnableAlgorithms' from the Algorithms library not invoked?
+    CudaTests.ILGPUReduceLongTest: ILGPU.Backends.NotSupportedIntrinsicException: The function 'Reduce' does not have an intrinsic implementation for this backend. 'EnableAlgorithms' from the Algorithms library not invoked?
+    CudaTests.ILGPUReduceUIntTest: ILGPU.Backends.NotSupportedIntrinsicException: The function 'Reduce' does not have an intrinsic implementation for this backend. 'EnableAlgorithms' from the Algorithms library not invoked?
+    CudaTests.ILGPUReduceULongTest: ILGPU.Backends.NotSupportedIntrinsicException: The function 'Reduce' does not have an intrinsic implementation for this backend. 'EnableAlgorithms' from the Algorithms library not invoked?
+    CudaTests.DynamicSharedF64Test: ILGPU.Runtime.Cuda.CudaException: an illegal memory access was encountered at cudaStatus
+    CudaTests.BroadcastTest: System.Exception: BroadcastTest failed at [1]: Expected 10, got 11
+    CudaTests.SubgroupShuffleTest: System.Exception: SubgroupShuffleTest failed at [1]: Expected 10, got 11
+    CudaTests.XMathFunctionsTest: System.AggregateException: One or more errors occurred. (The function 'SinhF' does not have an intrinsic implementation for this backend. 'EnableAlgorithms' from the Algorithms library not invoked?)
+    CudaTests.FloatRemTest: System.AggregateException: One or more errors occurred. (The function 'Rem' does not have an intrinsic implementation for this backend. 'EnableAlgorithms' from the Algorithms library not invoked?)
+

@@ -1,8 +1,8 @@
 using ILGPU;
 using ILGPU.Runtime;
-using SpawnDev.Blazor.UnitTesting;
+using SpawnDev.UnitTesting;
 
-namespace SpawnDev.ILGPU.Demo.UnitTests
+namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
 {
     // Part 1: Core tests (basic, float, 2D, 3D, vector, struct, math, control flow, atomics, intrinsics, shared memory)
     public abstract partial class BackendTestBase
@@ -173,6 +173,7 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
             int len = 64;
             using var buf = accelerator.Allocate1D<int>(len);
             using var atomicBuf = accelerator.Allocate1D<Index1D>(1);
+            atomicBuf.MemSetToZero();
             var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<int>, ArrayView<Index1D>>(AtomicKernel);
             kernel((Index1D)len, buf.View, atomicBuf.View);
             await accelerator.SynchronizeAsync();

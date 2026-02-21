@@ -1,0 +1,373 @@
+d:\users\tj\Projects\SpawnDev.ILGPU\SpawnDev.ILGPU\SpawnDev.ILGPU.Demo.Shared\UnitTests\BackendTestBase.cs(566,78): warning CS1718: Comparison made to same variable; did you mean to compare something else? [d:\users\tj\Projects\SpawnDev.ILGPU\SpawnDev.ILGPU\SpawnDev.ILGPU.Demo.Shared\SpawnDev.ILGPU.Demo.Shared.csproj]
+d:\users\tj\Projects\SpawnDev.ILGPU\SpawnDev.ILGPU\SpawnDev.ILGPU.Demo.Shared\UnitTests\BackendTestBase.cs(567,62): warning CS1718: Comparison made to same variable; did you mean to compare something else? [d:\users\tj\Projects\SpawnDev.ILGPU\SpawnDev.ILGPU\SpawnDev.ILGPU.Demo.Shared\SpawnDev.ILGPU.Demo.Shared.csproj]
+d:\users\tj\Projects\SpawnDev.ILGPU\SpawnDev.ILGPU\SpawnDev.ILGPU.Demo.Shared\UnitTests\BackendTestBase.Tests4.cs(153,17): warning CS1718: Comparison made to same variable; did you mean to compare something else? [d:\users\tj\Projects\SpawnDev.ILGPU\SpawnDev.ILGPU\SpawnDev.ILGPU.Demo.Shared\SpawnDev.ILGPU.Demo.Shared.csproj]
+=== SpawnDev.ILGPU Console Test Runner (Process-Isolated) ===
+
+Running tests for: CudaTests, OpenCLTests, CPUTests
+Found 360 tests (each in own process)
+ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+  [Γ£ô] CudaTests.KernelTest (554ms)
+  [Γ£ô] CudaTests.KernelFloatTest (439ms)
+  [Γ£ô] CudaTests.MultiScalarKernelTest (461ms)
+  [Γ£ô] CudaTests.Kernel2DTest (451ms)
+  [Γ£ô] CudaTests.Kernel3DTest (449ms)
+  [Γ£ô] CudaTests.VectorAddTest (429ms)
+  [Γ£ô] CudaTests.StructTest (428ms)
+  [Γ£ô] CudaTests.MathTest (424ms)
+  [Γ£ô] CudaTests.ControlFlowTest (443ms)
+  [Γ£ô] CudaTests.AtomicTest (432ms)
+  [Γ£ô] CudaTests.IntrinsicMathTest (437ms)
+  [Γ£ô] CudaTests.ConversionTest (440ms)
+  [Γ£ô] CudaTests.SharedMemoryTest (449ms)
+  [Γ£ô] CudaTests.NestedControlFlowTest (462ms)
+  [Γ£ô] CudaTests.FunctionCallTest (477ms)
+  [Γ£ô] CudaTests.CSharpSharedMemoryTest (512ms)
+  [Γ£ô] CudaTests.ComplexStructTest (426ms)
+  [Γ£ô] CudaTests.AtomicCASTest (445ms)
+  [Γ£ô] CudaTests.FMATest (420ms)
+  [Γ£ô] CudaTests.StructScalarArgTest (411ms)
+  [Γ£ô] CudaTests.NestedStructScalarArgTest (421ms)
+  [Γ£ô] CudaTests.DynamicSharedMemoryTest (440ms)
+  [Γ£ô] CudaTests.IntMathTest (486ms)
+  [Γ£ô] CudaTests.MatrixMulTest (453ms)
+  [Γ£ô] CudaTests.SpecializedIntrinsicsTest (474ms)
+  [Γ£ô] CudaTests.BitManipulationTest (443ms)
+  [Γ£ô] CudaTests.HistogramTest (421ms)
+  [Γ£ô] CudaTests.NestedLoopBreakTest (435ms)
+  [Γ£ô] CudaTests.LoopBreakAssignmentTest (430ms)
+  [Γ£ô] CudaTests.HyperbolicTest (443ms)
+  [Γ£ô] CudaTests.SharedMemoryBarrierTest (459ms)
+  [Γ£ô] CudaTests.SelectTest (437ms)
+  [Γ£ô] CudaTests.LinearBarrierTest (437ms)
+  [Γ£ô] CudaTests.AdvancedMathTest (460ms)
+  [Γ£ô] CudaTests.BitwiseTest (440ms)
+  [Γ£ô] CudaTests.InverseTrigTest (448ms)
+  [Γ£ô] CudaTests.LargeBufferTest (419ms)
+  [Γ£ô] CudaTests.SequentialKernelTest (417ms)
+  [Γ£ô] CudaTests.UnsignedIntTest (435ms)
+  [Γ£ô] CudaTests.AtomicMinMaxTest (423ms)
+  [Γ£ô] CudaTests.BufferReuseTest (415ms)
+  [Γ£ô] CudaTests.GridGroupDimensionTest (448ms)
+  [Γ£ô] CudaTests.ReduceMinMaxTest (437ms)
+  [Γ£ô] CudaTests.ILGPUReduceTest (493ms)
+  [Γ£ô] CudaTests.ILGPUReduceFloatTest (504ms)
+  [Γ£ô] CudaTests.ILGPUReduceDoubleTest (510ms)
+  [Γ£ô] CudaTests.ILGPUReduceLongTest (506ms)
+  [Γ£ô] CudaTests.ILGPUReduceUIntTest (500ms)
+  [Γ£ô] CudaTests.ILGPUReduceULongTest (514ms)
+  [Γ£ô] CudaTests.LongIntegerTest (430ms)
+  [Γ£ô] CudaTests.LongArithmeticTest (425ms)
+  [Γ£ô] CudaTests.LongBitwiseTest (417ms)
+  [Γ£ô] CudaTests.LongComparisonTest (435ms)
+  [Γ£ô] CudaTests.LongEdgeCasesTest (428ms)
+  [Γ£ô] CudaTests.LongMultiBufferTest (426ms)
+  [Γ£ô] CudaTests.LongNegationTest (513ms)
+  [Γ£ô] CudaTests.LongShiftTest (457ms)
+  [Γ£ô] CudaTests.LongSignedCompareTest (439ms)
+  [Γ£ô] CudaTests.LongChainedOpsTest (430ms)
+  [Γ£ô] CudaTests.LongNegativeValuesTest (419ms)
+  [Γ£ô] CudaTests.DoublePrecisionTest (427ms)
+  [Γ£ô] CudaTests.DoubleMathTest (437ms)
+  [Γ£ô] CudaTests.DoubleEdgeCasesTest (470ms)
+  [Γ£ô] CudaTests.DoubleMultiBufferTest (425ms)
+  [Γ£ô] CudaTests.DoubleNegationTest (419ms)
+  [Γ£ô] CudaTests.DoubleDivisionTest (430ms)
+  [Γ£ô] CudaTests.DoubleMinMaxTest (444ms)
+  [Γ£ô] CudaTests.MixedTypeBuffersTest (436ms)
+  [Γ£ô] CudaTests.EmptyBufferTest (423ms)
+  [Γ£ô] CudaTests.LargeDispatchTest (432ms)
+  [Γ£ô] CudaTests.ComparisonOperatorsTest (573ms)
+  [Γ£ô] CudaTests.ShortCircuitTest (497ms)
+  [Γ£ô] CudaTests.NaNInfinityTest (451ms)
+  [Γ£ô] CudaTests.ReductionTest (463ms)
+  [Γ£ô] CudaTests.ScatterGatherTest (438ms)
+  [Γ£ô] CudaTests.DeepNestingTest (444ms)
+  [Γ£ô] CudaTests.ZeroIterationLoopTest (429ms)
+  [Γ£ô] CudaTests.MultipleOutputsTest (436ms)
+  [Γ£ô] CudaTests.MatrixMultiplyTest (456ms)
+  [Γ£ô] CudaTests.KernelReuseTest (445ms)
+  [Γ£ô] CudaTests.ChainedKernelsTest (464ms)
+  [Γ£ô] CudaTests.BoundaryConditionsTest (450ms)
+  [Γ£ô] CudaTests.FloatSpecialOpsTest (434ms)
+  [Γ£ô] CudaTests.ModuloOperationsTest (430ms)
+  [Γ£ô] CudaTests.MillionElementsTest (435ms)
+  [Γ£ô] CudaTests.StencilOperationTest (444ms)
+  [Γ£ô] CudaTests.ParallelSumTest (425ms)
+  [Γ£ô] CudaTests.TypeConversionTest (450ms)
+  [Γ£ô] CudaTests.ShiftOperationsTest (448ms)
+  [Γ£ô] CudaTests.NestedStructTest (451ms)
+  [Γ£ô] CudaTests.BufferCopyTest (442ms)
+  [Γ£ô] CudaTests.UnaryOperationsTest (449ms)
+  [Γ£ô] CudaTests.SmoothstepTest (446ms)
+  [Γ£ô] CudaTests.LerpTest (435ms)
+  [Γ£ô] CudaTests.MixedTypesTest (454ms)
+  [Γ£ô] CudaTests.ComplexExpressionTest (436ms)
+  [Γ£ô] CudaTests.LongLargeDatasetTest (448ms)
+  [Γ£ô] CudaTests.DoubleChainedOpsTest (447ms)
+  [Γ£ô] CudaTests.DoubleLargeDatasetTest (440ms)
+  [Γ£ô] CudaTests.DoublePrecisionVerifyTest (446ms)
+  [Γ£ô] CudaTests.DynamicSharedF64Test (475ms)
+  [Γ£ô] CudaTests.BroadcastTest (479ms)
+  [Γ£ô] CudaTests.SubgroupShuffleTest (500ms)
+  [Γ£ô] CudaTests.ManyScalarKernelTest (463ms)
+  [Γ£ô] CudaTests.ColormapKernelTest (476ms)
+  [Γ£ô] CudaTests.AtomicAndOrXorTest (437ms)
+  [Γ£ô] CudaTests.XMathFunctionsTest (473ms)
+  [Γ£ô] CudaTests.IntrinsicMathClampTest (444ms)
+  [Γ£ô] CudaTests.ExplicitGroupKernelTest (454ms)
+  [Γ£ô] CudaTests.PrefixSumTest (468ms)
+  [Γ£ô] CudaTests.DotProductTest (473ms)
+  [Γ£ô] CudaTests.WhileLoopTest (483ms)
+  [Γ£ô] CudaTests.MultiBufferInputTest (449ms)
+  [Γ£ô] CudaTests.ConditionalExpressionTest (456ms)
+  [Γ£ô] CudaTests.FloatRemTest (476ms)
+  [Γ£ô] CudaTests.IsNaNIsInfTest (462ms)
+  [Γ£ô] CudaTests.BitwiseRotateTest (456ms)
+  [Γ£ô] CudaTests.MapReduceTest (490ms)
+  [Γ£ô] CudaTests.SaturatingArithmeticTest (473ms)
+  [Γ£ô] CudaTests.ArrayFillPatternTest (460ms)
+  [ΓÅ¡] OpenCLTests.KernelTest (184ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.KernelFloatTest (182ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.MultiScalarKernelTest (182ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.Kernel2DTest (188ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.Kernel3DTest (187ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.VectorAddTest (183ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.StructTest (195ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.MathTest (185ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.ControlFlowTest (185ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.AtomicTest (186ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.IntrinsicMathTest (188ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.ConversionTest (189ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.SharedMemoryTest (209ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.NestedControlFlowTest (224ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.FunctionCallTest (206ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.CSharpSharedMemoryTest (188ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.ComplexStructTest (186ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.AtomicCASTest (193ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.FMATest (188ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.StructScalarArgTest (200ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.NestedStructScalarArgTest (204ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.DynamicSharedMemoryTest (195ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.IntMathTest (216ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.MatrixMulTest (233ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.SpecializedIntrinsicsTest (194ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.BitManipulationTest (198ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.HistogramTest (202ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.NestedLoopBreakTest (197ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.LoopBreakAssignmentTest (203ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.HyperbolicTest (198ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.SharedMemoryBarrierTest (202ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.SelectTest (199ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.LinearBarrierTest (206ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.AdvancedMathTest (197ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.BitwiseTest (198ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.InverseTrigTest (199ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.LargeBufferTest (205ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.SequentialKernelTest (197ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.UnsignedIntTest (194ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.AtomicMinMaxTest (194ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.BufferReuseTest (194ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.GridGroupDimensionTest (205ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.ReduceMinMaxTest (192ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.ILGPUReduceTest (193ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.ILGPUReduceFloatTest (216ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.ILGPUReduceDoubleTest (198ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.ILGPUReduceLongTest (187ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.ILGPUReduceUIntTest (201ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.ILGPUReduceULongTest (197ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.LongIntegerTest (215ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.LongArithmeticTest (198ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.LongBitwiseTest (218ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.LongComparisonTest (204ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.LongEdgeCasesTest (196ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.LongMultiBufferTest (193ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.LongNegationTest (200ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.LongShiftTest (196ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.LongSignedCompareTest (203ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.LongChainedOpsTest (203ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.LongNegativeValuesTest (196ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.DoublePrecisionTest (194ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.DoubleMathTest (197ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.DoubleEdgeCasesTest (211ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.DoubleMultiBufferTest (211ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.DoubleNegationTest (207ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.DoubleDivisionTest (205ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.DoubleMinMaxTest (193ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.MixedTypeBuffersTest (200ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.EmptyBufferTest (201ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.LargeDispatchTest (199ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.ComparisonOperatorsTest (196ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.ShortCircuitTest (193ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.NaNInfinityTest (190ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.ReductionTest (200ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.ScatterGatherTest (197ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.DeepNestingTest (197ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.ZeroIterationLoopTest (191ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.MultipleOutputsTest (197ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.MatrixMultiplyTest (199ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.KernelReuseTest (200ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.ChainedKernelsTest (203ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.BoundaryConditionsTest (205ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.FloatSpecialOpsTest (195ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.ModuloOperationsTest (197ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.MillionElementsTest (201ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.StencilOperationTest (201ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.ParallelSumTest (197ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.TypeConversionTest (200ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.ShiftOperationsTest (200ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.NestedStructTest (198ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.BufferCopyTest (210ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.UnaryOperationsTest (194ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.SmoothstepTest (198ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.LerpTest (222ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.MixedTypesTest (205ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.ComplexExpressionTest (196ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.LongLargeDatasetTest (199ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.DoubleChainedOpsTest (197ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.DoubleLargeDatasetTest (209ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.DoublePrecisionVerifyTest (216ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.DynamicSharedF64Test (221ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.BroadcastTest (200ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.SubgroupShuffleTest (209ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.ManyScalarKernelTest (210ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.ColormapKernelTest (227ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.AtomicAndOrXorTest (225ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.XMathFunctionsTest (209ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.IntrinsicMathClampTest (221ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.ExplicitGroupKernelTest (212ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.PrefixSumTest (207ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.DotProductTest (213ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.WhileLoopTest (202ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.MultiBufferInputTest (222ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.ConditionalExpressionTest (201ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.FloatRemTest (214ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.IsNaNIsInfTest (215ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.BitwiseRotateTest (207ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.MapReduceTest (194ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.SaturatingArithmeticTest (201ms) - No OpenCL devices found
+  [ΓÅ¡] OpenCLTests.ArrayFillPatternTest (206ms) - No OpenCL devices found
+  [Γ£ô] CPUTests.KernelTest (229ms)
+  [Γ£ô] CPUTests.KernelFloatTest (218ms)
+  [Γ£ô] CPUTests.MultiScalarKernelTest (223ms)
+  [Γ£ô] CPUTests.Kernel2DTest (247ms)
+  [Γ£ô] CPUTests.Kernel3DTest (242ms)
+  [Γ£ô] CPUTests.VectorAddTest (216ms)
+  [Γ£ô] CPUTests.StructTest (225ms)
+  [Γ£ô] CPUTests.MathTest (212ms)
+  [Γ£ô] CPUTests.ControlFlowTest (229ms)
+  [Γ£ô] CPUTests.AtomicTest (233ms)
+  [Γ£ô] CPUTests.IntrinsicMathTest (231ms)
+  [Γ£ô] CPUTests.ConversionTest (217ms)
+  [Γ£ô] CPUTests.SharedMemoryTest (242ms)
+  [Γ£ô] CPUTests.NestedControlFlowTest (229ms)
+  [Γ£ô] CPUTests.FunctionCallTest (232ms)
+  [Γ£ô] CPUTests.CSharpSharedMemoryTest (253ms)
+  [Γ£ô] CPUTests.ComplexStructTest (207ms)
+  [Γ£ô] CPUTests.AtomicCASTest (221ms)
+  [Γ£ô] CPUTests.FMATest (228ms)
+  [Γ£ô] CPUTests.StructScalarArgTest (215ms)
+  [Γ£ô] CPUTests.NestedStructScalarArgTest (210ms)
+  [Γ£ô] CPUTests.DynamicSharedMemoryTest (241ms)
+  [Γ£ô] CPUTests.IntMathTest (238ms)
+  [Γ£ô] CPUTests.MatrixMulTest (263ms)
+  [Γ£ô] CPUTests.SpecializedIntrinsicsTest (266ms)
+  [Γ£ô] CPUTests.BitManipulationTest (272ms)
+  [Γ£ô] CPUTests.HistogramTest (213ms)
+  [Γ£ô] CPUTests.NestedLoopBreakTest (224ms)
+  [Γ£ô] CPUTests.LoopBreakAssignmentTest (222ms)
+  [Γ£ô] CPUTests.HyperbolicTest (221ms)
+  [Γ£ô] CPUTests.SharedMemoryBarrierTest (240ms)
+  [Γ£ô] CPUTests.SelectTest (224ms)
+  [Γ£ô] CPUTests.LinearBarrierTest (248ms)
+  [Γ£ô] CPUTests.AdvancedMathTest (209ms)
+  [Γ£ô] CPUTests.BitwiseTest (211ms)
+  [Γ£ô] CPUTests.InverseTrigTest (235ms)
+  [Γ£ô] CPUTests.LargeBufferTest (230ms)
+  [Γ£ô] CPUTests.SequentialKernelTest (215ms)
+  [Γ£ô] CPUTests.UnsignedIntTest (228ms)
+  [Γ£ô] CPUTests.AtomicMinMaxTest (219ms)
+  [Γ£ô] CPUTests.BufferReuseTest (212ms)
+  [Γ£ô] CPUTests.GridGroupDimensionTest (234ms)
+  [Γ£ô] CPUTests.ReduceMinMaxTest (244ms)
+  [Γ£ô] CPUTests.ILGPUReduceTest (644ms)
+  [Γ£ô] CPUTests.ILGPUReduceFloatTest (777ms)
+  [Γ£ô] CPUTests.ILGPUReduceDoubleTest (833ms)
+  [Γ£ô] CPUTests.ILGPUReduceLongTest (669ms)
+  [Γ£ô] CPUTests.ILGPUReduceUIntTest (611ms)
+  [Γ£ô] CPUTests.ILGPUReduceULongTest (622ms)
+  [Γ£ô] CPUTests.LongIntegerTest (213ms)
+  [Γ£ô] CPUTests.LongArithmeticTest (207ms)
+  [Γ£ô] CPUTests.LongBitwiseTest (211ms)
+  [Γ£ô] CPUTests.LongComparisonTest (212ms)
+  [Γ£ô] CPUTests.LongEdgeCasesTest (209ms)
+  [Γ£ô] CPUTests.LongMultiBufferTest (215ms)
+  [Γ£ô] CPUTests.LongNegationTest (226ms)
+  [Γ£ô] CPUTests.LongShiftTest (217ms)
+  [Γ£ô] CPUTests.LongSignedCompareTest (210ms)
+  [Γ£ô] CPUTests.LongChainedOpsTest (211ms)
+  [Γ£ô] CPUTests.LongNegativeValuesTest (210ms)
+  [Γ£ô] CPUTests.DoublePrecisionTest (210ms)
+  [Γ£ô] CPUTests.DoubleMathTest (210ms)
+  [Γ£ô] CPUTests.DoubleEdgeCasesTest (211ms)
+  [Γ£ô] CPUTests.DoubleMultiBufferTest (212ms)
+  [Γ£ô] CPUTests.DoubleNegationTest (208ms)
+  [Γ£ô] CPUTests.DoubleDivisionTest (214ms)
+  [Γ£ô] CPUTests.DoubleMinMaxTest (218ms)
+  [Γ£ô] CPUTests.MixedTypeBuffersTest (211ms)
+  [Γ£ô] CPUTests.EmptyBufferTest (206ms)
+  [Γ£ô] CPUTests.LargeDispatchTest (518ms)
+  [Γ£ô] CPUTests.ComparisonOperatorsTest (230ms)
+  [Γ£ô] CPUTests.ShortCircuitTest (228ms)
+  [Γ£ô] CPUTests.NaNInfinityTest (225ms)
+  [Γ£ô] CPUTests.ReductionTest (211ms)
+  [Γ£ô] CPUTests.ScatterGatherTest (206ms)
+  [Γ£ô] CPUTests.DeepNestingTest (207ms)
+  [Γ£ô] CPUTests.ZeroIterationLoopTest (230ms)
+  [Γ£ô] CPUTests.MultipleOutputsTest (206ms)
+  [Γ£ô] CPUTests.MatrixMultiplyTest (234ms)
+  [Γ£ô] CPUTests.KernelReuseTest (215ms)
+  [Γ£ô] CPUTests.ChainedKernelsTest (231ms)
+  [Γ£ô] CPUTests.BoundaryConditionsTest (241ms)
+  [Γ£ô] CPUTests.FloatSpecialOpsTest (227ms)
+  [Γ£ô] CPUTests.ModuloOperationsTest (215ms)
+  [Γ£ô] CPUTests.MillionElementsTest (5513ms)
+  [Γ£ô] CPUTests.StencilOperationTest (222ms)
+  [Γ£ô] CPUTests.ParallelSumTest (207ms)
+  [Γ£ô] CPUTests.TypeConversionTest (213ms)
+  [Γ£ô] CPUTests.ShiftOperationsTest (211ms)
+  [Γ£ô] CPUTests.NestedStructTest (211ms)
+  [Γ£ô] CPUTests.BufferCopyTest (207ms)
+  [Γ£ô] CPUTests.UnaryOperationsTest (214ms)
+  [Γ£ô] CPUTests.SmoothstepTest (209ms)
+  [Γ£ô] CPUTests.LerpTest (209ms)
+  [Γ£ô] CPUTests.MixedTypesTest (211ms)
+  [Γ£ô] CPUTests.ComplexExpressionTest (216ms)
+  [Γ£ô] CPUTests.LongLargeDatasetTest (215ms)
+  [Γ£ô] CPUTests.DoubleChainedOpsTest (207ms)
+  [Γ£ô] CPUTests.DoubleLargeDatasetTest (211ms)
+  [Γ£ô] CPUTests.DoublePrecisionVerifyTest (205ms)
+  [Γ£ô] CPUTests.DynamicSharedF64Test (234ms)
+  [Γ£ô] CPUTests.BroadcastTest (232ms)
+  [Γ£ô] CPUTests.SubgroupShuffleTest (226ms)
+  [Γ£ô] CPUTests.ManyScalarKernelTest (205ms)
+  [Γ£ô] CPUTests.ColormapKernelTest (222ms)
+  [Γ£ô] CPUTests.AtomicAndOrXorTest (216ms)
+  [Γ£ô] CPUTests.XMathFunctionsTest (226ms)
+  [Γ£ô] CPUTests.IntrinsicMathClampTest (230ms)
+  [Γ£ô] CPUTests.ExplicitGroupKernelTest (246ms)
+  [Γ£ô] CPUTests.PrefixSumTest (258ms)
+  [Γ£ô] CPUTests.DotProductTest (238ms)
+  [Γ£ô] CPUTests.WhileLoopTest (235ms)
+  [Γ£ô] CPUTests.MultiBufferInputTest (214ms)
+  [Γ£ô] CPUTests.ConditionalExpressionTest (223ms)
+  [Γ£ô] CPUTests.FloatRemTest (213ms)
+  [Γ£ô] CPUTests.IsNaNIsInfTest (220ms)
+  [Γ£ô] CPUTests.BitwiseRotateTest (214ms)
+  [Γ£ô] CPUTests.MapReduceTest (244ms)
+  [Γ£ô] CPUTests.SaturatingArithmeticTest (211ms)
+  [Γ£ô] CPUTests.ArrayFillPatternTest (220ms)
+ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+
+  ALL PASSED
+  Total: 360 | Passed: 240 | Failed: 0 | Skipped: 120 | Crashed: 0 | Duration: 113350ms
+

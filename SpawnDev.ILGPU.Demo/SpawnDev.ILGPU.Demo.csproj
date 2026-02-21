@@ -15,7 +15,6 @@
 	<ItemGroup>
 		<PackageReference Include="Microsoft.AspNetCore.Components.WebAssembly" Version="10.0.2" />
 		<PackageReference Include="Microsoft.AspNetCore.Components.WebAssembly.DevServer" Version="10.0.2" PrivateAssets="all" />
-		<PackageReference Include="SpawnDev.Blazor.UnitTesting" Version="2.6.0" />
 		
 	</ItemGroup>
 
@@ -24,6 +23,8 @@
 	  <ProjectReference Include="..\SpawnDev.ILGPU.Demo.Shared\SpawnDev.ILGPU.Demo.Shared.csproj" />
 	  <ProjectReference Include="..\ILGPU\ILGPU.csproj" />
 	  <ProjectReference Include="..\ILGPU.Algorithms\ILGPU.Algorithms.csproj" />
+	  <PackageReference Include="SpawnDev.UnitTesting" Version="1.0.0" />
+	  <PackageReference Include="SpawnDev.UnitTesting.Blazor" Version="1.0.0" />
 	</ItemGroup>
 
 </Project>

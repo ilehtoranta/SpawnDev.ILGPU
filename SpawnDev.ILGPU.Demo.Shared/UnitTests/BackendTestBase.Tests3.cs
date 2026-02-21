@@ -1,8 +1,8 @@
 using ILGPU;
 using ILGPU.Runtime;
-using SpawnDev.Blazor.UnitTesting;
+using SpawnDev.UnitTesting;
 
-namespace SpawnDev.ILGPU.Demo.UnitTests
+namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
 {
     // Part 3: Long/Double precision tests, comparison/logic tests, GPU patterns, and misc tests
     public abstract partial class BackendTestBase
@@ -511,6 +511,7 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
             int len = 64; var data = new int[len]; int expectedSum = 0;
             for (int i = 0; i < len; i++) { data[i] = i + 1; expectedSum += data[i]; }
             using var buf = accelerator.Allocate1D(data); using var bufResult = accelerator.Allocate1D<int>(1);
+            bufResult.MemSetToZero();
             var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<int>, ArrayView<int>, int>(ParallelSumKernel);
             kernel((Index1D)len, buf.View, bufResult.View, len);
             await accelerator.SynchronizeAsync();

@@ -1,7 +1,8 @@
 using ILGPU;
 using ILGPU.Runtime;
 using ILGPU.Runtime.CPU;
-using SpawnDev.Blazor.UnitTesting;
+using SpawnDev.UnitTesting;
+using SpawnDev.ILGPU.Demo.Shared.UnitTests;
 
 namespace SpawnDev.ILGPU.Demo.UnitTests
 {

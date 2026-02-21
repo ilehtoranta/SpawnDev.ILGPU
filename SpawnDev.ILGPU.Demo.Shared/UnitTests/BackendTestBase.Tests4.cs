@@ -1,8 +1,8 @@
 using ILGPU;
 using ILGPU.Runtime;
-using SpawnDev.Blazor.UnitTesting;
+using SpawnDev.UnitTesting;
 
-namespace SpawnDev.ILGPU.Demo.UnitTests
+namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
 {
     // Part 4: Tests inspired by ILGPU reference samples — expanded atomics, XMath, explicit grouping,
     //         prefix sum, dot product, while loops, multi-buffer, float rem, IsNaN/IsInf, and more.

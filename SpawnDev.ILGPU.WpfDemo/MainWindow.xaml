@@ -101,6 +101,9 @@
                     <RadioButton x:Name="NavBoids" Content="🐦  GPU Boids"
                                  Style="{StaticResource NavButtonStyle}"
                                  Checked="OnNavChanged" Tag="Boids" />
+                    <RadioButton x:Name="NavTests" Content="🧪  Tests"
+                                 Style="{StaticResource NavButtonStyle}"
+                                 Checked="OnNavChanged" Tag="Tests" />
                 </StackPanel>
             </DockPanel>
         </Border>

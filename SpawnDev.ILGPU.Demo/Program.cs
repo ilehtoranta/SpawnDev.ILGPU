@@ -1,6 +1,6 @@
 using Microsoft.AspNetCore.Components.Web;
 using Microsoft.AspNetCore.Components.WebAssembly.Hosting;
-using SpawnDev.Blazor.UnitTesting;
+
 using SpawnDev.BlazorJS;
 using SpawnDev.ILGPU.Demo;
 using SpawnDev.ILGPU.Demo.UnitTests;
@@ -15,7 +15,7 @@ builder.Services.AddSingleton<WasmTests>();
 builder.Services.AddSingleton<WebGLTests>();
 builder.Services.AddSingleton<DefaultTests>();
 
-builder.Services.AddSingleton<UnitTestService>();
+
 builder.Services.AddScoped(sp => new HttpClient { BaseAddress = new Uri(builder.HostEnvironment.BaseAddress) });
 
 builder.RootComponents.Add<App>("#app");

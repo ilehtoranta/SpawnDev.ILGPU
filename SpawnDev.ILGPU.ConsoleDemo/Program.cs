@@ -1,228 +1,423 @@
-﻿// ---------------------------------------------------------------------------------------
-//                        SpawnDev.ILGPU Console Demo
+﻿using System.Diagnostics;
+using System.Text.Json;
+using ILGPU;
+using ILGPU.Runtime;
+using ILGPU.Runtime.CPU;
+using ILGPU.Runtime.Cuda;
+using ILGPU.Runtime.OpenCL;
+using SpawnDev.UnitTesting;
+using SpawnDev.ILGPU.Demo.Shared.UnitTests;
+using ILGPU.Algorithms;
+
+// ════════════════════════════════════════════════════════════════════
+//  Process-Isolated Test Runner
 //
-// Demonstrates that SpawnDev.ILGPU works in a standard .NET console application.
-// Uses the unified async extensions (SynchronizeAsync, CopyToHostAsync)
-// which gracefully fall back to synchronous ILGPU calls for native backends.
+//  Each test runs in its own process to prevent CUDA sticky errors
+//  from cascading. When a GPU fault occurs, only that test's process
+//  is affected — the orchestrator continues with the next test.
 //
-// Backends available in console: CPU, Cuda (if supported), OpenCL (if supported).
-// Browser backends (WebGPU, WebGL, Wasm) are NOT available outside Blazor WASM.
-// ---------------------------------------------------------------------------------------
+//  Usage:
+//    dotnet run -- [cuda|opencl|all]           Run all tests (orchestrator)
+//    dotnet run -- --run-test ClassName.Method backend   Run single test (worker)
+// ════════════════════════════════════════════════════════════════════
 
-using global::ILGPU;
-using global::ILGPU.Runtime;
-using SpawnDev.ILGPU;
-
-Console.WriteLine("=== SpawnDev.ILGPU Console Demo ===");
-Console.WriteLine();
-
-// ──────────────────────────────────────────────
-// 1. Create Context — SAME async code as Blazor WASM
-// ──────────────────────────────────────────────
-// This is the EXACT same initialization code used in Blazor WASM.
-// AllAcceleratorsAsync() registers browser backends (WebGPU, WebGL, Wasm)
-// AND native backends (Cuda, OpenCL, CPU). Browser backends fail silently
-// on desktop since BlazorJSRuntime isn't available.
-using var context = await Context.CreateAsync(builder => builder.AllAcceleratorsAsync());
-
-Console.WriteLine("Registered devices:");
-foreach (var device in context)
+// Check if we're in worker mode (running a single test)
+var runTestIdx = Array.IndexOf(args, "--run-test");
+if (runTestIdx >= 0 && runTestIdx + 2 < args.Length)
 {
-    Console.WriteLine($"  - {device.Name} ({device.AcceleratorType})");
+    return await RunSingleTest(args[runTestIdx + 1], args[runTestIdx + 2]);
 }
-Console.WriteLine();
 
-// ──────────────────────────────────────────────
-// 2. Pick the best accelerator — SAME async code as Blazor WASM
-// ──────────────────────────────────────────────
-// CreatePreferredAcceleratorAsync() checks for WebGPU > WebGL > Wasm > CPU.
-// On desktop, browser backends aren't registered, so it falls through to
-// Cuda > OpenCL > CPU automatically.
-using var accelerator = await context.CreatePreferredAcceleratorAsync();
-
-Console.WriteLine($"Using accelerator: {accelerator.Name} ({accelerator.AcceleratorType})");
-Console.WriteLine();
-
-// ──────────────────────────────────────────────
-// 3. Vector Addition
-// ──────────────────────────────────────────────
-await RunVectorAddition(accelerator);
-
-// ──────────────────────────────────────────────
-// 4. Matrix Multiply (1D kernel)
-// ──────────────────────────────────────────────
-await RunMatrixMultiply(accelerator);
-
-// ──────────────────────────────────────────────
-// 5. Parallel Reduce (sum)
-// ──────────────────────────────────────────────
-await RunParallelReduce(accelerator);
-
-Console.WriteLine();
-Console.WriteLine("=== All tests passed! ===");
-Console.WriteLine("SpawnDev.ILGPU works in console apps.");
-
-// ════════════════════════════════════════════════════════════════════
-//  Test Functions
-// ════════════════════════════════════════════════════════════════════
-
-static async Task RunVectorAddition(Accelerator accelerator)
+// ── Diagnostic Mode ───────────────────────────────────────────────
+if (args.Length > 0 && args[0].Equals("diag", StringComparison.OrdinalIgnoreCase))
 {
-    Console.WriteLine("── Vector Addition ──");
-
-    const int length = 1024;
-    var hostA = Enumerable.Range(0, length).Select(i => (float)i).ToArray();
-    var hostB = Enumerable.Range(0, length).Select(i => (float)i * 2f).ToArray();
-
-    using var bufA = accelerator.Allocate1D(hostA);
-    using var bufB = accelerator.Allocate1D(hostB);
-    using var bufC = accelerator.Allocate1D<float>(length);
-
-    var kernel = accelerator.LoadAutoGroupedStreamKernel<
-        Index1D, ArrayView<float>, ArrayView<float>, ArrayView<float>>(VectorAddKernel);
-
-    kernel((Index1D)length, bufA.View, bufB.View, bufC.View);
-
-    // Use SpawnDev.ILGPU's unified async extension — falls back to sync for CPU/Cuda
-    await accelerator.SynchronizeAsync();
-
-    // Use SpawnDev.ILGPU's unified async readback
-    var results = await bufC.CopyToHostAsync<float>();
-
-    // Verify
-    bool pass = true;
-    for (int i = 0; i < length; i++)
+    Console.WriteLine("=== OpenCL Diagnostic ===");
+    Console.WriteLine($"Runtime Platform: {ILGPU.Backends.Backend.RuntimePlatform}");
+    Console.WriteLine($"OS Platform: {ILGPU.Backends.Backend.OSPlatform}");
+    Console.WriteLine($"RunningOnNativePlatform: {ILGPU.Backends.Backend.RunningOnNativePlatform}");
+    Console.WriteLine($"CLAPI.CurrentAPI type: {ILGPU.Runtime.OpenCL.CLAPI.CurrentAPI.GetType().Name}");
+    Console.WriteLine($"CLAPI.CurrentAPI.IsSupported: {ILGPU.Runtime.OpenCL.CLAPI.CurrentAPI.IsSupported}");
+    Console.WriteLine();
+    
+    // Try creating context with verbose output
+    try
     {
-        float expected = hostA[i] + hostB[i];
-        if (Math.Abs(results[i] - expected) > 0.001f)
+        Console.WriteLine("Creating ILGPU context with AllAccelerators()...");
+        using var context = Context.Create(builder => builder.AllAccelerators().EnableAlgorithms());
+        
+        Console.WriteLine($"Total devices: {context.Devices.Length}");
+        foreach (var device in context.Devices)
         {
-            Console.WriteLine($"  FAIL at [{i}]: expected {expected}, got {results[i]}");
-            pass = false;
-            break;
+            Console.WriteLine($"  Device: {device.Name} (Type: {device.AcceleratorType})");
+        }
+        
+        var clDevices = context.GetCLDevices();
+        Console.WriteLine($"OpenCL devices: {clDevices.Count}");
+        
+        if (clDevices.Count > 0)
+        {
+            var clDev = clDevices[0];
+            Console.WriteLine($"  CL Device: {clDev.Name}");
+            Console.WriteLine($"  Platform: {clDev.PlatformName}");
+            Console.WriteLine($"  Version: {clDev.DeviceVersion}");
+            Console.WriteLine($"  CVersion: {clDev.CVersion}");
+            Console.WriteLine($"  CLStdVersion: {clDev.CLStdVersion}");
+            Console.WriteLine($"  GenericAddressSpace: {clDev.Capabilities.GenericAddressSpace}");
+            Console.WriteLine($"  Vendor: {clDev.Vendor}");
+            
+            using var writer = new System.IO.StringWriter();
+            clDev.PrintInformation(writer);
+            Console.WriteLine(writer.ToString());
+        }
+        
+        // Also try with a custom predicate that accepts everything
+        Console.WriteLine("\nTrying OpenCL with no filters...");
+        using var context2 = Context.Create(builder => builder
+            .OpenCL(id => true)
+            .EnableAlgorithms());
+        var clDevices2 = context2.GetCLDevices();
+        Console.WriteLine($"OpenCL devices (no filter): {clDevices2.Count}");
+        if (clDevices2.Count > 0)
+        {
+            var clDev = clDevices2[0];
+            Console.WriteLine($"  CL Device: {clDev.Name}");
+            Console.WriteLine($"  Version: {clDev.DeviceVersion}");
+            Console.WriteLine($"  CVersion: {clDev.CVersion}");
+            Console.WriteLine($"  CLStdVersion: {clDev.CLStdVersion}");
+            Console.WriteLine($"  GenericAddressSpace: {clDev.Capabilities.GenericAddressSpace}");
+        }
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"Error: {ex.GetType().Name}: {ex.Message}");
+        Console.WriteLine(ex.StackTrace);
+    }
+    return 0;
+}
+
+// ── Orchestrator Mode ──────────────────────────────────────────────
+return await RunOrchestrator(args);
+
+// ════════════════════════════════════════════════════════════════════
+//  Orchestrator: discovers tests, spawns self per-test, aggregates
+// ════════════════════════════════════════════════════════════════════
+static async Task<int> RunOrchestrator(string[] args)
+{
+    Console.WriteLine("=== SpawnDev.ILGPU Console Test Runner (Process-Isolated) ===");
+    Console.WriteLine();
+
+    var backendArg = args.FirstOrDefault()?.ToLowerInvariant() ?? "all";
+    var testTypes = new List<Type>();
+
+    if (backendArg == "cuda" || backendArg == "all")
+        testTypes.Add(typeof(CudaTests));
+    if (backendArg == "opencl" || backendArg == "all")
+        testTypes.Add(typeof(OpenCLTests));
+    if (backendArg == "cpu" || backendArg == "all")
+        testTypes.Add(typeof(CPUTests));
+
+    if (testTypes.Count == 0)
+    {
+        Console.WriteLine($"Unknown backend: {backendArg}");
+        Console.WriteLine("Usage: dotnet run -- [cuda|opencl|cpu|all]");
+        return 1;
+    }
+
+    // Discover tests using UnitTestRunner (just for discovery, not execution)
+    var runner = new UnitTestRunner();
+    runner.SetTestTypes(testTypes);
+
+    Console.WriteLine($"Running tests for: {string.Join(", ", testTypes.Select(t => t.Name))}");
+    Console.WriteLine($"Found {runner.Tests.Count} tests (each in own process)");
+    Console.WriteLine(new string('─', 80));
+
+    // Find our own executable path
+    var exePath = Environment.ProcessPath ?? Process.GetCurrentProcess().MainModule?.FileName;
+    if (exePath == null)
+    {
+        Console.WriteLine("ERROR: Could not determine executable path for process isolation.");
+        return 1;
+    }
+
+    var isDll = exePath.EndsWith(".dll", StringComparison.OrdinalIgnoreCase);
+
+    int passed = 0, failed = 0, skipped = 0, crashed = 0;
+    double totalDuration = 0;
+    var failures = new List<(string test, string error)>();
+    var sw = new Stopwatch();
+
+    foreach (var test in runner.Tests)
+    {
+        var testName = $"{test.TestTypeName}.{test.TestMethodName}";
+        var backend = test.TestType == typeof(CudaTests) ? "cuda" :
+                      test.TestType == typeof(OpenCLTests) ? "opencl" : "cpu";
+
+        sw.Restart();
+
+        // Spawn self with --run-test
+        var psi = new ProcessStartInfo
+        {
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+        };
+
+        if (isDll)
+        {
+            psi.FileName = "dotnet";
+            psi.Arguments = $"\"{exePath}\" --run-test {testName} {backend}";
+        }
+        else
+        {
+            psi.FileName = exePath;
+            psi.Arguments = $"--run-test {testName} {backend}";
+        }
+
+        string stdout = "", stderr = "";
+        int exitCode = -1;
+
+        try
+        {
+            using var proc = Process.Start(psi)!;
+            stdout = await proc.StandardOutput.ReadToEndAsync();
+            stderr = await proc.StandardError.ReadToEndAsync();
+
+            // 30-second timeout per test
+            var completed = proc.WaitForExit(30_000);
+            if (!completed)
+            {
+                try { proc.Kill(entireProcessTree: true); } catch { }
+                exitCode = -1;
+            }
+            else
+            {
+                exitCode = proc.ExitCode;
+            }
+        }
+        catch (Exception ex)
+        {
+            stderr = ex.Message;
+            exitCode = -1;
+        }
+
+        sw.Stop();
+        var durationMs = Math.Round(sw.Elapsed.TotalMilliseconds);
+        totalDuration += durationMs;
+
+        // Parse result from exit code
+        // 0 = pass, 1 = fail, 2 = skip/unsupported, -1 = crash/timeout
+        switch (exitCode)
+        {
+            case 0:
+                passed++;
+                Console.ForegroundColor = ConsoleColor.Green;
+                Console.Write("  [✓] ");
+                Console.ResetColor();
+                Console.WriteLine($"{testName} ({durationMs}ms)");
+                break;
+
+            case 2:
+                skipped++;
+                Console.ForegroundColor = ConsoleColor.Yellow;
+                Console.Write("  [⏭] ");
+                Console.ResetColor();
+                var skipReason = ExtractMessage(stdout, "SKIP:");
+                Console.WriteLine($"{testName} ({durationMs}ms) - {skipReason}");
+                break;
+
+            case 1:
+                failed++;
+                var failMsg = ExtractMessage(stdout, "FAIL:");
+                failures.Add((testName, failMsg));
+                Console.ForegroundColor = ConsoleColor.Red;
+                Console.Write("  [✗] ");
+                Console.ResetColor();
+                Console.Write($"{testName} ({durationMs}ms)");
+                Console.ForegroundColor = ConsoleColor.Red;
+                Console.WriteLine($" - {failMsg}");
+                Console.ResetColor();
+                break;
+
+            default:
+                crashed++;
+                failed++;
+                var crashMsg = !string.IsNullOrEmpty(stderr) ? stderr.Split('\n')[0].Trim() : "Process crashed or timed out";
+                failures.Add((testName, $"CRASH: {crashMsg}"));
+                Console.ForegroundColor = ConsoleColor.Magenta;
+                Console.Write("  [💀] ");
+                Console.ResetColor();
+                Console.Write($"{testName} ({durationMs}ms)");
+                Console.ForegroundColor = ConsoleColor.Magenta;
+                Console.WriteLine($" - CRASH: {crashMsg}");
+                Console.ResetColor();
+                break;
         }
     }
 
-    Console.WriteLine(pass
-        ? $"  ✓ PASS  (result[0]={results[0]}, result[511]={results[511]}, result[1023]={results[1023]})"
-        : "  ✗ FAIL");
-    Console.WriteLine();
-}
+    Console.WriteLine(new string('─', 80));
 
-static async Task RunMatrixMultiply(Accelerator accelerator)
-{
-    Console.WriteLine("── Matrix Multiply (4×4 × 4×4) ──");
+    // Summary
+    Console.ForegroundColor = failed == 0 ? ConsoleColor.Green : ConsoleColor.Red;
+    Console.WriteLine($"\n  {(failed == 0 ? "ALL PASSED" : "FAILURES DETECTED")}");
+    Console.ResetColor();
+    Console.WriteLine($"  Total: {runner.Tests.Count} | Passed: {passed} | Failed: {failed} | Skipped: {skipped} | Crashed: {crashed} | Duration: {totalDuration}ms\n");
 
-    const int N = 4;
-
-    // Identity-like matrix A and simple matrix B
-    var hostA = new float[N * N];
-    var hostB = new float[N * N];
-    for (int i = 0; i < N; i++)
+    if (failures.Count > 0)
     {
-        for (int j = 0; j < N; j++)
+        Console.ForegroundColor = ConsoleColor.Red;
+        Console.WriteLine("  Failed tests:");
+        Console.ResetColor();
+        foreach (var (test, error) in failures)
         {
-            hostA[i * N + j] = (i == j) ? 1.0f : 0.0f; // Identity
-            hostB[i * N + j] = i * N + j + 1;           // 1..16
+            Console.WriteLine($"    {test}: {error}");
         }
+        Console.WriteLine();
     }
 
-    using var bufA = accelerator.Allocate1D(hostA);
-    using var bufB = accelerator.Allocate1D(hostB);
-    using var bufC = accelerator.Allocate1D<float>(N * N);
-
-    var kernel = accelerator.LoadAutoGroupedStreamKernel<
-        Index1D, ArrayView<float>, ArrayView<float>, ArrayView<float>, int>(MatMulKernel);
-
-    kernel((Index1D)(N * N), bufA.View, bufB.View, bufC.View, N);
-    await accelerator.SynchronizeAsync();
-
-    var results = await bufC.CopyToHostAsync<float>();
-
-    // Identity × B = B
-    bool pass = true;
-    for (int i = 0; i < N * N; i++)
-    {
-        if (Math.Abs(results[i] - hostB[i]) > 0.001f)
-        {
-            Console.WriteLine($"  FAIL at [{i}]: expected {hostB[i]}, got {results[i]}");
-            pass = false;
-            break;
-        }
-    }
-
-    Console.WriteLine(pass
-        ? $"  ✓ PASS  (C[0,0]={results[0]}, C[1,1]={results[5]}, C[3,3]={results[15]})"
-        : "  ✗ FAIL");
-    Console.WriteLine();
+    return failed > 0 ? 1 : 0;
 }
 
-static async Task RunParallelReduce(Accelerator accelerator)
+static string ExtractMessage(string stdout, string prefix)
 {
-    Console.WriteLine("── Parallel Reduce (sum of 1..256) ──");
-
-    const int length = 256;
-    var hostData = Enumerable.Range(1, length).Select(i => (float)i).ToArray();
-
-    using var bufData = accelerator.Allocate1D(hostData);
-    using var bufOutput = accelerator.Allocate1D<float>(1);
-
-    // Simple atomic-free reduction: just sum in the kernel
-    var kernel = accelerator.LoadAutoGroupedStreamKernel<
-        Index1D, ArrayView<float>, ArrayView<float>>(NaiveReduceKernel);
-
-    // Initialize output to 0
-    bufOutput.MemSetToZero();
-
-    kernel((Index1D)length, bufData.View, bufOutput.View);
-    await accelerator.SynchronizeAsync();
-
-    var results = await bufOutput.CopyToHostAsync<float>();
-    float expected = length * (length + 1) / 2f; // Sum formula: n(n+1)/2
-
-    bool pass = Math.Abs(results[0] - expected) < 0.1f;
-    Console.WriteLine(pass
-        ? $"  ✓ PASS  (sum={results[0]}, expected={expected})"
-        : $"  ✗ FAIL  (sum={results[0]}, expected={expected})");
-    Console.WriteLine();
+    var line = stdout.Split('\n').FirstOrDefault(l => l.Contains(prefix));
+    if (line != null)
+    {
+        var idx = line.IndexOf(prefix);
+        return line.Substring(idx + prefix.Length).Trim();
+    }
+    return stdout.Trim().Split('\n').LastOrDefault()?.Trim() ?? "Unknown";
 }
 
 // ════════════════════════════════════════════════════════════════════
-//  Kernels
+//  Worker: runs a single test and exits
+//  Exit codes: 0=pass, 1=fail, 2=skip/unsupported
+// ════════════════════════════════════════════════════════════════════
+static async Task<int> RunSingleTest(string testName, string backend)
+{
+    var parts = testName.Split('.', 2);
+    if (parts.Length != 2)
+    {
+        Console.WriteLine($"FAIL: Invalid test name format: {testName}");
+        return 1;
+    }
+
+    var className = parts[0];
+    var methodName = parts[1];
+
+    // Resolve test type
+    Type? testType = backend.ToLowerInvariant() switch
+    {
+        "cuda" => typeof(CudaTests),
+        "opencl" => typeof(OpenCLTests),
+        "cpu" => typeof(CPUTests),
+        _ => null
+    };
+
+    if (testType == null)
+    {
+        Console.WriteLine($"FAIL: Unknown backend: {backend}");
+        return 1;
+    }
+
+    // Only run if class name matches
+    if (!testType.Name.Equals(className, StringComparison.OrdinalIgnoreCase))
+    {
+        Console.WriteLine($"FAIL: Class {className} not found for backend {backend}");
+        return 1;
+    }
+
+    var runner = new UnitTestRunner();
+    runner.DefaultTimeoutMs = 25_000; // 25s timeout per test
+    runner.SetTestTypes(new[] { testType });
+
+    var test = runner.Tests.FirstOrDefault(t =>
+        t.TestMethodName.Equals(methodName, StringComparison.OrdinalIgnoreCase));
+
+    if (test == null)
+    {
+        Console.WriteLine($"FAIL: Test method {methodName} not found in {className}");
+        return 1;
+    }
+
+    await runner.RunTest(test);
+
+    switch (test.Result)
+    {
+        case TestResult.Success:
+            Console.WriteLine($"PASS: {testName}");
+            if (!string.IsNullOrEmpty(test.ResultText) && test.ResultText != "Success")
+                Console.WriteLine($"  Result: {test.ResultText}");
+            return 0;
+
+        case TestResult.Unsupported:
+            Console.WriteLine($"SKIP: {test.ResultText}");
+            return 2;
+
+        case TestResult.Error:
+            Console.WriteLine($"FAIL: {test.Error}");
+            if (!string.IsNullOrEmpty(test.StackTrace))
+                Console.Error.WriteLine(test.StackTrace);
+            return 1;
+
+        default:
+            Console.WriteLine($"FAIL: Unknown result: {test.Result}");
+            return 1;
+    }
+}
+
+// ════════════════════════════════════════════════════════════════════
+//  Test Classes
 // ════════════════════════════════════════════════════════════════════
 
-static void VectorAddKernel(
-    Index1D index,
-    ArrayView<float> a,
-    ArrayView<float> b,
-    ArrayView<float> c)
+public class CudaTests : BackendTestBase
 {
-    c[index] = a[index] + b[index];
-}
+    protected override string BackendName => "CUDA";
 
-static void MatMulKernel(
-    Index1D index,
-    ArrayView<float> a,
-    ArrayView<float> b,
-    ArrayView<float> c,
-    int n)
-{
-    int row = index / n;
-    int col = index - row * n;
-
-    float sum = 0;
-    for (int k = 0; k < n; k++)
+    protected override Task<(Context context, Accelerator accelerator)> CreateAcceleratorAsync()
     {
-        sum += a[row * n + k] * b[k * n + col];
+        var context = Context.Create(builder => builder.AllAccelerators().EnableAlgorithms());
+        var cudaDevices = context.GetCudaDevices();
+        if (cudaDevices.Count == 0)
+        {
+            context.Dispose();
+            throw new UnsupportedTestException("No CUDA devices found");
+        }
+        var accelerator = cudaDevices[0].CreateAccelerator(context);
+        return Task.FromResult<(Context, Accelerator)>((context, accelerator));
     }
-    c[index] = sum;
 }
 
-static void NaiveReduceKernel(
-    Index1D index,
-    ArrayView<float> data,
-    ArrayView<float> output)
+public class OpenCLTests : BackendTestBase
 {
-    // NOTE: This uses Atomic.Add for thread-safe accumulation.
-    // Works on Cuda/OpenCL. On CPU accelerator, ILGPU handles atomics internally.
-    Atomic.Add(ref output[0], data[index]);
+    protected override string BackendName => "OpenCL";
+
+    protected override Task<(Context context, Accelerator accelerator)> CreateAcceleratorAsync()
+    {
+        var context = Context.Create(builder => builder.AllAccelerators().EnableAlgorithms());
+        var clDevices = context.GetCLDevices();
+        if (clDevices.Count == 0)
+        {
+            context.Dispose();
+            throw new UnsupportedTestException("No OpenCL devices found");
+        }
+        var accelerator = clDevices[0].CreateAccelerator(context);
+        return Task.FromResult<(Context, Accelerator)>((context, accelerator));
+    }
+}
+
+public class CPUTests : BackendTestBase
+{
+    protected override string BackendName => "CPU";
+
+    protected override Task<(Context context, Accelerator accelerator)> CreateAcceleratorAsync()
+    {
+        // Use the Nvidia preset (warp=32, warps=32) to support group sizes up to 1024.
+        // The default preset (warp=4, warps=4) only supports groups of 16.
+        var context = Context.Create(builder => builder
+            .CPU(CPUDevice.Nvidia)
+            .EnableAlgorithms());
+        var accelerator = context.GetCPUDevice(0).CreateCPUAccelerator(context);
+        return Task.FromResult<(Context, Accelerator)>((context, accelerator));
+    }
 }

@@ -1,9 +1,9 @@
 using ILGPU;
 using ILGPU.Algorithms;
 using ILGPU.Runtime;
-using SpawnDev.Blazor.UnitTesting;
+using SpawnDev.UnitTesting;
 
-namespace SpawnDev.ILGPU.Demo.UnitTests
+namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
 {
     // Part 2: Advanced tests (dynamic shared, int math, matrix, intrinsics, bit ops, histogram, loops, trig, barriers, select, advanced math, bitwise, large buffer, sequential, unsigned, atomic min/max, buffer reuse, grid/group dims)
     public abstract partial class BackendTestBase
@@ -94,6 +94,7 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
             for (int i = 0; i < numItems; i++) data[i] = i % numBins;
             using var bufData = accelerator.Allocate1D(data);
             using var bufBins = accelerator.Allocate1D<int>(numBins);
+            bufBins.MemSetToZero();
             var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<int>, ArrayView<int>>(HistogramKernel);
             kernel((Index1D)numItems, bufData.View, bufBins.View);
             await accelerator.SynchronizeAsync();

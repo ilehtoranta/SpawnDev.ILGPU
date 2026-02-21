@@ -1,15 +1,14 @@
 using ILGPU;
 using ILGPU.Runtime;
-using SpawnDev.Blazor.UnitTesting;
-using SpawnDev.ILGPU.WebGPU;
+using SpawnDev.UnitTesting;
 
-namespace SpawnDev.ILGPU.Demo.UnitTests
+namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
 {
     /// <summary>
     /// Abstract base class containing all shared kernel tests.
     /// Each backend (WebGPU, Wasm, CPU) inherits and overrides CreateAcceleratorAsync().
     /// </summary>
-    public abstract partial class BackendTestBase
+    public abstract partial class BackendTestBase : IDisposable
     {
         /// <summary>Creates the backend-specific accelerator. Caller is responsible for disposing both.</summary>
         protected abstract Task<(Context context, Accelerator accelerator)> CreateAcceleratorAsync();
@@ -21,49 +20,124 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
         /// <summary>Backend display name for error messages.</summary>
         protected abstract string BackendName { get; }
 
-        // Helper to run a test body with proper resource cleanup
+        // Cached accelerator — reused across all tests in this class instance
+        private Context? _cachedContext;
+        private Accelerator? _cachedAccelerator;
+        private Context? _cachedEmulatedContext;
+        private Accelerator? _cachedEmulatedAccelerator;
+
+        /// <summary>
+        /// Gets or creates the cached accelerator for this test class.
+        /// Reuses a single context/accelerator across all tests to avoid
+        /// resource exhaustion from rapid create/dispose cycles.
+        /// </summary>
+        private async Task<Accelerator> GetOrCreateAcceleratorAsync()
+        {
+            if (_cachedAccelerator == null)
+            {
+                var (context, accelerator) = await CreateAcceleratorAsync();
+                _cachedContext = context;
+                _cachedAccelerator = accelerator;
+            }
+            return _cachedAccelerator;
+        }
+
+        private async Task<Accelerator> GetOrCreateEmulatedAcceleratorAsync()
+        {
+            if (_cachedEmulatedAccelerator == null)
+            {
+                var (context, accelerator) = await CreateEmulatedAcceleratorAsync();
+                _cachedEmulatedContext = context;
+                _cachedEmulatedAccelerator = accelerator;
+            }
+            return _cachedEmulatedAccelerator;
+        }
+
+        // Helper to run a test body with cached accelerator.
+        // On failure, invalidates the cached context so the next test
+        // gets a fresh one (prevents cascading failures from GPU faults).
         protected async Task RunTest(Func<Accelerator, Task> testBody)
         {
-            var (context, accelerator) = await CreateAcceleratorAsync();
-            try { await testBody(accelerator); }
-            finally { accelerator.Dispose(); context.Dispose(); }
+            var accelerator = await GetOrCreateAcceleratorAsync();
+            try
+            {
+                await testBody(accelerator);
+            }
+            catch
+            {
+                // GPU fault may have corrupted the context — invalidate cache
+                InvalidateCache();
+                throw;
+            }
         }
 
         // Helper to run a test body that requires 64-bit emulation
         protected async Task RunEmulatedTest(Func<Accelerator, Task> testBody)
         {
-            var (context, accelerator) = await CreateEmulatedAcceleratorAsync();
-            try { await testBody(accelerator); }
-            finally { accelerator.Dispose(); context.Dispose(); }
+            var accelerator = await GetOrCreateEmulatedAcceleratorAsync();
+            try
+            {
+                await testBody(accelerator);
+            }
+            catch
+            {
+                InvalidateEmulatedCache();
+                throw;
+            }
+        }
+
+        private void InvalidateCache()
+        {
+            try { _cachedAccelerator?.Dispose(); } catch { }
+            _cachedAccelerator = null;
+            try { _cachedContext?.Dispose(); } catch { }
+            _cachedContext = null;
+        }
+
+        private void InvalidateEmulatedCache()
+        {
+            try { _cachedEmulatedAccelerator?.Dispose(); } catch { }
+            _cachedEmulatedAccelerator = null;
+            try { _cachedEmulatedContext?.Dispose(); } catch { }
+            _cachedEmulatedContext = null;
+        }
+
+        /// <summary>Disposes cached accelerator and context.</summary>
+        public virtual void Dispose()
+        {
+            _cachedAccelerator?.Dispose();
+            _cachedAccelerator = null;
+            _cachedContext?.Dispose();
+            _cachedContext = null;
+            _cachedEmulatedAccelerator?.Dispose();
+            _cachedEmulatedAccelerator = null;
+            _cachedEmulatedContext?.Dispose();
+            _cachedEmulatedContext = null;
         }
 
         /// <summary>
-        /// Checks that the accelerator supports the specified WebGPU feature.
-        /// Throws UnsupportedTestException if the feature is not available.
+        /// Checks that the accelerator supports the specified feature.
+        /// Override in backend-specific test classes to implement feature checks.
         /// </summary>
-        protected static void RequireFeature(Accelerator accelerator, string featureName, string? reason = null)
+        protected virtual void RequireFeature(Accelerator accelerator, string featureName, string? reason = null)
         {
-            if (accelerator is WebGPUAccelerator webGpuAccelerator)
-            {
-                if (!webGpuAccelerator.EnabledFeatures.Contains(featureName))
-                    throw new UnsupportedTestException(reason ?? $"WebGPU feature '{featureName}' not supported");
-            }
+            // No-op by default. Backend-specific subclasses can override.
         }
 
         #region Structs
 
-        struct MyPoint
+        public struct MyPoint
         {
             public float X;
             public float Y;
         }
 
-        struct InnerStruct
+        public struct InnerStruct
         {
             public float Val;
         }
 
-        struct OuterStruct
+        public struct OuterStruct
         {
             public InnerStruct Inner;
             public int ID;
@@ -84,7 +158,7 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
         /// <summary>
         /// Simple struct for testing struct scalar kernel arguments.
         /// </summary>
-        struct ScalarStruct
+        public struct ScalarStruct
         {
             public float X;
             public float Y;
@@ -162,7 +236,7 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
         static void IntrinsicMathKernel(Index1D index, ArrayView<float> data)
         {
             if (index == 0) data[index] = MathF.Atan2(1.0f, 1.0f);
-            else if (index == 1) data[index] = MathF.FusedMultiplyAdd(2.0f, 3.0f, 4.0f);
+            else if (index == 1) data[index] = 2.0f * 3.0f + 4.0f; // FMA: a*b+c
             else if (index == 2) data[index] = 5.5f % 2.0f;
             else if (index == 5) data[index] = Math.Min(Math.Max(10.0f, 0.0f), 5.0f);
             else if (index == 7) data[index] = IntrinsicMathHelper(0.5f);
@@ -180,11 +254,13 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
 
         static void SharedMemoryKernel(Index1D index, ArrayView<int> data)
         {
+            int tid = Group.IdxX;
+            int gid = Grid.GlobalIndex.X;
             var shared = SharedMemory.Allocate<int>(64);
-            shared[index] = data[index];
+            shared[tid] = data[gid];
             Group.Barrier();
-            int neighbor = (index + 1) % 64;
-            data[index] = shared[neighbor];
+            int neighbor = (tid + 1) % 64;
+            data[gid] = shared[neighbor];
         }
 
         static void NestedControlFlowKernel(Index1D index, ArrayView<int> data)
@@ -207,12 +283,14 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
 
         static void CSharpSharedMemoryKernel(Index1D index, ArrayView<int> data)
         {
+            int tid = Group.IdxX;
+            int gid = Grid.GlobalIndex.X;
             var sharedMem = SharedMemory.Allocate<int>(64);
-            sharedMem[index] = data[index];
+            sharedMem[tid] = data[gid];
             Group.Barrier();
-            int reversedIndex = 63 - index;
+            int reversedIndex = 63 - tid;
             int val = sharedMem[reversedIndex];
-            data[index] = val;
+            data[gid] = val;
         }
 
         static void ComplexStructKernel(Index1D index, ArrayView<OuterStruct> data)
@@ -233,25 +311,29 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
             float a = (float)(int)index;
             float b = 2.0f;
             float c = 0.5f;
-            data[index] = MathF.FusedMultiplyAdd(a, b, c);
+            data[index] = a * b + c; // Manual FMA: a*b+c
         }
 
         static void DynamicSharedKernel(Index1D index, ArrayView<int> data)
         {
+            int tid = Group.IdxX;
+            int gid = Grid.GlobalIndex.X;
             var shared = SharedMemory.GetDynamic<int>();
-            shared[index] = index;
+            shared[tid] = gid;
             Group.Barrier();
-            int rev = 63 - index;
-            data[index] = shared[rev];
+            int rev = 63 - tid;
+            data[gid] = shared[rev];
         }
 
         protected static void DynamicSharedF64Kernel(Index1D index, ArrayView<double> data)
         {
+            int tid = Group.IdxX;
+            int gid = Grid.GlobalIndex.X;
             var shared = SharedMemory.GetDynamic<double>();
-            shared[index] = data[index];
+            shared[tid] = data[gid];
             Group.Barrier();
-            int rev = 63 - index;
-            data[index] = shared[rev];
+            int rev = 63 - tid;
+            data[gid] = shared[rev];
         }
 
         static void IntMathKernel(Index1D index, ArrayView<int> input, ArrayView<int> output)
@@ -576,17 +658,19 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
 
         protected static void BroadcastKernel(Index1D index, ArrayView<int> data)
         {
-            int val = data[index];
+            int gid = Grid.GlobalIndex.X;
+            int val = data[gid];
             int broadcasted = Group.Broadcast(val, 0);
-            data[index] = broadcasted;
+            data[gid] = broadcasted;
         }
 
         protected static void SubgroupShuffleKernel(Index1D index, ArrayView<int> data)
         {
-            int val = data[index];
+            int gid = Grid.GlobalIndex.X;
+            int val = data[gid];
             // Each thread reads from lane 0 of its subgroup via warp shuffle
             int shuffled = Warp.Shuffle(val, 0);
-            data[index] = shuffled;
+            data[gid] = shuffled;
         }
 
         /// <summary>

@@ -1,6 +1,7 @@
 using ILGPU;
 using ILGPU.Runtime;
-using SpawnDev.Blazor.UnitTesting;
+using SpawnDev.UnitTesting;
+using SpawnDev.ILGPU.Demo.Shared.UnitTests;
 using SpawnDev.ILGPU.WebGL;
 using SpawnDev.ILGPU.WebGL.Backend;
 
