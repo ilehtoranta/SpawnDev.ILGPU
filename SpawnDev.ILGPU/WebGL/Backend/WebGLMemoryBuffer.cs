@@ -7,34 +7,56 @@ namespace SpawnDev.ILGPU.WebGL.Backend
 {
     /// <summary>
     /// ILGPU MemoryBuffer implementation backed by a JavaScript ArrayBuffer.
-    /// WebGL2 does not have persistent GPU buffers like WebGPU — data lives in
-    /// CPU-side ArrayBuffers and is uploaded to GL buffers at dispatch time.
+    /// Data is uploaded to the GL worker on first use or when CPU-modified,
+    /// and stays GPU-resident until explicitly read back via CopyToHostAsync.
     /// </summary>
     public class WebGLMemoryBuffer : MemoryBuffer, IBrowserMemoryBuffer
     {
         private Uint8Array? _backingArray;
         private bool _disposed;
 
+        /// <summary>
+        /// Unique buffer ID used by the GL worker to reference this buffer's GPU-resident texture.
+        /// Assigned during construction, sent to worker via 'allocBuffer' message.
+        /// </summary>
+        internal int WorkerBufferId { get; }
+
+        /// <summary>
+        /// True when CPU-side data has been modified and needs upload to the GL worker.
+        /// Set by CopyFrom/MemSet, cleared after upload.
+        /// </summary>
+        internal bool NeedsUpload { get; set; }
+
+        /// <summary>
+        /// True when the GL worker has been notified to allocate this buffer.
+        /// </summary>
+        internal bool IsAllocatedInWorker { get; set; }
+
+        /// <summary>
+        /// The GLSL type for this buffer's texture format in the GL worker.
+        /// Default is "float" (R32F). Set by the accelerator based on kernel param bindings.
+        /// </summary>
+        internal string GlslType { get; set; } = "float";
+
         public WebGLMemoryBuffer(Accelerator accelerator, long length, int elementSize)
             : base(accelerator, length, elementSize)
         {
             _backingArray = new Uint8Array((int)LengthInBytes);
+            WorkerBufferId = ((WebGLAccelerator)accelerator).AllocateWorkerBufferId();
         }
 
         /// <summary>
-        /// Gets the backing Uint8Array that holds the data.
+        /// Gets the backing Uint8Array that holds the CPU-side data.
         /// </summary>
         public Uint8Array? BackingArray => _backingArray;
 
         /// <summary>
         /// Gets the underlying ArrayBuffer backing this memory buffer.
-        /// Used for zero-copy transfer to/from the GL worker.
         /// </summary>
         public ArrayBuffer? UnderlyingBuffer => _backingArray?.Buffer;
 
         /// <summary>
-        /// Replaces the underlying ArrayBuffer with a new one (used after transfer back from Worker).
-        /// Enables zero-copy ArrayBuffer transfers without requiring SharedArrayBuffer/COI.
+        /// Replaces the underlying ArrayBuffer with new data (used after readback from worker).
         /// </summary>
         internal void ReplaceArrayBuffer(ArrayBuffer newBuffer)
         {
@@ -44,8 +66,9 @@ namespace SpawnDev.ILGPU.WebGL.Backend
 
         public Task<Uint8Array> CopyToHostUint8ArrayAsync(long sourceByteOffset = 0, long? copyBytes = null)
         {
-            if (BackingArray == null) return Task.FromResult(new Uint8Array());
-            return copyBytes == null ? Task.FromResult(BackingArray.SubArray(sourceByteOffset)) : Task.FromResult(BackingArray.SubArray(sourceByteOffset, copyBytes.Value + sourceByteOffset));
+            // Request readback from the GL worker first
+            var accel = (WebGLAccelerator)Accelerator;
+            return accel.ReadbackAndGetUint8ArrayAsync(this, sourceByteOffset, copyBytes);
         }
 
         protected override void CopyFrom(
@@ -65,6 +88,9 @@ namespace SpawnDev.ILGPU.WebGL.Backend
 
                 var destContiguous = (IContiguousArrayView)destination;
                 _backingArray!.Write(byteArray, (int)destContiguous.Index);
+
+                // Mark CPU-dirty — needs upload to worker before next dispatch
+                NeedsUpload = true;
             }
             else
             {
@@ -103,6 +129,9 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             var data = new byte[view.Length];
             if (value != 0) global::System.Array.Fill(data, value);
             _backingArray!.Write(data, (int)viewContiguous.Index);
+
+            // Mark CPU-dirty
+            NeedsUpload = true;
         }
 
         protected override void DisposeAcceleratorObject(bool disposing)
@@ -111,6 +140,14 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             _disposed = true;
             if (disposing)
             {
+                // Tell worker to free the GPU-resident buffer
+                try
+                {
+                    var accel = Accelerator as WebGLAccelerator;
+                    accel?.FreeWorkerBuffer(WorkerBufferId);
+                }
+                catch { }
+
                 _backingArray?.Dispose();
                 _backingArray = null;
             }

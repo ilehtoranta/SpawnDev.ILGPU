@@ -183,10 +183,12 @@ namespace SpawnDev.ILGPU
                 return result;
             }
 
-            // Check for WebGL2 buffer
+            // Check for WebGL2 buffer — must request readback from GL worker first
             if (iView.Buffer is WebGLMemoryBuffer webGlBuffer)
             {
-                var byteData = webGlBuffer.BackingArray!.ReadBytes();
+                var accel = (WebGLAccelerator)buffer.Accelerator;
+                using var readback = await accel.ReadbackAndGetUint8ArrayAsync(webGlBuffer);
+                var byteData = readback.ReadBytes();
                 var result = new T[buffer.Length];
                 MemoryMarshal.Cast<byte, T>(byteData).CopyTo(new Span<T>(result));
                 return result;
@@ -227,11 +229,11 @@ namespace SpawnDev.ILGPU
                 return result;
             }
 
-            // Check for WebGL2 buffer
+            // Check for WebGL2 buffer — request readback from GL worker
             if (iView.Buffer is WebGLMemoryBuffer webGlBuffer)
             {
-                if (webGlBuffer.BackingArray == null) return new Uint8Array();
-                return copyBytes == null ? webGlBuffer.BackingArray.SubArray(sourceByteOffset) : webGlBuffer.BackingArray.SubArray(sourceByteOffset, copyBytes.Value + sourceByteOffset);
+                var accel = (WebGLAccelerator)buffer.Accelerator;
+                return await accel.ReadbackAndGetUint8ArrayAsync(webGlBuffer, sourceByteOffset, copyBytes);
             }
 
 
@@ -272,10 +274,12 @@ namespace SpawnDev.ILGPU
                 return result.ReCast<T>();
             }
 
-            // Check for WebGL2 buffer
+            // Check for WebGL2 buffer — request readback from GL worker
             if (iView.Buffer is WebGLMemoryBuffer webGlBuffer)
             {
-                return webGlBuffer.BackingArray!.ReCast<T>();
+                var accel = (WebGLAccelerator)buffer.Accelerator;
+                using var readback = await accel.ReadbackAndGetUint8ArrayAsync(webGlBuffer);
+                return readback.ReCast<T>();
             }
 
 

@@ -64,9 +64,24 @@ namespace SpawnDev.ILGPU.WebGL
         private int _nextDispatchId;
 
         /// <summary>
+        /// Monotonically increasing buffer ID for GPU-resident buffer tracking in the worker.
+        /// </summary>
+        private int _nextWorkerBufferId;
+
+        /// <summary>
+        /// Monotonically increasing readback request ID.
+        /// </summary>
+        private int _nextReadbackRequestId;
+
+        /// <summary>
         /// Pending dispatches awaiting worker responses, keyed by dispatch ID.
         /// </summary>
         private readonly ConcurrentDictionary<int, PendingDispatch> _pendingDispatches = new();
+
+        /// <summary>
+        /// Pending readback requests awaiting worker responses, keyed by request ID.
+        /// </summary>
+        private readonly ConcurrentDictionary<int, PendingReadback> _pendingReadbacks = new();
 
         /// <summary>
         /// Pending work tasks for fire-and-forget dispatch. Awaited by SynchronizeAsync.
@@ -91,18 +106,6 @@ namespace SpawnDev.ILGPU.WebGL
                     BaseViewProperty = t.GetProperty("BaseView", flags),
                 };
             });
-        }
-
-        // ---- Internal data class for marshaled buffer arguments ----
-        private class BufferArg
-        {
-            public WebGLMemoryBuffer MemoryBuffer { get; set; } = null!;
-            public long ByteOffset { get; set; }
-            public long ByteLength { get; set; }
-            public int ElementSize { get; set; }
-            public string GlslType { get; set; } = "float";
-            public int ParamIndex { get; set; }
-            public int ArgIndex { get; set; }
         }
 
         #region Construction
@@ -140,8 +143,8 @@ namespace SpawnDev.ILGPU.WebGL
         /// </summary>
         private void InitializeGLWorker()
         {
-            // Load worker from the library's static web assets
-            var workerUrl = "_content/SpawnDev.ILGPU/glWorker.js";
+            // Load worker from the library's static web assets (cache-bust to pick up changes)
+            var workerUrl = $"_content/SpawnDev.ILGPU/glWorker.js?v={DateTime.UtcNow.Ticks}";
             _glWorker = new Worker(workerUrl);
 
             // Transfer OffscreenCanvas to the worker
@@ -150,6 +153,19 @@ namespace SpawnDev.ILGPU.WebGL
             _glWorker.PostMessage(initMsg, new object[] { Canvas.JSRef! });
 
             _workerInitialized = true;
+
+            // Attach message handler now (not on first dispatch) so readback
+            // responses are received even before any kernel has been dispatched.
+            _workerMessageHandlerAttached = true;
+            _glWorker.OnMessage += (msg) => HandleWorkerResponse(msg);
+            _glWorker.OnError += (_) =>
+            {
+                foreach (var kvp in _pendingDispatches)
+                {
+                    if (_pendingDispatches.TryRemove(kvp.Key, out var p))
+                        p.Tcs.TrySetException(new Exception("[WebGL] GL Worker error during kernel execution"));
+                }
+            };
 
             Log("[WebGL] GL Worker initialized and OffscreenCanvas transferred");
         }
@@ -211,11 +227,122 @@ namespace SpawnDev.ILGPU.WebGL
 
         #endregion
 
+        #region Worker Buffer Management
+
+        /// <summary>
+        /// Allocates a unique buffer ID for the GL worker.
+        /// </summary>
+        internal int AllocateWorkerBufferId() => Interlocked.Increment(ref _nextWorkerBufferId);
+
+        /// <summary>
+        /// Ensures a WebGLMemoryBuffer is allocated and uploaded in the GL worker.
+        /// Called before dispatch for any buffer that needs to exist in the worker.
+        /// </summary>
+        internal void EnsureBufferInWorker(WebGLMemoryBuffer memBuffer, string glslType)
+        {
+            if (!memBuffer.IsAllocatedInWorker)
+            {
+                memBuffer.GlslType = glslType;
+                // Allocate in worker
+                _glWorker!.PostMessage(new
+                {
+                    type = "allocBuffer",
+                    bufferId = memBuffer.WorkerBufferId,
+                    byteSize = (int)memBuffer.LengthInBytes,
+                    glslType
+                });
+                memBuffer.IsAllocatedInWorker = true;
+                memBuffer.NeedsUpload = true; // Fresh alloc always needs initial data
+            }
+
+            if (memBuffer.NeedsUpload)
+            {
+                UploadBufferToWorker(memBuffer);
+            }
+        }
+
+        /// <summary>
+        /// Uploads CPU-side buffer data to the GL worker.
+        /// Creates a copy of the data and transfers it (zero-copy for the copy).
+        /// </summary>
+        private void UploadBufferToWorker(WebGLMemoryBuffer memBuffer)
+        {
+            if (memBuffer.BackingArray == null) return;
+
+            // Create a copy to transfer (original stays intact on main thread)
+            using var dataCopy = memBuffer.BackingArray.Slice();
+            var copyBuffer = dataCopy.Buffer;
+
+            _glWorker!.PostMessage(new
+            {
+                type = "uploadBuffer",
+                bufferId = memBuffer.WorkerBufferId,
+                buffer = copyBuffer,
+                byteOffset = 0,
+                byteLength = (int)memBuffer.LengthInBytes
+            }, new object[] { copyBuffer });
+
+            memBuffer.NeedsUpload = false;
+        }
+
+        /// <summary>
+        /// Sends a freeBuffer message to the GL worker.
+        /// </summary>
+        internal void FreeWorkerBuffer(int workerBufferId)
+        {
+            _glWorker?.PostMessage(new { type = "freeBuffer", bufferId = workerBufferId });
+        }
+
+        /// <summary>
+        /// Requests readback of a specific buffer from the GL worker and returns a Uint8Array view.
+        /// This is the only path for GPU→CPU data transfer.
+        /// </summary>
+        internal async Task<Uint8Array> ReadbackAndGetUint8ArrayAsync(
+            WebGLMemoryBuffer memBuffer, long sourceByteOffset = 0, long? copyBytes = null)
+        {
+            // Ensure the buffer exists in the worker (handles readback before any dispatch)
+            EnsureBufferInWorker(memBuffer, memBuffer.GlslType);
+
+            // Wait for any pending dispatches first
+            if (PendingWorkTasks.Count > 0)
+            {
+                await Task.WhenAll(PendingWorkTasks);
+                PendingWorkTasks.Clear();
+            }
+
+            // Request readback from worker
+            var requestId = Interlocked.Increment(ref _nextReadbackRequestId);
+            var tcs = new TaskCompletionSource<ArrayBuffer>();
+            _pendingReadbacks[requestId] = new PendingReadback { Tcs = tcs, MemoryBuffer = memBuffer };
+
+            _glWorker!.PostMessage(new
+            {
+                type = "readbackBuffer",
+                bufferId = memBuffer.WorkerBufferId,
+                requestId
+            });
+
+            // Wait for the worker to respond with the data
+            var resultBuffer = await tcs.Task;
+
+            // Update the CPU-side backing array
+            memBuffer.ReplaceArrayBuffer(resultBuffer);
+
+            // Return the requested slice
+            if (memBuffer.BackingArray == null) return new Uint8Array();
+            return copyBytes == null
+                ? memBuffer.BackingArray.SubArray(sourceByteOffset)
+                : memBuffer.BackingArray.SubArray(sourceByteOffset, copyBytes.Value + sourceByteOffset);
+        }
+
+        #endregion
+
         #region Kernel Execution
 
         /// <summary>
         /// Executes a WebGL2 kernel by dispatching to the dedicated GL worker.
         /// This is fire-and-forget — actual GL work happens on the worker thread.
+        /// Buffers are GPU-resident in the worker; no ArrayBuffer transfers per dispatch.
         /// Completion is tracked via PendingWorkTasks, awaited by SynchronizeAsync.
         /// </summary>
         public static void RunKernel(Kernel kernel, AcceleratorStream stream, object dimension, object[] args)
@@ -249,8 +376,8 @@ namespace SpawnDev.ILGPU.WebGL
 
             Log($"[WebGL-Debug] Dispatch: {totalVertices} vertices (dim={dimX}x{dimY}x{dimZ})");
 
-            // Marshal arguments
-            var (jsParams, bufferArgs, strideMap, outputs) = MarshalArguments(compiledKernel, args, webGlAccel);
+            // Marshal arguments — now returns buffer_ref params, no ArrayBuffer transfers
+            var (jsParams, strideMap, outputs) = MarshalArguments(compiledKernel, args, webGlAccel);
 
             // Build unique program ID from source hash
             var programId = compiledKernel.GLSLSource.GetHashCode().ToString("X8");
@@ -259,19 +386,10 @@ namespace SpawnDev.ILGPU.WebGL
                 .Select(o => o.VaryingName)
                 .ToArray();
 
-            // Build transfer list (all ArrayBuffers move to worker)
-            var transferList = new List<object>();
-            foreach (var ba in bufferArgs)
-            {
-                var underlying = ba.MemoryBuffer.UnderlyingBuffer;
-                if (underlying != null)
-                    transferList.Add(underlying);
-            }
-
             // Assign unique dispatch ID for response correlation
             var dispatchId = Interlocked.Increment(ref webGlAccel._nextDispatchId);
 
-            // Build dispatch message
+            // Build dispatch message — no ArrayBuffer transfers needed
             var dispatchMsg = new
             {
                 type = "dispatch",
@@ -290,41 +408,33 @@ namespace SpawnDev.ILGPU.WebGL
 
             // Track this dispatch via TCS
             var tcs = new TaskCompletionSource();
-            var pending = new PendingDispatch { Tcs = tcs, BufferArgs = bufferArgs };
+            var pending = new PendingDispatch { Tcs = tcs };
             webGlAccel._pendingDispatches[dispatchId] = pending;
 
-            // Ensure the shared message handler is attached (once)
-            if (!webGlAccel._workerMessageHandlerAttached)
-            {
-                webGlAccel._workerMessageHandlerAttached = true;
-                webGlAccel._glWorker!.OnMessage += (msg) => webGlAccel.HandleWorkerResponse(msg);
-                webGlAccel._glWorker.OnError += (_) =>
-                {
-                    // On error, fail all pending dispatches
-                    foreach (var kvp in webGlAccel._pendingDispatches)
-                    {
-                        if (webGlAccel._pendingDispatches.TryRemove(kvp.Key, out var p))
-                            p.Tcs.TrySetException(new Exception("[WebGL] GL Worker error during kernel execution"));
-                    }
-                };
-            }
 
-            if (transferList.Count > 0)
-                webGlAccel._glWorker!.PostMessage(dispatchMsg, transferList.ToArray());
-            else
-                webGlAccel._glWorker!.PostMessage(dispatchMsg);
-
+            // No transfer list — all data is GPU-resident in the worker
+            webGlAccel._glWorker!.PostMessage(dispatchMsg);
             webGlAccel.PendingWorkTasks.Add(tcs.Task);
         }
 
         /// <summary>
-        /// Handles a worker response message by matching it to the correct pending dispatch via dispatchId.
+        /// Handles all worker response messages (dispatch completion and readback results).
         /// </summary>
         private void HandleWorkerResponse(MessageEvent msg)
         {
             try
             {
                 using var data = msg.GetData<JSObject>();
+
+                // Check if this is a readback result
+                var msgType = data.JSRef!.Get<string?>("type");
+                if (msgType == "readbackResult")
+                {
+                    HandleReadbackResponse(data);
+                    return;
+                }
+
+                // Otherwise it's a dispatch completion
                 var dispatchId = data.JSRef!.Get<int>("dispatchId");
 
                 if (!_pendingDispatches.TryRemove(dispatchId, out var pending))
@@ -334,16 +444,6 @@ namespace SpawnDev.ILGPU.WebGL
                 }
 
                 var done = data.JSRef!.Get<bool>("done");
-
-                // Read diagnostic info from worker (contains ERR@ entries if GL errors occurred)
-                var diagInfo = data.JSRef!.Get<string?>("diag");
-                if (diagInfo != null && diagInfo.Contains("ERR@"))
-                {
-                    Console.Error.WriteLine($"[WebGL] GL errors detected (dispatch {dispatchId}): {diagInfo}");
-                }
-
-                // Receive transferred ArrayBuffers back
-                ReceiveTransferredBuffers(data, pending.BufferArgs);
 
                 if (!done)
                 {
@@ -361,23 +461,55 @@ namespace SpawnDev.ILGPU.WebGL
         }
 
         /// <summary>
+        /// Handles a readback response from the GL worker.
+        /// </summary>
+        private void HandleReadbackResponse(JSObject data)
+        {
+            var requestId = data.JSRef!.Get<int>("requestId");
+            if (!_pendingReadbacks.TryRemove(requestId, out var pending))
+            {
+                Log($"[WebGL] Warning: received readback for unknown requestId {requestId}");
+                return;
+            }
+
+            var error = data.JSRef!.Get<string?>("error");
+            if (error != null)
+            {
+                pending.Tcs.TrySetException(new Exception($"[WebGL] Readback error: {error}"));
+                return;
+            }
+
+            // Get the transferred ArrayBuffer (take ownership)
+            var resultBuffer = data.JSRef!.Get<ArrayBuffer>("buffer");
+            pending.Tcs.TrySetResult(resultBuffer);
+        }
+
+        /// <summary>
         /// Tracks a pending dispatch to the GL worker.
         /// </summary>
         private class PendingDispatch
         {
             public TaskCompletionSource Tcs { get; set; } = null!;
-            public List<BufferArg> BufferArgs { get; set; } = null!;
+        }
+
+        /// <summary>
+        /// Tracks a pending readback request.
+        /// </summary>
+        private class PendingReadback
+        {
+            public TaskCompletionSource<ArrayBuffer> Tcs { get; set; } = null!;
+            public WebGLMemoryBuffer MemoryBuffer { get; set; } = null!;
         }
 
         /// <summary>
         /// Marshals kernel arguments into JS-compatible parameter descriptors.
-        /// Returns (jsParams, bufferArgs, strideMap, outputDescriptors).
+        /// Buffer arguments are sent as buffer_ref (referencing GPU-resident buffers in the worker).
+        /// Returns (jsParams, strideMap, outputDescriptors).
         /// </summary>
-        private static (List<object> jsParams, List<BufferArg> bufferArgs, Dictionary<int, int[]> strides, List<object> outputs)
+        private static (List<object> jsParams, Dictionary<int, int[]> strides, List<object> outputs)
             MarshalArguments(WebGLCompiledKernel compiledKernel, object[] args, WebGLAccelerator webGlAccel)
         {
             var jsParams = new List<object>();
-            var bufferArgs = new List<BufferArg>();
             var strideMap = new Dictionary<int, int[]>();
             const int glslParamOffset = 1;
 
@@ -396,7 +528,7 @@ namespace SpawnDev.ILGPU.WebGL
 
                 if (arrayView != null)
                 {
-                    // Buffer argument
+                    // Buffer argument — use GPU-resident buffer reference
                     var contiguous = arrayView as IContiguousArrayView;
                     if (contiguous == null)
                     {
@@ -408,42 +540,27 @@ namespace SpawnDev.ILGPU.WebGL
                         throw new Exception($"Argument {pIdx} is not a contiguous buffer");
 
                     var memBuffer = contiguous.Buffer as WebGLMemoryBuffer;
-                    if (memBuffer?.BackingArray == null)
-                        throw new Exception($"Argument {pIdx} has no backing array");
+                    if (memBuffer == null)
+                        throw new Exception($"Argument {pIdx} has no WebGL memory buffer");
 
                     var elementSize = contiguous.ElementSize;
                     var length = (int)contiguous.Length;
-                    var byteLength = length * elementSize;
-                    var srcByteOffset = (int)contiguous.Index;
 
                     // Get GLSL type from parameter binding
                     var binding = compiledKernel.ParameterBindings
                         .FirstOrDefault(b => b.ParamIndex == glslParamIndex && b.Kind == KernelParamKind.Buffer);
                     string bufferGlslType = binding.GlslType ?? "float";
 
-                    var bufArg = new BufferArg
-                    {
-                        MemoryBuffer = memBuffer,
-                        ByteOffset = srcByteOffset,
-                        ByteLength = byteLength,
-                        ElementSize = elementSize,
-                        GlslType = bufferGlslType,
-                        ParamIndex = glslParamIndex,
-                        ArgIndex = pIdx
-                    };
-                    bufferArgs.Add(bufArg);
+                    // Ensure buffer is allocated and uploaded in the worker
+                    webGlAccel.EnsureBufferInWorker(memBuffer, bufferGlslType);
 
-                    // Pass the underlying ArrayBuffer (will be transferred)
+                    // Send buffer reference (no data transfer)
                     jsParams.Add(new
                     {
-                        kind = "buffer",
-                        buffer = memBuffer.UnderlyingBuffer,
-                        byteOffset = srcByteOffset,
-                        byteLength,
-                        glslType = bufferGlslType,
+                        kind = "buffer_ref",
+                        bufferId = memBuffer.WorkerBufferId,
                         paramIndex = glslParamIndex,
-                        argIndex = pIdx,
-                        elementCount = length  // for u_param{N}_length uniform (GetViewLength support)
+                        elementCount = length
                     });
 
                     // Extract stride dimensions for multi-dim views
@@ -458,7 +575,7 @@ namespace SpawnDev.ILGPU.WebGL
                 }
                 else
                 {
-                    // Scalar argument
+                    // Scalar argument (unchanged)
                     if (arg is double dVal && webGlAccel.Backend.Options.EnableF64Emulation)
                     {
                         var bits = BitConverter.DoubleToUInt64Bits(dVal);
@@ -521,10 +638,6 @@ namespace SpawnDev.ILGPU.WebGL
                         }
                         else if (arg != null && arg.GetType().IsValueType && !arg.GetType().IsEnum)
                         {
-                            // Struct scalar: recursively flatten all leaf fields with their uniform paths
-                            // For nested structs like NestedOuterStruct { NestedInnerStruct Inner; float Value; }
-                            // the GLSL declares struct_X { int field_0; int field_1; } and struct_Y { struct_X field_0; float field_1; }
-                            // WebGL2 uniform paths: u_paramN.field_0.field_0, u_paramN.field_0.field_1, u_paramN.field_1
                             var flatFields = new List<object>();
                             FlattenStructFieldsForUniform(arg, "", flatFields);
                             jsParams.Add(new
@@ -542,7 +655,7 @@ namespace SpawnDev.ILGPU.WebGL
                 }
             }
 
-            // Build output varying descriptors
+            // Build output varying descriptors — reference bufferIds instead of argIndex
             var outputs = new List<object>();
             var outputVaryings = compiledKernel.OutputVaryings;
             for (int outIdx = 0; outIdx < outputVaryings.Count; outIdx++)
@@ -570,10 +683,11 @@ namespace SpawnDev.ILGPU.WebGL
                             contiguous = (viewRefCache.BaseViewProperty != null ? viewRefCache.BaseViewProperty.GetValue(arrView) : arrView) as IContiguousArrayView;
                         }
 
-                        if (contiguous?.Buffer is WebGLMemoryBuffer)
+                        if (contiguous?.Buffer is WebGLMemoryBuffer webGlMem)
                         {
                             outputs.Add(new
                             {
+                                bufferId = webGlMem.WorkerBufferId,
                                 paramIndex = outputInfo.ParamIndex,
                                 outputIndex = outputInfo.OutputIndex,
                                 varyingName = outputInfo.VaryingName,
@@ -582,7 +696,6 @@ namespace SpawnDev.ILGPU.WebGL
                                 fieldIndex = outputInfo.FieldIndex,
                                 storeSlot = outputInfo.StoreSlot,
                                 storeCount = outputInfo.StoreCount,
-                                argIndex = argsIdx,
                                 writeByteOffset = (int)contiguous.Index,
                                 writeLengthBytes = (int)contiguous.LengthInBytes
                             });
@@ -591,40 +704,11 @@ namespace SpawnDev.ILGPU.WebGL
                 }
             }
 
-            return (jsParams, bufferArgs, strideMap, outputs);
+            return (jsParams, strideMap, outputs);
         }
 
-        /// <summary>
-        /// Receives transferred ArrayBuffers back from the GL worker and replaces the
-        /// underlying buffer references in WebGLMemoryBuffer (zero-copy).
-        /// </summary>
-        private static void ReceiveTransferredBuffers(JSObject data, List<BufferArg> bufferArgs)
-        {
-            try
-            {
-                using var buffersArr = data.JSRef!.Get<Array<JSObject>?>("buffers");
-                if (buffersArr == null) return;
-
-                for (int i = 0; i < buffersArr.Length; i++)
-                {
-                    using var bufObj = buffersArr[i];
-                    var argIndex = bufObj.JSRef!.Get<int>("index");
-                    // Get the transferred ArrayBuffer (do NOT dispose — we're taking ownership)
-                    var transferredBuffer = bufObj.JSRef!.Get<ArrayBuffer>("buffer");
-
-                    // Replace the underlying ArrayBuffer in the matching WebGLMemoryBuffer
-                    var match = bufferArgs.FirstOrDefault(b => b.ArgIndex == argIndex);
-                    if (match != null)
-                    {
-                        match.MemoryBuffer.ReplaceArrayBuffer(transferredBuffer);
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                Log($"[WebGL] Error receiving transferred buffers: {ex.Message}");
-            }
-        }
+        // ReceiveTransferredBuffers removed — no longer needed with GPU-resident buffers.
+        // Data stays in the worker; readback happens only via ReadbackAndGetUint8ArrayAsync.
 
         #endregion
 
