@@ -11,7 +11,7 @@
 		<DebugType>Embedded</DebugType>
 		<Title>SpawnDev.ILGPU</Title>
 		<Authors>LostBeard</Authors>
-		<Description>GPU compute everywhere. Write once, run on WebGPU, WebGL, Wasm, CUDA, OpenCL, and CPU.</Description>
+		<Description>.Net GPU compute for the browser and desktop. Write once, run on WebGPU, WebGL, Wasm, CUDA, OpenCL, and CPU.</Description>
 		<PackageProjectUrl>https://github.com/LostBeard/SpawnDev.ILGPU</PackageProjectUrl>
 		<PackageReadmeFile>README.md</PackageReadmeFile>
 		<PackageLicenseFile>LICENSE.txt</PackageLicenseFile>
