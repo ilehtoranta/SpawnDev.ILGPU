@@ -52,6 +52,9 @@ namespace SpawnDev.ILGPU.WpfDemo
                 case "Boids":
                     ContentArea.Content = new BoidsPage();
                     break;
+                case "Benchmarks":
+                    ContentArea.Content = new BenchmarksPage();
+                    break;
             }
         }
 
