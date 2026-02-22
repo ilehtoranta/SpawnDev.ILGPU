@@ -2,25 +2,26 @@
 
 [![NuGet](https://img.shields.io/nuget/v/SpawnDev.ILGPU.svg?)](https://www.nuget.org/packages/SpawnDev.ILGPU)
 
-**Run [ILGPU](https://github.com/m4rs-mt/ILGPU) C# kernels on WebGPU, WebGL, Wasm, Cuda, and OpenCL — from a single codebase.**  
+**Run [ILGPU](https://github.com/m4rs-mt/ILGPU) C# kernels on WebGPU, WebGL, Wasm, Cuda, OpenCL, and CPU — from a single codebase.**  
 Write parallel compute code in C# and let the library pick the best available backend automatically. In the browser, three backends (WebGPU, WebGL, Wasm) bring GPU-accelerated compute to virtually every modern browser. On desktop and server, ILGPU's native Cuda and OpenCL backends are available alongside CPU. The same async extension methods work everywhere.
 
 > **Your existing ILGPU kernels run in the browser with zero changes to the kernel code — and the same code runs on desktop too.**
 
 ## Architecture
 
-```
-┌───────────────────────────────────────────────────────────────────────────────┐
-│                          Your C# ILGPU Kernel                                 │
-├──────────────────┬──────────────────┬──────────────┬──────────┬───────────────┤
-│     WebGPU       │     WebGL        │     Wasm     │   Cuda   │   OpenCL      │
-│     Backend      │     Backend      │   Backend    │ Backend  │   Backend     │
-├──────────────────┼──────────────────┼──────────────┼──────────┼───────────────┤
-│ WGSL             │ GLSL ES 3.0      │ Wasm binary  │   PTX    │   OpenCL C    │
-│ transpile → GPU  │ transpile → GPU  │ → Workers    │  → GPU   │    → GPU      │
-└──────────────────┴──────────────────┴──────────────┴──────────┴───────────────┘
-  Browser backends: WebGPU, WebGL, Wasm    Desktop backends: Cuda, OpenCL, CPU
-```
+**Browser backends** (Blazor WebAssembly) — auto-selected: WebGPU → WebGL → Wasm
+
+| | WebGPU | WebGL | Wasm |
+|---|---|---|---|
+| **Compiles to** | WGSL | GLSL ES 3.0 | Wasm binary |
+| **Runs on** | GPU | GPU | Web Workers |
+
+**Desktop backends** (Console, WPF, ASP.NET) — auto-selected: Cuda → OpenCL → CPU
+
+| | Cuda | OpenCL | CPU |
+|---|---|---|---|
+| **Compiles to** | PTX | OpenCL C | — |
+| **Runs on** | NVIDIA GPU | Any GPU | CPU cores (multi-threaded) |
 
 ## Demo Applications
 
