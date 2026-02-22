@@ -26,7 +26,18 @@ Analysis of [open issues](https://github.com/m4rs-mt/ILGPU/issues) in the origin
 | **Fix complexity** | Medium — needs change in IL-to-IR conversion for the `conv.r.un`/`conv.r4` pattern |
 | **Testable** | ✅ Write a kernel: `float b = (float)someUint;` and verify on OpenCL |
 
-### 3. 🟡 [#1538](https://github.com/m4rs-mt/ILGPU/issues/1538) — Internal Compiler Error with nested struct properties
+### 3. ✅ [#1479](https://github.com/m4rs-mt/ILGPU/issues/1479) — Infinite compilation with large local arrays — **FIXED in v3.3.0**
+
+| | |
+|---|---|
+| **Severity** | High — 10+ minute compile, 10+ GB RAM for `new int[1_000_000]` |
+| **Affected** | All backends |
+| **Reproducible?** | Yes — any kernel with `new int[N]` where N is large |
+| **Root cause** | `LowerArrays.Lower` unrolled zero-initialization into N individual store IR nodes regardless of array size |
+| **Fix complexity** | Medium — added threshold (32 elements); small arrays keep unrolled stores, large arrays emit a proper IR loop |
+| **Testable** | ✅ All 366 existing tests pass across CUDA/OpenCL/CPU |
+
+### 4. 🟡 [#1538](https://github.com/m4rs-mt/ILGPU/issues/1538) — Internal Compiler Error with nested struct properties
 
 | | |
 |---|---|
@@ -60,7 +71,8 @@ Analysis of [open issues](https://github.com/m4rs-mt/ILGPU/issues) in the origin
 
 ## Recommended Priority
 
-1. **#1361 (CopySign)** — Easiest to fix, highest impact (silent wrong results), simple argument swap
-2. **#1309 (uint→float)** — Medium effort, important for broad OpenCL device compatibility
-3. **#1538 (struct ICE)** — Interesting but complex compiler fix, lower priority
-4. **#1539 (AMD OpenCL)** — Can't test without AMD hardware, skip for now
+1. ~~**#1361 (CopySign)**~~ ✅ Fixed
+2. ~~**#1309 (uint→float)**~~ ✅ Fixed
+3. ~~**#1479 (local array unrolling)**~~ ✅ Fixed
+4. **#1538 (struct ICE)** — Interesting but complex compiler fix, lower priority
+5. **#1539 (AMD OpenCL)** — Can't test without AMD hardware, skip for now

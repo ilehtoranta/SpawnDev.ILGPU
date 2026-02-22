@@ -661,6 +661,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 (WasmOpCodes.F32, BinaryArithmeticKind.Div) => WasmOpCodes.F32Div,
                 (WasmOpCodes.F32, BinaryArithmeticKind.Min) => WasmOpCodes.F32Min,
                 (WasmOpCodes.F32, BinaryArithmeticKind.Max) => WasmOpCodes.F32Max,
+                (WasmOpCodes.F32, BinaryArithmeticKind.CopySignF) => WasmOpCodes.F32Copysign,
 
                 (WasmOpCodes.F64, BinaryArithmeticKind.Add) => WasmOpCodes.F64Add,
                 (WasmOpCodes.F64, BinaryArithmeticKind.Sub) => WasmOpCodes.F64Sub,
@@ -668,6 +669,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 (WasmOpCodes.F64, BinaryArithmeticKind.Div) => WasmOpCodes.F64Div,
                 (WasmOpCodes.F64, BinaryArithmeticKind.Min) => WasmOpCodes.F64Min,
                 (WasmOpCodes.F64, BinaryArithmeticKind.Max) => WasmOpCodes.F64Max,
+                (WasmOpCodes.F64, BinaryArithmeticKind.CopySignF) => WasmOpCodes.F64Copysign,
 
                 _ => WasmOpCodes.I32Add // fallback
             };
@@ -756,22 +758,28 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             var srcType = GetWasmTypeFromIR(src.Type);
             var dstType = GetWasmType(value);
 
+            // Detect unsigned source conversion
+            bool isSourceUnsigned = (value.Flags & ConvertFlags.SourceUnsigned) == ConvertFlags.SourceUnsigned;
+
             EmitGetLocal(src);
 
-            byte? opcode = (srcType, dstType) switch
+            byte? opcode = (srcType, dstType, isSourceUnsigned) switch
             {
-                (WasmOpCodes.I32, WasmOpCodes.I64) => WasmOpCodes.I64ExtendI32S,
-                (WasmOpCodes.I32, WasmOpCodes.F32) => WasmOpCodes.F32ConvertI32S,
-                (WasmOpCodes.I32, WasmOpCodes.F64) => WasmOpCodes.F64ConvertI32S,
-                (WasmOpCodes.I64, WasmOpCodes.I32) => WasmOpCodes.I32WrapI64,
-                (WasmOpCodes.I64, WasmOpCodes.F32) => WasmOpCodes.F32ConvertI64S,
-                (WasmOpCodes.I64, WasmOpCodes.F64) => WasmOpCodes.F64ConvertI64S,
-                (WasmOpCodes.F32, WasmOpCodes.I32) => WasmOpCodes.I32TruncF32S,
-                (WasmOpCodes.F32, WasmOpCodes.I64) => WasmOpCodes.I64TruncF32S,
-                (WasmOpCodes.F32, WasmOpCodes.F64) => WasmOpCodes.F64PromoteF32,
-                (WasmOpCodes.F64, WasmOpCodes.I32) => WasmOpCodes.I32TruncF64S,
-                (WasmOpCodes.F64, WasmOpCodes.I64) => WasmOpCodes.I64TruncF64S,
-                (WasmOpCodes.F64, WasmOpCodes.F32) => WasmOpCodes.F32DemoteF64,
+                (WasmOpCodes.I32, WasmOpCodes.I64, false) => WasmOpCodes.I64ExtendI32S,
+                (WasmOpCodes.I32, WasmOpCodes.I64, true) => WasmOpCodes.I64ExtendI32U,
+                (WasmOpCodes.I32, WasmOpCodes.F32, false) => WasmOpCodes.F32ConvertI32S,
+                (WasmOpCodes.I32, WasmOpCodes.F32, true) => WasmOpCodes.F32ConvertI32U,
+                (WasmOpCodes.I32, WasmOpCodes.F64, false) => WasmOpCodes.F64ConvertI32S,
+                (WasmOpCodes.I32, WasmOpCodes.F64, true) => WasmOpCodes.F64ConvertI32U,
+                (WasmOpCodes.I64, WasmOpCodes.I32, _) => WasmOpCodes.I32WrapI64,
+                (WasmOpCodes.I64, WasmOpCodes.F32, _) => WasmOpCodes.F32ConvertI64S,
+                (WasmOpCodes.I64, WasmOpCodes.F64, _) => WasmOpCodes.F64ConvertI64S,
+                (WasmOpCodes.F32, WasmOpCodes.I32, _) => WasmOpCodes.I32TruncF32S,
+                (WasmOpCodes.F32, WasmOpCodes.I64, _) => WasmOpCodes.I64TruncF32S,
+                (WasmOpCodes.F32, WasmOpCodes.F64, _) => WasmOpCodes.F64PromoteF32,
+                (WasmOpCodes.F64, WasmOpCodes.I32, _) => WasmOpCodes.I32TruncF64S,
+                (WasmOpCodes.F64, WasmOpCodes.I64, _) => WasmOpCodes.I64TruncF64S,
+                (WasmOpCodes.F64, WasmOpCodes.F32, _) => WasmOpCodes.F32DemoteF64,
                 _ => null
             };
 

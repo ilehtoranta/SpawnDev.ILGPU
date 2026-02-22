@@ -1961,6 +1961,15 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 return;
             }
 
+            // CopySign: GLSL ES 3.0 has no copysign built-in.
+            // Can't use abs(x)*sign(y) because sign(0)=0 which zeroes the result.
+            // Use a ternary to handle the zero case correctly.
+            if (value.Kind == BinaryArithmeticKind.CopySignF)
+            {
+                AppendLine($"{prefix}{target} = ({right} < 0.0) ? -abs({left}) : abs({left});");
+                return;
+            }
+
             // Float remainder — GLSL ES 3.0 does not support % for floats
             if (value.Kind == BinaryArithmeticKind.Rem && (leftType == "float" || leftType.StartsWith("float")))
             {
@@ -2079,6 +2088,8 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             AppendLine($"{prefix}{target} = {left} {op} {right};");
         }
 
+
+
         public override void GenerateCode(ConvertValue value)
         {
             var target = Load(value);
@@ -2092,11 +2103,15 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             bool isEmulatedF64Source = Backend.Options.EnableF64Emulation && (sourceType == "vec2" || (Backend.Options.UseOzakiF64Emulation && sourceType == "vec4"));
             bool isEmulatedI64Source = Backend.Options.EnableI64Emulation && sourceType == "uvec2";
 
+            // Detect unsigned source conversion (e.g. uint → float)
+            bool isSourceUnsigned = (value.Flags & ConvertFlags.SourceUnsigned) == ConvertFlags.SourceUnsigned;
+
             if (isEmulatedF64Target)
             {
                 if (isEmulatedF64Source) AppendLine($"{prefix}{target} = {source};");
                 else if (isEmulatedI64Source) AppendLine($"{prefix}{target} = f64_from_f32(float(i64_to_i32({source})));");
                 else if (sourceType == "float") AppendLine($"{prefix}{target} = f64_from_f32({source});");
+                else if (isSourceUnsigned && sourceType == "int") AppendLine($"{prefix}{target} = f64_from_f32(float(uint({source})));");
                 else AppendLine($"{prefix}{target} = f64_from_f32(float({source}));");
                 return;
             }
@@ -2121,6 +2136,13 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 else if (targetType == "uint") AppendLine($"{prefix}{target} = u64_to_u32({source});");
                 else if (targetType == "float") AppendLine($"{prefix}{target} = float(i64_to_i32({source}));");
                 else AppendLine($"{prefix}{target} = {targetType}(i64_to_i32({source}));");
+                return;
+            }
+
+            // Unsigned int → float: must cast through uint to preserve unsigned value
+            if (isSourceUnsigned && sourceType == "int" && targetType == "float")
+            {
+                AppendLine($"{prefix}{target} = float(uint({source}));");
                 return;
             }
 

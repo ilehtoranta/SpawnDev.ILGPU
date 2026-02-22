@@ -2402,6 +2402,15 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 return;
             }
 
+            // CopySign: WGSL has no copysign built-in.
+            // Can't use abs(x)*sign(y) because sign(0)=0 which zeroes the result.
+            // Use select() to handle the zero case correctly.
+            if (value.Kind == BinaryArithmeticKind.CopySignF)
+            {
+                AppendLine($"{prefix}{target} = select(-abs({left}), abs({left}), {right} >= 0.0);");
+                return;
+            }
+
             var op = GetArithmeticOp(value.Kind);
 
             if (value.Kind == BinaryArithmeticKind.Shl || value.Kind == BinaryArithmeticKind.Shr)
@@ -2857,6 +2866,9 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             bool isScalarTarget = !targetType.StartsWith("vec") && !targetType.StartsWith("mat") && !targetType.StartsWith("array")
                                   && targetType != "emu_f64" && targetType != "emu_i64" && targetType != "emu_u64";
 
+            // Detect unsigned source conversion (e.g. uint → float)
+            bool isSourceUnsigned = (value.Flags & ConvertFlags.SourceUnsigned) == ConvertFlags.SourceUnsigned;
+
             // Emulated type detection
             bool isEmulatedF64Target = Backend.Options.EnableF64Emulation && targetType == "emu_f64";
             bool isEmulatedI64Target = Backend.Options.EnableI64Emulation && (targetType == "emu_i64" || targetType == "emu_u64");
@@ -2884,6 +2896,11 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 else if (sourceType == "f32")
                 {
                     AppendLine($"{prefix}{target} = f64_from_f32({source});");
+                }
+                else if (isSourceUnsigned && sourceType == "i32")
+                {
+                    // unsigned int → emu_f64: bitcast to u32 first to preserve unsigned value
+                    AppendLine($"{prefix}{target} = f64_from_f32(f32(bitcast<u32>({source})));");
                 }
                 else
                 {
@@ -2981,6 +2998,13 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             if (isVectorSource && isScalarTarget)
             {
                 AppendLine($"{prefix}{target} = {targetType}({source}.x);");
+                return;
+            }
+
+            // ---- Unsigned int → float: must bitcast to u32 first to preserve unsigned value ----
+            if (isSourceUnsigned && sourceType == "i32" && targetType == "f32")
+            {
+                AppendLine($"{prefix}{target} = f32(bitcast<u32>({source}));");
                 return;
             }
 

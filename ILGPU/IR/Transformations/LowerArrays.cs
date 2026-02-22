@@ -24,6 +24,18 @@ namespace ILGPU.IR.Transformations
     /// </summary>
     public sealed class LowerArrays : LowerTypes<ArrayType>
     {
+        #region Constants
+
+        /// <summary>
+        /// Arrays with this many elements or fewer use unrolled stores for
+        /// zero-initialization. Larger arrays emit a loop in the IR instead,
+        /// avoiding O(N) IR nodes that cause extreme compilation times
+        /// (upstream #1479).
+        /// </summary>
+        private const int MaxUnrolledArrayInitSize = 32;
+
+        #endregion
+
         #region Nested Types
 
         private sealed class ArrayTypeLowering : TypeLowering<ArrayType>
@@ -175,18 +187,99 @@ namespace ILGPU.IR.Transformations
                     result.Add(length);
             }
 
-            // Clear all array elements using explicit stores. We emit the code in
-            // the form of an unrolled loop to avoid additional loops from being
-            // generated.
-            // TODO: replace this loop with a high-level memset operation later on
+            // Clear all array elements to their default value. For small arrays
+            // we unroll the stores directly; for large arrays we emit a proper
+            // loop to avoid generating O(N) IR nodes (fixes upstream #1479).
             var defaultElement = builder.CreateNull(location, value.Type.ElementType);
-            for (int i = 0, e = primitiveLength.Int32Value; i < e; ++i)
+            int arraySize = primitiveLength.Int32Value;
+
+            if (arraySize <= MaxUnrolledArrayInitSize)
             {
-                var address = builder.CreateLoadElementAddress(
+                // Small array: unroll the zero-initialization stores
+                for (int i = 0; i < arraySize; ++i)
+                {
+                    var address = builder.CreateLoadElementAddress(
+                        location,
+                        view,
+                        builder.CreatePrimitiveValue(location, i));
+                    builder.CreateStore(location, address, defaultElement);
+                }
+            }
+            else
+            {
+                // Large array: emit a loop in the IR to avoid O(N) nodes.
+                // Structure: currentBlock → loopHeader → loopBody → loopHeader
+                //                                      ↘ exitBlock
+                var methodBuilder = builder.MethodBuilder;
+                var int32Type = builder.CreateType(typeof(int));
+
+                // Split the current block at the NewArray value. This moves
+                // all values that come after it (including the terminator) to
+                // a new "exit" block, leaving the current block open for us
+                // to redirect into the loop.
+                var exitBlock = builder.SplitBlock(value);
+
+                // Create the loop header and body blocks
+                var loopHeader = methodBuilder.CreateBasicBlock(location);
+                var loopBody = methodBuilder.CreateBasicBlock(location);
+
+                // --- Current block: branch to loop header ---
+                // SplitBlock already set a branch to exitBlock; replace it
+                // with a branch to our loop header instead.
+                builder.Terminator = null;
+                builder.CreateBranch(location, loopHeader);
+
+                // --- Loop header: phi(i), compare, conditional branch ---
+                var zeroVal = loopHeader.CreatePrimitiveValue(location, 0);
+                var phiBuilder = loopHeader.CreatePhi(
+                    location,
+                    int32Type,
+                    2);
+                // Add the initial value (0 from the current block)
+                phiBuilder.AddArgument(builder.BasicBlock, zeroVal);
+                // Note: the back-edge argument from loopBody is added below
+
+                var lengthVal = loopHeader.CreatePrimitiveValue(
+                    location, arraySize);
+                // We need the phi value for the comparison, seal it after
+                // adding the back-edge argument. For now, get a reference:
+                // We'll add the loopBody argument and seal after creating it.
+
+                // --- Loop body: store, increment, branch back ---
+                // We need to create the increment value in the body first so
+                // we can add it to the phi before sealing.
+                var phiRef = phiBuilder.PhiValue;
+                var bodyAddress = loopBody.CreateLoadElementAddress(
                     location,
                     view,
-                    builder.CreatePrimitiveValue(location, i));
-                builder.CreateStore(location, address, defaultElement);
+                    phiRef);
+                loopBody.CreateStore(location, bodyAddress, defaultElement);
+
+                var oneVal = loopBody.CreatePrimitiveValue(location, 1);
+                var nextI = loopBody.CreateArithmetic(
+                    location,
+                    phiRef,
+                    oneVal,
+                    BinaryArithmeticKind.Add);
+
+                // Add the back-edge argument to the phi and seal it
+                phiBuilder.AddArgument(loopBody, nextI);
+                var loopCounter = phiBuilder.Seal();
+
+                // Now create the comparison in the header
+                var cmp = loopHeader.CreateCompare(
+                    location,
+                    loopCounter,
+                    lengthVal,
+                    CompareKind.LessThan);
+                loopHeader.CreateIfBranch(
+                    location,
+                    cmp,
+                    loopBody,      // true: continue loop
+                    exitBlock);    // false: done
+
+                // Loop body branches back to header
+                loopBody.CreateBranch(location, loopHeader);
             }
 
             // Replace the current value with a new structure instance
