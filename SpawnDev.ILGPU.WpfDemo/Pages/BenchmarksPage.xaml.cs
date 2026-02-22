@@ -6,6 +6,7 @@ using System.Windows.Shapes;
 using global::ILGPU;
 using global::ILGPU.Runtime;
 using global::ILGPU.Runtime.CPU;
+using SpawnDev.ILGPU.Demo.Shared.Benchmarks;
 using Grid = System.Windows.Controls.Grid;
 
 namespace SpawnDev.ILGPU.WpfDemo.Pages
@@ -15,25 +16,6 @@ namespace SpawnDev.ILGPU.WpfDemo.Pages
         // ── State ──
         private bool _isRunning;
         private readonly List<BenchmarkResult> _results = new();
-
-        // ── Constants ──
-        private const int WarmUpIterations = 2;
-        private const int MeasuredIterations = 5;
-
-        // ── Records ──
-        private record BenchmarkDef(string Id, string Name, string Icon, string Description);
-        private record BackendInfo(string Name, int DefaultN, int MandelbrotSize, int PrimesN);
-
-        private record BenchmarkResult
-        {
-            public string BackendName { get; init; } = "";
-            public string BenchmarkName { get; init; } = "";
-            public double? MedianMs { get; init; }
-            public string? Throughput { get; init; }
-            public int ElementCount { get; init; }
-            public bool Failed { get; init; }
-            public string? Error { get; init; }
-        }
 
         // Ranking display item
         public class RankingItem
@@ -45,22 +27,12 @@ namespace SpawnDev.ILGPU.WpfDemo.Pages
             public string AvgLabel { get; set; } = "";
         }
 
-        // ── Benchmark definitions ──
-        private readonly BenchmarkDef[] _benchmarkDefs =
+        // ── Desktop backend profiles (all use standard workload sizes) ──
+        private readonly BackendProfile[] _backends =
         [
-            new("mandelbrot", "Mandelbrot", "🎨", "512×512 fractal, 200 iterations — compute-bound"),
-            new("vecadd", "Vector Add", "➕", "a[i] = b[i] + c[i] — raw memory throughput"),
-            new("vecscale", "Vector Scale", "✖", "a[i] = a[i] * scalar — scalar argument marshaling"),
-            new("saxpy", "SAXPY", "📐", "a[i] = alpha * x[i] + y[i] — classic GPU benchmark"),
-            new("primes", "Prime Count", "🔢", "Count primes up to N using trial division — integer ALU-heavy"),
-        ];
-
-        // Desktop backends with larger workloads
-        private readonly BackendInfo[] _backends =
-        [
-            new("Cuda", 4_000_000, 1024, 4_000_000),
-            new("OpenCL", 4_000_000, 1024, 4_000_000),
-            new("CPU", 4_000_000, 512, 2_000_000),
+            new("Cuda", BenchmarkDefs.StandardProfile.DefaultN, BenchmarkDefs.StandardProfile.MandelbrotSize, BenchmarkDefs.StandardProfile.PrimesN),
+            new("OpenCL", BenchmarkDefs.StandardProfile.DefaultN, BenchmarkDefs.StandardProfile.MandelbrotSize, BenchmarkDefs.StandardProfile.PrimesN),
+            new("CPU", BenchmarkDefs.StandardProfile.DefaultN, BenchmarkDefs.StandardProfile.MandelbrotSize, BenchmarkDefs.StandardProfile.PrimesN),
         ];
 
         // ── Backend colors ──
@@ -86,56 +58,6 @@ namespace SpawnDev.ILGPU.WpfDemo.Pages
         }
 
         private void OnLoaded(object sender, RoutedEventArgs e) { }
-
-        // ====================================================================
-        //  KERNELS (identical to Blazor version)
-        // ====================================================================
-
-        private static void VectorAddKernel(Index1D index, ArrayView<float> a, ArrayView<float> b, ArrayView<float> c)
-        {
-            c[index] = a[index] + b[index];
-        }
-
-        private static void VectorScaleKernel(Index1D index, ArrayView<float> a, float scalar)
-        {
-            a[index] = a[index] * scalar;
-        }
-
-        private static void SaxpyKernel(Index1D index, ArrayView<float> y, ArrayView<float> x, float alpha)
-        {
-            y[index] = alpha * x[index] + y[index];
-        }
-
-        private static void MandelbrotKernel(Index1D index, ArrayView<int> output, int width, int height, int maxIter)
-        {
-            int px = index % width;
-            int py = index / width;
-            float x0 = (px / (float)width) * 3.5f - 2.5f;
-            float y0 = (py / (float)height) * 2.0f - 1.0f;
-            float x = 0, y = 0;
-            int iter = 0;
-            while (x * x + y * y <= 4.0f && iter < maxIter)
-            {
-                float xtemp = x * x - y * y + x0;
-                y = 2.0f * x * y + y0;
-                x = xtemp;
-                iter++;
-            }
-            output[index] = iter;
-        }
-
-        private static void PrimeCountKernel(Index1D index, ArrayView<int> results, int offset)
-        {
-            int n = offset + index;
-            if (n < 2) { results[index] = 0; return; }
-            if (n < 4) { results[index] = 1; return; }
-            if (n % 2 == 0) { results[index] = 0; return; }
-            for (int d = 3; d * d <= n; d += 2)
-            {
-                if (n % d == 0) { results[index] = 0; return; }
-            }
-            results[index] = 1;
-        }
 
         // ====================================================================
         //  BACKEND FACTORY (Desktop backends)
@@ -189,10 +111,10 @@ namespace SpawnDev.ILGPU.WpfDemo.Pages
             ProgressPanel.Visibility = Visibility.Visible;
             StatusText.Text = "Starting benchmarks...";
 
-            int totalSteps = _benchmarkDefs.Length * _backends.Length;
+            int totalSteps = BenchmarkDefs.All.Length * _backends.Length;
             int step = 0;
 
-            foreach (var bench in _benchmarkDefs)
+            foreach (var bench in BenchmarkDefs.All)
             {
                 var benchResults = new List<BenchmarkResult>();
 
@@ -225,10 +147,10 @@ namespace SpawnDev.ILGPU.WpfDemo.Pages
         }
 
         // ====================================================================
-        //  SINGLE BENCHMARK RUNNER
+        //  SINGLE BENCHMARK RUNNER — delegates to shared BenchmarkRunner
         // ====================================================================
 
-        private async Task<BenchmarkResult> RunSingleBenchmark(BenchmarkDef bench, BackendInfo backend)
+        private async Task<BenchmarkResult> RunSingleBenchmark(BenchmarkDef bench, BackendProfile backend)
         {
             (global::ILGPU.Context ctx, Accelerator acc)? pair = null;
             try
@@ -238,36 +160,7 @@ namespace SpawnDev.ILGPU.WpfDemo.Pages
                     return new BenchmarkResult { BackendName = backend.Name, BenchmarkName = bench.Name, Failed = true, Error = "Backend unavailable" };
 
                 var (ctx, acc) = pair.Value;
-
-                var times = bench.Id switch
-                {
-                    "vecadd" => await BenchVectorAdd(acc, backend),
-                    "vecscale" => await BenchVectorScale(acc, backend),
-                    "saxpy" => await BenchSaxpy(acc, backend),
-                    "mandelbrot" => await BenchMandelbrot(acc, backend),
-                    "primes" => await BenchPrimes(acc, backend),
-                    _ => throw new ArgumentException($"Unknown benchmark: {bench.Id}")
-                };
-
-                int elementCount = bench.Id switch
-                {
-                    "mandelbrot" => backend.MandelbrotSize * backend.MandelbrotSize,
-                    "primes" => backend.PrimesN,
-                    _ => backend.DefaultN,
-                };
-
-                double median = Median(times);
-                double throughput = elementCount / (median / 1000.0);
-                string throughputStr = FormatThroughput(throughput, bench.Id == "mandelbrot" ? "px" : "elem");
-
-                return new BenchmarkResult
-                {
-                    BackendName = backend.Name,
-                    BenchmarkName = bench.Name,
-                    MedianMs = Math.Round(median, 2),
-                    Throughput = throughputStr,
-                    ElementCount = elementCount,
-                };
+                return await BenchmarkRunner.RunAsync(acc, bench.Id, backend);
             }
             catch (Exception ex)
             {
@@ -287,148 +180,6 @@ namespace SpawnDev.ILGPU.WpfDemo.Pages
                     pair.Value.ctx.Dispose();
                 }
             }
-        }
-
-        // ====================================================================
-        //  INDIVIDUAL BENCHMARKS
-        // ====================================================================
-
-        private async Task<double[]> BenchVectorAdd(Accelerator acc, BackendInfo backend)
-        {
-            int n = backend.DefaultN;
-            var a = Enumerable.Range(0, n).Select(i => (float)i).ToArray();
-            var b = Enumerable.Range(0, n).Select(i => (float)(i * 2)).ToArray();
-            var c = new float[n];
-
-            using var bufA = acc.Allocate1D(a);
-            using var bufB = acc.Allocate1D(b);
-            using var bufC = acc.Allocate1D(c);
-
-            var kernel = acc.LoadAutoGroupedStreamKernel<Index1D, ArrayView<float>, ArrayView<float>, ArrayView<float>>(VectorAddKernel);
-
-            for (int i = 0; i < WarmUpIterations; i++)
-            {
-                kernel((Index1D)n, bufA.View, bufB.View, bufC.View);
-                acc.Synchronize();
-            }
-
-            var times = new double[MeasuredIterations];
-            for (int i = 0; i < MeasuredIterations; i++)
-            {
-                var sw = Stopwatch.StartNew();
-                kernel((Index1D)n, bufA.View, bufB.View, bufC.View);
-                acc.Synchronize();
-                sw.Stop();
-                times[i] = sw.Elapsed.TotalMilliseconds;
-            }
-            return times;
-        }
-
-        private async Task<double[]> BenchVectorScale(Accelerator acc, BackendInfo backend)
-        {
-            int n = backend.DefaultN;
-            var a = Enumerable.Range(0, n).Select(i => (float)i).ToArray();
-
-            using var bufA = acc.Allocate1D(a);
-            var kernel = acc.LoadAutoGroupedStreamKernel<Index1D, ArrayView<float>, float>(VectorScaleKernel);
-
-            for (int i = 0; i < WarmUpIterations; i++)
-            {
-                kernel((Index1D)n, bufA.View, 2.0f);
-                acc.Synchronize();
-            }
-
-            var times = new double[MeasuredIterations];
-            for (int i = 0; i < MeasuredIterations; i++)
-            {
-                var sw = Stopwatch.StartNew();
-                kernel((Index1D)n, bufA.View, 2.0f);
-                acc.Synchronize();
-                sw.Stop();
-                times[i] = sw.Elapsed.TotalMilliseconds;
-            }
-            return times;
-        }
-
-        private async Task<double[]> BenchSaxpy(Accelerator acc, BackendInfo backend)
-        {
-            int n = backend.DefaultN;
-            var x = Enumerable.Range(0, n).Select(i => (float)i).ToArray();
-            var y = Enumerable.Range(0, n).Select(i => (float)(i * 0.5)).ToArray();
-
-            using var bufX = acc.Allocate1D(x);
-            using var bufY = acc.Allocate1D(y);
-            var kernel = acc.LoadAutoGroupedStreamKernel<Index1D, ArrayView<float>, ArrayView<float>, float>(SaxpyKernel);
-
-            for (int i = 0; i < WarmUpIterations; i++)
-            {
-                kernel((Index1D)n, bufY.View, bufX.View, 2.5f);
-                acc.Synchronize();
-            }
-
-            var times = new double[MeasuredIterations];
-            for (int i = 0; i < MeasuredIterations; i++)
-            {
-                var sw = Stopwatch.StartNew();
-                kernel((Index1D)n, bufY.View, bufX.View, 2.5f);
-                acc.Synchronize();
-                sw.Stop();
-                times[i] = sw.Elapsed.TotalMilliseconds;
-            }
-            return times;
-        }
-
-        private async Task<double[]> BenchMandelbrot(Accelerator acc, BackendInfo backend)
-        {
-            int size = backend.MandelbrotSize;
-            int totalPixels = size * size;
-            var output = new int[totalPixels];
-
-            using var buf = acc.Allocate1D(output);
-            var kernel = acc.LoadAutoGroupedStreamKernel<Index1D, ArrayView<int>, int, int, int>(MandelbrotKernel);
-
-            for (int i = 0; i < WarmUpIterations; i++)
-            {
-                kernel((Index1D)totalPixels, buf.View, size, size, 200);
-                acc.Synchronize();
-            }
-
-            var times = new double[MeasuredIterations];
-            for (int i = 0; i < MeasuredIterations; i++)
-            {
-                var sw = Stopwatch.StartNew();
-                kernel((Index1D)totalPixels, buf.View, size, size, 200);
-                acc.Synchronize();
-                sw.Stop();
-                times[i] = sw.Elapsed.TotalMilliseconds;
-            }
-            return times;
-        }
-
-        private async Task<double[]> BenchPrimes(Accelerator acc, BackendInfo backend)
-        {
-            int n = backend.PrimesN;
-            var results = new int[n];
-
-            using var buf = acc.Allocate1D(results);
-            var kernel = acc.LoadAutoGroupedStreamKernel<Index1D, ArrayView<int>, int>(PrimeCountKernel);
-
-            for (int i = 0; i < WarmUpIterations; i++)
-            {
-                kernel((Index1D)n, buf.View, 2);
-                acc.Synchronize();
-            }
-
-            var times = new double[MeasuredIterations];
-            for (int i = 0; i < MeasuredIterations; i++)
-            {
-                var sw = Stopwatch.StartNew();
-                kernel((Index1D)n, buf.View, 2);
-                acc.Synchronize();
-                sw.Stop();
-                times[i] = sw.Elapsed.TotalMilliseconds;
-            }
-            return times;
         }
 
         // ====================================================================
@@ -475,14 +226,16 @@ namespace SpawnDev.ILGPU.WpfDemo.Pages
             grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
             grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
             grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
             grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(80) });
 
             // Header row
             AddTableHeader(grid, 0, "Backend");
-            AddTableHeader(grid, 1, "Median (ms)");
-            AddTableHeader(grid, 2, "Throughput");
-            AddTableHeader(grid, 3, "Elements");
-            AddTableHeader(grid, 4, "Status");
+            AddTableHeader(grid, 1, "Warmup (ms)");
+            AddTableHeader(grid, 2, "Median (ms)");
+            AddTableHeader(grid, 3, "Throughput");
+            AddTableHeader(grid, 4, "Elements");
+            AddTableHeader(grid, 5, "Status");
 
             var ordered = benchResults.OrderBy(r => r.MedianMs ?? double.MaxValue).ToList();
             double? bestMs = ordered.FirstOrDefault(r => r.MedianMs.HasValue)?.MedianMs;
@@ -501,7 +254,7 @@ namespace SpawnDev.ILGPU.WpfDemo.Pages
                         Background = new SolidColorBrush(Color.FromArgb(0x10, 0x22, 0xC5, 0x5E)),
                     };
                     Grid.SetRow(rowBg, row);
-                    Grid.SetColumnSpan(rowBg, 5);
+                    Grid.SetColumnSpan(rowBg, 6);
                     grid.Children.Add(rowBg);
                 }
 
@@ -523,9 +276,10 @@ namespace SpawnDev.ILGPU.WpfDemo.Pages
                 });
                 AddTableCell(grid, row, 0, namePanel);
 
-                AddTableText(grid, row, 1, r.MedianMs.HasValue ? r.MedianMs.Value.ToString("F2") : "—", r.Failed);
-                AddTableText(grid, row, 2, r.Throughput ?? "—", r.Failed);
-                AddTableText(grid, row, 3, r.ElementCount > 0 ? r.ElementCount.ToString("N0") : "—", r.Failed);
+                AddTableText(grid, row, 1, r.WarmupMs > 0 ? r.WarmupMs.ToString("F0") : "—", r.Failed);
+                AddTableText(grid, row, 2, r.MedianMs.HasValue ? r.MedianMs.Value.ToString("F2") : "—", r.Failed);
+                AddTableText(grid, row, 3, r.Throughput ?? "—", r.Failed);
+                AddTableText(grid, row, 4, r.ElementCount > 0 ? r.ElementCount.ToString("N0") : "—", r.Failed);
 
                 // Status
                 var statusText = new TextBlock
@@ -538,7 +292,7 @@ namespace SpawnDev.ILGPU.WpfDemo.Pages
                     ToolTip = r.Error,
                 };
                 Grid.SetRow(statusText, row);
-                Grid.SetColumn(statusText, 4);
+                Grid.SetColumn(statusText, 5);
                 grid.Children.Add(statusText);
 
                 row++;
@@ -622,7 +376,7 @@ namespace SpawnDev.ILGPU.WpfDemo.Pages
                 double chartW = w - padL - padR;
                 double chartH = h - padT - padB;
 
-                var values = valid.Select(r => r.ElementCount / (r.MedianMs!.Value / 1000.0)).ToArray();
+                var values = valid.Select(r => r.ThroughputElemPerSec).ToArray();
                 double maxVal = values.Max() * 1.15;
                 double barW = Math.Min(60, chartW / valid.Count * 0.6);
                 double gap = (chartW - barW * valid.Count) / (valid.Count + 1);
@@ -641,7 +395,7 @@ namespace SpawnDev.ILGPU.WpfDemo.Pages
 
                     var label = new TextBlock
                     {
-                        Text = FormatShortThroughput(maxVal * g / 4.0),
+                        Text = BenchmarkRunner.FormatShortThroughput(maxVal * g / 4.0),
                         FontSize = 10,
                         Foreground = FindResource("TextMutedBrush") as Brush,
                     };
@@ -676,7 +430,7 @@ namespace SpawnDev.ILGPU.WpfDemo.Pages
                     // Value label above bar
                     var valLabel = new TextBlock
                     {
-                        Text = FormatShortThroughput(values[i]),
+                        Text = BenchmarkRunner.FormatShortThroughput(values[i]),
                         FontSize = 11,
                         FontWeight = FontWeights.Bold,
                         Foreground = FindResource("TextPrimaryBrush") as Brush,
@@ -744,29 +498,6 @@ namespace SpawnDev.ILGPU.WpfDemo.Pages
         // ====================================================================
         //  HELPERS
         // ====================================================================
-
-        private static double Median(double[] values)
-        {
-            var sorted = values.OrderBy(v => v).ToArray();
-            int mid = sorted.Length / 2;
-            return sorted.Length % 2 == 0 ? (sorted[mid - 1] + sorted[mid]) / 2.0 : sorted[mid];
-        }
-
-        private static string FormatThroughput(double elemPerSec, string unit)
-        {
-            if (elemPerSec >= 1_000_000_000) return $"{elemPerSec / 1e9:F2} G{unit}/s";
-            if (elemPerSec >= 1_000_000) return $"{elemPerSec / 1e6:F2} M{unit}/s";
-            if (elemPerSec >= 1_000) return $"{elemPerSec / 1e3:F2} K{unit}/s";
-            return $"{elemPerSec:F0} {unit}/s";
-        }
-
-        private static string FormatShortThroughput(double v)
-        {
-            if (v >= 1e9) return $"{v / 1e9:F1}G";
-            if (v >= 1e6) return $"{v / 1e6:F1}M";
-            if (v >= 1e3) return $"{v / 1e3:F1}K";
-            return $"{v:F0}";
-        }
 
         private static string TruncateError(string? err) =>
             err != null && err.Length > 40 ? err[..40] + "…" : err ?? "";
