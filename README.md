@@ -421,6 +421,24 @@ When publishing, specific MSBuild properties are required:
 </PropertyGroup>
 ```
 
+## 💖 Support This Project
+
+If SpawnDev.ILGPU has been useful to you, please consider [**sponsoring me on GitHub**](https://github.com/sponsors/LostBeard)! Your support directly helps me continue developing and maintaining this library and my other open-source projects.
+
+I'm currently working on a modest development machine with only **16 GB of DDR5 RAM**, which makes building, testing, and debugging across multiple GPU backends genuinely painful — especially when running the browser demo, CUDA/OpenCL tests, and the IDE simultaneously.
+
+Any sponsorship — big or small — goes toward upgrading my development hardware so I can keep pushing this project forward:
+
+| Priority | Upgrade | Why It Matters |
+|----------|---------|----------------|
+| 🔴 **Critical** | **RAM (64–128 GB DDR5)** | 16 GB is not enough for multi-backend testing + browser debugging |
+| 🟡 **High** | **High-end NVIDIA GPU** (RTX 5090) | Faster CUDA compute, larger VRAM for AI/ML workloads and testing |
+| 🟢 **Dream** | **NVIDIA RTX 6000** | The ultimate card for AI compute and open-source GPU development |
+
+Every contribution — whether it's a one-time donation or a monthly sponsorship — is deeply appreciated and makes a real difference. Thank you! 🙏
+
+[![Sponsor LostBeard](https://img.shields.io/badge/Sponsor-❤️-ea4aaa?style=for-the-badge&logo=github-sponsors)](https://github.com/sponsors/LostBeard)
+
 ## License
 
 This project is licensed under the same terms as ILGPU. See [LICENSE](LICENSE) for details.
