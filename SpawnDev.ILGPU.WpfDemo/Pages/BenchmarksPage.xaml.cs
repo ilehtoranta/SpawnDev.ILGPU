@@ -88,11 +88,12 @@ namespace SpawnDev.ILGPU.WpfDemo.Pages
 
                 if (device == null) { ctx.Dispose(); return null; }
 
-                // For CPU, use the Nvidia preset (32×32 = 1024 threads) in parallel
-                // mode for a realistic GPU-like simulation
+                // For CPU, use a high-throughput config: small groups (2×2 = 4 threads)
+                // but all CPU cores as multiprocessors, with parallel execution mode
                 if (device is CPUDevice)
                 {
-                    var acc = CPUDevice.Nvidia.CreateCPUAccelerator(ctx, CPUAcceleratorMode.Parallel);
+                    var htDevice = new CPUDevice(2, 2, Environment.ProcessorCount);
+                    var acc = htDevice.CreateCPUAccelerator(ctx, CPUAcceleratorMode.Parallel);
                     return (ctx, acc);
                 }
                 else

@@ -50,13 +50,7 @@
                 <div class="progress-bar-fill" style="width: @(_progressPercent)%"></div>
             </div>
             <div class="progress-label">@_progressLabel</div>
-            @if (_currentBackend is "Wasm")
-            {
-                <div class="freeze-warning">
-                    <span class="freeze-icon">⏳</span>
-                    <span>Wasm backend may briefly freeze the UI during kernel execution.</span>
-                </div>
-            }
+
         </div>
     }
 
