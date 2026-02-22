@@ -601,6 +601,59 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             }
         });
 
+        // --- Nested Struct ICE (upstream #1538) ---
+        // 4-level nested record struct parameter + static struct member access
+        // Types must be public so ILGPU runtime can access them during compilation.
+        public readonly record struct ParameterLayer1(ParameterLayer2 p2);
+        public readonly record struct ParameterLayer2(ParameterLayer3 p3);
+        public readonly record struct ParameterLayer3(ParameterLayer4 p4);
+        public readonly record struct ParameterLayer4(float a, TestVector1538 b);
+        public readonly struct DataLayer1_1538
+        {
+            public static DataLayer2_1538 StaticMemberStruct { get; } = new(
+                new TestVector1538(1.0f, 2.0f, 3.0f),
+                4.0f);
+        }
+        public readonly struct DataLayer2_1538
+        {
+            public readonly TestVector1538 A;
+            public readonly float B;
+            public DataLayer2_1538(TestVector1538 a, float b) { A = a; B = b; }
+        }
+        public readonly record struct TestVector1538(float X, float Y, float Z);
+
+        private static void NestedStructICEKernel(Index1D index, ParameterLayer1 p, ArrayView<float> output)
+        {
+            var v = DataLayer1_1538.StaticMemberStruct.A;
+            output[index] = v.X + v.Y + v.Z;
+        }
+
+        [TestMethod]
+        public async Task NestedStructICETest() => await RunTest(async accelerator =>
+        {
+            // Upstream #1538: kernel compilation should not throw ICE with deeply nested struct params
+            int len = 4;
+            using var bufOut = accelerator.Allocate1D<float>(len);
+
+            var param = new ParameterLayer1(
+                new ParameterLayer2(
+                    new ParameterLayer3(
+                        new ParameterLayer4(1.0f, new TestVector1538(1, 2, 3)))));
+
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<
+                Index1D, ParameterLayer1, ArrayView<float>>(NestedStructICEKernel);
+            kernel((Index1D)len, param, bufOut.View);
+            await accelerator.SynchronizeAsync();
+            var result = await bufOut.CopyToHostAsync<float>();
+
+            float expected = 1.0f + 2.0f + 3.0f; // = 6.0f
+            for (int i = 0; i < len; i++)
+            {
+                if (result[i] != expected)
+                    throw new Exception($"Nested struct ICE test failed at {i}: expected {expected}, got {result[i]}");
+            }
+        });
+
         #endregion
     }
 }

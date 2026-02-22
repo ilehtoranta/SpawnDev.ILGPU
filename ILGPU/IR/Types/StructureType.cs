@@ -871,9 +871,12 @@ namespace ILGPU.IR.Types
             this.Assert(span.HasSpan && span.Span < NumFields);
             var builder = typeContext.CreateStructureType(span.Span);
 
-            // Slice all field types into the builder
-            int index = 0;
-            SliceRecursive(ref builder, ref index, span);
+            // Use flat fields directly instead of SliceRecursive to avoid
+            // depending on DirectFields, which may be incorrect when type
+            // unification has merged structurally-identical types with
+            // different high-level field groupings (fixes issue #1538).
+            for (int i = 0; i < span.Span; ++i)
+                builder.Add(Fields[span.Index + i]);
 
             return builder.Seal();
         }
