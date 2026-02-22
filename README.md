@@ -37,13 +37,19 @@ The [Live Demo](https://lostbeard.github.io/SpawnDev.ILGPU/) source is in [Spawn
 
 ### Desktop Demo (WPF)
 
-The [WPF Demo](SpawnDev.ILGPU.WpfDemo) runs the same shared kernels on CUDA, OpenCL, and CPU:
-- Fractal Explorer, 3D Raymarching, and GPU Boids — with live backend switching
-- All demos share kernels via [SpawnDev.ILGPU.Demo.Shared](SpawnDev.ILGPU.Demo.Shared)
+The [WPF Demo](SpawnDev.ILGPU.WpfDemo) runs the same shared kernels on CUDA, OpenCL, and CPU with live backend switching:
+- Fractal Explorer — Interactive Mandelbrot / Multi-fractal Explorer with double-precision zoom
+- 3D Raymarching — Real-time GPU raymarched scenes
+- GPU Boids — 3D flocking simulation with GPU physics
+- Benchmarks — Performance comparison across CUDA, OpenCL, and CPU backends
 
 ### Console Demo
 
 The [Console Demo](SpawnDev.ILGPU.ConsoleDemo) runs the full unit test suite on desktop backends (CUDA, OpenCL, CPU).
+
+```bash
+dotnet run --project SpawnDev.ILGPU.ConsoleDemo
+```
 
 [![Benchmarks Screenshot](https://raw.githubusercontent.com/LostBeard/SpawnDev.ILGPU/master/SpawnDev.ILGPU.Demo/wwwroot/screenshots/benchmark-3.jpg)](https://lostbeard.github.io/SpawnDev.ILGPU/benchmarks)  
 [![Fractal Explorer Screenshot](https://raw.githubusercontent.com/LostBeard/SpawnDev.ILGPU/master/SpawnDev.ILGPU.Demo/wwwroot/screenshots/spawndev-ilgpu-fractal-explorer-3.jpg)](https://lostbeard.github.io/SpawnDev.ILGPU/fractals)
