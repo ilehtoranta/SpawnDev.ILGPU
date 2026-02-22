@@ -161,6 +161,12 @@ namespace SpawnDev.ILGPU.WebGL.Backend
 
         protected readonly HashSet<string> declaredVariables = new();
         protected readonly HashSet<string> booleanVariables = new();
+        // Maps LAEA pointer variable names to their array[index] expressions
+        protected readonly Dictionary<string, string> _leaArrayExprs = new();
+        // Maps Alloca value variable names to their GLSL array names
+        protected readonly Dictionary<string, string> _allocaArrayNames = new();
+        // Tracks Alloca values for array declarations
+        protected int _localArrayCounter = 0;
 
         protected void Declare(Variable variable)
         {
@@ -843,6 +849,8 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 case global::ILGPU.IR.Values.Load v: GenerateCode(v); break;
                 case global::ILGPU.IR.Values.Store v: GenerateCode(v); break;
                 case global::ILGPU.IR.Values.LoadElementAddress v: GenerateCode(v); break;
+                case global::ILGPU.IR.Values.LoadArrayElementAddress v: GenerateCode(v); break;
+                case global::ILGPU.IR.Values.NewArray v: GenerateCode(v); break;
                 case global::ILGPU.IR.Values.LoadFieldAddress v: GenerateCode(v); break;
                 case global::ILGPU.IR.Values.Alloca v: GenerateCode(v); break;
                 case global::ILGPU.IR.Values.NewView v: GenerateCode(v); break;
@@ -1063,16 +1071,28 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             var target = Load(loadVal);
             var source = Load(loadVal.Source);
             Declare(target);
-            AppendLine($"{target} = {source};");
+            // If the source is a LAEA pointer, use the array[index] expression
+            if (_leaArrayExprs.TryGetValue(source.Name, out var arrayExpr))
+                AppendLine($"{target} = {arrayExpr};");
+            else
+                AppendLine($"{target} = {source};");
         }
 
         public virtual void GenerateCode(global::ILGPU.IR.Values.Store storeVal)
         {
             var address = Load(storeVal.Target);
             var val = Load(storeVal.Value);
-            // GLSL ES 3.0: cast value to match address type if needed
-            string valExpr = CastIfNeeded(val, address.Type);
-            AppendLine($"{address} = {valExpr};");
+            // If the address is a LAEA pointer, use the array[index] expression
+            if (_leaArrayExprs.TryGetValue(address.Name, out var arrayExpr))
+            {
+                AppendLine($"{arrayExpr} = {val};");
+            }
+            else
+            {
+                // GLSL ES 3.0: cast value to match address type if needed
+                string valExpr = CastIfNeeded(val, address.Type);
+                AppendLine($"{address} = {valExpr};");
+            }
         }
 
         protected virtual bool IsAtomicPointer(Value ptr) => false;
@@ -1123,7 +1143,53 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             AppendLine($"// LFA: {target} = {source}.{fieldName}");
         }
 
-        public virtual void GenerateCode(Alloca value) { }
+        public virtual void GenerateCode(Alloca value)
+        {
+            // Handle array allocations: declare GLSL local arrays
+            if (value.IsArrayAllocation(out var lengthVal))
+            {
+                int arraySize = lengthVal.Int32Value;
+                string elementType = TypeGenerator[value.AllocaType];
+                string arrayName = $"local_arr_{_localArrayCounter++}";
+                var target = Load(value);
+                _allocaArrayNames[target.Name] = arrayName;
+                declaredVariables.Add(target.Name);
+                AppendLine($"{elementType} {arrayName}[{arraySize}];");
+            }
+        }
+
+        public virtual void GenerateCode(global::ILGPU.IR.Values.NewArray value)
+        {
+            // NewArray creates a local array — declare it as a GLSL array
+            var arrayType = value.Type;
+            string elementType = TypeGenerator[arrayType.ElementType];
+            // Get array size from the dimension node
+            int arraySize = 1;
+            foreach (var dim in value.Nodes)
+            {
+                if (dim.Resolve() is PrimitiveValue pv)
+                    arraySize *= pv.Int32Value;
+            }
+            string arrayName = $"local_arr_{_localArrayCounter++}";
+            var target = Load(value);
+            _allocaArrayNames[target.Name] = arrayName;
+            declaredVariables.Add(target.Name);
+            AppendLine($"{elementType} {arrayName}[{arraySize}];");
+        }
+
+        public virtual void GenerateCode(global::ILGPU.IR.Values.LoadArrayElementAddress value)
+        {
+            var target = Load(value);
+            var arraySource = Load(value.ArrayValue);
+            declaredVariables.Add(target.Name);
+            // value.Dimensions[0] is the index expression
+            var indexVar = Load(value.Dimensions[0]);
+            // Map from the Alloca variable to the actual array name
+            string arrayName = _allocaArrayNames.TryGetValue(arraySource.Name, out var name)
+                ? name : arraySource.Name;
+            _leaArrayExprs[target.Name] = $"{arrayName}[{indexVar}]";
+            AppendLine($"// LAEA: {target} -> {arrayName}[{indexVar}]");
+        }
 
         // Constants
         public virtual void GenerateCode(PrimitiveValue value)
@@ -1190,7 +1256,24 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         {
             var target = Load(value);
             Declare(target);
-            AppendLine($"{target} = {target.Type}(0); // null");
+            // GLSL struct constructors require all fields — cannot use structType(0)
+            if (value.Type is StructureType structType)
+            {
+                var sb = new StringBuilder();
+                sb.Append($"{target} = {target.Type}(");
+                for (int i = 0; i < structType.NumFields; i++)
+                {
+                    if (i > 0) sb.Append(", ");
+                    var fieldGlslType = TypeGenerator[structType.Fields[i]];
+                    sb.Append(GetDefaultValue(fieldGlslType));
+                }
+                sb.Append("); // null");
+                AppendLine(sb.ToString());
+            }
+            else
+            {
+                AppendLine($"{target} = {GetDefaultValue(target.Type)}; // null");
+            }
         }
 
         public virtual void GenerateCode(global::ILGPU.IR.Values.Barrier value)

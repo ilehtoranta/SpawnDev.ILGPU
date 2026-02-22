@@ -178,14 +178,22 @@ namespace SpawnDev.ILGPU.WebGPU
         /// </summary>
         private void OnGPUUncapturedError(GPUUncapturedErrorEvent e)
         {
-            var message = e.Error?.Message ?? "Unknown GPU error";
-            Console.Error.WriteLine($"[WebGPU ERROR] {message}");
-            if (_lastCompiledWGSL != null)
+            try
             {
-                Console.Error.WriteLine($"[WebGPU ERROR] Last WGSL source ({_lastCompiledWGSL.Length} chars):");
-                // Dump first 2000 chars to avoid flooding
-                var snippet = _lastCompiledWGSL.Length > 2000 ? _lastCompiledWGSL.Substring(0, 2000) + "\n...TRUNCATED..." : _lastCompiledWGSL;
-                Console.Error.WriteLine(snippet);
+                var message = e.Error?.Message ?? "Unknown GPU error";
+                WebGPUBackend.Log($"[WebGPU ERROR] {message}");
+                if (WebGPUBackend.VerboseLogging && _lastCompiledWGSL != null)
+                {
+                    var snippet = _lastCompiledWGSL.Length > 2000
+                        ? _lastCompiledWGSL.Substring(0, 2000) + "\n...TRUNCATED..."
+                        : _lastCompiledWGSL;
+                    WebGPUBackend.Log($"[WebGPU ERROR] Last WGSL source ({_lastCompiledWGSL.Length} chars):");
+                    WebGPUBackend.Log(snippet);
+                }
+            }
+            catch
+            {
+                // Swallow any exceptions to avoid triggering Blazor's unhandled error banner
             }
         }
 

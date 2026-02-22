@@ -395,9 +395,6 @@
 
     private async Task InitializeWebGL()
     {
-        // Temporarily enable verbose logging to diagnose shader generation
-        WebGLBackend.VerboseLogging = true;
-        WebGLAccelerator.VerboseLogging = true;
         _ilgpuContext = await Context.CreateAsync(builder => builder.WebGL());
         var devices = _ilgpuContext.GetWebGLDevices();
         if (devices.Count == 0) throw new Exception("No WebGL2 device found");

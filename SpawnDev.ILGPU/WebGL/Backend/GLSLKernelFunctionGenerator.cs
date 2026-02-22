@@ -829,7 +829,25 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                     // Track boolean variables for logical operator selection
                     if (type == "bool")
                         booleanVariables.Add(variable.Name);
-                    string init = GetDefaultValue(type);
+                    // GLSL struct constructors require all fields — not just (0)
+                    string init;
+                    if (value.Type is global::ILGPU.IR.Types.StructureType structType && type.StartsWith("struct_"))
+                    {
+                        var sb = new StringBuilder();
+                        sb.Append($"{type}(");
+                        for (int i = 0; i < structType.NumFields; i++)
+                        {
+                            if (i > 0) sb.Append(", ");
+                            var fieldGlslType = TypeGenerator[structType.Fields[i]];
+                            sb.Append(GetDefaultValue(fieldGlslType));
+                        }
+                        sb.Append(")");
+                        init = sb.ToString();
+                    }
+                    else
+                    {
+                        init = GetDefaultValue(type);
+                    }
                     AppendLine($"{type} {variable.Name} = {init};");
                 }
             }
@@ -849,6 +867,60 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             "uvec2" => "uvec2(0u)",
             _ => $"{glslType}(0)"
         };
+
+        /// <summary>
+        /// Override Alloca to declare local arrays at function scope (not inside switch/case).
+        /// In multi-block kernels, arrays must be visible across all state machine blocks.
+        /// </summary>
+        public override void GenerateCode(Alloca value)
+        {
+            if (value.IsArrayAllocation(out var lengthVal))
+            {
+                int arraySize = lengthVal.Int32Value;
+                string elementType = TypeGenerator[value.AllocaType];
+                string arrayName = $"local_arr_{_localArrayCounter++}";
+                var target = Load(value);
+                _allocaArrayNames[target.Name] = arrayName;
+                declaredVariables.Add(target.Name);
+                // Use VariableBuilder when state machine is active to hoist to function scope
+                if (IsStateMachineActive)
+                {
+                    VariableBuilder.AppendLine($"    {elementType} {arrayName}[{arraySize}];");
+                }
+                else
+                {
+                    AppendLine($"{elementType} {arrayName}[{arraySize}];");
+                }
+            }
+        }
+
+        /// <summary>
+        /// Override NewArray to declare local arrays at function scope (not inside switch/case).
+        /// NewArray is the IR value for inline array initializations like BVHNode[] nodes = [...].
+        /// </summary>
+        public override void GenerateCode(global::ILGPU.IR.Values.NewArray value)
+        {
+            var arrayType = value.Type;
+            string elementType = TypeGenerator[arrayType.ElementType];
+            int arraySize = 1;
+            foreach (var dim in value.Nodes)
+            {
+                if (dim.Resolve() is PrimitiveValue pv)
+                    arraySize *= pv.Int32Value;
+            }
+            string arrayName = $"local_arr_{_localArrayCounter++}";
+            var target = Load(value);
+            _allocaArrayNames[target.Name] = arrayName;
+            declaredVariables.Add(target.Name);
+            if (IsStateMachineActive)
+            {
+                VariableBuilder.AppendLine($"    {elementType} {arrayName}[{arraySize}];");
+            }
+            else
+            {
+                AppendLine($"{elementType} {arrayName}[{arraySize}];");
+            }
+        }
 
         #endregion
 
@@ -1462,6 +1534,15 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             var target = Load(loadVal);
             var source = Load(loadVal.Source);
 
+            // Local array element access via LAEA pointer
+            if (_leaArrayExprs.TryGetValue(source.Name, out var arrayExpr))
+            {
+                string prefix = _hoistedPrimitives.Contains(loadVal) ? "" : $"{TypeGenerator[loadVal.Type]} ";
+                declaredVariables.Add(target.Name);
+                AppendLine($"{prefix}{target} = {arrayExpr};");
+                return;
+            }
+
             // Check for direct parameter load (View alias)
             if (loadVal.Source.Resolve() is global::ILGPU.IR.Values.Parameter param && param.Type is ViewType)
             {
@@ -1600,6 +1681,12 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             var address = Load(storeVal.Target);
             var val = Load(storeVal.Value);
 
+            // Local array element write via LAEA pointer
+            if (_leaArrayExprs.TryGetValue(address.Name, out var arrayExpr))
+            {
+                AppendLine($"{arrayExpr} = {val};");
+                return;
+            }
 
             // Emulated 64-bit buffer store via TF output
             if (_emulatedVarMappings.TryGetValue(address.ToString(), out var emulInfo))

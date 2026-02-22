@@ -654,6 +654,150 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             }
         });
 
+        // --- BVH Ray Traversal Wrong Results (upstream #1539) ---
+        // Complex kernel with while loop, stack-based BVH traversal, nested record structs.
+        // Produces wrong results on AMD integrated GPU OpenCL.
+        // On correct backends: all 100 rays should MISS (geometry is behind target plane).
+        public readonly record struct Vec3_1539(float X, float Y, float Z)
+        {
+            public float Length => MathF.Sqrt(X * X + Y * Y + Z * Z);
+            public static Vec3_1539 operator -(Vec3_1539 l, Vec3_1539 r) =>
+                new(l.X - r.X, l.Y - r.Y, l.Z - r.Z);
+            public static Vec3_1539 operator *(Vec3_1539 v, float d) =>
+                new(d * v.X, d * v.Y, d * v.Z);
+        }
+
+        public readonly record struct Ray_1539(Vec3_1539 Origin, Vec3_1539 Direction)
+        {
+            public readonly Vec3_1539 ReciprocalDirection =
+                new(1f / Direction.X, 1f / Direction.Y, 1f / Direction.Z);
+        }
+
+        public readonly record struct AABB_1539(Vec3_1539 Min, Vec3_1539 Max);
+
+        public readonly record struct BVHNode_1539(AABB_1539 BoundingBox, int ChildNodeIndex, int InnerNodeIndicator)
+        {
+            public bool IsInnerNode() => InnerNodeIndicator == -1;
+        }
+
+        private static float IntersectAABB_1539(Ray_1539 ray, AABB_1539 box)
+        {
+            float tx1 = (box.Min.X - ray.Origin.X) * ray.ReciprocalDirection.X;
+            float tx2 = (box.Max.X - ray.Origin.X) * ray.ReciprocalDirection.X;
+            float tMin = MathF.Min(tx1, tx2);
+            float tMax = MathF.Max(tx1, tx2);
+
+            float ty1 = (box.Min.Y - ray.Origin.Y) * ray.ReciprocalDirection.Y;
+            float ty2 = (box.Max.Y - ray.Origin.Y) * ray.ReciprocalDirection.Y;
+            tMin = MathF.Max(tMin, MathF.Min(ty1, ty2));
+            tMax = MathF.Min(tMax, MathF.Max(ty1, ty2));
+
+            float tz1 = (box.Min.Z - ray.Origin.Z) * ray.ReciprocalDirection.Z;
+            float tz2 = (box.Max.Z - ray.Origin.Z) * ray.ReciprocalDirection.Z;
+            tMin = MathF.Max(tMin, MathF.Min(tz1, tz2));
+            tMax = MathF.Min(tMax, MathF.Max(tz1, tz2));
+
+            if (tMax >= tMin && tMax > 0f)
+                return tMin; // Hit
+            return float.MaxValue; // Miss
+        }
+
+        private static float DistanceToGeometry_1539(Ray_1539 ray, BVHNode_1539[] nodes)
+        {
+            BVHNode_1539[] nodeStack = new BVHNode_1539[10];
+            uint nodeStackPtr = 0;
+            BVHNode_1539 node = nodes[0]; // root
+            float nearestHitDistance = float.MaxValue;
+
+            while (true)
+            {
+                if (node.IsInnerNode())
+                {
+                    BVHNode_1539 child1 = nodes[node.ChildNodeIndex];
+                    BVHNode_1539 child2 = nodes[node.ChildNodeIndex + 1];
+                    float dist1 = IntersectAABB_1539(ray, child1.BoundingBox);
+                    float dist2 = IntersectAABB_1539(ray, child2.BoundingBox);
+
+                    // THIS EXACT PATTERN triggers the AMD OpenCL bug:
+                    // combining the condition inline instead of extracting to a variable
+                    if (dist1 == float.MaxValue || dist1 > nearestHitDistance)
+                    {
+                        if (nodeStackPtr == 0)
+                            break;
+                        node = nodeStack[--nodeStackPtr];
+                    }
+                    else
+                    {
+                        node = child1;
+                        if (dist2 != float.MaxValue && dist2 < nearestHitDistance)
+                        {
+                            nodeStack[nodeStackPtr++] = child2;
+                        }
+                    }
+                }
+                else
+                {
+                    // Leaf node — set distance far beyond any ray-to-target distance (= miss)
+                    nearestHitDistance = 1000f;
+                    if (nodeStackPtr == 0)
+                        break;
+                    node = nodeStack[--nodeStackPtr];
+                }
+            }
+            return nearestHitDistance;
+        }
+
+        private static void BVHRayTraversalKernel_1539(Index1D index, ArrayView<int> resultBuffer)
+        {
+            const int numberOfPoints = 100;
+            if (index >= numberOfPoints)
+                return;
+
+            var rayOrigin = new Vec3_1539(0f, 0f, 1f);
+            float x = index % 10 - 5;
+            float y = index / 10 - 5;
+            var rayTarget = new Vec3_1539(x, y, -10f);
+
+            // Geometry BEHIND target plane — should NOT be hit by any ray
+            BVHNode_1539[] nodes =
+            [
+                new(new AABB_1539(new Vec3_1539(-2f, -2f, -15f), new Vec3_1539(2f, 2f, -18f)), 1, -1),  // root (inner)
+                new(new AABB_1539(new Vec3_1539(-1f, -1f, -16f), new Vec3_1539(1f, 1f, -17f)), 42, 43), // leaf 1
+                new(new AABB_1539(new Vec3_1539(-1f, -1f, -16f), new Vec3_1539(1f, 1f, -17f)), 42, 43), // leaf 2
+            ];
+
+            var originToTarget = rayTarget - rayOrigin;
+            var originToTargetDistance = originToTarget.Length;
+            var normalizedDir = originToTarget * (1f / originToTargetDistance);
+            var ray = new Ray_1539(rayOrigin, normalizedDir);
+
+            float hitDistance = DistanceToGeometry_1539(ray, nodes);
+            bool geometryShadows = hitDistance < originToTargetDistance;
+            resultBuffer[index] = geometryShadows ? 1 : 0;
+        }
+
+        [TestMethod]
+        public async Task BVHRayTraversalTest() => await RunTest(async accelerator =>
+        {
+            // Upstream #1539: BVH traversal kernel produces wrong hit/miss on AMD OpenCL.
+            // On correct backends, all 100 rays should MISS (0 hits).
+            const int numberOfPoints = 100;
+            using var bufOut = accelerator.Allocate1D<int>(numberOfPoints);
+
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<
+                Index1D, ArrayView<int>>(BVHRayTraversalKernel_1539);
+            kernel((Index1D)numberOfPoints, bufOut.View);
+            await accelerator.SynchronizeAsync();
+            var result = await bufOut.CopyToHostAsync<int>();
+
+            int hits = 0;
+            for (int i = 0; i < numberOfPoints; i++)
+                if (result[i] == 1) hits++;
+
+            if (hits != 0)
+                throw new Exception($"BVH ray traversal: expected 0 hits (all miss), got {hits} hits out of {numberOfPoints}");
+        });
+
         #endregion
     }
 }

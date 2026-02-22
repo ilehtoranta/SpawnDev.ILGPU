@@ -130,7 +130,7 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
         [TestMethod]
         public async Task WebGPUDynamicSharedF64Test()
         {
-            SpawnDev.ILGPU.WebGPU.Backend.WebGPUBackend.VerboseLogging = true;
+            // VerboseLogging disabled (was flooding console)
             // F64 emulation is enabled by default
             var builder = Context.Create();
             await builder.WebGPU();

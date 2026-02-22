@@ -108,6 +108,10 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         protected readonly Dictionary<Value, Variable> valueVariables = new();
         private readonly Dictionary<BasicBlock, string> blockLabels = new();
 
+        // Local array support (NewArray + LoadArrayElementAddress)
+        protected readonly Dictionary<string, string> _allocaArrayNames = new();
+        protected int _localArrayCounter = 0;
+
         // Flag to tracking if we are generating code within the state machine loop
         protected bool IsStateMachineActive { get; set; } = false;
 
@@ -463,7 +467,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
                     // Infer type from the expression for the var declaration
                     string inferredType = "bool"; // default for comparisons
-                    if (expr.Contains("&param") || expr.Contains("&temp_"))
+                    if (expr.Contains("&param") || expr.Contains("&temp_") || expr.Contains("&local_arr_"))
                     {
                         // Pointer aliases — keep as let (they can't be var since var can't hold references)
                         return match.Value;
@@ -653,6 +657,12 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     GenerateCode(v);
                     break;
                 case global::ILGPU.IR.Values.Alloca v:
+                    GenerateCode(v);
+                    break;
+                case global::ILGPU.IR.Values.NewArray v:
+                    GenerateCode(v);
+                    break;
+                case global::ILGPU.IR.Values.LoadArrayElementAddress v:
                     GenerateCode(v);
                     break;
                 case global::ILGPU.IR.Values.NewView v:
@@ -1175,6 +1185,43 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         public virtual void GenerateCode(Alloca value)
         {
             // Already handled in SetupAllocations
+        }
+
+        public virtual void GenerateCode(global::ILGPU.IR.Values.NewArray value)
+        {
+            // NewArray creates a local array — declare it
+            var arrayType = value.Type;
+            string elementType = TypeGenerator[arrayType.ElementType];
+            int arraySize = 1;
+            foreach (var dim in value.Nodes)
+            {
+                if (dim.Resolve() is PrimitiveValue pv)
+                    arraySize *= pv.Int32Value;
+            }
+            string arrayName = $"local_arr_{_localArrayCounter++}";
+            var target = Load(value);
+            _allocaArrayNames[target.Name] = arrayName;
+            if (IsStateMachineActive)
+            {
+                VariableBuilder.AppendLine($"    var {arrayName} : array<{elementType}, {arraySize}>;");
+            }
+            else
+            {
+                AppendLine($"var {arrayName} : array<{elementType}, {arraySize}>;");
+            }
+        }
+
+        public virtual void GenerateCode(global::ILGPU.IR.Values.LoadArrayElementAddress value)
+        {
+            var target = Load(value);
+            var arraySource = Load(value.ArrayValue);
+            var indexVar = Load(value.Dimensions[0]);
+            string arrayName = _allocaArrayNames.TryGetValue(arraySource.Name, out var name)
+                ? name : arraySource.Name;
+            // Emit a WGSL pointer: let v_N = &array[index];
+            AppendIndent();
+            Builder.Append($"let {target.Name} = &{arrayName}[{indexVar}];");
+            Builder.AppendLine();
         }
 
         // Constants
