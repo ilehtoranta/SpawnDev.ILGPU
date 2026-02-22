@@ -791,11 +791,12 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             var result = await bufOut.CopyToHostAsync<int>();
 
             int hits = 0;
+            var hitIndices = new List<int>();
             for (int i = 0; i < numberOfPoints; i++)
-                if (result[i] == 1) hits++;
+                if (result[i] == 1) { hits++; hitIndices.Add(i); }
 
             if (hits != 0)
-                throw new Exception($"BVH ray traversal: expected 0 hits (all miss), got {hits} hits out of {numberOfPoints}");
+                throw new Exception($"BVH ray traversal: expected 0 hits (all miss), got {hits} hits out of {numberOfPoints}. Hit indices: [{string.Join(", ", hitIndices)}]");
         });
 
         #endregion

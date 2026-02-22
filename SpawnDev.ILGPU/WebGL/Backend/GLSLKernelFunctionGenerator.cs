@@ -1146,6 +1146,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             bool trueIsExit = ExitsLoopTransitively(trueTarget, loop);
             bool falseIsExit = ExitsLoopTransitively(falseTarget, loop);
 
+
             // Case 1: Loop condition check — one side continues, other exits
             if (trueIsBackEdge && falseIsExit)
             {
@@ -1233,19 +1234,22 @@ namespace SpawnDev.ILGPU.WebGL.Backend
 
             // Case 4: Both sides stay in loop — use post-dominator for merge
             var merge = _postDominators?.GetImmediateDominator(source);
+            bool mergeInLoop = merge != null && loop.Contains(merge);
 
-            // FIX: Temporarily mark the merge block as visited so that neither
-            // branch can consume it. Without this, GenerateLoopBody from the
-            // false target can follow unconditional branches past the clamp
-            // block into the merge block, incorrectly nesting the entire
-            // drawing/continuation code inside the else branch.
-            bool mergeWasVisited = merge != null && _visitedBlocks.Contains(merge);
-            if (merge != null && !mergeWasVisited)
-                _visitedBlocks.Add(merge);
+            // Note: We intentionally do NOT temporarily mark the merge as visited.
+            // The merge block may be needed as a continuation target by nested
+            // branches (e.g., the merge for an outer if/else might be the PHI
+            // write-back + continue block that an inner branch needs to reach).
 
-            PushPhiValues(trueTarget, source);
+            // Save visited state before the true branch so that blocks consumed
+            // by the true path can be re-visited by the false path. This is
+            // essential when both paths share a common back-edge block (e.g.,
+            // the PHI write-back + continue block in BVH traversal).
+            var visitedBeforeTrueBranch = new HashSet<BasicBlock>(_visitedBlocks);
+
             AppendLine($"if ({cond}) {{");
             PushIndent();
+            PushPhiValues(trueTarget, source);
             if (trueTarget == merge)
             {
                 // True goes directly to merge — nothing to generate
@@ -1258,6 +1262,11 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             AppendLine("} else {");
             PushIndent();
             PushPhiValues(falseTarget, source);
+
+            // Restore visited state: remove blocks that were only visited during
+            // the true branch, so the false branch can reach shared targets.
+            _visitedBlocks.IntersectWith(visitedBeforeTrueBranch);
+
             if (falseTarget == merge)
             {
                 // False goes directly to merge — nothing to generate
@@ -1269,12 +1278,9 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             PopIndent();
             AppendLine("}");
 
-            // Remove the temporary visited mark so the merge block can be emitted
-            if (merge != null && !mergeWasVisited)
-                _visitedBlocks.Remove(merge);
-
-            // Continue with merge block if it's in the loop
-            if (merge != null && loop.Contains(merge) && !_visitedBlocks.Contains(merge))
+            // Continue with merge block if it's in the loop and wasn't consumed
+            // by BOTH branches (it may have been consumed by just one)
+            if (mergeInLoop && !_visitedBlocks.Contains(merge))
             {
                 GenerateLoopBody(merge, loop, outerStop);
             }
