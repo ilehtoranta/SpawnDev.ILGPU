@@ -57,6 +57,39 @@
         </div>
     }
 
+    @* ── Summary (at top) ── *@
+    @if (_results.Count > 0 && !_isRunning)
+    {
+        <div class="bench-card summary-card">
+            <h2>🏆 Overall Ranking</h2>
+            <div class="ranking-grid">
+                @{
+                    var ranking = _results
+                        .Where(r => r.MedianMs.HasValue)
+                        .GroupBy(r => r.BackendName)
+                        .Select(g => new { Name = g.Key, AvgMs = g.Average(r => r.MedianMs!.Value), Wins = g.Count(r =>
+                        {
+                            var benchGroup = _results.Where(x => x.BenchmarkName == r.BenchmarkName && x.MedianMs.HasValue);
+                            return benchGroup.Any() && r.MedianMs == benchGroup.Min(x => x.MedianMs);
+                        }) })
+                        .OrderByDescending(x => x.Wins).ThenBy(x => x.AvgMs)
+                        .ToList();
+                    int rank = 1;
+                }
+                @foreach (var r in ranking)
+                {
+                    <div class="rank-item">
+                        <span class="rank-number">#@(rank++)</span>
+                        <span class="backend-dot" style="background: @(GetBackendColor(r.Name))"></span>
+                        <span class="rank-name">@r.Name</span>
+                        <span class="rank-wins">@r.Wins 🥇</span>
+                        <span class="rank-avg">avg @r.AvgMs.ToString("F1") ms</span>
+                    </div>
+                }
+            </div>
+        </div>
+    }
+
     @* ── Results ── *@
     @foreach (var bench in _benchmarkDefs)
     {
@@ -111,39 +144,6 @@
 
             @* Canvas chart *@
             <canvas id="chart-@bench.Id" class="bench-chart" width="700" height="260"></canvas>
-        </div>
-    }
-
-    @* ── Summary ── *@
-    @if (_results.Count > 0 && !_isRunning)
-    {
-        <div class="bench-card summary-card">
-            <h2>🏆 Overall Ranking</h2>
-            <div class="ranking-grid">
-                @{
-                    var ranking = _results
-                        .Where(r => r.MedianMs.HasValue)
-                        .GroupBy(r => r.BackendName)
-                        .Select(g => new { Name = g.Key, AvgMs = g.Average(r => r.MedianMs!.Value), Wins = g.Count(r =>
-                        {
-                            var benchGroup = _results.Where(x => x.BenchmarkName == r.BenchmarkName && x.MedianMs.HasValue);
-                            return benchGroup.Any() && r.MedianMs == benchGroup.Min(x => x.MedianMs);
-                        }) })
-                        .OrderByDescending(x => x.Wins).ThenBy(x => x.AvgMs)
-                        .ToList();
-                    int rank = 1;
-                }
-                @foreach (var r in ranking)
-                {
-                    <div class="rank-item">
-                        <span class="rank-number">#@(rank++)</span>
-                        <span class="backend-dot" style="background: @(GetBackendColor(r.Name))"></span>
-                        <span class="rank-name">@r.Name</span>
-                        <span class="rank-wins">@r.Wins 🥇</span>
-                        <span class="rank-avg">avg @r.AvgMs.ToString("F1") ms</span>
-                    </div>
-                }
-            </div>
         </div>
     }
 </div>
