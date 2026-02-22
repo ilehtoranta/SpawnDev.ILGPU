@@ -11,8 +11,7 @@ Blazor WebAssembly runs on a single thread. Blocking that thread prevents JavaSc
 ### ❌ Will Deadlock
 
 ```csharp
-accelerator.Synchronize();          // DEADLOCKS — blocks waiting for GPU
-buffer.GetAsArray1D();               // DEADLOCKS — calls Synchronize internally
+buffer.GetAsArray1D();               // DEADLOCKS — calls synchronous readback internally
 var result = task.Result;            // DEADLOCKS — blocks on async result
 task.Wait();                         // DEADLOCKS
 task.GetAwaiter().GetResult();       // DEADLOCKS
@@ -21,8 +20,14 @@ task.GetAwaiter().GetResult();       // DEADLOCKS
 ### ✅ Correct Async Pattern
 
 ```csharp
-await accelerator.SynchronizeAsync();                  // Non-blocking wait
-var results = await buffer.CopyToHostAsync<float>();   // Async readback
+// Synchronize() flushes commands to the backend (non-blocking, safe in WASM)
+accelerator.Synchronize();
+
+// SynchronizeAsync() flushes AND waits for completion
+await accelerator.SynchronizeAsync();
+
+// CopyToHostAsync() is the only way to read GPU data back to CPU
+var results = await buffer.CopyToHostAsync<float>();
 ```
 
 > **Rule:** Always propagate `async/await` through your entire call stack. Never use `.Result`, `.Wait()`, or `.GetAwaiter().GetResult()` on the main thread.

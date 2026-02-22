@@ -50,8 +50,8 @@ using var accelerator = await context.CreatePreferredAcceleratorAsync();
 
 // ... load kernel, dispatch ...
 
-await accelerator.SynchronizeAsync();
-var results = await bufC.CopyToHostAsync<float>();
+await accelerator.SynchronizeAsync();                // Waits for GPU completion (no data transfer)
+var results = await bufC.CopyToHostAsync<float>();   // The only GPU→CPU data transfer path
 ```
 
 `AllAcceleratorsAsync()` automatically detects the environment:
@@ -167,6 +167,8 @@ using var accelerator = devices[0].CreateAccelerator(context, options);
 ### Architecture
 
 The WebGL backend is unique — all GL calls are dispatched to a dedicated Web Worker via `glWorker.js`. This keeps the main thread responsive even during intensive GPU compute.
+
+Buffers persist as **GPU-resident textures** in the worker. Kernel dispatch sends buffer references (not data) — no `ArrayBuffer` transfers occur per dispatch. Data only moves to the CPU when explicitly requested via `CopyToHostAsync()`.
 
 ### Limitations
 

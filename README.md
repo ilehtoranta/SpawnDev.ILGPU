@@ -253,7 +253,7 @@ _test.bat
 
 ## Test Coverage
 
-**600+ tests** across eight test suites covering all core features on both browser and desktop.
+**640 tests** across eight test suites covering all core features on both browser and desktop.
 
 ### Test Suites
 
@@ -372,17 +372,20 @@ The Wasm backend compiles ILGPU kernels to native WebAssembly binary modules and
 - Compiled modules are cached and reused across dispatches
 - Shared memory uses `SharedArrayBuffer` for zero-copy data sharing
 
-## Async Synchronization
-
-In Blazor WebAssembly, the main thread cannot block. Use `SynchronizeAsync()` instead of `Synchronize()`:
+## Synchronization
 
 ```csharp
-// ❌ Don't use — causes deadlock in Blazor WASM
+// Synchronize() — flushes queued commands to the backend (non-blocking, safe in WASM)
 accelerator.Synchronize();
 
-// ✅ Use async version — works with all backends
+// SynchronizeAsync() — flushes AND waits for GPU completion
 await accelerator.SynchronizeAsync();
+
+// CopyToHostAsync() — the ONLY way to read GPU data back to CPU
+var results = await buffer.CopyToHostAsync<float>();
 ```
+
+> **Note:** `Synchronize()` does **not** block in Blazor WASM — it flushes commands without waiting. `SynchronizeAsync()` flushes and waits for completion. Neither transfers data; use `CopyToHostAsync()` for GPU→CPU readback.
 
 ## Verbose Logging
 

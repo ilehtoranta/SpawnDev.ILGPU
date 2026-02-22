@@ -82,16 +82,21 @@ kernel((Index1D)length, buffer.View, 2.5f, 10);
 
 ## Reading Data from the GPU
 
-### SynchronizeAsync (Wait for Completion)
+### Synchronization
 
-After launching a kernel, you **must** wait for the GPU to finish before reading results:
+After launching a kernel, you must synchronize before reading results:
 
 ```csharp
 kernel((Index1D)length, bufA.View, bufB.View, bufC.View);
-await accelerator.SynchronizeAsync();  // Wait for kernel to complete
+
+// Synchronize() flushes commands to the backend (non-blocking, safe in WASM)
+accelerator.Synchronize();
+
+// SynchronizeAsync() flushes AND waits for GPU completion
+await accelerator.SynchronizeAsync();
 ```
 
-> **Critical:** Always use `SynchronizeAsync()` in Blazor WASM. The synchronous `Synchronize()` will deadlock. See [Limitations](limitations.md).
+> **Semantics:** `Synchronize()` flushes queued commands to the backend but does **not** wait for completion and does **not** transfer data. `SynchronizeAsync()` flushes and waits for all GPU operations to complete. Neither transfers data — use `CopyToHostAsync()` to read results back to the CPU.
 
 ### CopyToHostAsync — Unified Extension Method
 
