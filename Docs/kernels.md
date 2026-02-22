@@ -1,6 +1,6 @@
 # Writing Kernels
 
-A kernel is a function that runs in parallel on the GPU (or CPU workers). SpawnDev.ILGPU compiles your C# kernel code into GPU shader languages (WGSL, GLSL) or WebAssembly automatically.
+A kernel is a function that runs in parallel across many threads. SpawnDev.ILGPU compiles your C# kernel code into the target backend's native language — WGSL or GLSL for browser GPUs, PTX or OpenCL C for desktop GPUs, or WebAssembly / native threads for CPU backends.
 
 ## Kernel Basics
 
@@ -26,7 +26,7 @@ These rules apply to all kernel code — they come from ILGPU's design and the c
 | Must return `void` | Kernels don't return values — use output buffers |
 | First parameter is the index | `Index1D`, `Index2D`, or `Index3D` |
 | Value types only | No classes, no `string`, no reference types |
-| No `throw` | The WGSL/GLSL transpiler does not support exception handling |
+| No `throw` | No backend supports exception handling in kernels |
 | No `ref` / `out` | Parameters are passed by value |
 | No recursion | GPU hardware doesn't support call stacks |
 | No dynamic allocation | No `new` inside kernels (except fixed-size structs) |
@@ -236,7 +236,7 @@ These .NET methods contain internal `throw` statements and will fail during tran
 
 Shared memory allows threads within a workgroup to share data. It's much faster than global memory but limited in size.
 
-> **Availability:** WebGPU and Wasm backends only. WebGL does not support shared memory.
+> **Availability:** Supported on WebGPU, Wasm, CUDA, OpenCL, and CPU backends. WebGL does not support shared memory.
 
 ### Static Shared Memory
 

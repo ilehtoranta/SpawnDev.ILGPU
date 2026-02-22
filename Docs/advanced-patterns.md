@@ -10,15 +10,15 @@ ILGPU provides built-in intrinsics for GPU-specific operations. SpawnDev.ILGPU s
 
 Group (workgroup) operations let threads within a workgroup coordinate:
 
-| Intrinsic | Description | WebGPU | WebGL | Wasm |
-|-----------|-------------|--------|-------|------|
-| `Group.IdxX` / `IdxY` / `IdxZ` | Thread index within workgroup | ✅ | ✅ | ✅ |
-| `Group.DimX` / `DimY` / `DimZ` | Workgroup size | ✅ | ✅ | ✅ |
-| `Group.Barrier()` | Synchronize all threads in group | ✅ | ❌ | ✅ |
-| `Group.BarrierPopCount(bool)` | Barrier + count true values | ✅ | ❌ | ✅ |
-| `Group.BarrierAnd(bool)` | Barrier + AND across group | ✅ | ❌ | ✅ |
-| `Group.BarrierOr(bool)` | Barrier + OR across group | ✅ | ❌ | ✅ |
-| `Group.Broadcast(value, idx)` | Broadcast value from one thread | ✅ | ❌ | ✅ |
+| Intrinsic | Description | WebGPU | WebGL | Wasm | CUDA | OpenCL | CPU |
+|-----------|-------------|--------|-------|------|------|--------|-----|
+| `Group.IdxX` / `IdxY` / `IdxZ` | Thread index within workgroup | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `Group.DimX` / `DimY` / `DimZ` | Workgroup size | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `Group.Barrier()` | Synchronize all threads in group | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ |
+| `Group.BarrierPopCount(bool)` | Barrier + count true values | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ |
+| `Group.BarrierAnd(bool)` | Barrier + AND across group | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ |
+| `Group.BarrierOr(bool)` | Barrier + OR across group | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ |
+| `Group.Broadcast(value, idx)` | Broadcast value from one thread | ✅ | ❌ | ✅ | ✅ | ✅¹ | ✅ |
 
 ```csharp
 static void BarrierExample(ArrayView<int> data, ArrayView<int> output)
@@ -69,16 +69,17 @@ static void GridExample(ArrayView<float> data)
 
 Warp (subgroup) operations allow threads within a warp to communicate directly without shared memory:
 
-| Intrinsic | Description | WebGPU | WebGL | Wasm |
-|-----------|-------------|--------|-------|------|
-| `Warp.WarpSize` | Number of threads in a warp | ✅¹ | ❌ | ✅ |
-| `Warp.LaneIdx` | Thread index within warp | ✅¹ | ❌ | ✅ |
-| `Warp.Shuffle(value, srcLane)` | Read value from another lane | ✅¹ | ❌ | ✅ |
-| `Warp.ShuffleDown(value, delta)` | Read from lane + delta | ✅¹ | ❌ | ✅ |
-| `Warp.ShuffleUp(value, delta)` | Read from lane - delta | ✅¹ | ❌ | ✅ |
-| `Warp.ShuffleXor(value, mask)` | Read from lane XOR mask | ✅¹ | ❌ | ✅ |
+| Intrinsic | Description | WebGPU | WebGL | Wasm | CUDA | OpenCL | CPU |
+|-----------|-------------|--------|-------|------|------|--------|-----|
+| `Warp.WarpSize` | Number of threads in a warp | ✅² | ❌ | ✅ | ✅ | ✅¹ | ✅ |
+| `Warp.LaneIdx` | Thread index within warp | ✅² | ❌ | ✅ | ✅ | ✅¹ | ✅ |
+| `Warp.Shuffle(value, srcLane)` | Read value from another lane | ✅² | ❌ | ✅ | ✅ | ✅¹ | ✅ |
+| `Warp.ShuffleDown(value, delta)` | Read from lane + delta | ✅² | ❌ | ✅ | ✅ | ✅¹ | ✅ |
+| `Warp.ShuffleUp(value, delta)` | Read from lane - delta | ✅² | ❌ | ✅ | ✅ | ✅¹ | ✅ |
+| `Warp.ShuffleXor(value, mask)` | Read from lane XOR mask | ✅² | ❌ | ✅ | ✅ | ✅¹ | ✅ |
 
-> ¹ WebGPU warp operations require the `subgroups` extension (Chrome 128+).
+¹ Requires device subgroup support (dynamically detected; some OpenCL 3.0 devices may lack subgroups)  
+² Requires `subgroups` WebGPU extension (Chrome 128+).
 
 ```csharp
 static void WarpReduceExample(ArrayView<float> data, ArrayView<float> output)
@@ -104,16 +105,16 @@ static void WarpReduceExample(ArrayView<float> data, ArrayView<float> output)
 
 Atomics perform thread-safe read-modify-write operations on shared or global memory:
 
-| Intrinsic | Description | WebGPU | WebGL | Wasm |
-|-----------|-------------|--------|-------|------|
-| `Atomic.Add(ref, value)` | Atomic add | ✅ | ❌ | ✅ |
-| `Atomic.Min(ref, value)` | Atomic minimum | ✅ | ❌ | ✅ |
-| `Atomic.Max(ref, value)` | Atomic maximum | ✅ | ❌ | ✅ |
-| `Atomic.And(ref, value)` | Atomic bitwise AND | ✅ | ❌ | ✅ |
-| `Atomic.Or(ref, value)` | Atomic bitwise OR | ✅ | ❌ | ✅ |
-| `Atomic.Xor(ref, value)` | Atomic bitwise XOR | ✅ | ❌ | ✅ |
-| `Atomic.Exchange(ref, value)` | Atomic swap | ✅ | ❌ | ✅ |
-| `Atomic.CompareExchange(ref, cmp, val)` | CAS (compare-and-swap) | ✅ | ❌ | ✅ |
+| Intrinsic | Description | WebGPU | WebGL | Wasm | CUDA | OpenCL | CPU |
+|-----------|-------------|--------|-------|------|------|--------|-----|
+| `Atomic.Add(ref, value)` | Atomic add | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ |
+| `Atomic.Min(ref, value)` | Atomic minimum | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ |
+| `Atomic.Max(ref, value)` | Atomic maximum | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ |
+| `Atomic.And(ref, value)` | Atomic bitwise AND | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ |
+| `Atomic.Or(ref, value)` | Atomic bitwise OR | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ |
+| `Atomic.Xor(ref, value)` | Atomic bitwise XOR | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ |
+| `Atomic.Exchange(ref, value)` | Atomic swap | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ |
+| `Atomic.CompareExchange(ref, cmp, val)` | CAS (compare-and-swap) | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ |
 
 ```csharp
 static void AtomicCountKernel(Index1D index, ArrayView<int> data, ArrayView<int> counter)
@@ -423,4 +424,4 @@ var result = await output.CopyToHostAsync<float>();
 // result[0] == 15
 ```
 
-> **Note:** Not all algorithms work with all backends. Algorithms using shared memory or atomics require WebGPU or Wasm. See [Backends](backends.md) for the compatibility matrix.
+> **Note:** Not all algorithms work with all backends. Algorithms using shared memory or atomics require WebGPU, Wasm, CUDA, OpenCL, or CPU — they do not work on WebGL. See [Backends](backends.md) for the full compatibility matrix.

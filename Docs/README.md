@@ -7,7 +7,7 @@ Comprehensive documentation for SpawnDev.ILGPU — run ILGPU C# kernels on WebGP
 ## Table of Contents
 
 ### Getting Started
-- **[Getting Started](getting-started.md)** — Installation, Program.cs setup, and your first GPU kernel in the browser
+- **[Getting Started](getting-started.md)** — Installation, setup, and your first GPU kernel (browser or desktop)
 
 ### Core Concepts
 - **[Backends](backends.md)** — WebGPU, WebGL, Wasm, Cuda, OpenCL, and CPU: setup, capabilities, and auto-selection

@@ -100,7 +100,7 @@ await accelerator.SynchronizeAsync();
 
 ### CopyToHostAsync — Unified Extension Method
 
-The simplest way to read GPU data. Works with **all backends** (WebGPU, WebGL, Wasm, CPU):
+The simplest way to read GPU data. Works with **all six backends** (WebGPU, WebGL, Wasm, CUDA, OpenCL, CPU):
 
 ```csharp
 using SpawnDev.ILGPU;

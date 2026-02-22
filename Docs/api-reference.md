@@ -17,11 +17,11 @@ using SpawnDev.ILGPU;
 | Method | Return | Description |
 |--------|--------|-------------|
 | `Context.CreateAsync(Action<Builder>)` | `Task<Context>` | Creates a context using an async builder (required for WebGPU probing) |
-| `builder.AllAcceleratorsAsync()` | `Builder` | Enables all WASM backends: WebGPU, WebGL, Wasm. Silently skips unavailable ones |
+| `builder.AllAcceleratorsAsync()` | `Builder` | Enables all available backends (browser: WebGPU, WebGL, Wasm; desktop: CUDA, OpenCL, CPU). Silently skips unavailable ones |
 | `builder.WebGPU()` | `Builder` | Enables WebGPU backend only |
 | `builder.WebGL()` | `Builder` | Enables WebGL backend only |
 | `builder.Wasm()` | `Builder` | Enables Wasm backend only |
-| `context.CreatePreferredAcceleratorAsync()` | `Task<Accelerator>` | Creates the best available accelerator (WebGPU > WebGL > Wasm) |
+| `context.CreatePreferredAcceleratorAsync()` | `Task<Accelerator>` | Creates the best available accelerator (browser: WebGPU > WebGL > Wasm; desktop: CUDA > OpenCL > CPU) |
 | `accelerator.SynchronizeAsync()` | `Task` | Async wait for all GPU work to complete |
 | `buffer.CopyToHostAsync<T>()` | `Task<T[]>` | Copies buffer data to a new array (works with all backends) |
 | `context.GetWebGPUDevices()` | `List<WebGPUILGPUDevice>` | Lists registered WebGPU devices |

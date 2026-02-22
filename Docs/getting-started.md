@@ -1,14 +1,20 @@
 # Getting Started
 
-This guide walks you through installing SpawnDev.ILGPU, configuring your Blazor WebAssembly project, and running your first GPU kernel in the browser.
+This guide walks you through installing SpawnDev.ILGPU and running your first GPU kernel — in the browser via Blazor WebAssembly or on desktop via a console app.
 
-SpawnDev.ILGPU brings the power of [ILGPU](https://github.com/m4rs-mt/ILGPU) — a high-performance .NET GPU computing framework originally developed by [Marcel Koester](https://github.com/m4rs-mt) — to Blazor WebAssembly. If you're already familiar with ILGPU from desktop/server development, most of your knowledge applies here. Your existing ILGPU kernels run in the browser with zero changes to the kernel code.
+SpawnDev.ILGPU extends [ILGPU](https://github.com/m4rs-mt/ILGPU) — a high-performance .NET GPU computing framework by [Marcel Koester](https://github.com/m4rs-mt) — with three browser backends (WebGPU, WebGL, Wasm) while also supporting ILGPU's native desktop backends (CUDA, OpenCL, CPU). Your existing ILGPU kernels work across all six backends with zero changes to the kernel code.
 
 ## Prerequisites
 
 - **.NET 10 SDK** (or later)
-- **Blazor WebAssembly** project
+
+**For browser (Blazor WebAssembly):**
+- Blazor WebAssembly project
 - A modern browser (Chrome 113+ for WebGPU, any modern browser for WebGL/Wasm)
+
+**For desktop (Console, WPF, ASP.NET):**
+- Any .NET 10 project
+- NVIDIA GPU + driver (for CUDA) or OpenCL 2.0+ GPU (for OpenCL) — or CPU-only
 
 ## Installation
 
@@ -35,6 +41,8 @@ builder.Services.AddBlazorJSRuntime();
 // Use BlazorJSRunAsync instead of RunAsync
 await builder.Build().BlazorJSRunAsync();
 ```
+
+> **Desktop apps** do not require SpawnDev.BlazorJS. Use `SpawnDev.ILGPU` directly — no special initialization needed.
 
 ## Publishing Configuration
 
@@ -71,7 +79,8 @@ Here's a complete example that adds two arrays on the GPU:
         // 1. Create a context with all available backends
         using var context = await Context.CreateAsync(builder => builder.AllAcceleratorsAsync());
 
-        // 2. Create the best available accelerator (WebGPU > WebGL > Wasm)
+        // 2. Create the best available accelerator
+        // Browser: WebGPU > WebGL > Wasm | Desktop: CUDA > OpenCL > CPU
         using var accelerator = await context.CreatePreferredAcceleratorAsync();
 
         // 3. Allocate GPU buffers
@@ -119,7 +128,7 @@ Here's a complete example that adds two arrays on the GPU:
 using var context = await Context.CreateAsync(builder => builder.AllAcceleratorsAsync());
 ```
 
-`Context.CreateAsync` is the async version of ILGPU's `Context.Create`. The `AllAcceleratorsAsync()` extension probes the browser for all available backends (WebGPU, WebGL, Wasm) and registers them. The CPU backend is always available.
+`Context.CreateAsync` is the async version of ILGPU's `Context.Create`. The `AllAcceleratorsAsync()` extension probes the environment for all available backends — browser backends (WebGPU, WebGL, Wasm) in Blazor, or native backends (CUDA, OpenCL, CPU) on desktop — and registers them.
 
 ### Accelerator Creation
 
@@ -127,7 +136,7 @@ using var context = await Context.CreateAsync(builder => builder.AllAccelerators
 using var accelerator = await context.CreatePreferredAcceleratorAsync();
 ```
 
-This picks the best available backend in priority order: **WebGPU → WebGL → Wasm**. You can also target a specific backend — see [Backends](backends.md).
+This picks the best available backend: **WebGPU → WebGL → Wasm** in the browser, or **CUDA → OpenCL → CPU** on desktop. You can also target a specific backend — see [Backends](backends.md).
 
 ### The Kernel
 
@@ -153,7 +162,7 @@ Key rules:
 await accelerator.SynchronizeAsync();
 ```
 
-> **Critical:** In Blazor WASM, you **must** use `SynchronizeAsync()` instead of `Synchronize()`. The main thread is single-threaded — calling the synchronous version will deadlock.
+> **Critical:** In Blazor WASM, you **must** use `SynchronizeAsync()` instead of `Synchronize()`. The main thread is single-threaded — calling the synchronous version will deadlock. On desktop, both sync and async work, but async is recommended for cross-platform code.
 
 ### Data Readback
 
@@ -161,7 +170,7 @@ await accelerator.SynchronizeAsync();
 var results = await bufC.CopyToHostAsync<float>();
 ```
 
-This copies data from the GPU back to a C# array. It works with all backends (WebGPU, WebGL, Wasm, CPU) automatically.
+This copies data from the GPU back to a C# array. It works with all six backends automatically.
 
 ## Next Steps
 
