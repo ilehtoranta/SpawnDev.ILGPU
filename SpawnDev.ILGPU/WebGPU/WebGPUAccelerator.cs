@@ -53,6 +53,14 @@ namespace SpawnDev.ILGPU.WebGPU
         private static List<GPUBuffer>? _reusableScalarReturnList;
         [ThreadStatic]
         private static List<GPUBindGroupEntry>? _reusableEntryList;
+        [ThreadStatic]
+        private static List<object?>? _reusableExpandedArgs;
+        [ThreadStatic]
+        private static Dictionary<int, List<int>>? _reusableBodyStructMap;
+        [ThreadStatic]
+        private static HashSet<int>? _reusableBodyStructScalarSet;
+        [ThreadStatic]
+        private static Dictionary<int, ScalarPackingEntry>? _reusablePackedScalarLookup;
 
         // Cache for CopyStructToBytes<T> MethodInfo per type (avoids repeated MakeGenericMethod)
         private static readonly ConcurrentDictionary<Type, MethodInfo> _copyStructMethodCache = new();
@@ -347,116 +355,121 @@ namespace SpawnDev.ILGPU.WebGPU
             return dynamicMethod;
         }
 
-        // Helper to robustly extract dimensions (X, Y, Z) using Duck Typing
+        // Cache for dimension extraction: per-type function that extracts int[] dimensions from a view
+        private static readonly ConcurrentDictionary<Type, Func<object, int[]>> _dimensionExtractorCache = new();
+
+        // Helper to robustly extract dimensions (X, Y, Z) using Duck Typing, with caching
         private static int[] ExtractDimensionsFromView(object view, Type viewType)
         {
-            try
+            var extractor = _dimensionExtractorCache.GetOrAdd(viewType, BuildDimensionExtractor);
+            return extractor(view);
+        }
+
+        private static Func<object, int[]> BuildDimensionExtractor(Type viewType)
+        {
+            var flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+
+            // Strategy 1: Find a sub-struct field with X/Y/Z members (e.g., Extent, Index)
+            foreach (var field in viewType.GetFields(flags))
             {
-                var flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
-
-                int[] GetXYZ(object d)
+                if (field.FieldType.IsPrimitive || field.FieldType.IsPointer) continue;
+                var xyzAccessor = BuildXYZAccessor(field.FieldType);
+                if (xyzAccessor != null)
                 {
-                    if (d == null) return Array.Empty<int>();
-                    var t = d.GetType();
-                    int x = -1, y = -1, z = -1;
-
-                    // Try to get X
-                    var fX = t.GetField("X", flags);
-                    if (fX != null) x = Convert.ToInt32(fX.GetValue(d));
-                    else
+                    var capturedField = field;
+                    var capturedAccessor = xyzAccessor;
+                    return (obj) =>
                     {
-                        var pX = t.GetProperty("X", flags);
-                        if (pX != null) x = Convert.ToInt32(pX.GetValue(d));
-                    }
-
-                    // Try to get Y
-                    var fY = t.GetField("Y", flags);
-                    if (fY != null) y = Convert.ToInt32(fY.GetValue(d));
-                    else
-                    {
-                        var pY = t.GetProperty("Y", flags);
-                        if (pY != null) y = Convert.ToInt32(pY.GetValue(d));
-                    }
-
-                    // Try to get Z
-                    var fZ = t.GetField("Z", flags);
-                    if (fZ != null) z = Convert.ToInt32(fZ.GetValue(d));
-                    else
-                    {
-                        var pZ = t.GetProperty("Z", flags);
-                        if (pZ != null) z = Convert.ToInt32(pZ.GetValue(d));
-                    }
-
-                    if (x >= 0)
-                    {
-                        if (y >= 0)
+                        try
                         {
-                            if (z >= 0) return new int[] { x, y, z };
-                            return new int[] { x, y };
+                            var val = capturedField.GetValue(obj);
+                            if (val != null)
+                            {
+                                var res = capturedAccessor(val);
+                                if (res.Length > 0 && res[0] > 0) return res;
+                            }
                         }
-                        return new int[] { x };
-                    }
-                    return Array.Empty<int>();
-                }
-
-                foreach (var field in viewType.GetFields(flags))
-                {
-                    if (field.FieldType.IsPrimitive || field.FieldType.IsPointer) continue;
-                    try
-                    {
-                        var val = field.GetValue(view);
-                        var res = GetXYZ(val);
-                        if (res.Length > 0 && res[0] > 0) return res;
-                    }
-                    catch { }
-                }
-
-                // DIRECT PROPERTY CHECK (Fallback for 1D ArrayView/Base)
-                var pIntLength = viewType.GetProperty("IntLength", flags);
-                if (pIntLength != null)
-                {
-                    try
-                    {
-                        var val = (int)pIntLength.GetValue(view);
-                        return new int[] { val };
-                    }
-                    catch { }
-                }
-
-                // Fallback to Length (Long)
-                var pLength = viewType.GetProperty("Length", flags);
-                if (pLength != null && (pLength.PropertyType == typeof(int) || pLength.PropertyType == typeof(long)))
-                {
-                    try
-                    {
-                        var val = Convert.ToInt32(pLength.GetValue(view));
-                        return new int[] { val };
-                    }
-                    catch { }
-                }
-
-                foreach (var prop in viewType.GetProperties(flags))
-                {
-                    if (prop.GetIndexParameters().Length > 0) continue;
-                    if (prop.PropertyType.IsPrimitive || prop.PropertyType.IsPointer) continue;
-                    try
-                    {
-                        var val = prop.GetValue(view);
-                        var res = GetXYZ(val);
-                        if (res.Length > 0 && res[0] > 0) return res;
-                    }
-                    catch { }
-                }
-
-                var directWidth = viewType.GetProperty("Width", flags);
-                if (directWidth != null)
-                {
-                    int x = Convert.ToInt32(directWidth.GetValue(view));
-                    if (x > 0) return new int[] { x, 0 };
+                        catch { }
+                        return Array.Empty<int>();
+                    };
                 }
             }
-            catch { }
-            return Array.Empty<int>();
+
+            // Strategy 2: IntLength property (1D ArrayView)
+            var pIntLength = viewType.GetProperty("IntLength", flags);
+            if (pIntLength != null)
+                return (obj) => { try { return new int[] { (int)pIntLength.GetValue(obj)! }; } catch { return Array.Empty<int>(); } };
+
+            // Strategy 3: Length property
+            var pLength = viewType.GetProperty("Length", flags);
+            if (pLength != null && (pLength.PropertyType == typeof(int) || pLength.PropertyType == typeof(long)))
+                return (obj) => { try { return new int[] { Convert.ToInt32(pLength.GetValue(obj)) }; } catch { return Array.Empty<int>(); } };
+
+            // Strategy 4: Properties with X/Y/Z sub-structs
+            foreach (var prop in viewType.GetProperties(flags))
+            {
+                if (prop.GetIndexParameters().Length > 0) continue;
+                if (prop.PropertyType.IsPrimitive || prop.PropertyType.IsPointer) continue;
+                var xyzAccessor = BuildXYZAccessor(prop.PropertyType);
+                if (xyzAccessor != null)
+                {
+                    var capturedProp = prop;
+                    var capturedAccessor = xyzAccessor;
+                    return (obj) =>
+                    {
+                        try
+                        {
+                            var val = capturedProp.GetValue(obj);
+                            if (val != null)
+                            {
+                                var res = capturedAccessor(val);
+                                if (res.Length > 0 && res[0] > 0) return res;
+                            }
+                        }
+                        catch { }
+                        return Array.Empty<int>();
+                    };
+                }
+            }
+
+            // Strategy 5: Direct Width property
+            var directWidth = viewType.GetProperty("Width", flags);
+            if (directWidth != null)
+                return (obj) => { try { int x = Convert.ToInt32(directWidth.GetValue(obj)); return x > 0 ? new int[] { x, 0 } : Array.Empty<int>(); } catch { return Array.Empty<int>(); } };
+
+            // No dimension info found
+            return (_) => Array.Empty<int>();
+        }
+
+        // Build a function that extracts X/Y/Z from a sub-struct type. Returns null if type has no X/Y/Z.
+        private static Func<object, int[]>? BuildXYZAccessor(Type type)
+        {
+            var flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+
+            // Resolve X accessor
+            var fX = type.GetField("X", flags);
+            var pX = fX == null ? type.GetProperty("X", flags) : null;
+            if (fX == null && pX == null) return null;
+
+            // Resolve Y accessor
+            var fY = type.GetField("Y", flags);
+            var pY = fY == null ? type.GetProperty("Y", flags) : null;
+
+            // Resolve Z accessor
+            var fZ = type.GetField("Z", flags);
+            var pZ = fZ == null ? type.GetProperty("Z", flags) : null;
+
+            return (obj) =>
+            {
+                int x = fX != null ? Convert.ToInt32(fX.GetValue(obj)) : (pX != null ? Convert.ToInt32(pX.GetValue(obj)) : -1);
+                if (x < 0) return Array.Empty<int>();
+
+                int y = fY != null ? Convert.ToInt32(fY.GetValue(obj)) : (pY != null ? Convert.ToInt32(pY.GetValue(obj)) : -1);
+                if (y < 0) return new int[] { x };
+
+                int z = fZ != null ? Convert.ToInt32(fZ.GetValue(obj)) : (pZ != null ? Convert.ToInt32(pZ.GetValue(obj)) : -1);
+                return z >= 0 ? new int[] { x, y, z } : new int[] { x, y };
+            };
         }
 
         /// <summary>
@@ -474,9 +487,12 @@ namespace SpawnDev.ILGPU.WebGPU
             var compiledKernel = webGpuKernel.CompiledKernel;
 
             // ---- DEBUG LOGGING: WGSL SOURCE ----
-            WebGPUBackend.Log("\n[WebGPU-Debug] ---- GENERATED WGSL ----");
-            WebGPUBackend.Log(compiledKernel.WGSLSource);
-            WebGPUBackend.Log("[WebGPU-Debug] ------------------------\n");
+            if (WebGPUBackend.VerboseLogging)
+            {
+                WebGPUBackend.Log("\n[WebGPU-Debug] ---- GENERATED WGSL ----");
+                WebGPUBackend.Log(compiledKernel.WGSLSource);
+                WebGPUBackend.Log("[WebGPU-Debug] ------------------------\n");
+            }
             // ------------------------------------
 
             // Build override constants for dynamic shared memory
@@ -498,7 +514,8 @@ namespace SpawnDev.ILGPU.WebGPU
                         numElements = (sharedMemConfig.NumElements * sharedMemConfig.ElementSize) / overrideInfo.ElementSize;
                     }
                     overrideConstants[overrideInfo.ConstantName] = (double)numElements;
-                    WebGPUBackend.Log($"[WebGPU-Debug] Dynamic shared memory override: {overrideInfo.ConstantName} = {numElements}");
+                    if (WebGPUBackend.VerboseLogging)
+                        WebGPUBackend.Log($"[WebGPU-Debug] Dynamic shared memory override: {overrideInfo.ConstantName} = {numElements}");
                 }
             }
 
@@ -558,7 +575,9 @@ namespace SpawnDev.ILGPU.WebGPU
                 // We also build argsToEffectiveOffset: for each original args[i], the starting index
                 // in effectiveArgs where args[i]'s contribution begins. This lets Phase 2 (scalar packing)
                 // correctly look up scalar values from effectiveArgs using IR param indices.
-                var expandedArgs = new List<object?>();
+                _reusableExpandedArgs ??= new List<object?>();
+                _reusableExpandedArgs.Clear();
+                var expandedArgs = _reusableExpandedArgs;
                 // argsToEffectiveOffset[i] = index in effectiveArgs where args[i] starts
                 var argsToEffectiveOffset = new int[args.Length];
                 for (int i = 0; i < args.Length; i++)
@@ -567,7 +586,8 @@ namespace SpawnDev.ILGPU.WebGPU
                     var a = args[i];
                     if (a != null && a.GetType().IsValueType && !(a is IArrayView) && ContainsPointerFields(a.GetType()))
                     {
-                        WebGPUBackend.Log($"[WebGPU-Debug] Pre-expand: Flattening body struct {a.GetType().Name} at args[{i}]");
+                        if (WebGPUBackend.VerboseLogging)
+                            WebGPUBackend.Log($"[WebGPU-Debug] Pre-expand: Flattening body struct {a.GetType().Name} at args[{i}]");
                         expandedArgs.AddRange(FlattenStructFields(a));
                     }
                     else
@@ -575,7 +595,8 @@ namespace SpawnDev.ILGPU.WebGPU
                         expandedArgs.Add(a);
                     }
                 }
-                var effectiveArgs = expandedArgs.ToArray();
+                // Use expandedArgs list directly as indexable span to avoid ToArray()
+                var effectiveArgsCount = expandedArgs.Count;
 
                 // Build packed scalar lookup mapping effectiveArgs index → ScalarPackingEntry.
                 //
@@ -586,7 +607,9 @@ namespace SpawnDev.ILGPU.WebGPU
                 //
                 // Strategy: track which effectiveArgs indices are non-view backing fields of body structs.
                 // bodyStructScalarEffectiveIdx[argsIdx][nthNonViewField] = effectiveArgsIdx
-                var bodyStructScalarEffectiveIdxMap = new Dictionary<int, List<int>>(); // argsIdx → list of effectiveArgs indices for non-view fields
+                _reusableBodyStructMap ??= new Dictionary<int, List<int>>();
+                _reusableBodyStructMap.Clear();
+                var bodyStructScalarEffectiveIdxMap = _reusableBodyStructMap;
                 for (int i = 0; i < args.Length; i++)
                 {
                     var a = args[i];
@@ -612,17 +635,16 @@ namespace SpawnDev.ILGPU.WebGPU
                     }
                 }
 
-                // Pre-build a set of ALL body-struct non-view effectiveArgs indices.
-                // Body-struct scalar fields that have NO manifest entry (e.g., ReducedValue in
-                // ReductionImplementation — a shader-local variable) must still be SKIPPED
-                // during Phase 1 (view binding). Without this, they'd create spurious bindings,
-                // offsetting the scalar pack binding index and breaking the WGSL binding layout.
-                var allBodyStructScalarEffectiveIdxSet = new HashSet<int>();
+                _reusableBodyStructScalarSet ??= new HashSet<int>();
+                _reusableBodyStructScalarSet.Clear();
+                var allBodyStructScalarEffectiveIdxSet = _reusableBodyStructScalarSet;
                 foreach (var kvp in bodyStructScalarEffectiveIdxMap)
                     foreach (var idx in kvp.Value)
                         allBodyStructScalarEffectiveIdxSet.Add(idx);
 
-                var packedScalarLookup = new Dictionary<int, ScalarPackingEntry>();
+                _reusablePackedScalarLookup ??= new Dictionary<int, ScalarPackingEntry>();
+                _reusablePackedScalarLookup.Clear();
+                var packedScalarLookup = _reusablePackedScalarLookup;
                 if (compiledKernel.HasScalarPacking)
                 {
                     // Pre-compute total manifest entry count per body-struct param index.
@@ -682,11 +704,13 @@ namespace SpawnDev.ILGPU.WebGPU
                                 {
                                     int effectiveArgsIdx = nonViewIdxList[nthCSharpScalarField];
                                     packedScalarLookup[effectiveArgsIdx] = entry;
-                                    WebGPUBackend.Log($"[WebGPU-Debug] Body struct scalar: ParamIndex={entry.ParamIndex}, effectiveArgsIdx={effectiveArgsIdx}, nthManifest={nthManifestEntry}, nthCSharp={nthCSharpScalarField}");
+                                    if (WebGPUBackend.VerboseLogging)
+                                        WebGPUBackend.Log($"[WebGPU-Debug] Body struct scalar: ParamIndex={entry.ParamIndex}, effectiveArgsIdx={effectiveArgsIdx}, nthManifest={nthManifestEntry}, nthCSharp={nthCSharpScalarField}");
                                 }
                                 else
                                 {
-                                    WebGPUBackend.Log($"[WebGPU-Debug] Body struct scalar: ParamIndex={entry.ParamIndex}, SKIPPED (IR-only, nthManifest={nthManifestEntry}, extra={extraIROnlyEntries})");
+                                    if (WebGPUBackend.VerboseLogging)
+                                        WebGPUBackend.Log($"[WebGPU-Debug] Body struct scalar: ParamIndex={entry.ParamIndex}, SKIPPED (IR-only, nthManifest={nthManifestEntry}, extra={extraIROnlyEntries})");
                                 }
                             }
                         }
@@ -694,7 +718,7 @@ namespace SpawnDev.ILGPU.WebGPU
                         {
                             // Regular param: map IR param index to effectiveArgs index
                             int effectiveArgsIdx = entry.ParamIndex - kernelParamOffset;
-                            if (effectiveArgsIdx >= 0 && effectiveArgsIdx < effectiveArgs.Length)
+                            if (effectiveArgsIdx >= 0 && effectiveArgsIdx < effectiveArgsCount)
                                 packedScalarLookup[effectiveArgsIdx] = entry;
                         }
                     }
@@ -703,7 +727,7 @@ namespace SpawnDev.ILGPU.WebGPU
                 // --- Phase 1: Emit bindings for non-packed params (views, structs, atomics) ---
                 // effectiveArgs[] has body structs pre-expanded into their constituent fields.
                 // Skip the index param (effectiveArgs[0..runtimeIndexSkip-1]) and packed scalars.
-                for (int i = 0; i < effectiveArgs.Length; i++)
+                for (int i = 0; i < effectiveArgsCount; i++)
                 {
                     // Skip the Index type param at effectiveArgs[0] for explicitly grouped kernels
                     if (i < runtimeIndexSkip)
@@ -721,7 +745,7 @@ namespace SpawnDev.ILGPU.WebGPU
                     if (allBodyStructScalarEffectiveIdxSet.Contains(i))
                         continue;
 
-                    var arg = effectiveArgs[i];
+                    var arg = expandedArgs[i];
 
                     IArrayView? arrayView = arg as IArrayView;
                     int[] dims = Array.Empty<int>();
@@ -757,7 +781,8 @@ namespace SpawnDev.ILGPU.WebGPU
                         var nativeBuffer = contiguous.Buffer as WebGPUMemoryBuffer;
                         var gpuBuffer = nativeBuffer!.NativeBuffer.NativeBuffer!;
 
-                        WebGPUBackend.Log($"[WebGPU-Debug] Arg {i}: Binding Buffer. Size={contiguous.LengthInBytes}, Offset={contiguous.IndexInBytes}");
+                        if (WebGPUBackend.VerboseLogging)
+                            WebGPUBackend.Log($"[WebGPU-Debug] Arg {i}: Binding Buffer. Size={contiguous.LengthInBytes}, Offset={contiguous.IndexInBytes}");
 
                         resource = new GPUBufferBinding
                         {
@@ -773,7 +798,8 @@ namespace SpawnDev.ILGPU.WebGPU
                         var uBuffer = GetPooledScalarBuffer(device);
                         scalarBuffersToReturn.Add(uBuffer);
 
-                        WebGPUBackend.Log($"[WebGPU-Debug] Arg {i}: Binding Struct Scalar. Value={arg}");
+                        if (WebGPUBackend.VerboseLogging)
+                            WebGPUBackend.Log($"[WebGPU-Debug] Arg {i}: Binding Struct Scalar. Value={arg}");
 
                         if (arg != null && arg.GetType().IsValueType)
                         {
@@ -790,7 +816,8 @@ namespace SpawnDev.ILGPU.WebGPU
                             GetCopyStructMethod(argType).Invoke(null, new object[] { arg, bytes });
 
                             device.Queue.WriteBuffer(uBuffer, 0, bytes);
-                            WebGPUBackend.Log($"[WebGPU-Debug] Arg {i}: Struct scalar {argType.Name}, Size={structSize} bytes");
+                            if (WebGPUBackend.VerboseLogging)
+                                WebGPUBackend.Log($"[WebGPU-Debug] Arg {i}: Struct scalar {argType.Name}, Size={structSize} bytes");
                         }
                         else throw new NotSupportedException($"Unsupported non-packed non-view argument type: {arg?.GetType()}");
 
@@ -802,7 +829,8 @@ namespace SpawnDev.ILGPU.WebGPU
 
                     if (dims.Length > 1)
                     {
-                        WebGPUBackend.Log($"[WebGPU-Debug] Arg {i}: Binding Stride Buffer. Values=[{string.Join(", ", dims)}]");
+                        if (WebGPUBackend.VerboseLogging)
+                            WebGPUBackend.Log($"[WebGPU-Debug] Arg {i}: Binding Stride Buffer. Values=[{string.Join(", ", dims)}]");
 
                         var strideSize = 256;
                         var strideBuffer = GetPooledScalarBuffer(device);
@@ -839,10 +867,11 @@ namespace SpawnDev.ILGPU.WebGPU
                     {
                         int effectiveArgsIdx = kvp.Key;
                         var entry = kvp.Value;
-                        var arg = effectiveArgs[effectiveArgsIdx];
+                        var arg = expandedArgs[effectiveArgsIdx];
                         int byteOffset = entry.ByteOffset;
 
-                        WebGPUBackend.Log($"[WebGPU-Debug] Packing scalar param {entry.ParamIndex} (effectiveArgs[{effectiveArgsIdx}]) at byte offset {byteOffset}: {arg}");
+                        if (WebGPUBackend.VerboseLogging)
+                            WebGPUBackend.Log($"[WebGPU-Debug] Packing scalar param {entry.ParamIndex} (effectiveArgs[{effectiveArgsIdx}]) at byte offset {byteOffset}: {arg}");
 
                         if (arg is int iVal)
                             BitConverter.GetBytes(iVal).CopyTo(packedData, byteOffset);
@@ -930,13 +959,14 @@ namespace SpawnDev.ILGPU.WebGPU
                     });
                     currentBindingIndex++;
 
-                    WebGPUBackend.Log($"[WebGPU-Debug] Packed {packedScalarLookup.Count} scalars into 1 buffer ({totalBytes} bytes used, binding {currentBindingIndex - 1})");
+                    if (WebGPUBackend.VerboseLogging)
+                        WebGPUBackend.Log($"[WebGPU-Debug] Packed {packedScalarLookup.Count} scalars into 1 buffer ({totalBytes} bytes used, binding {currentBindingIndex - 1})");
                 }
 
 
                 var bindGroupDesc = new GPUBindGroupDescriptor
                 {
-                    Layout = shader.Pipeline!.GetBindGroupLayout(0),
+                    Layout = shader.BindGroupLayout!,
                     Entries = entries.ToArray()
                 };
 
@@ -958,7 +988,8 @@ namespace SpawnDev.ILGPU.WebGPU
                 else if (dimension is LongIndex2D l2) { workX = (uint)Math.Ceiling(l2.X / 8.0); workY = (uint)Math.Ceiling(l2.Y / 8.0); }
                 else if (dimension is LongIndex3D l3) { workX = (uint)Math.Ceiling(l3.X / 4.0); workY = (uint)Math.Ceiling(l3.Y / 4.0); workZ = (uint)Math.Ceiling(l3.Z / 4.0); }
 
-                WebGPUBackend.Log($"[WebGPU-Debug] Dispatching: ({workX}, {workY}, {workZ})");
+                if (WebGPUBackend.VerboseLogging)
+                    WebGPUBackend.Log($"[WebGPU-Debug] Dispatching: ({workX}, {workY}, {workZ})");
 
                 // Use the stream's shared encoder for batched submission
                 var webGpuStream = stream as WebGPUStream ?? (WebGPUStream)webGpuAccel.DefaultStream;

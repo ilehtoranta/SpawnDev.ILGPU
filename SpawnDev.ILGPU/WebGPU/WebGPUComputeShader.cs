@@ -42,8 +42,11 @@ namespace SpawnDev.ILGPU.WebGPU
 
             // Create shader module from WGSL source
             accelerator._lastCompiledWGSL = wgslSource;
-            // DEBUG: Store WGSL in a JS global for browser-side inspection
-            try { BlazorJS.BlazorJSRuntime.JS.Set("wgslDebug", wgslSource); } catch { }
+            // DEBUG: Store WGSL in a JS global for browser-side inspection (only when verbose logging is on)
+            if (WebGPU.Backend.WebGPUBackend.VerboseLogging)
+            {
+                try { BlazorJS.BlazorJSRuntime.JS.Set("wgslDebug", wgslSource); } catch { }
+            }
             var shaderDescriptor = new GPUShaderModuleDescriptor
             {
                 Code = wgslSource
@@ -102,6 +105,11 @@ namespace SpawnDev.ILGPU.WebGPU
         /// Returns the current bind group.
         /// </summary>
         public GPUBindGroup? BindGroup => _bindGroup;
+
+        /// <summary>
+        /// Returns the cached bind group layout (fetched once at construction).
+        /// </summary>
+        public GPUBindGroupLayout? BindGroupLayout => _bindGroupLayout;
 
         #endregion
 
