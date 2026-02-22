@@ -501,6 +501,13 @@ namespace ILGPU.Backends.OpenCL
                 // Wire phi nodes
                 if (phiBindings.TryGetBindings(block, out var bindings))
                 {
+                    // Clear intermediate phi variables from previous blocks.
+                    // These intermediates are only valid within a single block's
+                    // phi binding set (for handling phi swaps within the same
+                    // block). Using stale intermediates from other blocks causes
+                    // incorrect source resolution (fixes issue #1539).
+                    intermediatePhiVariables.Clear();
+
                     // Assign all temporaries
                     foreach (var (phiValue, value) in bindings)
                     {
