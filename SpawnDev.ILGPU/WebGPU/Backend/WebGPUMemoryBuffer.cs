@@ -57,7 +57,28 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             }
             else
             {
-                throw new NotSupportedException("Peer-to-peer copies not yet implemented");
+                // GPU-to-GPU copy using CopyBufferToBuffer
+                var accelerator = (WebGPUAccelerator)Accelerator;
+                accelerator.FlushPendingCommands();
+
+                var srcContiguous = (IContiguousArrayView)source;
+                var srcMemBuffer = srcContiguous.Buffer as WebGPUMemoryBuffer
+                    ?? throw new InvalidOperationException("Source buffer is not a WebGPU memory buffer");
+                var srcGpuBuffer = srcMemBuffer.NativeBuffer.NativeBuffer
+                    ?? throw new InvalidOperationException("Source GPU buffer is null");
+
+                var destContiguous = (IContiguousArrayView)destination;
+
+                var device = accelerator.NativeAccelerator.NativeDevice
+                    ?? throw new InvalidOperationException("GPU device not initialized");
+
+                using var encoder = device.CreateCommandEncoder();
+                encoder.CopyBufferToBuffer(
+                    srcGpuBuffer, (ulong)srcContiguous.Index,
+                    _buffer!.NativeBuffer!, (ulong)destContiguous.Index,
+                    (ulong)source.Length);
+                using var commandBuffer = encoder.Finish();
+                accelerator.NativeAccelerator.Queue?.Submit(new[] { commandBuffer });
             }
         }
 
