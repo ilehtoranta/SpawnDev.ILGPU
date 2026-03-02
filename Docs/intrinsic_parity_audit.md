@@ -1,1 +1,195 @@
-# Intrinsic Parity Audit — Full Report\r\n\r\n> Generated: 2026-03-02 | Updated with all session fixes (PopC/CLZ/CTZ/IsFinF, Wasm RegisterMathIntrinsics, WebGL gaps)\r\n\r\n## Summary\r\n\r\n| Backend | Type | Threading | Atomics | Math Coverage |\r\n|---------|------|:---------:|:-------:|:-------------:|\r\n| CPU | Desktop | ✅ | ✅ | ✅ Full |\r\n| OpenCL | Desktop | ✅ | ✅ | ✅ Full |\r\n| PTX/CUDA | Desktop | ✅ | ✅ | ✅ Full |\r\n| Velocity | Desktop | ✅ | ✅ | ✅ Full |\r\n| **Wasm** | Browser | ✅ wasm-threads | ✅ Full (inc. float CAS) | ✅ **27/27 unary** |\r\n| **WebGPU** | Browser | ✅ compute | ✅ Full (inc. float CAS) | ✅ **27/27 unary** |\r\n| **WebGL** | Browser | ❌ vertex shader | ❌ stubs only | ✅ **27/27 codegen** (3 TF-limited) |\r\n\r\n> [!IMPORTANT]\r\n> **Wasm** has full wasm-threads: Web Workers, SharedArrayBuffer, `memory.atomic.wait32`/`notify`, sense-reversing barriers, shared memory, and `Group.Broadcast`. It has **full `GenericAtomic` and `AtomicCAS` handlers** including float atomics via CAS loop with bitcast reinterpret (f32↔i32, f64↔i64). This includes float Add/Min/Max/Exchange and integer Add/Sub/And/Or/Xor/Exchange/Cmpxchg plus integer Min/Max via CAS.\r\n\r\n> [!IMPORTANT]\r\n> **WebGPU** has full `GenericAtomic` and `AtomicCAS` handlers with `ScanForAtomicUsage()` pre-pass. Float atomics use CAS loop (`atomicCompareExchangeWeak`). Unsigned atomics use `atomic<u32>`. Emulated 64-bit atomics supported via dual-u32 packing.\r\n\r\n> [!NOTE]\r\n> **WebGL** `GenericAtomic`/`AtomicCAS`/`Barrier`/`Broadcast` handlers exist but are **stubs** — they emit `// not supported in WebGL2 vertex shaders` and return 0. This is an architectural limitation of GLSL ES 3.0 Transform Feedback.\r\n\r\n---\r\n\r\n## 1. UnaryArithmeticKind (27 members)\r\n\r\n| Kind | Desktop | Wasm | WebGPU | WebGL | Notes |\r\n|------|:-------:|:----:|:------:|:-----:|-------|\r\n| `Neg` | ✅ | ✅ | ✅ | ✅ | All |\r\n| `Not` | ✅ | ✅ | ✅ | ✅ | All |\r\n| `Abs` | ✅ | ✅ native | ✅ `abs()` | ✅ | All |\r\n| `PopC` | ✅ | ✅ `i32.popcnt` | ✅ `countOneBits` | ⚠️ `bitCount()` | WebGL: emits but TF returns 255 |\r\n| `CLZ` | ✅ | ✅ `i32.clz` | ✅ `countLeadingZeros()` | ⚠️ `findMSB()` | WebGL: emits but TF-limited |\r\n| `CTZ` | ✅ | ✅ `i32.ctz` | ✅ `countTrailingZeros()` | ⚠️ `findLSB()` | WebGL: emits but TF-limited |\r\n| `RcpF` | ✅ | ✅ `1/x` | ✅ `1/x` | ✅ | All |\r\n| `IsNaNF` | ✅ | ✅ `x!=x` | ✅ `x!=x` | ✅ `isnan()` | All |\r\n| `IsInfF` | ✅ | ✅ `abs==∞` | ✅ `abs==1/0` | ✅ `isinf()` | All |\r\n| `IsFinF` | ✅ | ✅ `!NaN&&!Inf` | ✅ `!NaN&&!Inf` | ✅ `!isnan&&!isinf` | All |\r\n| `SqrtF` | ✅ | ✅ native | ✅ `sqrt()` | ✅ | All |\r\n| `RsqrtF` | ✅ | ✅ `1/sqrt` | ✅ `1/sqrt` | ✅ `inversesqrt()` | All |\r\n| `SinF` | ✅ | ✅ import | ✅ `sin()` | ✅ | All |\r\n| `CosF` | ✅ | ✅ import | ✅ `cos()` | ✅ | All |\r\n| `TanF` | ✅ | ✅ import | ✅ `tan()` | ✅ | All |\r\n| `AsinF` | ✅ | ✅ import | ✅ `asin()` | ✅ | All |\r\n| `AcosF` | ✅ | ✅ import | ✅ `acos()` | ✅ | All |\r\n| `AtanF` | ✅ | ✅ import | ✅ `atan()` | ✅ | All |\r\n| `SinhF` | ✅ | ✅ import | ✅ `sinh()` | ✅ | All |\r\n| `CoshF` | ✅ | ✅ import | ✅ `cosh()` | ✅ | All |\r\n| `TanhF` | ✅ | ✅ import | ✅ `tanh()` | ✅ | All |\r\n| `ExpF` | ✅ | ✅ import | ✅ `exp()` | ✅ | All |\r\n| `Exp2F` | ✅ | ✅ `exp(x*ln2)` | ✅ `exp2()` | ✅ `exp2()` | All |\r\n| `FloorF` | ✅ | ✅ native | ✅ `floor()` | ✅ | All |\r\n| `CeilingF` | ✅ | ✅ native | ✅ `ceil()` | ✅ | All |\r\n| `LogF` | ✅ | ✅ import | ✅ `log()` | ✅ | All |\r\n| `Log2F` | ✅ | ✅ import | ✅ `log2()` | ✅ `log2()` | All |\r\n| `Log10F` | ✅ | ✅ `log/ln10` | ✅ `log/2.302` | ✅ `log/log(10)` | All |\r\n\r\n**Totals:** Desktop 27/27 • WebGPU 27/27 ✅ • Wasm 27/27 ✅ • WebGL 24/27 ✅ + 3 ⚠️ (TF-limited)\r\n\r\n---\r\n\r\n## 2. BinaryArithmeticKind (16 members)\r\n\r\n| Kind | Desktop | Wasm | WebGPU | WebGL | Notes |\r\n|------|:-------:|:----:|:------:|:-----:|-------|\r\n| `Add` | ✅ | ✅ | ✅ | ✅ | All |\r\n| `Sub` | ✅ | ✅ | ✅ | ✅ | All |\r\n| `Mul` | ✅ | ✅ | ✅ | ✅ | All |\r\n| `Div` | ✅ | ✅ | ✅ | ✅ | All |\r\n| `Rem` | ✅ | ✅ emulated float | ✅ `%` | ✅ | All |\r\n| `And` | ✅ | ✅ | ✅ | ✅ | All |\r\n| `Or` | ✅ | ✅ | ✅ | ✅ | All |\r\n| `Xor` | ✅ | ✅ | ✅ | ✅ | All |\r\n| `Shl` | ✅ | ✅ | ✅ | ✅ | All |\r\n| `Shr` | ✅ | ✅ | ✅ | ✅ | All |\r\n| `Min` | ✅ | ✅ | ✅ `min()` | ✅ | All |\r\n| `Max` | ✅ | ✅ | ✅ `max()` | ✅ | All |\r\n| `Atan2F` | ✅ | ✅ import | ✅ `atan2()` | ✅ `atan(y,x)` | All |\r\n| `PowF` | ✅ | ✅ import | ✅ `pow()` | ✅ | All |\r\n| `BinaryLogF` | ✅ | ✅ `log(x)/log(y)` | ✅ | ✅ `log(x)/log(y)` | All |\r\n| `CopySignF` | ✅ | ✅ native | ✅ `select` | ✅ `abs(x)*sign(y)` | All |\r\n\r\n**Totals:** All backends 16/16 ✅\r\n\r\n## 3. TernaryArithmeticKind\r\n\r\n| Kind | Desktop | Wasm | WebGPU | WebGL |\r\n|------|:-------:|:----:|:------:|:-----:|\r\n| `MultiplyAdd` | ✅ | ✅ `a*b+c` | ✅ `fma()` | ✅ | All |\r\n\r\n---\r\n\r\n## 4. Atomic Operations\r\n\r\n### Wasm — Full support ✅\r\n\r\n| Op | i32 | i64 | f32 | f64 |\r\n|----|:---:|:---:|:---:|:---:|\r\n| Add | ✅ `I32AtomicRmwAdd` | ✅ `I64AtomicRmwAdd` | ✅ CAS loop | ✅ CAS loop |\r\n| Sub | ✅ | ✅ | — | — |\r\n| And | ✅ | ✅ | — | — |\r\n| Or | ✅ | ✅ | — | — |\r\n| Xor | ✅ | ✅ | — | — |\r\n| Exchange | ✅ | ✅ | ✅ CAS | ✅ CAS |\r\n| Min | ✅ CAS loop | ✅ CAS | ✅ CAS | ✅ CAS |\r\n| Max | ✅ CAS loop | ✅ CAS | ✅ CAS | ✅ CAS |\r\n| CmpXchg | ✅ | ✅ | — | — |\r\n\r\n### WebGPU — Full support ✅\r\n\r\n| Op | i32 | u32 | f32 (CAS) | emu64 |\r\n|----|:---:|:---:|:---------:|:-----:|\r\n| Add | ✅ `atomicAdd` | ✅ | ✅ CAS loop | ✅ |\r\n| Min/Max | ✅ `atomicMin/Max` | ✅ | ✅ CAS | ✅ |\r\n| And/Or/Xor | ✅ | ✅ | — | — |\r\n| Exchange | ✅ `atomicExchange` | ✅ | ✅ CAS | ✅ |\r\n| CAS | ✅ `atomicCompareExchangeWeak` | ✅ | — | ✅ |\r\n\r\n### WebGL — Stubs only ❌\r\nAll `GenericAtomic`/`AtomicCAS` emit `// not supported` and return 0.\r\n\r\n---\r\n\r\n## 5. Threading & Synchronization\r\n\r\n| Feature | Wasm | WebGPU | WebGL |\r\n|---------|:----:|:------:|:-----:|\r\n| Multi-threaded dispatch | ✅ Web Workers | ✅ compute shader | ❌ |\r\n| SharedArrayBuffer | ✅ | N/A (GPU mem) | ❌ |\r\n| Shared memory allocations | ✅ `SetupSharedAllocations` | ✅ `var<workgroup>` | ❌ |\r\n| Barriers | ✅ sense-reversing (wait/notify) | ✅ `workgroupBarrier()` | ❌ stub |\r\n| Group.Broadcast | ✅ shared mem + barrier | ✅ | ❌ stub |\r\n| Warp shuffle | ❌ N/A | ✅ `subgroupShuffle` | ❌ stub |\r\n\r\n---\r\n\r\n## 6. Math/MathF Redirect Registrations\r\n\r\n| Function | WebGPU | WebGL | Wasm |\r\n|----------|:------:|:-----:|:----:|\r\n| Abs/Sign/Round/Truncate | ✅ | ✅ | ✅ |\r\n| Atan2/Max/Min/Pow | ✅ | ✅ | ✅ |\r\n| Clamp/FMA | ✅ | ✅ | ✅ |\r\n| IntrinsicMath.Abs/Min/Max | ✅ | ✅ | ✅ |\r\n\r\n> [!NOTE]\r\n> All three browser backends now have `RegisterMathIntrinsics()` with throw-free wrappers for `Math.Round`, `Math.Truncate`, `Math.Sign`, `Math.Clamp`, `Math.FusedMultiplyAdd`, and `IntrinsicMath` methods. Wasm support was added in this session.\r\n\r\n## 7. XMath & Algorithms Registrations\r\n\r\n| Intrinsic | WebGPU | WebGL | Wasm |\r\n|-----------|:------:|:-----:|:----:|\r\n| XMath.Rsqrt/Rcp | ✅ | ✅ | ✅ |\r\n| GroupExtensions.Reduce/AllReduce | ✅ subgroups | ❌ N/A | ✅ WasmAlgorithmContext |\r\n| WarpExtensions.Reduce/AllReduce | ✅ subgroups | ❌ N/A | ✅ WasmAlgorithmContext |\r\n| ILGroupExtensions.*Reduce | ✅ | ❌ | ✅ |\r\n| Scan (Excl/Incl) | ✅ | ❌ N/A | ✅ shared mem |\r\n| RadixSort | ✅ | ❌ N/A | ✅ |\r\n| Histogram | ✅ | ❌ N/A | ✅ |\r\n\r\n---\r\n\r\n## 8. 64-bit Emulation\r\n\r\n| Type | WebGPU | WebGL | Wasm | Desktop |\r\n|------|:------:|:-----:|:----:|:-------:|\r\n| f64 (Dekker default) | ✅ `vec2<f32>` ~48-bit | ✅ `vec2` ~48-bit | ✅ native | ✅ native |\r\n| f64 (Ozaki opt-in) | ✅ `vec4<f32>` IEEE 754 | ✅ `vec4` IEEE 754 | N/A | N/A |\r\n| i64/u64 | ✅ `vec2<u32>` | ✅ `uvec2` | ✅ native | ✅ native |\r\n\r\n---\r\n\r\n## Backend Scorecard\r\n\r\n| Category | Desktop | WebGPU | Wasm | WebGL |\r\n|----------|:-------:|:------:|:----:|:-----:|\r\n| Unary (27) | 27 | **27** ✅ | **27** ✅ | **24** ✅ + 3 ⚠️ |\r\n| Binary (16) | 16 | **16** ✅ | **16** ✅ | **16** ✅ |\r\n| Ternary (1) | 1 | **1** ✅ | **1** ✅ | **1** ✅ |\r\n| Int atomics | ✅ | ✅ | ✅ | ❌ stub |\r\n| Float atomics | ✅ | ✅ CAS | ✅ CAS | ❌ stub |\r\n| AtomicCAS | ✅ | ✅ | ✅ | ❌ stub |\r\n| Barriers | ✅ | ✅ | ✅ | ❌ stub |\r\n| Shared memory | ✅ | ✅ | ✅ | ❌ |\r\n| Math redirects | ✅ | ✅ | ✅ | ✅ |\r\n| XMath Rsqrt/Rcp | ✅ | ✅ | ✅ | ✅ |\r\n| Algorithms | ✅ | ✅ | ✅ | ❌ |\r\n| f64 emulation | N/A | ✅ Dekker+Ozaki | N/A (native) | ✅ Dekker+Ozaki |\r\n\r\n> [!NOTE]\r\n> All previously identified gaps have been addressed. WebGPU and Wasm now have **full parity** with desktop backends. WebGL's remaining limitations (atomics, barriers, shared memory, PopC/CLZ/CTZ runtime behavior) are architectural constraints of GLSL ES 3.0 vertex shader Transform Feedback and cannot be resolved without a fundamentally different approach.\r\n
+# Intrinsic Parity Audit — Full Report
+
+> Generated: 2026-03-02 | Updated with all session fixes (PopC/CLZ/CTZ/IsFinF, Wasm RegisterMathIntrinsics, WebGL gaps)
+
+## Summary
+
+| Backend | Type | Threading | Atomics | Math Coverage |
+|---------|------|:---------:|:-------:|:-------------:|
+| CPU | Desktop | ✅ | ✅ | ✅ Full |
+| OpenCL | Desktop | ✅ | ✅ | ✅ Full |
+| PTX/CUDA | Desktop | ✅ | ✅ | ✅ Full |
+| Velocity | Desktop | ✅ | ✅ | ✅ Full |
+| **Wasm** | Browser | ✅ wasm-threads | ✅ Full (inc. float CAS) | ✅ **27/27 unary** |
+| **WebGPU** | Browser | ✅ compute | ✅ Full (inc. float CAS) | ✅ **27/27 unary** |
+| **WebGL** | Browser | ❌ vertex shader | ❌ stubs only | ✅ **27/27 codegen** (3 TF-limited) |
+
+> [!IMPORTANT]
+> **Wasm** has full wasm-threads: Web Workers, SharedArrayBuffer, `memory.atomic.wait32`/`notify`, sense-reversing barriers, shared memory, and `Group.Broadcast`. It has **full `GenericAtomic` and `AtomicCAS` handlers** including float atomics via CAS loop with bitcast reinterpret (f32↔i32, f64↔i64). This includes float Add/Min/Max/Exchange and integer Add/Sub/And/Or/Xor/Exchange/Cmpxchg plus integer Min/Max via CAS.
+
+> [!IMPORTANT]
+> **WebGPU** has full `GenericAtomic` and `AtomicCAS` handlers with `ScanForAtomicUsage()` pre-pass. Float atomics use CAS loop (`atomicCompareExchangeWeak`). Unsigned atomics use `atomic<u32>`. Emulated 64-bit atomics supported via dual-u32 packing.
+
+> [!NOTE]
+> **WebGL** `GenericAtomic`/`AtomicCAS`/`Barrier`/`Broadcast` handlers exist but are **stubs** — they emit `// not supported in WebGL2 vertex shaders` and return 0. This is an architectural limitation of GLSL ES 3.0 Transform Feedback.
+
+---
+
+## 1. UnaryArithmeticKind (27 members)
+
+| Kind | Desktop | Wasm | WebGPU | WebGL | Notes |
+|------|:-------:|:----:|:------:|:-----:|-------|
+| `Neg` | ✅ | ✅ | ✅ | ✅ | All |
+| `Not` | ✅ | ✅ | ✅ | ✅ | All |
+| `Abs` | ✅ | ✅ native | ✅ `abs()` | ✅ | All |
+| `PopC` | ✅ | ✅ `i32.popcnt` | ✅ `countOneBits` | ⚠️ `bitCount()` | WebGL: emits but TF returns 255 |
+| `CLZ` | ✅ | ✅ `i32.clz` | ✅ `countLeadingZeros()` | ⚠️ `findMSB()` | WebGL: emits but TF-limited |
+| `CTZ` | ✅ | ✅ `i32.ctz` | ✅ `countTrailingZeros()` | ⚠️ `findLSB()` | WebGL: emits but TF-limited |
+| `RcpF` | ✅ | ✅ `1/x` | ✅ `1/x` | ✅ | All |
+| `IsNaNF` | ✅ | ✅ `x!=x` | ✅ `x!=x` | ✅ `isnan()` | All |
+| `IsInfF` | ✅ | ✅ `abs==∞` | ✅ `abs==1/0` | ✅ `isinf()` | All |
+| `IsFinF` | ✅ | ✅ `!NaN&&!Inf` | ✅ `!NaN&&!Inf` | ✅ `!isnan&&!isinf` | All |
+| `SqrtF` | ✅ | ✅ native | ✅ `sqrt()` | ✅ | All |
+| `RsqrtF` | ✅ | ✅ `1/sqrt` | ✅ `1/sqrt` | ✅ `inversesqrt()` | All |
+| `SinF` | ✅ | ✅ import | ✅ `sin()` | ✅ | All |
+| `CosF` | ✅ | ✅ import | ✅ `cos()` | ✅ | All |
+| `TanF` | ✅ | ✅ import | ✅ `tan()` | ✅ | All |
+| `AsinF` | ✅ | ✅ import | ✅ `asin()` | ✅ | All |
+| `AcosF` | ✅ | ✅ import | ✅ `acos()` | ✅ | All |
+| `AtanF` | ✅ | ✅ import | ✅ `atan()` | ✅ | All |
+| `SinhF` | ✅ | ✅ import | ✅ `sinh()` | ✅ | All |
+| `CoshF` | ✅ | ✅ import | ✅ `cosh()` | ✅ | All |
+| `TanhF` | ✅ | ✅ import | ✅ `tanh()` | ✅ | All |
+| `ExpF` | ✅ | ✅ import | ✅ `exp()` | ✅ | All |
+| `Exp2F` | ✅ | ✅ `exp(x*ln2)` | ✅ `exp2()` | ✅ `exp2()` | All |
+| `FloorF` | ✅ | ✅ native | ✅ `floor()` | ✅ | All |
+| `CeilingF` | ✅ | ✅ native | ✅ `ceil()` | ✅ | All |
+| `LogF` | ✅ | ✅ import | ✅ `log()` | ✅ | All |
+| `Log2F` | ✅ | ✅ import | ✅ `log2()` | ✅ `log2()` | All |
+| `Log10F` | ✅ | ✅ `log/ln10` | ✅ `log/2.302` | ✅ `log/log(10)` | All |
+
+**Totals:** Desktop 27/27 • WebGPU 27/27 ✅ • Wasm 27/27 ✅ • WebGL 24/27 ✅ + 3 ⚠️ (TF-limited)
+
+---
+
+## 2. BinaryArithmeticKind (16 members)
+
+| Kind | Desktop | Wasm | WebGPU | WebGL | Notes |
+|------|:-------:|:----:|:------:|:-----:|-------|
+| `Add` | ✅ | ✅ | ✅ | ✅ | All |
+| `Sub` | ✅ | ✅ | ✅ | ✅ | All |
+| `Mul` | ✅ | ✅ | ✅ | ✅ | All |
+| `Div` | ✅ | ✅ | ✅ | ✅ | All |
+| `Rem` | ✅ | ✅ emulated float | ✅ `%` | ✅ | All |
+| `And` | ✅ | ✅ | ✅ | ✅ | All |
+| `Or` | ✅ | ✅ | ✅ | ✅ | All |
+| `Xor` | ✅ | ✅ | ✅ | ✅ | All |
+| `Shl` | ✅ | ✅ | ✅ | ✅ | All |
+| `Shr` | ✅ | ✅ | ✅ | ✅ | All |
+| `Min` | ✅ | ✅ | ✅ `min()` | ✅ | All |
+| `Max` | ✅ | ✅ | ✅ `max()` | ✅ | All |
+| `Atan2F` | ✅ | ✅ import | ✅ `atan2()` | ✅ `atan(y,x)` | All |
+| `PowF` | ✅ | ✅ import | ✅ `pow()` | ✅ | All |
+| `BinaryLogF` | ✅ | ✅ `log(x)/log(y)` | ✅ | ✅ `log(x)/log(y)` | All |
+| `CopySignF` | ✅ | ✅ native | ✅ `select` | ✅ `abs(x)*sign(y)` | All |
+
+**Totals:** All backends 16/16 ✅
+
+## 3. TernaryArithmeticKind
+
+| Kind | Desktop | Wasm | WebGPU | WebGL |
+|------|:-------:|:----:|:------:|:-----:|
+| `MultiplyAdd` | ✅ | ✅ `a*b+c` | ✅ `fma()` | ✅ | All |
+
+---
+
+## 4. Atomic Operations
+
+### Wasm — Full support ✅
+
+| Op | i32 | i64 | f32 | f64 |
+|----|:---:|:---:|:---:|:---:|
+| Add | ✅ `I32AtomicRmwAdd` | ✅ `I64AtomicRmwAdd` | ✅ CAS loop | ✅ CAS loop |
+| Sub | ✅ | ✅ | — | — |
+| And | ✅ | ✅ | — | — |
+| Or | ✅ | ✅ | — | — |
+| Xor | ✅ | ✅ | — | — |
+| Exchange | ✅ | ✅ | ✅ CAS | ✅ CAS |
+| Min | ✅ CAS loop | ✅ CAS | ✅ CAS | ✅ CAS |
+| Max | ✅ CAS loop | ✅ CAS | ✅ CAS | ✅ CAS |
+| CmpXchg | ✅ | ✅ | — | — |
+
+### WebGPU — Full support ✅
+
+| Op | i32 | u32 | f32 (CAS) | emu64 |
+|----|:---:|:---:|:---------:|:-----:|
+| Add | ✅ `atomicAdd` | ✅ | ✅ CAS loop | ✅ |
+| Min/Max | ✅ `atomicMin/Max` | ✅ | ✅ CAS | ✅ |
+| And/Or/Xor | ✅ | ✅ | — | — |
+| Exchange | ✅ `atomicExchange` | ✅ | ✅ CAS | ✅ |
+| CAS | ✅ `atomicCompareExchangeWeak` | ✅ | — | ✅ |
+
+### WebGL — Stubs only ❌
+All `GenericAtomic`/`AtomicCAS` emit `// not supported` and return 0.
+
+---
+
+## 5. Threading & Synchronization
+
+| Feature | Wasm | WebGPU | WebGL |
+|---------|:----:|:------:|:-----:|
+| Multi-threaded dispatch | ✅ Web Workers | ✅ compute shader | ❌ |
+| SharedArrayBuffer | ✅ | N/A (GPU mem) | ❌ |
+| Shared memory allocations | ✅ `SetupSharedAllocations` | ✅ `var<workgroup>` | ❌ |
+| Barriers | ✅ sense-reversing (wait/notify) | ✅ `workgroupBarrier()` | ❌ stub |
+| Group.Broadcast | ✅ shared mem + barrier | ✅ | ❌ stub |
+| Warp shuffle | ❌ N/A | ✅ `subgroupShuffle` | ❌ stub |
+
+---
+
+## 6. Math/MathF Redirect Registrations
+
+| Function | WebGPU | WebGL | Wasm |
+|----------|:------:|:-----:|:----:|
+| Abs/Sign/Round/Truncate | ✅ | ✅ | ✅ |
+| Atan2/Max/Min/Pow | ✅ | ✅ | ✅ |
+| Clamp/FMA | ✅ | ✅ | ✅ |
+| IntrinsicMath.Abs/Min/Max | ✅ | ✅ | ✅ |
+
+> [!NOTE]
+> All three browser backends now have `RegisterMathIntrinsics()` with throw-free wrappers for `Math.Round`, `Math.Truncate`, `Math.Sign`, `Math.Clamp`, `Math.FusedMultiplyAdd`, and `IntrinsicMath` methods. Wasm support was added in this session.
+
+## 7. XMath & Algorithms Registrations
+
+| Intrinsic | WebGPU | WebGL | Wasm |
+|-----------|:------:|:-----:|:----:|
+| XMath.Rsqrt/Rcp | ✅ | ✅ | ✅ |
+| GroupExtensions.Reduce/AllReduce | ✅ subgroups | ❌ N/A | ✅ WasmAlgorithmContext |
+| WarpExtensions.Reduce/AllReduce | ✅ subgroups | ❌ N/A | ✅ WasmAlgorithmContext |
+| ILGroupExtensions.*Reduce | ✅ | ❌ | ✅ |
+| Scan (Excl/Incl) | ✅ | ❌ N/A | ✅ shared mem |
+| RadixSort | ✅ | ❌ N/A | ✅ |
+| Histogram | ✅ | ❌ N/A | ✅ |
+
+---
+
+## 8. 64-bit Emulation
+
+| Type | WebGPU | WebGL | Wasm | Desktop |
+|------|:------:|:-----:|:----:|:-------:|
+| f64 (Dekker default) | ✅ `vec2<f32>` ~48-bit | ✅ `vec2` ~48-bit | ✅ native | ✅ native |
+| f64 (Ozaki opt-in) | ✅ `vec4<f32>` IEEE 754 | ✅ `vec4` IEEE 754 | N/A | N/A |
+| i64/u64 | ✅ `vec2<u32>` | ✅ `uvec2` | ✅ native | ✅ native |
+
+---
+
+## Backend Scorecard
+
+| Category | Desktop | WebGPU | Wasm | WebGL |
+|----------|:-------:|:------:|:----:|:-----:|
+| Unary (27) | 27 | **27** ✅ | **27** ✅ | **24** ✅ + 3 ⚠️ |
+| Binary (16) | 16 | **16** ✅ | **16** ✅ | **16** ✅ |
+| Ternary (1) | 1 | **1** ✅ | **1** ✅ | **1** ✅ |
+| Int atomics | ✅ | ✅ | ✅ | ❌ stub |
+| Float atomics | ✅ | ✅ CAS | ✅ CAS | ❌ stub |
+| AtomicCAS | ✅ | ✅ | ✅ | ❌ stub |
+| Barriers | ✅ | ✅ | ✅ | ❌ stub |
+| Shared memory | ✅ | ✅ | ✅ | ❌ |
+| Math redirects | ✅ | ✅ | ✅ | ✅ |
+| XMath Rsqrt/Rcp | ✅ | ✅ | ✅ | ✅ |
+| Algorithms | ✅ | ✅ | ✅ | ❌ |
+| f64 emulation | N/A | ✅ Dekker+Ozaki | N/A (native) | ✅ Dekker+Ozaki |
+
+> [!NOTE]
+> All previously identified gaps have been addressed. WebGPU and Wasm now have **full parity** with desktop backends. WebGL's remaining limitations (atomics, barriers, shared memory, PopC/CLZ/CTZ runtime behavior) are architectural constraints of GLSL ES 3.0 vertex shader Transform Feedback and cannot be resolved without a fundamentally different approach.
+
