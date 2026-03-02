@@ -27,6 +27,18 @@ using SpawnDev.ILGPU;
 | `context.GetWebGPUDevices()` | `List<WebGPUILGPUDevice>` | Lists registered WebGPU devices |
 | `context.GetWebGLDevices()` | `List<WebGLILGPUDevice>` | Lists registered WebGL devices |
 
+### GpuMatrix4x4
+
+GPU-friendly 4×4 matrix struct. Auto-transposes from .NET's row-major `Matrix4x4` to GPU column-major order.
+
+| Member | Type | Description |
+|--------|------|-------------|
+| `FromMatrix4x4(Matrix4x4)` | `static GpuMatrix4x4` | Creates from .NET matrix (auto-transposes) |
+| `Identity` | `static GpuMatrix4x4` | Identity matrix |
+| `TransformPoint(m, x, y, z, out rx, ry, rz)` | `static void` | Rotation + translation (kernel-safe) |
+| `TransformDirection(m, x, y, z, out rx, ry, rz)` | `static void` | Rotation only (kernel-safe) |
+| `this[row, col]` | `float` | Element accessor (0-indexed) |
+
 ### IBrowserMemoryBuffer
 
 Interface implemented by GPU-backed memory buffers for browser interop.

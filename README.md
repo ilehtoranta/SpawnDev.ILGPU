@@ -119,6 +119,7 @@ SpawnDev.ILGPU bundles ILGPU's native backends, so the same NuGet package works 
 - **Blazor WebAssembly** — Seamless integration via [SpawnDev.BlazorJS](https://github.com/LostBeard/SpawnDev.BlazorJS)
 - **Shared memory & barriers** — Static and dynamic workgroup memory with `Group.Barrier()` synchronization (WebGPU, Wasm, Cuda, OpenCL)
 - **Broadcast** — `Group.Broadcast` for intra-group value sharing (WebGPU, Wasm)
+- **GpuMatrix4x4** — GPU-friendly 4×4 matrix struct that auto-transposes from .NET's row-major `Matrix4x4` to GPU column-major order. Use `TransformPoint` and `TransformDirection` directly inside kernels for 3D transformations
 - **No native dependencies** — Entirely written in C#
 
 ## Installation
@@ -303,6 +304,7 @@ _test.bat
 | **Dynamic Shared Memory** | Runtime-sized workgroup memory via `SharedMemory.GetDynamic()` | ✅ |
 | **Special Values** | NaN, Infinity detection | ✅ |
 | **Backend Selection** | Auto-discovery, priority, cross-backend kernel execution | ✅ |
+| **GpuMatrix4x4** | Identity, translation, LookAt transforms across all backends | ✅ |
 
 ## Browser Requirements
 

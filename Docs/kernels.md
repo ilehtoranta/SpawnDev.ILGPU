@@ -172,6 +172,54 @@ static void PhysicsKernel(Index1D index, ArrayView<float> positions, SimParams p
 }
 ```
 
+### GpuMatrix4x4 — GPU-Friendly 4×4 Matrix
+
+SpawnDev.ILGPU includes `GpuMatrix4x4`, a GPU-friendly 4×4 matrix struct that auto-transposes from .NET's row-major `System.Numerics.Matrix4x4` to GPU column-major order. Use it for 3D transformations inside kernels:
+
+```csharp
+using SpawnDev.ILGPU;
+using System.Numerics;
+
+// On the host: create from a .NET Matrix4x4 (auto-transposes to GPU column-major)
+var viewMatrix = Matrix4x4.CreateLookAt(
+    new Vector3(0, 0, 5),   // eye
+    Vector3.Zero,            // target
+    Vector3.UnitY);          // up
+var gpuMatrix = GpuMatrix4x4.FromMatrix4x4(viewMatrix);
+
+// Pass directly as a kernel parameter
+kernel((Index1D)count, positionsView, outputView, gpuMatrix);
+```
+
+```csharp
+// In the kernel: use static transform methods
+static void TransformKernel(
+    Index1D index,
+    ArrayView<float> positions,
+    ArrayView<float> output,
+    GpuMatrix4x4 matrix)
+{
+    int i = index * 3;
+    float x = positions[i], y = positions[i + 1], z = positions[i + 2];
+
+    // Transform point (rotation + translation)
+    GpuMatrix4x4.TransformPoint(matrix, x, y, z, out float rx, out float ry, out float rz);
+
+    output[i] = rx;
+    output[i + 1] = ry;
+    output[i + 2] = rz;
+}
+```
+
+| Method | Description |
+|--------|-------------|
+| `GpuMatrix4x4.FromMatrix4x4(Matrix4x4)` | Auto-transposes from .NET row-major to GPU column-major |
+| `GpuMatrix4x4.Identity` | Returns the identity matrix |
+| `GpuMatrix4x4.TransformPoint(m, x, y, z, out rx, ry, rz)` | Applies rotation + translation |
+| `GpuMatrix4x4.TransformDirection(m, x, y, z, out rx, ry, rz)` | Applies rotation only (no translation) |
+
+> **Why not `System.Numerics.Matrix4x4`?** .NET uses row-major layout with `v * M` convention, while GPUs use column-major with `M * v`. `GpuMatrix4x4` handles this transpose automatically so your transforms work correctly on all backends.
+
 ### ArrayView Parameters
 
 `ArrayView<T>` is the primary way to access GPU memory from kernels:
@@ -219,18 +267,19 @@ ILGPU maps standard .NET math to GPU-native operations:
 | `MathF.FusedMultiplyAdd` | `fma(a, b, c)` | ✅ All backends |
 | `MathF.Atan2(y, x)` | `atan2(y, x)` | ✅ All backends |
 
-### Unsupported Functions (Contain `throw`)
+### Previously Unsupported Functions (Now Auto-Redirected)
 
-These .NET methods contain internal `throw` statements and will fail during transpilation:
+These .NET methods contain internal `throw` statements, but all browser backends now include **throw-free redirects** that handle them automatically:
 
-| C# | Workaround |
-|----|------------|
-| `Math.Clamp(val, min, max)` | `Math.Min(Math.Max(val, min), max)` |
-| `Math.Round(x)` | Avoid — no direct replacement |
-| `Math.Truncate(x)` | Avoid — no direct replacement |
-| `Math.Sign(x)` | `x > 0 ? 1 : (x < 0 ? -1 : 0)` |
+| C# | Status | Notes |
+|----|:------:|----------|
+| `Math.Clamp(val, min, max)` | ✅ Auto-redirected | Replaced with `Min(Max(val, min), max)` |
+| `Math.Round(x)` | ✅ Auto-redirected | Throw-free wrapper |
+| `Math.Truncate(x)` | ✅ Auto-redirected | Throw-free wrapper |
+| `Math.Sign(x)` | ✅ Auto-redirected | Throw-free wrapper |
+| `MathF.FusedMultiplyAdd` | ✅ Auto-redirected | Throw-free wrapper |
 
-> **Rule of thumb:** If a .NET math method might validate its arguments and throw, it won't work in kernels. Stick to the functions in the "Supported" table above.
+> **Safe to use:** These functions work directly in kernels on all backends thanks to `RegisterMathIntrinsics()`. See [Limitations](limitations.md) for the general `throw` constraint.
 
 ## Shared Memory
 

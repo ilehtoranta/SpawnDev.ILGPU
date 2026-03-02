@@ -38,22 +38,27 @@ The WGSL and GLSL transpilers cannot translate the IL `throw` instruction. If an
 
 ### Common Offenders
 
-Many `System.Math` methods contain implicit argument validation with `throw`:
+Many `System.Math` methods contain implicit argument validation with `throw`. All browser backends (WebGPU, WebGL, Wasm) include **throw-free redirects** that handle the most common cases automatically:
 
-| Method | Contains `throw`? | Alternative |
-|--------|-------------------|-------------|
-| `Math.Clamp(val, min, max)` | ✅ Yes | `Math.Min(Math.Max(val, min), max)` |
-| `Math.Round(x)` | ✅ Yes | Avoid in kernels |
-| `Math.Truncate(x)` | ✅ Yes | `(float)(int)x` for truncation |
-| `Math.Sign(x)` | ✅ Yes | `x > 0 ? 1 : (x < 0 ? -1 : 0)` |
-| `MathF.Sin(x)` | ❌ No | Safe to use |
-| `MathF.Sqrt(x)` | ❌ No | Safe to use |
-| `Math.Min(a, b)` | ❌ No | Safe to use |
-| `Math.Max(a, b)` | ❌ No | Safe to use |
+| Method | Contains `throw`? | Auto-redirected? | Notes |
+|--------|-------------------|:----------------:|-------|
+| `Math.Clamp(val, min, max)` | ✅ Yes | ✅ Yes | Redirected to `Min(Max(val, min), max)` |
+| `Math.Round(x)` | ✅ Yes | ✅ Yes | Redirected to throw-free wrapper |
+| `Math.Truncate(x)` | ✅ Yes | ✅ Yes | Redirected to throw-free wrapper |
+| `Math.Sign(x)` | ✅ Yes | ✅ Yes | Redirected to throw-free wrapper |
+| `MathF.FusedMultiplyAdd` | ✅ Yes | ✅ Yes | Redirected to throw-free wrapper |
+| `XMath.Rsqrt(x)` | ✅ Yes | ✅ Yes | Redirected to throw-free wrapper |
+| `XMath.Rcp(x)` | ✅ Yes | ✅ Yes | Redirected to throw-free wrapper |
+| `MathF.Sin(x)` | ❌ No | — | Safe to use directly |
+| `MathF.Sqrt(x)` | ❌ No | — | Safe to use directly |
+| `Math.Min(a, b)` | ❌ No | — | Safe to use directly |
+| `Math.Max(a, b)` | ❌ No | — | Safe to use directly |
+
+> **Auto-redirects**: The `RegisterMathIntrinsics()` infrastructure in each browser backend automatically intercepts calls to problematic .NET methods and replaces them with throw-free equivalents at compile time. You can use `Math.Clamp`, `Math.Round`, `Math.Truncate`, and `Math.Sign` directly in kernels — they will work on all backends.
 
 ### General Rule
 
-Avoid calling any helper method that might throw exceptions. If you're not sure, check the .NET source for the method — if it contains `throw new ArgumentException(...)` or similar, it won't work.
+Avoid calling any helper method that might throw exceptions. If you're not sure, check the .NET source for the method — if it contains `throw new ArgumentException(...)` or similar, it won't work unless a redirect is registered for it.
 
 ## No Reference Types in Kernels
 
