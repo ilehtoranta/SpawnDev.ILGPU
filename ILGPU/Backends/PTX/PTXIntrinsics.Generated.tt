@@ -1,4 +1,4 @@
-﻿// ---------------------------------------------------------------------------------------
+// ---------------------------------------------------------------------------------------
 //                                        ILGPU
 //                        Copyright (c) 2016-2024 ILGPU Project
 //                                    www.ilgpu.net
@@ -135,6 +135,19 @@ namespace ILGPU.Backends.PTX
                     nameof(Warp<#= operation #>Float64),
                     IntrinsicImplementationMode.Redirect));
 
+            manager.RegisterWarpShuffle(
+                ShuffleKind.<#= kind #>,
+                BasicValueType.Float16,
+                CreateIntrinsic(
+                    nameof(Warp<#= operation #>Half),
+                    IntrinsicImplementationMode.Redirect));
+            manager.RegisterSubWarpShuffle(
+                ShuffleKind.<#= kind #>,
+                BasicValueType.Float16,
+                CreateIntrinsic(
+                    nameof(Warp<#= operation #>Half),
+                    IntrinsicImplementationMode.Redirect));
+
 <# } #>
         }
 
@@ -187,6 +200,34 @@ namespace ILGPU.Backends.PTX
                 idx,
                 width);
             return Interop.IntAsFloat(shuffled);
+        }
+
+        /// <summary>
+        /// Wraps a single warp-shuffle operation for Half (f16).
+        /// Widens to uint before the b32 shuffle, then narrows back to f16.
+        /// PTX has no shfl.sync.*.b16; all shuffle instructions operate on 32-bit values.
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static Half Warp<#= operation #>Half(Half value, int idx)
+        {
+            uint widened = (uint)Interop.FloatAsInt(value);
+            uint shuffled = Warp.<#= operation #>(widened, idx);
+            return Interop.IntAsFloat((ushort)shuffled);
+        }
+
+        /// <summary>
+        /// Wraps a single sub-warp-shuffle operation for Half (f16).
+        /// Widens to uint before the b32 shuffle, then narrows back to f16.
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static Half SubWarp<#= operation #>Half(
+            Half value,
+            int idx,
+            int width)
+        {
+            uint widened = (uint)Interop.FloatAsInt(value);
+            uint shuffled = Warp.<#= operation #>(widened, idx, width);
+            return Interop.IntAsFloat((ushort)shuffled);
         }
 
 <# } #>

@@ -1,4 +1,4 @@
-﻿// ---------------------------------------------------------------------------------------
+// ---------------------------------------------------------------------------------------
 //                                   ILGPU Algorithms
 //                        Copyright (c) 2019-2023 ILGPU Project
 //                                    www.ilgpu.net
@@ -37,18 +37,37 @@ namespace ILGPU.Algorithms.IL
         {
             TReduction reduction = default;
 
-            ref var sharedMemory = ref SharedMemory.Allocate<T>();
+            // Allocate one slot per warp so each warp's first lane can write its
+            // reduced value without contention — no AtomicApply needed.
+            // MaxNumWarps = 2048 max threads / 32 min warp size (CPUDevice.Nvidia).
+            const int MaxNumWarps = 64;
+            var warpResults = SharedMemory.Allocate<T>(MaxNumWarps);
+            int warpIdx = Warp.WarpIdx;
+            int numWarps = IntrinsicMath.DivRoundUp(Group.DimX, Warp.WarpSize);
+
             if (Group.IsFirstThread)
-                sharedMemory = reduction.Identity;
+            {
+                for (int i = 0; i < numWarps; i++)
+                    warpResults[i] = reduction.Identity;
+            }
             Group.Barrier();
 
-            // Reduce inside all warps first
-            var firstLaneReduced = ILWarpExtensions.Reduce<T, TReduction>(value);
+            // Each warp reduces its values; only the first lane writes its result.
+            var warpReduced = ILWarpExtensions.Reduce<T, TReduction>(value);
             if (Warp.IsFirstLane)
-                reduction.AtomicApply(ref sharedMemory, firstLaneReduced);
-
+                warpResults[warpIdx] = warpReduced;
             Group.Barrier();
-            return sharedMemory;
+
+            // First thread serially combines all warp results and broadcasts via slot 0.
+            if (Group.IsFirstThread)
+            {
+                var result = warpResults[0];
+                for (int i = 1; i < numWarps; i++)
+                    result = reduction.Apply(result, warpResults[i]);
+                warpResults[0] = result;
+            }
+            Group.Barrier();
+            return warpResults[0];
         }
 
         #endregion

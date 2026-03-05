@@ -1,4 +1,4 @@
-﻿// ---------------------------------------------------------------------------------------
+// ---------------------------------------------------------------------------------------
 //                                   ILGPU Algorithms
 //                        Copyright (c) 2019-2023 ILGPU Project
 //                                    www.ilgpu.net
@@ -32,39 +32,45 @@ namespace ILGPU.Algorithms.PTX
             where T : unmanaged
             where TReduction : struct, IScanReduceOperation<T>
         {
-            // A fixed number of memory banks to distribute the workload
-            // of the atomic operations in shared memory.
-            const int NumMemoryBanks = 4;
-            var sharedMemory = SharedMemory.Allocate<T>(NumMemoryBanks);
+            // Allocate one slot per warp so each warp's first lane can write its
+            // reduced value without contention — no AtomicApply needed.
+            // CUDA: max 1024 threads / warp size 32 = 32 warps, which also fits
+            // in a single warp for the final XOR-butterfly aggregation.
+            const int MaxWarps = 32;
+            var sharedMemory = SharedMemory.Allocate<T>(MaxWarps);
 
             var warpIdx = Warp.ComputeWarpIdx(Group.IdxX);
             var laneIdx = Warp.LaneIdx;
 
             TReduction reduction = default;
 
+            // Warp 0 initializes all warp slots to Identity.
             if (warpIdx == 0)
             {
-                for (
-                    int bankIdx = laneIdx;
-                    bankIdx < NumMemoryBanks;
-                    bankIdx += Warp.WarpSize)
-                    sharedMemory[bankIdx] = reduction.Identity;
+                for (int i = laneIdx; i < MaxWarps; i += Warp.WarpSize)
+                    sharedMemory[i] = reduction.Identity;
             }
             Group.Barrier();
 
+            // Each warp reduces its values; first lane writes to its own dedicated slot.
             value = PTXWarpExtensions.Reduce<T, TReduction>(value);
             if (laneIdx == 0)
-                reduction.AtomicApply(ref sharedMemory[warpIdx % NumMemoryBanks], value);
+                sharedMemory[warpIdx] = value;
             Group.Barrier();
 
-            // Note that this is explicitly unrolled (see NumMemoryBanks above)
-            var result = sharedMemory[0];
-            result = reduction.Apply(result, sharedMemory[1]);
-            result = reduction.Apply(result, sharedMemory[2]);
-            result = reduction.Apply(result, sharedMemory[3]);
+            // First warp aggregates all warp results via XOR butterfly.
+            // This works because MaxWarps (32) == Warp.WarpSize for CUDA.
+            int numWarps = IntrinsicMath.DivRoundUp(Group.DimX, Warp.WarpSize);
+            if (warpIdx == 0)
+            {
+                var myVal = laneIdx < numWarps ? sharedMemory[laneIdx] : reduction.Identity;
+                myVal = PTXWarpExtensions.AllReduce<T, TReduction>(myVal);
+                if (laneIdx == 0)
+                    sharedMemory[0] = myVal;
+            }
             Group.Barrier();
 
-            return result;
+            return sharedMemory[0];
         }
 
         #region Scan Primitives

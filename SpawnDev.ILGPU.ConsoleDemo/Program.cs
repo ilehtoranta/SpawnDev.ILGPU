@@ -396,21 +396,6 @@ public class CudaTests : BackendTestBase
         return Task.FromResult<(Context, Accelerator)>((context, accelerator));
     }
 
-    [TestMethod]
-    public new async Task AlgorithmExclusiveScanHalfTest() =>
-        throw new UnsupportedTestException("CUDA: PTX warp shuffle only supports b32; Half (b16) requires promotion intrinsics not yet implemented");
-
-    [TestMethod]
-    public new async Task AlgorithmInclusiveScanHalfTest() =>
-        throw new UnsupportedTestException("CUDA: PTX warp shuffle only supports b32; Half (b16) requires promotion intrinsics not yet implemented");
-
-    [TestMethod]
-    public new async Task AlgorithmAllReduceHalfTest() =>
-        throw new UnsupportedTestException("CUDA: AllReduce requires Half atomics which are not supported");
-
-    [TestMethod]
-    public new async Task AlgorithmGroupReduceHalfTest() =>
-        throw new UnsupportedTestException("CUDA: GroupReduce uses AllReduce internally; PTX warp shuffle only supports b32 and Half atomics are not yet implemented");
 }
 
 public class OpenCLTests : BackendTestBase
@@ -463,11 +448,4 @@ public class CPUTests : BackendTestBase
         return Task.FromResult<(Context, Accelerator)>((context, accelerator));
     }
 
-    [TestMethod]
-    public new async Task AlgorithmAllReduceHalfTest() =>
-        throw new UnsupportedTestException("CPU: AllReduce requires Half atomics which are not supported");
-
-    [TestMethod]
-    public new async Task AlgorithmGroupReduceHalfTest() =>
-        throw new UnsupportedTestException("CPU: GroupReduce uses AllReduce internally which requires Half atomics not yet implemented");
 }

@@ -6,24 +6,9 @@ This document consolidates actionable items from the Half coverage plans, deskto
 
 ## 1. ~~Immediate / Pending Work~~ DONE
 
-### Desktop Backend Skip Overrides — COMPLETED
+### Desktop Backend Skip Overrides — ALL RESOLVED
 
-**Location:** `SpawnDev.ILGPU.ConsoleDemo/Program.cs`
-
-Skip overrides added for ConsoleDemo test classes:
-
-| Class | Test Method | Reason |
-|-------|-------------|--------|
-| `CudaTests` | `AlgorithmExclusiveScanHalfTest` | CUDA: PTX warp shuffle only supports b32; Half (b16) requires promotion intrinsics not yet implemented |
-| `CudaTests` | `AlgorithmInclusiveScanHalfTest` | Same as above |
-| `CudaTests` | `AlgorithmAllReduceHalfTest` | CUDA: AllReduce requires Half atomics which are not supported (Half excluded from AtomicNumericTypes) |
-| `CPUTests` | `AlgorithmAllReduceHalfTest` | CPU: AllReduce requires Half atomics which are not supported (Half excluded from AtomicNumericTypes) |
-
-**Root causes:**
-- PTX `shfl.sync.*.b32` instructions operate on 32-bit values only. Half is 16-bit, so the PTX JIT rejects generated code.
-- Both `PTXGroupExtensions.AllReduce` and `ILGroupExtensions.AllReduce` call `reduction.AtomicApply()`. Half is excluded from `AtomicNumericTypes` in `ILGPU/Static/TypeInformation.ttinclude` because hardware typically lacks half-precision atomics.
-
-**Note:** CPU ExclusiveScan and InclusiveScan Half tests should pass (IL backend uses sequential scan without warp shuffles or atomics).
+All previously-skipped Half tests on CUDA and CPU now pass. No active skip overrides remain for Half in `Program.cs`.
 
 ---
 
@@ -45,9 +30,9 @@ Skip overrides added for ConsoleDemo test classes:
 - **Intrinsic handlers** — `GenerateConvertHalfToFloat`, `GenerateConvertFloatToHalf` in `WGSLCodeGenerator.cs`; `HalfExtensions` made public for intrinsic chain
 - **Capability detection** — Float16 support from WebGPU device capabilities
 
-### Desktop Backend Skip Overrides
+### Desktop Backend Skip Overrides — ALL REMOVED
 
-- **`SpawnDev.ILGPU.ConsoleDemo/Program.cs`** — `CudaTests`: skip `AlgorithmExclusiveScanHalfTest`, `AlgorithmInclusiveScanHalfTest` (PTX b32 shuffle), `AlgorithmAllReduceHalfTest` (Half atomics); `CPUTests`: skip `AlgorithmAllReduceHalfTest` (Half atomics)
+All 6 Half skip overrides previously in `Program.cs` have been removed. Half tests now pass on CUDA and CPU.
 
 ### XMath Half Overloads
 
@@ -57,6 +42,30 @@ Skip overrides added for ConsoleDemo test classes:
 
 - **`BackendTestBase.Tests3.cs`** — Added `HalfEdgeCasesTest` (zero, negative zero, subnormals, max/min values) and `HalfMixedTypeTest` (Half + int → float kernel)
 - **`BackendTestBase.cs`** — Added `HalfEdgeCasesKernel` and `HalfMixedTypeKernel` static kernel methods
+- **Bug fix** — `HalfEdgeCasesTest` used `HalfExtensions.Zero/Epsilon/MaxValue/MinValue` (these don't exist on `HalfExtensions`); corrected to `Half.Zero`, `Half.Epsilon`, `Half.MaxValue`, `Half.MinValue` (defined on the `Half` struct in `HalfConversion.cs`)
+
+### Algorithm Test Type Variants
+
+- **`BackendTestBase.Tests6.cs`** — 14 new kernel methods and 14 new test methods added covering `ExclusiveScan` (double, uint), `InclusiveScan` (long, double, uint), `AllReduce` (double, long, uint), and `GroupReduce` (float, long, double, uint, Half). `double`/`long` variants use `RunEmulatedTest`; Half tests are capability-gated on `accelerator.Capabilities.Float16`.
+- **`CPUTests.cs`, `WebGLTests.cs`** — Skip overrides for all 14 new algorithm tests (CPU: WASM single-threaded; WebGL: no shared memory/barriers).
+- **`Program.cs`** — Additional skip overrides for `AlgorithmGroupReduceHalfTest` on `CudaTests` and `CPUTests`.
+
+### Half Test Coverage Bug Fix
+
+- **`BackendTestBase.Tests3.cs`** — Corrected `HalfExtensions.Zero/Epsilon/MaxValue/MinValue` to `Half.Zero/Epsilon/MaxValue/MinValue`. These constants are defined on the `Half` struct (in `HalfConversion.cs`), not on `HalfExtensions`. This resolved 4 compilation errors that had been blocking the build.
+
+### CUDA PTX Half Warp Shuffle Support
+
+- **`PTXIntrinsics.Generated.tt` / `.cs`** — 8 Half redirect methods added (`WarpShuffleHalf`, `WarpShuffleDownHalf`, `WarpShuffleUpHalf`, `WarpShuffleXorHalf` + `SubWarp*` variants). Widens `Half → uint` via `Interop.FloatAsInt` before the `b32` shuffle, narrows back via `Interop.IntAsFloat((ushort))`. Registered for all 4 `ShuffleKind` values in both `RegisterWarpShuffle` and `RegisterSubWarpShuffle`.
+
+### AllReduce Lock-Free Rewrite (Half Atomics Avoided)
+
+- **`ILGroupExtensions.AllReduce`** — Rewritten to allocate `MaxNumWarps=64` shared memory slots. Per-warp first-lane write pattern; first thread serially combines and broadcasts via slot 0. No `AtomicApply` call.
+- **`PTXGroupExtensions.AllReduce`** — Rewritten to allocate `MaxWarps=32` shared memory slots. Per-warp first-lane write; first warp aggregates via XOR butterfly (`PTXWarpExtensions.AllReduce`). No `AtomicApply` call.
+
+### `Half.One` Constant Bug Fix
+
+- **`ILGPU/HalfConversion.cs`** — `Half.One` was `new Half(0x1)` (smallest positive denormal, ~5.96e-8). Fixed to `new Half(0x3C00)` which is FP16 `1.0` exactly.
 
 ### Quality
 
@@ -64,27 +73,26 @@ Skip overrides added for ConsoleDemo test classes:
 
 ---
 
-## 3. Medium-term: CUDA PTX Half Warp Shuffle Support
+## 3. ~~Medium-term: CUDA PTX Half Warp Shuffle Support~~ DONE
 
-**Problem:** PTX `shfl.sync.idx.b32`, `shfl.sync.down.b32`, `shfl.sync.up.b32`, `shfl.sync.bfly.b32` operate on 32-bit values only. Half is 16-bit.
+**Solution implemented:** `PTXIntrinsics.Generated.tt` and `.cs` updated with 8 Half redirect methods (`WarpShuffleXxxHalf`, `SubWarpShuffleXxxHalf`) for all 4 `ShuffleKind` values. Each method widens `Half → uint` via `Interop.FloatAsInt`, performs a `b32` shuffle, and narrows back via `Interop.IntAsFloat((ushort))`. `RegisterWarpShuffle` and `RegisterSubWarpShuffle` now map `BasicValueType.Float16` to these redirects for all shuffle kinds.
 
-**Solution:** Add Half shuffle intrinsics that widen `f16` to `b32` before shuffling and narrow back afterwards.
+**PTX emitted per shuffle:** `cvt.u32.u16` → `shfl.sync.*.b32` → `cvt.u16.u32`
 
-**Files:** `ILGPU/Backends/PTX/PTXInstructions.Data.cs`, `ILGPU.Algorithms/PTX/PTXWarpExtensions.cs` (or equivalent intrinsics)
-
-**Impact:** Unlock `ExclusiveScanHalf` and `InclusiveScanHalf` on CUDA, removing 2 skip overrides.
+**Unlocked:** `ExclusiveScanHalf`, `InclusiveScanHalf`, `AllReduceHalf`, `GroupReduceHalfTest` on CUDA.
 
 ---
 
-## 4. Medium-term: Half Atomics Support
+## 4. ~~Medium-term: Half Atomics Support~~ DONE (via lock-free approach)
 
-**Problem:** `AtomicFloatTypes = FloatTypes.Skip(1)` in `ILGPU/Static/TypeInformation.ttinclude` (line 134) excludes Half. `AtomicNumericTypes` therefore has no Half.
+**Solution implemented:** Instead of adding hardware Half atomics, `AllReduce` in both backends was rewritten to avoid `AtomicApply` entirely using a per-warp-slot pattern:
 
-**Options:**
-- **A:** Add Half to `AtomicFloatTypes` — cascades to `AtomicFunctions.tt` and all backends (PTX, OpenCL, CPU, WebGPU, etc.). Requires each backend to emit valid half-precision atomic instructions or fallbacks.
-- **B:** CAS-based Half atomics — Use `Atomic.CompareExchange` on `ushort`. Note: `Atomic.CompareExchange` in `ILGPU/Atomic.cs` currently supports only int, long, uint, ulong, float, double — would need `ushort`/Half support first.
+- **`ILGroupExtensions.AllReduce`** — Allocates `MaxNumWarps=64` shared memory slots. Each warp's first lane writes its warp-reduced value to its own slot (no contention, no atomics). The first thread serially combines all warp results and stores in slot 0. All threads read slot 0.
+- **`PTXGroupExtensions.AllReduce`** — Allocates `MaxWarps=32` shared memory slots. Same per-warp write. The first warp aggregates all 32 results via XOR butterfly (`PTXWarpExtensions.AllReduce`), which fits since CUDA's max 32 warps == warp size 32.
 
-**Impact:** Unlock `AllReduceHalf` on CUDA/CPU; enable `accelerator.Reduce<Half, AddHalf>` (multi-workgroup reduction) and `ILGPUReduceHalfTest`.
+**Why this is better than CAS-based atomics:** No 16-bit atomic alignment issues, works for all types (no regression for int/float), simpler code.
+
+**Unlocked:** `AllReduceHalf`, `GroupReduceHalfTest` on CUDA and CPU.
 
 ---
 
@@ -136,10 +144,18 @@ Added `XMath.Min(Half, Half)`, `XMath.Max(Half, Half)`, and `XMath.Clamp(Half, H
 | Half in mixed-type scenarios | — | DONE — `HalfMixedTypeTest` added to Tests3 |
 | Half edge cases (NaN, Inf, subnormals) | — | DONE — `HalfEdgeCasesTest` added to Tests3 |
 
-### Algorithm Test Type Variants
+### Algorithm Test Type Variants — COMPLETED
 
-- `AlgorithmGroupReduceTest` — currently int only; could add float, long, double, Half variants
-- `InclusiveScan` / `AllReduce` — currently int, float, Half; could add long, double, uint
+All type variants have been added to `BackendTestBase.Tests6.cs`:
+
+| Operation | New Types Added | Test Methods |
+|-----------|----------------|--------------|
+| `ExclusiveScan` | double, uint | `AlgorithmExclusiveScanDoubleTest`, `AlgorithmExclusiveScanUIntTest` |
+| `InclusiveScan` | long, double, uint | `AlgorithmInclusiveScanLongTest`, `AlgorithmInclusiveScanDoubleTest`, `AlgorithmInclusiveScanUIntTest` |
+| `AllReduce` | double, long, uint | `AlgorithmAllReduceDoubleTest`, `AlgorithmAllReduceLongTest`, `AlgorithmAllReduceUIntTest` |
+| `GroupReduce` | float, long, double, uint, Half | `AlgorithmGroupReduceFloatTest`, `AlgorithmGroupReduceLongTest`, `AlgorithmGroupReduceDoubleTest`, `AlgorithmGroupReduceUIntTest`, `AlgorithmGroupReduceHalfTest` |
+
+Browser skip overrides added in `CPUTests.cs` and `WebGLTests.cs` for all 14 new tests (CPU: single-threaded WASM cannot support barriers; WebGL: no shared memory or barriers). `AlgorithmGroupReduceHalfTest` additionally skipped on CUDA and CPU desktop backends due to Half atomics limitation.
 
 ---
 
