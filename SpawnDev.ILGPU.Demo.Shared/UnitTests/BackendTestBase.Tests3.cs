@@ -342,6 +342,72 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             }
         });
 
+        /// <summary>
+        /// Verifies Half edge cases: zero, negative zero, subnormals (Epsilon), MaxValue, MinValue.
+        /// NaN and Infinity are excluded because GPU passthrough of NaN bit patterns
+        /// is not guaranteed across all backends.
+        /// </summary>
+        [TestMethod]
+        public async Task HalfEdgeCasesTest() => await RunTest(async accelerator =>
+        {
+            if (!accelerator.Capabilities.Float16)
+                throw new UnsupportedTestException("Float16 not supported on this device");
+            var data = new global::ILGPU.Half[]
+            {
+                global::ILGPU.Half.Zero,
+                (global::ILGPU.Half)(-0.0f),
+                global::ILGPU.Half.Epsilon,
+                global::ILGPU.Half.MaxValue,
+                global::ILGPU.Half.MinValue,
+                (global::ILGPU.Half)0.00006103515625f, // smallest normal Half
+                (global::ILGPU.Half)(-0.00006103515625f),
+                (global::ILGPU.Half)65504.0f, // max finite Half
+            };
+            int len = data.Length;
+            using var buf = accelerator.Allocate1D(data);
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<global::ILGPU.Half>>(HalfEdgeCasesKernel);
+            kernel((Index1D)len, buf.View);
+            await accelerator.SynchronizeAsync();
+            var result = await buf.CopyToHostAsync<global::ILGPU.Half>();
+            for (int i = 0; i < len; i++)
+            {
+                float expected = (float)data[i];
+                float actual = (float)result[i];
+                if (MathF.Abs(actual - expected) > 0.01f)
+                    throw new Exception($"Half edge case failed at [{i}]: expected={expected}, got={actual}");
+            }
+        });
+
+        /// <summary>
+        /// Verifies Half values can be combined with int values in a mixed-type kernel.
+        /// </summary>
+        [TestMethod]
+        public async Task HalfMixedTypeTest() => await RunTest(async accelerator =>
+        {
+            if (!accelerator.Capabilities.Float16)
+                throw new UnsupportedTestException("Float16 not supported on this device");
+            var halfData = new global::ILGPU.Half[]
+            {
+                (global::ILGPU.Half)1.5f, (global::ILGPU.Half)2.25f,
+                (global::ILGPU.Half)(-3.0f), (global::ILGPU.Half)0.0f
+            };
+            var intData = new int[] { 10, 20, 30, 40 };
+            int len = halfData.Length;
+            using var bufHalf = accelerator.Allocate1D(halfData);
+            using var bufInt = accelerator.Allocate1D(intData);
+            using var bufOut = accelerator.Allocate1D<float>(len);
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<global::ILGPU.Half>, ArrayView<int>, ArrayView<float>>(HalfMixedTypeKernel);
+            kernel((Index1D)len, bufHalf.View, bufInt.View, bufOut.View);
+            await accelerator.SynchronizeAsync();
+            var result = await bufOut.CopyToHostAsync<float>();
+            for (int i = 0; i < len; i++)
+            {
+                float expected = (float)halfData[i] + (float)intData[i];
+                if (MathF.Abs(result[i] - expected) > 0.1f)
+                    throw new Exception($"Half mixed type failed at [{i}]: expected={expected}, got={result[i]}");
+            }
+        });
+
         #endregion
 
         #region Comparison, Logic, and Misc Tests

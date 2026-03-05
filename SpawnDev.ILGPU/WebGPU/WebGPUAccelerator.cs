@@ -1151,8 +1151,11 @@ namespace SpawnDev.ILGPU.WebGPU
                     // The WGSL binding count is the source of truth. The runtime may create
                     // extra entries (e.g. Phase 2 scalar buffer for ArrayView extents that the
                     // WGSL handles via arrayLength()). Trim to match the WGSL layout.
-                    var kernelName = compiledKernel.Name ?? "unknown";
-                    Console.WriteLine($"[WebGPU-BindGroup] Trimming entries from {entries.Count} to {expectedCount} for kernel '{kernelName}' (HasScalarPacking={compiledKernel.HasScalarPacking})");
+                    if (WebGPUBackend.VerboseLogging)
+                    {
+                        var kernelName = compiledKernel.Name ?? "unknown";
+                        Console.WriteLine($"[WebGPU-BindGroup] Trimming entries from {entries.Count} to {expectedCount} for kernel '{kernelName}' (HasScalarPacking={compiledKernel.HasScalarPacking})");
+                    }
                     while (entries.Count > expectedCount)
                         entries.RemoveAt(entries.Count - 1);
                 }

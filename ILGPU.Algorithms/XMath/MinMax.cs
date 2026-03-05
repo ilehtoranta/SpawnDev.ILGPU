@@ -1,4 +1,4 @@
-﻿// ---------------------------------------------------------------------------------------
+// ---------------------------------------------------------------------------------------
 //                                   ILGPU Algorithms
 //                        Copyright (c) 2019-2023 ILGPU Project
 //                                    www.ilgpu.net
@@ -9,6 +9,7 @@
 // Source License. See LICENSE.txt for details.
 // ---------------------------------------------------------------------------------------
 
+using System;
 using System.Runtime.CompilerServices;
 
 namespace ILGPU.Algorithms
@@ -34,6 +35,16 @@ namespace ILGPU.Algorithms
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static float Min(float first, float second) =>
             IntrinsicMath.Min(first, second);
+
+        /// <summary>
+        /// Computes min(first, second).
+        /// </summary>
+        /// <param name="first">The first argument.</param>
+        /// <param name="second">The second argument.</param>
+        /// <returns>The minimum of first and second value.</returns>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static Half Min(Half first, Half second) =>
+            (Half)IntrinsicMath.Min((float)first, (float)second);
 
         /// <summary>
         /// Computes min(first, second).
@@ -142,6 +153,16 @@ namespace ILGPU.Algorithms
         /// <param name="second">The second argument.</param>
         /// <returns>The maximum of first and second value.</returns>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static Half Max(Half first, Half second) =>
+            (Half)IntrinsicMath.Max((float)first, (float)second);
+
+        /// <summary>
+        /// Computes max(first, second).
+        /// </summary>
+        /// <param name="first">The first argument.</param>
+        /// <param name="second">The second argument.</param>
+        /// <returns>The maximum of first and second value.</returns>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static sbyte Max(sbyte first, sbyte second) =>
             IntrinsicMath.Max(first, second);
 
@@ -236,6 +257,17 @@ namespace ILGPU.Algorithms
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static float Clamp(float value, float min, float max) =>
             IntrinsicMath.Clamp(value, min, max);
+
+        /// <summary>
+        /// Computes clamp(value, min, max) = Max(Min(clamp, max), min).
+        /// </summary>
+        /// <param name="value">The value to clamp.</param>
+        /// <param name="min">The first argument.</param>
+        /// <param name="max">The second argument.</param>
+        /// <returns>The clamped value in the interval [min, max].</returns>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static Half Clamp(Half value, Half min, Half max) =>
+            (Half)IntrinsicMath.Clamp((float)value, (float)min, (float)max);
 
         /// <summary>
         /// Computes clamp(value, min, max) = Max(Min(clamp, max), min).

@@ -516,6 +516,8 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
         static void HalfPassthroughKernel(Index1D index, ArrayView<global::ILGPU.Half> data) { data[index] = data[index]; }
         static void HalfArithmeticKernel(Index1D index, ArrayView<global::ILGPU.Half> input, ArrayView<global::ILGPU.Half> output) { output[index] = (global::ILGPU.Half)((float)input[index] * 2f + 1f); }
         static void HalfMinMaxKernel(Index1D index, ArrayView<global::ILGPU.Half> a, ArrayView<global::ILGPU.Half> b, ArrayView<global::ILGPU.Half> output) { float va = (float)a[index], vb = (float)b[index]; output[index] = (global::ILGPU.Half)((va > vb ? va : vb) - (va < vb ? va : vb)); }
+        static void HalfEdgeCasesKernel(Index1D index, ArrayView<global::ILGPU.Half> data) { data[index] = (global::ILGPU.Half)((float)data[index] * 1.0f); }
+        static void HalfMixedTypeKernel(Index1D index, ArrayView<global::ILGPU.Half> halfIn, ArrayView<int> intIn, ArrayView<float> output) { output[index] = (float)halfIn[index] + (float)intIn[index]; }
         static void LongIntegerKernel(Index1D index, ArrayView<long> data) { data[index] = data[index] * 2 + 1; }
         static void LongArithmeticKernel(Index1D index, ArrayView<long> a, ArrayView<long> b, ArrayView<long> output) { output[index] = (a[index] + b[index]) - (a[index] * 2); }
         static void LongBitwiseKernel(Index1D index, ArrayView<long> input, ArrayView<long> output) { long val = input[index]; long mask = 0x0F0F0F0F0F0F0F0FL; output[index] = (val & mask) | ((val >> 4) & mask); }

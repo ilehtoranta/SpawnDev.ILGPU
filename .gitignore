@@ -366,3 +366,4 @@ FodyWeavers.xsd
 .tools/
 /State
 /.agents/workflows
+/.cursorrules

@@ -399,6 +399,61 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
         });
 
         /// <summary>
+        /// Test ExclusiveScan with double type — verifies AddDouble operation (f64 emulation on WebGPU).
+        /// </summary>
+        [TestMethod]
+        public async Task AlgorithmExclusiveScanDoubleTest() => await RunEmulatedTest(async accelerator =>
+        {
+            int groupSize = Math.Min(64, accelerator.Device.MaxNumThreadsPerGroup);
+            using var inputBuf = accelerator.Allocate1D<double>(groupSize);
+            using var outputBuf = accelerator.Allocate1D<double>(groupSize);
+
+            var inputData = new double[groupSize];
+            for (int i = 0; i < groupSize; i++) inputData[i] = 1.0;
+            inputBuf.CopyFromCPU(inputData);
+
+            var kernel = accelerator.LoadStreamKernel<Index1D, ArrayView<double>, ArrayView<double>>(
+                ExclusiveScanDoubleKernel);
+            kernel(new KernelConfig(1, groupSize), (Index1D)groupSize, inputBuf.View, outputBuf.View);
+            await accelerator.SynchronizeAsync();
+
+            var result = await outputBuf.CopyToHostAsync<double>();
+            for (int i = 0; i < groupSize; i++)
+            {
+                double expected = (double)i;
+                if (Math.Abs(result[i] - expected) > 0.001)
+                    throw new Exception($"ExclusiveScanDouble failed at {i}. Expected {expected}, got {result[i]}");
+            }
+        });
+
+        /// <summary>
+        /// Test ExclusiveScan with uint type — verifies AddUInt32 operation.
+        /// </summary>
+        [TestMethod]
+        public async Task AlgorithmExclusiveScanUIntTest() => await RunTest(async accelerator =>
+        {
+            int groupSize = Math.Min(64, accelerator.Device.MaxNumThreadsPerGroup);
+            using var inputBuf = accelerator.Allocate1D<uint>(groupSize);
+            using var outputBuf = accelerator.Allocate1D<uint>(groupSize);
+
+            var inputData = new uint[groupSize];
+            for (int i = 0; i < groupSize; i++) inputData[i] = 1u;
+            inputBuf.CopyFromCPU(inputData);
+
+            var kernel = accelerator.LoadStreamKernel<Index1D, ArrayView<uint>, ArrayView<uint>>(
+                ExclusiveScanUIntKernel);
+            kernel(new KernelConfig(1, groupSize), (Index1D)groupSize, inputBuf.View, outputBuf.View);
+            await accelerator.SynchronizeAsync();
+
+            var result = await outputBuf.CopyToHostAsync<uint>();
+            for (int i = 0; i < groupSize; i++)
+            {
+                if (result[i] != (uint)i)
+                    throw new Exception($"ExclusiveScanUInt failed at {i}. Expected {i}, got {result[i]}");
+            }
+        });
+
+        /// <summary>
         /// Test InclusiveScan with float type — verifies AddFloat operation.
         /// </summary>
         [TestMethod]
@@ -427,6 +482,90 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
         });
 
         /// <summary>
+        /// Test InclusiveScan with long type — verifies AddInt64 (i64 emulation on WebGPU).
+        /// </summary>
+        [TestMethod]
+        public async Task AlgorithmInclusiveScanLongTest() => await RunEmulatedTest(async accelerator =>
+        {
+            int groupSize = Math.Min(64, accelerator.Device.MaxNumThreadsPerGroup);
+            using var inputBuf = accelerator.Allocate1D<long>(groupSize);
+            using var outputBuf = accelerator.Allocate1D<long>(groupSize);
+
+            var inputData = new long[groupSize];
+            for (int i = 0; i < groupSize; i++) inputData[i] = 1L;
+            inputBuf.CopyFromCPU(inputData);
+
+            var kernel = accelerator.LoadStreamKernel<Index1D, ArrayView<long>, ArrayView<long>>(
+                InclusiveScanLongKernel);
+            kernel(new KernelConfig(1, groupSize), (Index1D)groupSize, inputBuf.View, outputBuf.View);
+            await accelerator.SynchronizeAsync();
+
+            var result = await outputBuf.CopyToHostAsync<long>();
+            for (int i = 0; i < groupSize; i++)
+            {
+                long expected = (long)(i + 1);
+                if (result[i] != expected)
+                    throw new Exception($"InclusiveScanLong failed at {i}. Expected {expected}, got {result[i]}");
+            }
+        });
+
+        /// <summary>
+        /// Test InclusiveScan with double type — verifies AddDouble operation (f64 emulation on WebGPU).
+        /// </summary>
+        [TestMethod]
+        public async Task AlgorithmInclusiveScanDoubleTest() => await RunEmulatedTest(async accelerator =>
+        {
+            int groupSize = Math.Min(64, accelerator.Device.MaxNumThreadsPerGroup);
+            using var inputBuf = accelerator.Allocate1D<double>(groupSize);
+            using var outputBuf = accelerator.Allocate1D<double>(groupSize);
+
+            var inputData = new double[groupSize];
+            for (int i = 0; i < groupSize; i++) inputData[i] = 1.0;
+            inputBuf.CopyFromCPU(inputData);
+
+            var kernel = accelerator.LoadStreamKernel<Index1D, ArrayView<double>, ArrayView<double>>(
+                InclusiveScanDoubleKernel);
+            kernel(new KernelConfig(1, groupSize), (Index1D)groupSize, inputBuf.View, outputBuf.View);
+            await accelerator.SynchronizeAsync();
+
+            var result = await outputBuf.CopyToHostAsync<double>();
+            for (int i = 0; i < groupSize; i++)
+            {
+                double expected = (double)(i + 1);
+                if (Math.Abs(result[i] - expected) > 0.001)
+                    throw new Exception($"InclusiveScanDouble failed at {i}. Expected {expected}, got {result[i]}");
+            }
+        });
+
+        /// <summary>
+        /// Test InclusiveScan with uint type — verifies AddUInt32 operation.
+        /// </summary>
+        [TestMethod]
+        public async Task AlgorithmInclusiveScanUIntTest() => await RunTest(async accelerator =>
+        {
+            int groupSize = Math.Min(64, accelerator.Device.MaxNumThreadsPerGroup);
+            using var inputBuf = accelerator.Allocate1D<uint>(groupSize);
+            using var outputBuf = accelerator.Allocate1D<uint>(groupSize);
+
+            var inputData = new uint[groupSize];
+            for (int i = 0; i < groupSize; i++) inputData[i] = 1u;
+            inputBuf.CopyFromCPU(inputData);
+
+            var kernel = accelerator.LoadStreamKernel<Index1D, ArrayView<uint>, ArrayView<uint>>(
+                InclusiveScanUIntKernel);
+            kernel(new KernelConfig(1, groupSize), (Index1D)groupSize, inputBuf.View, outputBuf.View);
+            await accelerator.SynchronizeAsync();
+
+            var result = await outputBuf.CopyToHostAsync<uint>();
+            for (int i = 0; i < groupSize; i++)
+            {
+                uint expected = (uint)(i + 1);
+                if (result[i] != expected)
+                    throw new Exception($"InclusiveScanUInt failed at {i}. Expected {expected}, got {result[i]}");
+            }
+        });
+
+        /// <summary>
         /// Test AllReduce with float type — verifies AddFloat operation.
         /// </summary>
         [TestMethod]
@@ -451,6 +590,181 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             {
                 if (MathF.Abs(result[i] - expectedSum) > 0.001f)
                     throw new Exception($"AllReduceFloat failed at {i}. Expected {expectedSum}, got {result[i]}");
+            }
+        });
+
+        /// <summary>
+        /// Test AllReduce with double type — verifies AddDouble operation (f64 emulation on WebGPU).
+        /// </summary>
+        [TestMethod]
+        public async Task AlgorithmAllReduceDoubleTest() => await RunEmulatedTest(async accelerator =>
+        {
+            int groupSize = Math.Min(64, accelerator.Device.MaxNumThreadsPerGroup);
+            using var inputBuf = accelerator.Allocate1D<double>(groupSize);
+            using var outputBuf = accelerator.Allocate1D<double>(groupSize);
+
+            var inputData = new double[groupSize];
+            for (int i = 0; i < groupSize; i++) inputData[i] = (double)(i + 1);
+            inputBuf.CopyFromCPU(inputData);
+
+            var kernel = accelerator.LoadStreamKernel<Index1D, ArrayView<double>, ArrayView<double>>(
+                AllReduceDoubleKernel);
+            kernel(new KernelConfig(1, groupSize), (Index1D)groupSize, inputBuf.View, outputBuf.View);
+            await accelerator.SynchronizeAsync();
+
+            var result = await outputBuf.CopyToHostAsync<double>();
+            double expectedSum = groupSize * (groupSize + 1) / 2.0;
+            for (int i = 0; i < groupSize; i++)
+            {
+                if (Math.Abs(result[i] - expectedSum) > 0.001)
+                    throw new Exception($"AllReduceDouble failed at {i}. Expected {expectedSum}, got {result[i]}");
+            }
+        });
+
+        /// <summary>
+        /// Test AllReduce with long type — verifies AddInt64 (i64 emulation on WebGPU).
+        /// </summary>
+        [TestMethod]
+        public async Task AlgorithmAllReduceLongTest() => await RunEmulatedTest(async accelerator =>
+        {
+            int groupSize = Math.Min(64, accelerator.Device.MaxNumThreadsPerGroup);
+            using var inputBuf = accelerator.Allocate1D<long>(groupSize);
+            using var outputBuf = accelerator.Allocate1D<long>(groupSize);
+
+            var inputData = new long[groupSize];
+            for (int i = 0; i < groupSize; i++) inputData[i] = (long)(i + 1);
+            inputBuf.CopyFromCPU(inputData);
+
+            var kernel = accelerator.LoadStreamKernel<Index1D, ArrayView<long>, ArrayView<long>>(
+                AllReduceLongKernel);
+            kernel(new KernelConfig(1, groupSize), (Index1D)groupSize, inputBuf.View, outputBuf.View);
+            await accelerator.SynchronizeAsync();
+
+            var result = await outputBuf.CopyToHostAsync<long>();
+            long expectedSum = (long)groupSize * (groupSize + 1) / 2L;
+            for (int i = 0; i < groupSize; i++)
+            {
+                if (result[i] != expectedSum)
+                    throw new Exception($"AllReduceLong failed at {i}. Expected {expectedSum}, got {result[i]}");
+            }
+        });
+
+        /// <summary>
+        /// Test AllReduce with uint type — verifies AddUInt32 operation.
+        /// </summary>
+        [TestMethod]
+        public async Task AlgorithmAllReduceUIntTest() => await RunTest(async accelerator =>
+        {
+            int groupSize = Math.Min(64, accelerator.Device.MaxNumThreadsPerGroup);
+            using var inputBuf = accelerator.Allocate1D<uint>(groupSize);
+            using var outputBuf = accelerator.Allocate1D<uint>(groupSize);
+
+            var inputData = new uint[groupSize];
+            for (int i = 0; i < groupSize; i++) inputData[i] = (uint)(i + 1);
+            inputBuf.CopyFromCPU(inputData);
+
+            var kernel = accelerator.LoadStreamKernel<Index1D, ArrayView<uint>, ArrayView<uint>>(
+                AllReduceUIntKernel);
+            kernel(new KernelConfig(1, groupSize), (Index1D)groupSize, inputBuf.View, outputBuf.View);
+            await accelerator.SynchronizeAsync();
+
+            var result = await outputBuf.CopyToHostAsync<uint>();
+            uint expectedSum = (uint)(groupSize * (groupSize + 1) / 2);
+            for (int i = 0; i < groupSize; i++)
+            {
+                if (result[i] != expectedSum)
+                    throw new Exception($"AllReduceUInt failed at {i}. Expected {expectedSum}, got {result[i]}");
+            }
+        });
+
+        /// <summary>
+        /// Test ExclusiveScan with Half type — verifies AddHalf operation.
+        /// Uses a smaller group size to keep sums within Half's exact integer range.
+        /// </summary>
+        [TestMethod]
+        public async Task AlgorithmExclusiveScanHalfTest() => await RunTest(async accelerator =>
+        {
+            if (!accelerator.Capabilities.Float16)
+                throw new UnsupportedTestException("Float16 not supported on this device");
+            int groupSize = Math.Min(32, accelerator.Device.MaxNumThreadsPerGroup);
+            using var inputBuf = accelerator.Allocate1D<global::ILGPU.Half>(groupSize);
+            using var outputBuf = accelerator.Allocate1D<global::ILGPU.Half>(groupSize);
+
+            var inputData = new global::ILGPU.Half[groupSize];
+            for (int i = 0; i < groupSize; i++) inputData[i] = (global::ILGPU.Half)1.0f;
+            inputBuf.CopyFromCPU(inputData);
+
+            var kernel = accelerator.LoadStreamKernel<Index1D, ArrayView<global::ILGPU.Half>, ArrayView<global::ILGPU.Half>>(
+                ExclusiveScanHalfKernel);
+            kernel(new KernelConfig(1, groupSize), (Index1D)groupSize, inputBuf.View, outputBuf.View);
+            await accelerator.SynchronizeAsync();
+
+            var result = await outputBuf.CopyToHostAsync<global::ILGPU.Half>();
+            for (int i = 0; i < groupSize; i++)
+            {
+                float expected = (float)i;
+                if (MathF.Abs((float)result[i] - expected) > 0.1f)
+                    throw new Exception($"ExclusiveScanHalf failed at {i}. Expected {expected}, got {(float)result[i]}");
+            }
+        });
+
+        /// <summary>
+        /// Test InclusiveScan with Half type — verifies AddHalf operation.
+        /// </summary>
+        [TestMethod]
+        public async Task AlgorithmInclusiveScanHalfTest() => await RunTest(async accelerator =>
+        {
+            if (!accelerator.Capabilities.Float16)
+                throw new UnsupportedTestException("Float16 not supported on this device");
+            int groupSize = Math.Min(32, accelerator.Device.MaxNumThreadsPerGroup);
+            using var inputBuf = accelerator.Allocate1D<global::ILGPU.Half>(groupSize);
+            using var outputBuf = accelerator.Allocate1D<global::ILGPU.Half>(groupSize);
+
+            var inputData = new global::ILGPU.Half[groupSize];
+            for (int i = 0; i < groupSize; i++) inputData[i] = (global::ILGPU.Half)1.0f;
+            inputBuf.CopyFromCPU(inputData);
+
+            var kernel = accelerator.LoadStreamKernel<Index1D, ArrayView<global::ILGPU.Half>, ArrayView<global::ILGPU.Half>>(
+                InclusiveScanHalfKernel);
+            kernel(new KernelConfig(1, groupSize), (Index1D)groupSize, inputBuf.View, outputBuf.View);
+            await accelerator.SynchronizeAsync();
+
+            var result = await outputBuf.CopyToHostAsync<global::ILGPU.Half>();
+            for (int i = 0; i < groupSize; i++)
+            {
+                float expected = (float)(i + 1);
+                if (MathF.Abs((float)result[i] - expected) > 0.1f)
+                    throw new Exception($"InclusiveScanHalf failed at {i}. Expected {expected}, got {(float)result[i]}");
+            }
+        });
+
+        /// <summary>
+        /// Test AllReduce with Half type — verifies AddHalf operation.
+        /// </summary>
+        [TestMethod]
+        public async Task AlgorithmAllReduceHalfTest() => await RunTest(async accelerator =>
+        {
+            if (!accelerator.Capabilities.Float16)
+                throw new UnsupportedTestException("Float16 not supported on this device");
+            int groupSize = Math.Min(32, accelerator.Device.MaxNumThreadsPerGroup);
+            using var inputBuf = accelerator.Allocate1D<global::ILGPU.Half>(groupSize);
+            using var outputBuf = accelerator.Allocate1D<global::ILGPU.Half>(groupSize);
+
+            var inputData = new global::ILGPU.Half[groupSize];
+            for (int i = 0; i < groupSize; i++) inputData[i] = (global::ILGPU.Half)(float)(i + 1);
+            inputBuf.CopyFromCPU(inputData);
+
+            var kernel = accelerator.LoadStreamKernel<Index1D, ArrayView<global::ILGPU.Half>, ArrayView<global::ILGPU.Half>>(
+                AllReduceHalfKernel);
+            kernel(new KernelConfig(1, groupSize), (Index1D)groupSize, inputBuf.View, outputBuf.View);
+            await accelerator.SynchronizeAsync();
+
+            var result = await outputBuf.CopyToHostAsync<global::ILGPU.Half>();
+            float expectedSum = groupSize * (groupSize + 1) / 2.0f;
+            for (int i = 0; i < groupSize; i++)
+            {
+                if (MathF.Abs((float)result[i] - expectedSum) > 1.0f)
+                    throw new Exception($"AllReduceHalf failed at {i}. Expected {expectedSum}, got {(float)result[i]}");
             }
         });
 
@@ -642,6 +956,139 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                 throw new Exception($"GroupReduce failed. Expected {expectedSum}, got {result[0]}");
         });
 
+        /// <summary>
+        /// Test GroupReduce with float type — verifies AddFloat operation.
+        /// </summary>
+        [TestMethod]
+        public async Task AlgorithmGroupReduceFloatTest() => await RunTest(async accelerator =>
+        {
+            int groupSize = Math.Min(64, accelerator.Device.MaxNumThreadsPerGroup);
+            using var inputBuf = accelerator.Allocate1D<float>(groupSize);
+            using var outputBuf = accelerator.Allocate1D<float>(1);
+            outputBuf.MemSetToZero();
+
+            var inputData = new float[groupSize];
+            for (int i = 0; i < groupSize; i++) inputData[i] = (float)(i + 1);
+            inputBuf.CopyFromCPU(inputData);
+
+            var kernel = accelerator.LoadStreamKernel<Index1D, ArrayView<float>, ArrayView<float>>(
+                GroupReduceFloatKernel);
+            kernel(new KernelConfig(1, groupSize), (Index1D)groupSize, inputBuf.View, outputBuf.View);
+            await accelerator.SynchronizeAsync();
+
+            var result = await outputBuf.CopyToHostAsync<float>();
+            float expectedSum = groupSize * (groupSize + 1) / 2.0f;
+            if (MathF.Abs(result[0] - expectedSum) > 0.001f)
+                throw new Exception($"GroupReduceFloat failed. Expected {expectedSum}, got {result[0]}");
+        });
+
+        /// <summary>
+        /// Test GroupReduce with long type — verifies AddInt64 (i64 emulation on WebGPU).
+        /// </summary>
+        [TestMethod]
+        public async Task AlgorithmGroupReduceLongTest() => await RunEmulatedTest(async accelerator =>
+        {
+            int groupSize = Math.Min(64, accelerator.Device.MaxNumThreadsPerGroup);
+            using var inputBuf = accelerator.Allocate1D<long>(groupSize);
+            using var outputBuf = accelerator.Allocate1D<long>(1);
+            outputBuf.MemSetToZero();
+
+            var inputData = new long[groupSize];
+            for (int i = 0; i < groupSize; i++) inputData[i] = (long)(i + 1);
+            inputBuf.CopyFromCPU(inputData);
+
+            var kernel = accelerator.LoadStreamKernel<Index1D, ArrayView<long>, ArrayView<long>>(
+                GroupReduceLongKernel);
+            kernel(new KernelConfig(1, groupSize), (Index1D)groupSize, inputBuf.View, outputBuf.View);
+            await accelerator.SynchronizeAsync();
+
+            var result = await outputBuf.CopyToHostAsync<long>();
+            long expectedSum = (long)groupSize * (groupSize + 1) / 2L;
+            if (result[0] != expectedSum)
+                throw new Exception($"GroupReduceLong failed. Expected {expectedSum}, got {result[0]}");
+        });
+
+        /// <summary>
+        /// Test GroupReduce with double type — verifies AddDouble operation (f64 emulation on WebGPU).
+        /// </summary>
+        [TestMethod]
+        public async Task AlgorithmGroupReduceDoubleTest() => await RunEmulatedTest(async accelerator =>
+        {
+            int groupSize = Math.Min(64, accelerator.Device.MaxNumThreadsPerGroup);
+            using var inputBuf = accelerator.Allocate1D<double>(groupSize);
+            using var outputBuf = accelerator.Allocate1D<double>(1);
+            outputBuf.MemSetToZero();
+
+            var inputData = new double[groupSize];
+            for (int i = 0; i < groupSize; i++) inputData[i] = (double)(i + 1);
+            inputBuf.CopyFromCPU(inputData);
+
+            var kernel = accelerator.LoadStreamKernel<Index1D, ArrayView<double>, ArrayView<double>>(
+                GroupReduceDoubleKernel);
+            kernel(new KernelConfig(1, groupSize), (Index1D)groupSize, inputBuf.View, outputBuf.View);
+            await accelerator.SynchronizeAsync();
+
+            var result = await outputBuf.CopyToHostAsync<double>();
+            double expectedSum = groupSize * (groupSize + 1) / 2.0;
+            if (Math.Abs(result[0] - expectedSum) > 0.001)
+                throw new Exception($"GroupReduceDouble failed. Expected {expectedSum}, got {result[0]}");
+        });
+
+        /// <summary>
+        /// Test GroupReduce with uint type — verifies AddUInt32 operation.
+        /// </summary>
+        [TestMethod]
+        public async Task AlgorithmGroupReduceUIntTest() => await RunTest(async accelerator =>
+        {
+            int groupSize = Math.Min(64, accelerator.Device.MaxNumThreadsPerGroup);
+            using var inputBuf = accelerator.Allocate1D<uint>(groupSize);
+            using var outputBuf = accelerator.Allocate1D<uint>(1);
+            outputBuf.MemSetToZero();
+
+            var inputData = new uint[groupSize];
+            for (int i = 0; i < groupSize; i++) inputData[i] = (uint)(i + 1);
+            inputBuf.CopyFromCPU(inputData);
+
+            var kernel = accelerator.LoadStreamKernel<Index1D, ArrayView<uint>, ArrayView<uint>>(
+                GroupReduceUIntKernel);
+            kernel(new KernelConfig(1, groupSize), (Index1D)groupSize, inputBuf.View, outputBuf.View);
+            await accelerator.SynchronizeAsync();
+
+            var result = await outputBuf.CopyToHostAsync<uint>();
+            uint expectedSum = (uint)(groupSize * (groupSize + 1) / 2);
+            if (result[0] != expectedSum)
+                throw new Exception($"GroupReduceUInt failed. Expected {expectedSum}, got {result[0]}");
+        });
+
+        /// <summary>
+        /// Test GroupReduce with Half type — verifies AddHalf operation.
+        /// Uses smaller group size for Half's limited range.
+        /// </summary>
+        [TestMethod]
+        public async Task AlgorithmGroupReduceHalfTest() => await RunTest(async accelerator =>
+        {
+            if (!accelerator.Capabilities.Float16)
+                throw new UnsupportedTestException("Float16 not supported on this device");
+            int groupSize = Math.Min(32, accelerator.Device.MaxNumThreadsPerGroup);
+            using var inputBuf = accelerator.Allocate1D<global::ILGPU.Half>(groupSize);
+            using var outputBuf = accelerator.Allocate1D<global::ILGPU.Half>(1);
+            outputBuf.MemSetToZero();
+
+            var inputData = new global::ILGPU.Half[groupSize];
+            for (int i = 0; i < groupSize; i++) inputData[i] = (global::ILGPU.Half)(float)(i + 1);
+            inputBuf.CopyFromCPU(inputData);
+
+            var kernel = accelerator.LoadStreamKernel<Index1D, ArrayView<global::ILGPU.Half>, ArrayView<global::ILGPU.Half>>(
+                GroupReduceHalfKernel);
+            kernel(new KernelConfig(1, groupSize), (Index1D)groupSize, inputBuf.View, outputBuf.View);
+            await accelerator.SynchronizeAsync();
+
+            var result = await outputBuf.CopyToHostAsync<global::ILGPU.Half>();
+            float expectedSum = groupSize * (groupSize + 1) / 2.0f;
+            if (MathF.Abs((float)result[0] - expectedSum) > 1.0f)
+                throw new Exception($"GroupReduceHalf failed. Expected {expectedSum}, got {(float)result[0]}");
+        });
+
         #region Algorithm Kernel Methods
 
 
@@ -753,6 +1200,187 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             float val = input[gid];
             float reduced = GroupExtensions.AllReduce<float, AddFloat>(val);
             output[gid] = reduced;
+        }
+
+        static void ExclusiveScanHalfKernel(
+            Index1D index,
+            ArrayView<global::ILGPU.Half> input,
+            ArrayView<global::ILGPU.Half> output)
+        {
+            int gid = Grid.GlobalIndex.X;
+            global::ILGPU.Half val = input[gid];
+            global::ILGPU.Half scanned = GroupExtensions.ExclusiveScan<global::ILGPU.Half, AddHalf>(val);
+            output[gid] = scanned;
+        }
+
+        static void InclusiveScanHalfKernel(
+            Index1D index,
+            ArrayView<global::ILGPU.Half> input,
+            ArrayView<global::ILGPU.Half> output)
+        {
+            int gid = Grid.GlobalIndex.X;
+            global::ILGPU.Half val = input[gid];
+            global::ILGPU.Half scanned = GroupExtensions.InclusiveScan<global::ILGPU.Half, AddHalf>(val);
+            output[gid] = scanned;
+        }
+
+        static void AllReduceHalfKernel(
+            Index1D index,
+            ArrayView<global::ILGPU.Half> input,
+            ArrayView<global::ILGPU.Half> output)
+        {
+            int gid = Grid.GlobalIndex.X;
+            global::ILGPU.Half val = input[gid];
+            global::ILGPU.Half reduced = GroupExtensions.AllReduce<global::ILGPU.Half, AddHalf>(val);
+            output[gid] = reduced;
+        }
+
+        static void ExclusiveScanDoubleKernel(
+            Index1D index,
+            ArrayView<double> input,
+            ArrayView<double> output)
+        {
+            int gid = Grid.GlobalIndex.X;
+            double val = input[gid];
+            double scanned = GroupExtensions.ExclusiveScan<double, AddDouble>(val);
+            output[gid] = scanned;
+        }
+
+        static void ExclusiveScanUIntKernel(
+            Index1D index,
+            ArrayView<uint> input,
+            ArrayView<uint> output)
+        {
+            int gid = Grid.GlobalIndex.X;
+            uint val = input[gid];
+            uint scanned = GroupExtensions.ExclusiveScan<uint, AddUInt32>(val);
+            output[gid] = scanned;
+        }
+
+        static void InclusiveScanLongKernel(
+            Index1D index,
+            ArrayView<long> input,
+            ArrayView<long> output)
+        {
+            int gid = Grid.GlobalIndex.X;
+            long val = input[gid];
+            long scanned = GroupExtensions.InclusiveScan<long, AddInt64>(val);
+            output[gid] = scanned;
+        }
+
+        static void InclusiveScanDoubleKernel(
+            Index1D index,
+            ArrayView<double> input,
+            ArrayView<double> output)
+        {
+            int gid = Grid.GlobalIndex.X;
+            double val = input[gid];
+            double scanned = GroupExtensions.InclusiveScan<double, AddDouble>(val);
+            output[gid] = scanned;
+        }
+
+        static void InclusiveScanUIntKernel(
+            Index1D index,
+            ArrayView<uint> input,
+            ArrayView<uint> output)
+        {
+            int gid = Grid.GlobalIndex.X;
+            uint val = input[gid];
+            uint scanned = GroupExtensions.InclusiveScan<uint, AddUInt32>(val);
+            output[gid] = scanned;
+        }
+
+        static void AllReduceDoubleKernel(
+            Index1D index,
+            ArrayView<double> input,
+            ArrayView<double> output)
+        {
+            int gid = Grid.GlobalIndex.X;
+            double val = input[gid];
+            double reduced = GroupExtensions.AllReduce<double, AddDouble>(val);
+            output[gid] = reduced;
+        }
+
+        static void AllReduceLongKernel(
+            Index1D index,
+            ArrayView<long> input,
+            ArrayView<long> output)
+        {
+            int gid = Grid.GlobalIndex.X;
+            long val = input[gid];
+            long reduced = GroupExtensions.AllReduce<long, AddInt64>(val);
+            output[gid] = reduced;
+        }
+
+        static void AllReduceUIntKernel(
+            Index1D index,
+            ArrayView<uint> input,
+            ArrayView<uint> output)
+        {
+            int gid = Grid.GlobalIndex.X;
+            uint val = input[gid];
+            uint reduced = GroupExtensions.AllReduce<uint, AddUInt32>(val);
+            output[gid] = reduced;
+        }
+
+        static void GroupReduceFloatKernel(
+            Index1D index,
+            ArrayView<float> input,
+            ArrayView<float> output)
+        {
+            int gid = Grid.GlobalIndex.X;
+            float val = input[gid];
+            float reduced = GroupExtensions.Reduce<float, AddFloat>(val);
+            if (Group.IsFirstThread)
+                output[0] = reduced;
+        }
+
+        static void GroupReduceLongKernel(
+            Index1D index,
+            ArrayView<long> input,
+            ArrayView<long> output)
+        {
+            int gid = Grid.GlobalIndex.X;
+            long val = input[gid];
+            long reduced = GroupExtensions.Reduce<long, AddInt64>(val);
+            if (Group.IsFirstThread)
+                output[0] = reduced;
+        }
+
+        static void GroupReduceDoubleKernel(
+            Index1D index,
+            ArrayView<double> input,
+            ArrayView<double> output)
+        {
+            int gid = Grid.GlobalIndex.X;
+            double val = input[gid];
+            double reduced = GroupExtensions.Reduce<double, AddDouble>(val);
+            if (Group.IsFirstThread)
+                output[0] = reduced;
+        }
+
+        static void GroupReduceUIntKernel(
+            Index1D index,
+            ArrayView<uint> input,
+            ArrayView<uint> output)
+        {
+            int gid = Grid.GlobalIndex.X;
+            uint val = input[gid];
+            uint reduced = GroupExtensions.Reduce<uint, AddUInt32>(val);
+            if (Group.IsFirstThread)
+                output[0] = reduced;
+        }
+
+        static void GroupReduceHalfKernel(
+            Index1D index,
+            ArrayView<global::ILGPU.Half> input,
+            ArrayView<global::ILGPU.Half> output)
+        {
+            int gid = Grid.GlobalIndex.X;
+            global::ILGPU.Half val = input[gid];
+            global::ILGPU.Half reduced = GroupExtensions.Reduce<global::ILGPU.Half, AddHalf>(val);
+            if (Group.IsFirstThread)
+                output[0] = reduced;
         }
 
         #endregion

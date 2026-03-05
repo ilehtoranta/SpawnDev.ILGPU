@@ -192,10 +192,12 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
             if (devices.Length == 0)
                 throw new UnsupportedTestException("No WebGL2 devices found");
             var device = devices[0];
+#if DEBUG
             device.PrintInfo(Console.Out);
             Console.WriteLine($"WebGL2 Device Name: {device.Name}");
             Console.WriteLine($"WebGL2 Vendor: {device.Vendor}");
             Console.WriteLine($"WebGL2 Max Texture Size: {device.MaxTextureSize}");
+#endif
 
             // Verify device has reasonable capabilities
             if (device.MaxTextureSize < 2048)
@@ -539,14 +541,62 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
         public new async Task AlgorithmExclusiveScanLongTest() =>
             throw new UnsupportedTestException("WebGL: algorithm tests require shared memory + barriers");
         [TestMethod]
+        public new async Task AlgorithmExclusiveScanDoubleTest() =>
+            throw new UnsupportedTestException("WebGL: algorithm tests require shared memory + barriers");
+        [TestMethod]
+        public new async Task AlgorithmExclusiveScanUIntTest() =>
+            throw new UnsupportedTestException("WebGL: algorithm tests require shared memory + barriers");
+        [TestMethod]
         public new async Task AlgorithmInclusiveScanFloatTest() =>
+            throw new UnsupportedTestException("WebGL: algorithm tests require shared memory + barriers");
+        [TestMethod]
+        public new async Task AlgorithmInclusiveScanLongTest() =>
+            throw new UnsupportedTestException("WebGL: algorithm tests require shared memory + barriers");
+        [TestMethod]
+        public new async Task AlgorithmInclusiveScanDoubleTest() =>
+            throw new UnsupportedTestException("WebGL: algorithm tests require shared memory + barriers");
+        [TestMethod]
+        public new async Task AlgorithmInclusiveScanUIntTest() =>
             throw new UnsupportedTestException("WebGL: algorithm tests require shared memory + barriers");
         [TestMethod]
         public new async Task AlgorithmAllReduceFloatTest() =>
             throw new UnsupportedTestException("WebGL: algorithm tests require shared memory + barriers");
+        [TestMethod]
+        public new async Task AlgorithmAllReduceDoubleTest() =>
+            throw new UnsupportedTestException("WebGL: algorithm tests require shared memory + barriers");
+        [TestMethod]
+        public new async Task AlgorithmAllReduceLongTest() =>
+            throw new UnsupportedTestException("WebGL: algorithm tests require shared memory + barriers");
+        [TestMethod]
+        public new async Task AlgorithmAllReduceUIntTest() =>
+            throw new UnsupportedTestException("WebGL: algorithm tests require shared memory + barriers");
+        [TestMethod]
+        public new async Task AlgorithmExclusiveScanHalfTest() =>
+            throw new UnsupportedTestException("WebGL: algorithm tests require shared memory + barriers");
+        [TestMethod]
+        public new async Task AlgorithmInclusiveScanHalfTest() =>
+            throw new UnsupportedTestException("WebGL: algorithm tests require shared memory + barriers");
+        [TestMethod]
+        public new async Task AlgorithmAllReduceHalfTest() =>
+            throw new UnsupportedTestException("WebGL: algorithm tests require shared memory + barriers");
 
         [TestMethod]
         public new async Task AlgorithmGroupReduceTest() =>
+            throw new UnsupportedTestException("WebGL: algorithm tests require shared memory + barriers");
+        [TestMethod]
+        public new async Task AlgorithmGroupReduceFloatTest() =>
+            throw new UnsupportedTestException("WebGL: algorithm tests require shared memory + barriers");
+        [TestMethod]
+        public new async Task AlgorithmGroupReduceLongTest() =>
+            throw new UnsupportedTestException("WebGL: algorithm tests require shared memory + barriers");
+        [TestMethod]
+        public new async Task AlgorithmGroupReduceDoubleTest() =>
+            throw new UnsupportedTestException("WebGL: algorithm tests require shared memory + barriers");
+        [TestMethod]
+        public new async Task AlgorithmGroupReduceUIntTest() =>
+            throw new UnsupportedTestException("WebGL: algorithm tests require shared memory + barriers");
+        [TestMethod]
+        public new async Task AlgorithmGroupReduceHalfTest() =>
             throw new UnsupportedTestException("WebGL: algorithm tests require shared memory + barriers");
     }
 }

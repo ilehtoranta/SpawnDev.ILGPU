@@ -24,11 +24,13 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
             using var context = builder.ToContext();
 
             var devices = context.GetAllDeviceInfo();
+#if DEBUG
             Console.WriteLine($"Registered devices ({devices.Count}):");
             foreach (var (name, type) in devices)
             {
                 Console.WriteLine($"  [{type}] {name}");
             }
+#endif
 
             // Should have at least CPU
             if (devices.Count == 0)
@@ -38,11 +40,15 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
 
             // Verify we have WebGPU (expected in Chrome/Edge)
             bool hasWebGPU = devices.Any(d => d.Type == AcceleratorType.WebGPU);
+#if DEBUG
             Console.WriteLine($"WebGPU available: {hasWebGPU}");
+#endif
 
             // Verify we have CPU
             bool hasCPU = devices.Any(d => d.Type == AcceleratorType.CPU);
+#if DEBUG
             Console.WriteLine($"CPU available: {hasCPU}");
+#endif
         }
 
         #endregion
@@ -62,16 +68,17 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
 
             using var accelerator = await context.CreatePreferredAcceleratorAsync();
 
-            Console.WriteLine($"Preferred accelerator: {accelerator.AcceleratorType} - {accelerator.Name}");
-
             // Should have selected *something*
             if (accelerator == null)
                 throw new Exception("CreatePreferredAcceleratorAsync returned null");
 
+#if DEBUG
+            Console.WriteLine($"Preferred accelerator: {accelerator.AcceleratorType} - {accelerator.Name}");
             Console.WriteLine($"AcceleratorType: {accelerator.AcceleratorType}");
             Console.WriteLine($"Name: {accelerator.Name}");
             Console.WriteLine($"MemorySize: {accelerator.MemorySize}");
             Console.WriteLine($"MaxNumThreadsPerGroup: {accelerator.MaxNumThreadsPerGroup}");
+#endif
         }
 
         #endregion
@@ -95,7 +102,9 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
             using var context = builder.ToContext();
 
             using var accelerator = await context.CreatePreferredAcceleratorAsync();
+#if DEBUG
             Console.WriteLine($"Running kernel on: {accelerator.AcceleratorType} - {accelerator.Name}");
+#endif
 
             const int length = 256;
             using var bufA = accelerator.Allocate1D<int>(length);
@@ -125,7 +134,9 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
                     throw new Exception($"Mismatch at index {i}: expected {expected}, got {result[i]}");
             }
 
+#if DEBUG
             Console.WriteLine($"Default kernel execution: All {length} results correct on {accelerator.AcceleratorType}");
+#endif
         }
 
         #endregion
