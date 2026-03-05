@@ -1,4 +1,4 @@
-﻿using System.Diagnostics;
+using System.Diagnostics;
 using System.Text.Json;
 using ILGPU;
 using ILGPU.Runtime;
@@ -64,7 +64,16 @@ if (args.Length > 0 && args[0].Equals("diag", StringComparison.OrdinalIgnoreCase
             Console.WriteLine($"  CLStdVersion: {clDev.CLStdVersion}");
             Console.WriteLine($"  GenericAddressSpace: {clDev.Capabilities.GenericAddressSpace}");
             Console.WriteLine($"  Vendor: {clDev.Vendor}");
-            
+            Console.WriteLine($"  Extensions (device): {string.Join(", ", clDev.Extensions)}");
+
+            // Create accelerator to get runtime-detected subgroup capabilities
+            using (var accel = clDev.CreateCLAccelerator(context))
+            {
+                Console.WriteLine($"  SubGroups (runtime): {accel.Capabilities.SubGroups}");
+                Console.WriteLine($"  SubGroupShuffle (runtime): {accel.Capabilities.SubGroupShuffle}");
+                Console.WriteLine($"  WarpSize: {accel.WarpSize}");
+            }
+
             using var writer = new System.IO.StringWriter();
             clDev.PrintInformation(writer);
             Console.WriteLine(writer.ToString());
@@ -407,10 +416,18 @@ public class OpenCLTests : BackendTestBase
 
     protected override void RequireFeature(Accelerator accelerator, string featureName, string? reason = null)
     {
-        if (featureName == "subgroups" && accelerator is ILGPU.Runtime.OpenCL.CLAccelerator clAccel)
+        if (accelerator is not ILGPU.Runtime.OpenCL.CLAccelerator clAccel)
+            return;
+
+        if (featureName == "subgroups")
         {
             if (!clAccel.Capabilities.SubGroups)
                 throw new UnsupportedTestException(reason ?? "Subgroup support not available on this OpenCL device");
+        }
+        else if (featureName == "subgroup_shuffle")
+        {
+            if (!clAccel.Capabilities.SubGroupShuffle)
+                throw new UnsupportedTestException(reason ?? "Subgroup shuffle (Warp.Shuffle) requires cl_intel_subgroups or cl_khr_subgroup_shuffle on this OpenCL device");
         }
     }
 }

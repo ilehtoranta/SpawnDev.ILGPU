@@ -78,7 +78,7 @@ Warp (subgroup) operations allow threads within a warp to communicate directly w
 | `Warp.ShuffleUp(value, delta)` | Read from lane - delta | ✅² | ❌ | ✅ | ✅ | ✅¹ | ✅ |
 | `Warp.ShuffleXor(value, mask)` | Read from lane XOR mask | ✅² | ❌ | ✅ | ✅ | ✅¹ | ✅ |
 
-¹ Requires device subgroup support (dynamically detected; some OpenCL 3.0 devices may lack subgroups)  
+¹ Requires device subgroup support. For OpenCL: base subgroups need `cl_khr_subgroups` or `cl_intel_subgroups`; Warp.Shuffle additionally needs `cl_intel_subgroups` (Intel) or `cl_khr_subgroup_shuffle` + `cl_khr_subgroup_shuffle_relative` (NVIDIA/AMD). Dynamically detected.  
 ² Requires `subgroups` WebGPU extension (Chrome 128+).
 
 ```csharp

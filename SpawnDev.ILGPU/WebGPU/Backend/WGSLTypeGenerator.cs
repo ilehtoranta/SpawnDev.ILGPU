@@ -83,10 +83,11 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 if (typeNode is PrimitiveType primitiveType)
                 {
                     var basicType = primitiveType.BasicValueType;
-                    if (basicType == BasicValueType.Float64 ||
+                    if (basicType == BasicValueType.Float16 ||
+                        basicType == BasicValueType.Float64 ||
                         basicType == BasicValueType.Int64)
                     {
-                        // Return dynamic value based on current emulation flags
+                        // Return dynamic value based on current flags (f16 capability, emulation)
                         return GetBasicValueType(basicType);
                     }
                 }
@@ -116,7 +117,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 BasicValueType.Int16 => "i32", // WGSL doesn't have i16, promote to i32
                 BasicValueType.Int32 => "i32",
                 BasicValueType.Int64 => useI64Emu ? "emu_i64" : "i32",
-                BasicValueType.Float16 => "f32", // Promoting
+                BasicValueType.Float16 => Backend.HasShaderF16 ? "f16" : "f32", // Native f16 when shader-f16 enabled
                 BasicValueType.Float32 => "f32",
                 BasicValueType.Float64 => useF64Emu ? "emu_f64" : "f32",
                 _ => null
@@ -139,7 +140,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 ArithmeticBasicValueType.UInt16 => "u32",
                 ArithmeticBasicValueType.UInt32 => "u32",
                 ArithmeticBasicValueType.UInt64 => useI64Emu ? "emu_u64" : "u32",
-                ArithmeticBasicValueType.Float16 => "f32",
+                ArithmeticBasicValueType.Float16 => Backend.HasShaderF16 ? "f16" : "f32",
                 ArithmeticBasicValueType.Float32 => "f32",
                 ArithmeticBasicValueType.Float64 => useF64Emu ? "emu_f64" : "f32",
                 _ => null
@@ -218,6 +219,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     if (kvp.Value == "i32" ||
                         kvp.Value == "u32" ||
                         kvp.Value == "f32" ||
+                        kvp.Value == "f16" ||
                         kvp.Value == "bool" ||
                         kvp.Value.StartsWith("vec") ||
                         kvp.Value.StartsWith("mat") ||

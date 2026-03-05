@@ -37,10 +37,11 @@ namespace SpawnDev.ILGPU.WebGPU
             if (device == null)
                 throw new InvalidOperationException("GPU device not initialized");
 
-            // Create GPU buffer
+            // Create GPU buffer (WebGPU requires size multiple of 4)
+            var gpuSize = WebGPUAlignment.AlignTo4(LengthInBytes);
             var descriptor = new GPUBufferDescriptor
             {
-                Size = (ulong)LengthInBytes,
+                Size = (ulong)gpuSize,
                 Usage = GPUBufferUsage.Storage | GPUBufferUsage.CopySrc | GPUBufferUsage.CopyDst,
                 MappedAtCreation = false
             };
@@ -111,8 +112,10 @@ namespace SpawnDev.ILGPU.WebGPU
             if (queue == null)
                 throw new InvalidOperationException("GPU queue not available");
 
-            // Use Uint8Array.Write<T> for direct transfer without Marshal.Copy overhead
-            using var uint8Array = new Uint8Array(sourceArray.Length * ElementSize);
+            // WebGPU writeBuffer requires the number of bytes to write to be a multiple of 4
+            var copyBytes = sourceArray.Length * ElementSize;
+            var paddedBytes = WebGPUAlignment.AlignTo4(copyBytes);
+            using var uint8Array = new Uint8Array((int)paddedBytes);
             uint8Array.Write(sourceArray);
             queue.WriteBuffer(_buffer, (long)(targetOffset * ElementSize), uint8Array);
         }
@@ -153,6 +156,7 @@ namespace SpawnDev.ILGPU.WebGPU
             if (copyLength <= 0) return 0;
 
             var copyBytes = copyLength * ElementSize;
+            var paddedBytes = WebGPUAlignment.AlignTo4(copyBytes);
             var sourceByteOffset = sourceOffset * ElementSize;
 
             WebGPUBackend.Log($"[WebGPU] CopyToHostAsync: SourceOffset={sourceOffset}, Length={copyLength} elements");
@@ -162,27 +166,28 @@ namespace SpawnDev.ILGPU.WebGPU
                 throw new InvalidOperationException("GPU device not initialized");
 
             // Ensure cached staging buffer is large enough (created once, reused)
-            if (_cachedStagingBuffer == null || _cachedStagingSize < copyBytes)
+            // WebGPU CopyBufferToBuffer requires copy size to be a multiple of 4
+            if (_cachedStagingBuffer == null || _cachedStagingSize < paddedBytes)
             {
                 _cachedStagingBuffer?.Destroy();
                 _cachedStagingBuffer?.Dispose();
 
                 var stagingDescriptor = new GPUBufferDescriptor
                 {
-                    Size = (ulong)copyBytes,
+                    Size = (ulong)paddedBytes,
                     Usage = GPUBufferUsage.CopyDst | GPUBufferUsage.MapRead,
                     MappedAtCreation = false
                 };
                 _cachedStagingBuffer = device.CreateBuffer(stagingDescriptor);
-                _cachedStagingSize = copyBytes;
+                _cachedStagingSize = paddedBytes;
             }
 
             // Flush pending ILGPU kernel dispatches before copying
             Accelerator.FlushPendingCommands?.Invoke();
 
-            // Copy from GPU buffer to cached staging buffer
+            // Copy from GPU buffer to cached staging buffer (size must be multiple of 4)
             using var encoder = device.CreateCommandEncoder();
-            encoder.CopyBufferToBuffer(_buffer, (ulong)sourceByteOffset, _cachedStagingBuffer, 0, (ulong)copyBytes);
+            encoder.CopyBufferToBuffer(_buffer, (ulong)sourceByteOffset, _cachedStagingBuffer, 0, (ulong)paddedBytes);
             using var commandBuffer = encoder.Finish();
             Accelerator.Queue?.Submit(new[] { commandBuffer });
 
@@ -217,6 +222,8 @@ namespace SpawnDev.ILGPU.WebGPU
             copyBytes ??= Length * ElementSize - sourceByteOffset;
             if (copyBytes <= 0) return new Uint8Array();
 
+            var paddedBytes = WebGPUAlignment.AlignTo4(copyBytes.Value);
+
             WebGPUBackend.Log($"[WebGPU] CopyToHostUint8ArrayAsync: SourceByteOffset={sourceByteOffset}, CopyBytes={copyBytes} elements");
 
             var device = Accelerator.NativeDevice;
@@ -224,27 +231,27 @@ namespace SpawnDev.ILGPU.WebGPU
                 throw new InvalidOperationException("GPU device not initialized");
 
             // Ensure cached staging buffer is large enough (created once, reused)
-            if (_cachedStagingBuffer == null || _cachedStagingSize < copyBytes)
+            if (_cachedStagingBuffer == null || _cachedStagingSize < paddedBytes)
             {
                 _cachedStagingBuffer?.Destroy();
                 _cachedStagingBuffer?.Dispose();
 
                 var stagingDescriptor = new GPUBufferDescriptor
                 {
-                    Size = (ulong)copyBytes,
+                    Size = (ulong)paddedBytes,
                     Usage = GPUBufferUsage.CopyDst | GPUBufferUsage.MapRead,
                     MappedAtCreation = false
                 };
                 _cachedStagingBuffer = device.CreateBuffer(stagingDescriptor);
-                _cachedStagingSize = copyBytes.Value;
+                _cachedStagingSize = paddedBytes;
             }
 
             // Flush pending ILGPU kernel dispatches before copying
             Accelerator.FlushPendingCommands?.Invoke();
 
-            // Copy from GPU buffer to cached staging buffer
+            // Copy from GPU buffer to cached staging buffer (size must be multiple of 4)
             using var encoder = device.CreateCommandEncoder();
-            encoder.CopyBufferToBuffer(_buffer, (ulong)sourceByteOffset, _cachedStagingBuffer, 0, (ulong)copyBytes);
+            encoder.CopyBufferToBuffer(_buffer, (ulong)sourceByteOffset, _cachedStagingBuffer, 0, (ulong)paddedBytes);
             using var commandBuffer = encoder.Finish();
             Accelerator.Queue?.Submit(new[] { commandBuffer });
 
@@ -256,8 +263,9 @@ namespace SpawnDev.ILGPU.WebGPU
                 using var mappedRange = _cachedStagingBuffer.GetMappedRange();
                 if (mappedRange != null)
                 {
-                    // msut copy the data out of the mapped range before unmapping, as the mapped range becomes invalid after unmap
-                    result = new Uint8Array(mappedRange.Slice(0));
+                    // Must copy the data out of the mapped range before unmapping, as the mapped range becomes invalid after unmap
+                    // Slice to actual requested size (paddedBytes may be larger for alignment)
+                    result = new Uint8Array(mappedRange.Slice(0, (int)copyBytes.Value));
                 }
             }
             finally
@@ -290,6 +298,7 @@ namespace SpawnDev.ILGPU.WebGPU
             if (count <= 0) return 0;
 
             var copyBytes = count * destElementSize;
+            var paddedBytes = WebGPUAlignment.AlignTo4(copyBytes);
             var sourceByteOffset = sourceOffset * destElementSize;
 
             WebGPUBackend.Log($"[WebGPU] CopyToHostAsync<{typeof(TDest).Name}>: SourceOffset={sourceOffset}, Length={count} elements, ByteSize={copyBytes}");
@@ -299,27 +308,27 @@ namespace SpawnDev.ILGPU.WebGPU
                 throw new InvalidOperationException("GPU device not initialized");
 
             // Ensure cached staging buffer is large enough (created once, reused)
-            if (_cachedStagingBuffer == null || _cachedStagingSize < copyBytes)
+            if (_cachedStagingBuffer == null || _cachedStagingSize < paddedBytes)
             {
                 _cachedStagingBuffer?.Destroy();
                 _cachedStagingBuffer?.Dispose();
 
                 var stagingDescriptor = new GPUBufferDescriptor
                 {
-                    Size = (ulong)copyBytes,
+                    Size = (ulong)paddedBytes,
                     Usage = GPUBufferUsage.CopyDst | GPUBufferUsage.MapRead,
                     MappedAtCreation = false
                 };
                 _cachedStagingBuffer = device.CreateBuffer(stagingDescriptor);
-                _cachedStagingSize = copyBytes;
+                _cachedStagingSize = paddedBytes;
             }
 
             // Flush pending ILGPU kernel dispatches before copying
             Accelerator.FlushPendingCommands?.Invoke();
 
-            // Copy from GPU buffer to cached staging buffer
+            // Copy from GPU buffer to cached staging buffer (size must be multiple of 4)
             using var encoder = device.CreateCommandEncoder();
-            encoder.CopyBufferToBuffer(_buffer, (ulong)sourceByteOffset, _cachedStagingBuffer, 0, (ulong)copyBytes);
+            encoder.CopyBufferToBuffer(_buffer, (ulong)sourceByteOffset, _cachedStagingBuffer, 0, (ulong)paddedBytes);
             using var commandBuffer = encoder.Finish();
             Accelerator.Queue?.Submit(new[] { commandBuffer });
 

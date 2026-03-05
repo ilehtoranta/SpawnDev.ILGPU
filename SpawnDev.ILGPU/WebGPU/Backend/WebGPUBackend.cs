@@ -532,6 +532,23 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             {
                 WebGPUBackend.Log($"WebGPU: Error registering group/warp reduction intrinsics: {ex.Message}");
             }
+
+            // Register Half ↔ float conversion intrinsics.
+            // The default HalfExtensions.ConvertHalfToFloat / ConvertFloatToHalf use
+            // static lookup tables that cannot be accessed from GPU code. When inlined,
+            // all table reads return zero, producing incorrect results. Replace with
+            // native WGSL f32()/f16() conversions when shader-f16 is available.
+            if (HasShaderF16)
+            {
+                RegisterIntrinsic(
+                    typeof(HalfExtensions),
+                    nameof(HalfExtensions.ConvertHalfToFloat),
+                    WGSLCodeGenerator.GenerateConvertHalfToFloat);
+                RegisterIntrinsic(
+                    typeof(HalfExtensions),
+                    nameof(HalfExtensions.ConvertFloatToHalf),
+                    WGSLCodeGenerator.GenerateConvertFloatToHalf);
+            }
         }
 
 

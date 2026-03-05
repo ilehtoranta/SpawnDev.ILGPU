@@ -226,6 +226,14 @@ namespace ILGPU.Runtime.OpenCL
         internal static readonly ImmutableArray<string> Int64_AtomicsExtensions =
             ImmutableArray.Create("cl_khr_int64_base_atomics", "cl_khr_int64_extended_atomics");
 
+        /// <summary>
+        /// Extensions for Khronos subgroup shuffle (sub_group_shuffle, sub_group_shuffle_up/down/xor).
+        /// </summary>
+        internal static readonly ImmutableArray<string> SubGroupShuffleExtensions =
+            ImmutableArray.Create(
+                "cl_khr_subgroup_shuffle",
+                "cl_khr_subgroup_shuffle_relative");
+
         #endregion
 
         #region Instance
@@ -238,7 +246,8 @@ namespace ILGPU.Runtime.OpenCL
             bool float64,
             bool genericAddressSpace,
             bool int64_Atomics,
-            bool subGroups
+            bool subGroups,
+            bool subGroupShuffle
             )
         {
             var extensions = ImmutableArray.CreateBuilder<string>();
@@ -253,6 +262,7 @@ namespace ILGPU.Runtime.OpenCL
             if (Int64_Atomics)
                 extensions.AddRange(Int64_AtomicsExtensions);
             SubGroups = subGroups;
+            SubGroupShuffle = subGroupShuffle;
             Extensions = extensions.ToImmutable();
         }
 
@@ -270,6 +280,7 @@ namespace ILGPU.Runtime.OpenCL
             if (Int64_Atomics)
                 extensions.AddRange(Int64_AtomicsExtensions);
             SubGroups = false;
+            SubGroupShuffle = false;
             Extensions = extensions.ToImmutable();
         }
 
@@ -280,7 +291,7 @@ namespace ILGPU.Runtime.OpenCL
         /// <summary>
         /// List of OpenCL extensions.
         /// </summary>
-        public ImmutableArray<string> Extensions { get; }
+        public ImmutableArray<string> Extensions { get; internal set; }
 
         /// <summary>
         /// Supports Float64 (double) data type.
@@ -301,6 +312,11 @@ namespace ILGPU.Runtime.OpenCL
         /// Supports SubGroups.
         /// </summary>
         public bool SubGroups { get; internal set; }
+
+        /// <summary>
+        /// Supports subgroup shuffle (Warp.Shuffle). Requires cl_intel_subgroups or cl_khr_subgroup_shuffle + cl_khr_subgroup_shuffle_relative.
+        /// </summary>
+        public bool SubGroupShuffle { get; internal set; }
 
         #endregion
 
@@ -337,6 +353,31 @@ namespace ILGPU.Runtime.OpenCL
             new CapabilityNotSupportedException(
                 string.Format(ErrorMessages.CapabilityNotSupported,
                     "SubGroups extension"));
+
+        /// <summary>
+        /// Creates exception for 'SubGroupShuffle'.
+        /// </summary>
+        public static Exception GetNotSupportedSubGroupShuffleException() =>
+            new CapabilityNotSupportedException(
+                string.Format(ErrorMessages.CapabilityNotSupported,
+                    "SubGroupShuffle extension (cl_intel_subgroups or cl_khr_subgroup_shuffle)"));
+
+        /// <summary>
+        /// Appends subgroup-related extension pragmas to Extensions. Call from InitSubGroupSupport
+        /// when SubGroups and/or SubGroupShuffle are enabled.
+        /// </summary>
+        /// <param name="subgroupExts">Extensions for base subgroups (e.g. cl_khr_subgroups).</param>
+        /// <param name="shuffleExts">Extensions for shuffle (cl_khr_subgroup_shuffle, etc.). Empty for Intel.</param>
+        internal void AddSubGroupExtensions(
+            ImmutableArray<string> subgroupExts,
+            ImmutableArray<string> shuffleExts)
+        {
+            var builder = ImmutableArray.CreateBuilder<string>();
+            builder.AddRange(Extensions);
+            builder.AddRange(subgroupExts);
+            builder.AddRange(shuffleExts);
+            Extensions = builder.ToImmutable();
+        }
 
         #endregion
     }

@@ -3181,7 +3181,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                             else if (scalarWgslType == "f32")
                                 AppendLine($"var {fieldVarName} = bitcast<f32>(_scalar_params[{slot}]);");
                             else
-                                AppendLine($"var {fieldVarName} = bitcast<{scalarWgslType}>(_scalar_params[{slot}]);");
+                                AppendLine($"var {fieldVarName} = {BitcastFromU32($"_scalar_params[{slot}]", scalarWgslType)};");
                         }
                     }
                     continue; // Skip normal variable declaration for this param
@@ -3220,7 +3220,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                         }
                         else
                         {
-                            AppendLine($"var {variable.Name} = bitcast<{wgslType}>(_scalar_params[{slot}]);");
+                            AppendLine($"var {variable.Name} = {BitcastFromU32($"_scalar_params[{slot}]", wgslType)};");
                         }
                     }
                     continue;

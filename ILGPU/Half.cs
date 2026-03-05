@@ -1,4 +1,4 @@
-﻿// ---------------------------------------------------------------------------------------
+// ---------------------------------------------------------------------------------------
 //                                        ILGPU
 //                        Copyright (c) 2020-2023 ILGPU Project
 //                                    www.ilgpu.net
@@ -326,7 +326,7 @@ namespace ILGPU
         #endregion
     }
 
-    internal static partial class HalfExtensions
+    public static partial class HalfExtensions
     {
         /// <summary>
         /// Negates the given half value.

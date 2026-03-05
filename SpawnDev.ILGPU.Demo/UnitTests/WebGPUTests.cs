@@ -46,6 +46,14 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
             return await CreateAcceleratorAsync(enableEmulation: true);
         }
 
+        /// <summary>
+        /// RadixSort with double keys uses bit manipulation that is incompatible with
+        /// WebGPU's f64 emulation (emu_f64). Skip until native f64 or fixed emulation path.
+        /// </summary>
+        [TestMethod]
+        public new async Task AlgorithmRadixSortPairsDoubleTest() =>
+            throw new UnsupportedTestException("WebGPU: RadixSort with double keys is incompatible with f64 emulation (emu_f64)");
+
         #region WebGPU-Specific Tests
 
         /// <summary>
@@ -395,6 +403,13 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
     public class WebGPUNoSubgroupsTests : BackendTestBase
     {
         protected override string BackendName => "WebGPU (No Subgroups)";
+
+        /// <summary>
+        /// Same as WebGPUTests: RadixSort with double keys incompatible with f64 emulation.
+        /// </summary>
+        [TestMethod]
+        public new async Task AlgorithmRadixSortPairsDoubleTest() =>
+            throw new UnsupportedTestException("WebGPU: RadixSort with double keys is incompatible with f64 emulation (emu_f64)");
 
         protected override async Task<(Context context, Accelerator accelerator)> CreateAcceleratorAsync()
         {

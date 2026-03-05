@@ -1,4 +1,4 @@
-﻿// ---------------------------------------------------------------------------------------
+// ---------------------------------------------------------------------------------------
 //                                        ILGPU
 //                        Copyright (c) 2019-2023 ILGPU Project
 //                                    www.ilgpu.net
@@ -177,6 +177,29 @@ namespace ILGPU.Backends.OpenCL
             ShuffleKind kind,
             [NotNullWhen(true)] out string? operation) =>
             ShuffleOperations.TryGetValue((vendor, kind), out operation);
+
+        /// <summary>
+        /// Tries to resolve a shuffle operation with capability check. For non-Intel vendors,
+        /// Khronos ops are only returned when <paramref name="hasSubGroupShuffle"/> is true.
+        /// </summary>
+        /// <param name="vendor">The accelerator vendor.</param>
+        /// <param name="kind">The shuffle kind.</param>
+        /// <param name="hasSubGroupShuffle">Whether the device supports subgroup shuffle.</param>
+        /// <param name="operation">The resolved shuffle operation.</param>
+        /// <returns>True, if the operation could be resolved.</returns>
+        public static bool TryGetShuffleOperation(
+            CLDeviceVendor vendor,
+            ShuffleKind kind,
+            bool hasSubGroupShuffle,
+            [NotNullWhen(true)] out string? operation)
+        {
+            if (!ShuffleOperations.TryGetValue((vendor, kind), out operation))
+                return false;
+            // Intel has shuffle via cl_intel_subgroups when SubGroups is true
+            if (vendor == CLDeviceVendor.Intel)
+                return true;
+            return hasSubGroupShuffle;
+        }
 
         /// <summary>
         /// Resolves a broadcast operation.

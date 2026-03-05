@@ -1565,7 +1565,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 BasicValueType.Int16 => value.Int16Value.ToString(),
                 BasicValueType.Int32 => value.Int32Value.ToString(),
                 BasicValueType.Int64 => value.Int64Value.ToString(),
-                BasicValueType.Float16 => FormatFloat(value.Float32Value),
+                BasicValueType.Float16 => FormatFloat((float)value.Float16Value),
                 BasicValueType.Float32 => FormatFloat(value.Float32Value),
                 BasicValueType.Float64 => FormatFloat((float)value.Float64Value),
                 _ => "0"
@@ -2060,7 +2060,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                         // Step 2: first lane of each subgroup stores to _grp_sg_results
                         AppendLine($"if (subgroup_invocation_id == 0u) {{");
                         PushIndent();
-                        AppendLine($"_grp_sg_results[subgroup_id] = bitcast<u32>({warpResult});");
+                        AppendLine($"_grp_sg_results[subgroup_id] = {BitcastToU32(warpResult, wgslType)};");
                         PopIndent();
                         AppendLine("}");
 
@@ -2068,8 +2068,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                         AppendLine("workgroupBarrier();");
 
                         // Step 4: all threads cooperatively reduce across subgroups
-                        string load0Expr = $"bitcast<{wgslType}>(_grp_sg_results[0u])";
-                        string loadNExpr = $"bitcast<{wgslType}>(_grp_sg_results[_sgi])";
+                        string load0Expr = BitcastFromU32("_grp_sg_results[0u]", wgslType);
+                        string loadNExpr = BitcastFromU32("_grp_sg_results[_sgi]", wgslType);
                         AppendLine("{");
                         PushIndent();
                         AppendLine($"var _grp_accum : {wgslType} = {load0Expr};");
@@ -2140,7 +2140,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                         }
                         else
                         {
-                            AppendLine($"_warp_shuffle_buf[local_index] = bitcast<u32>({storeVal});");
+                            AppendLine($"_warp_shuffle_buf[local_index] = {BitcastToU32(storeVal, wgslType)};");
                         }
                         AppendLine("workgroupBarrier();");
 
@@ -2164,8 +2164,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                         }
                         else
                         {
-                            load0 = $"bitcast<{wgslType}>(_warp_shuffle_buf[0u])";
-                            loadN = $"bitcast<{wgslType}>(_warp_shuffle_buf[_ri])";
+                            load0 = BitcastFromU32("_warp_shuffle_buf[0u]", wgslType);
+                            loadN = BitcastFromU32("_warp_shuffle_buf[_ri]", wgslType);
                         }
                         AppendLine("{");
                         PushIndent();
@@ -2237,7 +2237,16 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             var target = Load(value);
             var source = Load(value.Value);
             Declare(target);
-            AppendLine($"{target} = bitcast<{target.Type}>({source});");
+            if (source.Type == "f16")
+            {
+                // f16 is 2 bytes, target is i32 (4 bytes) -- size-mismatched bitcast is invalid in WGSL.
+                // Pack f16 into the low 16 bits of a u32 via vec2<f16>, then cast to i32.
+                AppendLine($"{target} = i32(bitcast<u32>(vec2<f16>({source}, f16(0.0))));");
+            }
+            else
+            {
+                AppendLine($"{target} = bitcast<{target.Type}>({source});");
+            }
         }
 
         public virtual void GenerateCode(IntAsFloatCast value)
@@ -2245,7 +2254,41 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             var target = Load(value);
             var source = Load(value.Value);
             Declare(target);
-            AppendLine($"{target} = bitcast<{target.Type}>({source});");
+            if (target.Type == "f16")
+            {
+                // i32 is 4 bytes, target f16 is 2 bytes -- size-mismatched bitcast is invalid in WGSL.
+                // Reinterpret u32 as vec2<f16> and extract the low half.
+                AppendLine($"{target} = bitcast<vec2<f16>>(u32({source})).x;");
+            }
+            else
+            {
+                AppendLine($"{target} = bitcast<{target.Type}>({source});");
+            }
+        }
+
+        /// <summary>
+        /// Produces a WGSL expression that packs a scalar value into a u32 via bitcast.
+        /// For f16 (2 bytes), a direct <c>bitcast&lt;u32&gt;(f16)</c> is invalid because WGSL
+        /// requires bitcast operands to have matching byte sizes.  Instead we pack via
+        /// <c>bitcast&lt;u32&gt;(vec2&lt;f16&gt;(val, f16(0.0)))</c>.
+        /// </summary>
+        protected static string BitcastToU32(string expr, string sourceWgslType)
+        {
+            if (sourceWgslType == "f16")
+                return $"bitcast<u32>(vec2<f16>({expr}, f16(0.0)))";
+            return $"bitcast<u32>({expr})";
+        }
+
+        /// <summary>
+        /// Produces a WGSL expression that unpacks a u32 into the given scalar type via bitcast.
+        /// For f16 (2 bytes), a direct <c>bitcast&lt;f16&gt;(u32)</c> is invalid.  Instead we
+        /// unpack via <c>bitcast&lt;vec2&lt;f16&gt;&gt;(u32).x</c>.
+        /// </summary>
+        protected static string BitcastFromU32(string expr, string targetWgslType)
+        {
+            if (targetWgslType == "f16")
+                return $"bitcast<vec2<f16>>({expr}).x";
+            return $"bitcast<{targetWgslType}>({expr})";
         }
 
         // Atomics & Barriers
@@ -2358,11 +2401,12 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 string casNew = $"_cas_new_{target.Name}";
                 string casRes = $"_cas_res_{target.Name}";
 
+                string floatType = target.Type;
                 AppendLine($"var {casOld} = atomicLoad({ptr});");
                 AppendLine($"loop {{");
                 PushIndent();
 
-                string floatOld = $"bitcast<f32>({casOld})";
+                string floatOld = BitcastFromU32(casOld, floatType);
                 string newFloat = value.Kind switch
                 {
                     AtomicKind.Add => $"{floatOld} + {val}",
@@ -2372,13 +2416,13 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     _ => $"{floatOld} + {val}"  // fallback: Add
                 };
 
-                AppendLine($"let {casNew} = bitcast<u32>({newFloat});");
+                AppendLine($"let {casNew} = {BitcastToU32(newFloat, floatType)};");
                 AppendLine($"let {casRes} = atomicCompareExchangeWeak({ptr}, {casOld}, {casNew});");
                 AppendLine($"if ({casRes}.exchanged) {{ break; }}");
                 AppendLine($"{casOld} = {casRes}.old_value;");
                 PopIndent();
                 AppendLine($"}}");
-                AppendLine($"{target} = bitcast<{target.Type}>({casOld});");
+                AppendLine($"{target} = {BitcastFromU32(casOld, floatType)};");
             }
             else if (IsUnsignedAtomicTarget(value.Target))
             {
@@ -2473,10 +2517,10 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 {
                     // Shared-memory emulation: write all values, read from warp-base (lane 0)
                     var warpBase = $"_warp_base_{target.Name}";
-                    AppendLine($"_warp_shuffle_buf[local_index] = bitcast<u32>({source});");
+                    AppendLine($"_warp_shuffle_buf[local_index] = {BitcastToU32($"{source}", source.Type)};");
                     AppendLine("workgroupBarrier();");
                     AppendLine($"let {warpBase} = (local_index / workgroup_size.x) * workgroup_size.x;");
-                    AppendLine($"{target} = bitcast<{target.Type}>(_warp_shuffle_buf[{warpBase}]);");
+                    AppendLine($"{target} = {BitcastFromU32($"_warp_shuffle_buf[{warpBase}]", target.Type)};");
                     AppendLine("workgroupBarrier();");
                 }
             }
@@ -2500,10 +2544,10 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 //   warp_base = (local_index / warp_size) * warp_size
                 //   src_idx   = warp_base + origin
                 var warpBase = $"_wb_{target.Name}";
-                AppendLine($"_warp_shuffle_buf[local_index] = bitcast<u32>({source});");
+                AppendLine($"_warp_shuffle_buf[local_index] = {BitcastToU32($"{source}", source.Type)};");
                 AppendLine("workgroupBarrier();");
                 AppendLine($"let {warpBase} = (local_index / u32(workgroup_size.x)) * u32(workgroup_size.x);");
-                AppendLine($"{target} = bitcast<{target.Type}>(_warp_shuffle_buf[{warpBase} + u32({origin})]);");
+                AppendLine($"{target} = {BitcastFromU32($"_warp_shuffle_buf[{warpBase} + u32({origin})]", target.Type)};");
                 AppendLine("workgroupBarrier();");
             }
         }
@@ -2522,10 +2566,10 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             {
                 // Same fix as WarpShuffle: origin is lane-relative, buffer is global.
                 var warpBase = $"_wb_{target.Name}";
-                AppendLine($"_warp_shuffle_buf[local_index] = bitcast<u32>({source});");
+                AppendLine($"_warp_shuffle_buf[local_index] = {BitcastToU32($"{source}", source.Type)};");
                 AppendLine("workgroupBarrier();");
                 AppendLine($"let {warpBase} = (local_index / u32(workgroup_size.x)) * u32(workgroup_size.x);");
-                AppendLine($"{target} = bitcast<{target.Type}>(_warp_shuffle_buf[{warpBase} + u32({origin})]);");
+                AppendLine($"{target} = {BitcastFromU32($"_warp_shuffle_buf[{warpBase} + u32({origin})]", target.Type)};");
                 AppendLine("workgroupBarrier();");
             }
         }
@@ -2613,6 +2657,43 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             else
             {
                 AppendLine("return;");
+            }
+        }
+
+        #endregion
+
+        #region Half Conversion Intrinsics
+
+        /// <summary>
+        /// Handles <c>HalfExtensions.ConvertHalfToFloat(Half)</c> by emitting a native
+        /// WGSL <c>f32(source)</c> conversion instead of the lookup-table implementation
+        /// that the CPU path uses. The lookup tables are static .NET arrays that cannot
+        /// be accessed from GPU code, so inlining the default implementation produces
+        /// all-zero results.
+        /// </summary>
+        public static void GenerateConvertHalfToFloat(WebGPUBackend backend, WGSLCodeGenerator codeGenerator, Value value)
+        {
+            if (value is MethodCall methodCall)
+            {
+                var target = codeGenerator.LoadIntrinsicValue(value);
+                var operand = codeGenerator.LoadIntrinsicValue(methodCall[0].Resolve());
+                codeGenerator.Declare(target);
+                codeGenerator.AppendLine($"{target} = f32({operand});");
+            }
+        }
+
+        /// <summary>
+        /// Handles <c>HalfExtensions.ConvertFloatToHalf(float)</c> by emitting a native
+        /// WGSL <c>f16(source)</c> conversion.
+        /// </summary>
+        public static void GenerateConvertFloatToHalf(WebGPUBackend backend, WGSLCodeGenerator codeGenerator, Value value)
+        {
+            if (value is MethodCall methodCall)
+            {
+                var target = codeGenerator.LoadIntrinsicValue(value);
+                var operand = codeGenerator.LoadIntrinsicValue(methodCall[0].Resolve());
+                codeGenerator.Declare(target);
+                codeGenerator.AppendLine($"{target} = f16({operand});");
             }
         }
 
@@ -2966,8 +3047,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             }
             else
             {
-                // 32-bit types: bitcast to u32 for storage (works for i32, u32, f32)
-                codeGenerator.AppendLine($"    _grp_sg_results[subgroup_id] = bitcast<u32>(_sg_part_{sfx});");
+                codeGenerator.AppendLine($"    _grp_sg_results[subgroup_id] = {BitcastToU32($"_sg_part_{sfx}", wgslType)};");
             }
             codeGenerator.AppendLine($"}}");
 
@@ -2985,7 +3065,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             }
             else
             {
-                string loadExpr = $"bitcast<{wgslType}>(_grp_sg_results[subgroup_invocation_id])";
+                string loadExpr = BitcastFromU32("_grp_sg_results[subgroup_invocation_id]", wgslType);
                 codeGenerator.AppendLine($"let _sg0_val_{sfx} = select({identityExpr}, {loadExpr},");
             }
             codeGenerator.AppendLine($"    subgroup_invocation_id < _num_sg_{sfx});");
@@ -3000,7 +3080,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             }
             else
             {
-                codeGenerator.AppendLine($"    _grp_sg_results[0] = bitcast<u32>(_final_{sfx});");
+                codeGenerator.AppendLine($"    _grp_sg_results[0] = {BitcastToU32($"_final_{sfx}", wgslType)};");
             }
             codeGenerator.AppendLine($"}}");
 
@@ -3014,7 +3094,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             }
             else
             {
-                string readExpr = $"bitcast<{wgslType}>(_grp_sg_results[0])";
+                string readExpr = BitcastFromU32("_grp_sg_results[0]", wgslType);
                 codeGenerator.AppendLine($"{target} = {(needsBitcast ? $"bitcast<{irType}>({readExpr})" : readExpr)};");
             };
         }

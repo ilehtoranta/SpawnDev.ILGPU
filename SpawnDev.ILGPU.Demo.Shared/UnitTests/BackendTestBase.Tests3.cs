@@ -251,6 +251,99 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
 
         #endregion
 
+        #region Half Precision Tests (Float16)
+
+        /// <summary>
+        /// Verifies Half buffer allocation, GPU copy, and readback.
+        /// Skips when Float16 is not supported (e.g. OpenCL without cl_khr_fp16).
+        /// </summary>
+        [TestMethod]
+        public async Task HalfBufferRoundTripTest() => await RunTest(async accelerator =>
+        {
+            if (!accelerator.Capabilities.Float16)
+                throw new UnsupportedTestException("Float16 not supported on this device");
+            var data = new[] {
+                (global::ILGPU.Half)(float)1.5f, (global::ILGPU.Half)(float)(-2.25f),
+                (global::ILGPU.Half)(float)0.0f, (global::ILGPU.Half)(float)100.0f,
+                (global::ILGPU.Half)(float)0.00390625f, (global::ILGPU.Half)(float)(-0.5f)
+            };
+            int len = data.Length;
+            using var buf = accelerator.Allocate1D(data);
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<global::ILGPU.Half>>(HalfPassthroughKernel);
+            kernel((Index1D)len, buf.View);
+            await accelerator.SynchronizeAsync();
+            var result = await buf.CopyToHostAsync<global::ILGPU.Half>();
+            for (int i = 0; i < len; i++)
+            {
+                float expected = (float)data[i];
+                if (MathF.Abs((float)result[i] - expected) > 0.01f)
+                    throw new Exception($"Half buffer round-trip failed at [{i}]: expected={expected}, got={(float)result[i]}");
+            }
+        });
+
+        /// <summary>
+        /// Verifies Half arithmetic in a kernel (multiply, add).
+        /// </summary>
+        [TestMethod]
+        public async Task HalfArithmeticTest() => await RunTest(async accelerator =>
+        {
+            if (!accelerator.Capabilities.Float16)
+                throw new UnsupportedTestException("Float16 not supported on this device");
+            var input = new[] {
+                (global::ILGPU.Half)(float)1.0f, (global::ILGPU.Half)(float)2.5f,
+                (global::ILGPU.Half)(float)(-3.0f), (global::ILGPU.Half)(float)0.0f,
+                (global::ILGPU.Half)(float)10.0f
+            };
+            int len = input.Length;
+            using var bufIn = accelerator.Allocate1D(input);
+            using var bufOut = accelerator.Allocate1D<global::ILGPU.Half>(len);
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<global::ILGPU.Half>, ArrayView<global::ILGPU.Half>>(HalfArithmeticKernel);
+            kernel((Index1D)len, bufIn.View, bufOut.View);
+            await accelerator.SynchronizeAsync();
+            var result = await bufOut.CopyToHostAsync<global::ILGPU.Half>();
+            for (int i = 0; i < len; i++)
+            {
+                float expected = (float)input[i] * 2f + 1f;
+                if (MathF.Abs((float)result[i] - expected) > 0.05f)
+                    throw new Exception($"Half arithmetic failed at [{i}]: expected={expected}, got={(float)result[i]}");
+            }
+        });
+
+        /// <summary>
+        /// Verifies Half Min/Max in a kernel.
+        /// </summary>
+        [TestMethod]
+        public async Task HalfMinMaxTest() => await RunTest(async accelerator =>
+        {
+            if (!accelerator.Capabilities.Float16)
+                throw new UnsupportedTestException("Float16 not supported on this device");
+            var a = new[] {
+                (global::ILGPU.Half)(float)1.5f, (global::ILGPU.Half)(float)(-1.5f),
+                (global::ILGPU.Half)(float)0.0f, (global::ILGPU.Half)(float)100.0f
+            };
+            var b = new[] {
+                (global::ILGPU.Half)(float)2.5f, (global::ILGPU.Half)(float)(-0.5f),
+                (global::ILGPU.Half)(float)0.0f, (global::ILGPU.Half)(float)(-100.0f)
+            };
+            int len = a.Length;
+            using var bufA = accelerator.Allocate1D(a);
+            using var bufB = accelerator.Allocate1D(b);
+            using var bufOut = accelerator.Allocate1D<global::ILGPU.Half>(len);
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<global::ILGPU.Half>, ArrayView<global::ILGPU.Half>, ArrayView<global::ILGPU.Half>>(HalfMinMaxKernel);
+            kernel((Index1D)len, bufA.View, bufB.View, bufOut.View);
+            await accelerator.SynchronizeAsync();
+            var result = await bufOut.CopyToHostAsync<global::ILGPU.Half>();
+            for (int i = 0; i < len; i++)
+            {
+                float va = (float)a[i], vb = (float)b[i];
+                float expected = (Math.Max(va, vb) - Math.Min(va, vb));
+                if (MathF.Abs((float)result[i] - expected) > 0.05f)
+                    throw new Exception($"Half MinMax failed at [{i}]: expected={expected}, got={(float)result[i]}");
+            }
+        });
+
+        #endregion
+
         #region Comparison, Logic, and Misc Tests
 
         [TestMethod]
@@ -726,7 +819,7 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
         public async Task SubgroupShuffleTest() => await RunTest(async accelerator =>
         {
             // Dynamically check if subgroups are available
-            RequireFeature(accelerator, "subgroups", "Subgroup/Warp shuffle operations require 'subgroups' feature");
+            RequireFeature(accelerator, "subgroup_shuffle", "Subgroup/Warp shuffle operations require 'subgroup_shuffle' feature");
 
             // Use 32 threads — small enough to fit in a single subgroup on all GPUs
             int len = 32;

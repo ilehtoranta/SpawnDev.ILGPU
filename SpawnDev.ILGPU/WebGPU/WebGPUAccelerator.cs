@@ -269,6 +269,10 @@ namespace SpawnDev.ILGPU.WebGPU
             // Wire flush callback so WebGPUBuffer readback operations auto-flush pending dispatches
             accelerator.NativeAccelerator.FlushPendingCommands = () => accelerator.FlushPendingCommands();
 
+            // Update device capabilities from actual enabled features (Float16, Float64, Int64)
+            if (device.Capabilities is WebGPUCapabilityContext webCaps)
+                webCaps.UpdateFromEnabledFeatures(accelerator.NativeAccelerator.EnabledFeatures);
+
             // Always log detected features (important for diagnostics)
             var features = accelerator.NativeAccelerator.EnabledFeatures;
             if (features.Count > 0)
@@ -298,6 +302,10 @@ namespace SpawnDev.ILGPU.WebGPU
             accelerator.Init(accelerator.Backend);
             accelerator.DefaultStream = accelerator.CreateStreamInternal();
             accelerator.NativeAccelerator.FlushPendingCommands = () => accelerator.FlushPendingCommands();
+
+            // Update device capabilities from actual enabled features (Float16, Float64, Int64)
+            if (ilgpuDevice.Capabilities is WebGPUCapabilityContext webCaps)
+                webCaps.UpdateFromEnabledFeatures(accelerator.NativeAccelerator.EnabledFeatures);
 
             var features = accelerator.NativeAccelerator.EnabledFeatures;
             if (features.Count > 0)
@@ -857,9 +865,9 @@ namespace SpawnDev.ILGPU.WebGPU
                         ulong rawOffset = (ulong)((long)contiguous.IndexInBytes);
                         ulong alignedOffset = rawOffset & ~255UL; // round DOWN to 256
                         ulong padding = rawOffset - alignedOffset;
-                        ulong bindingSize = padding + (ulong)contiguous.LengthInBytes;
-                        // Clamp to actual buffer size (safety for edge cases)
-                        ulong bufferSize = (ulong)nativeBuffer.LengthInBytes;
+                        ulong bindingSize = (ulong)WebGPUAlignment.AlignTo4((long)(padding + (ulong)contiguous.LengthInBytes));
+                        // Clamp to actual GPU buffer size (which was allocated with AlignTo4)
+                        ulong bufferSize = (ulong)WebGPUAlignment.AlignTo4(nativeBuffer.LengthInBytes);
                         if (alignedOffset + bindingSize > bufferSize)
                             bindingSize = bufferSize - alignedOffset;
                         
@@ -897,7 +905,8 @@ namespace SpawnDev.ILGPU.WebGPU
                             // Use Interop.SizeOf(Type) which handles generic structs via Unsafe.SizeOf<T>
                             // (Marshal.SizeOf fails on generic types like ReductionImplementation<T,S,R>).
                             int structSize = global::ILGPU.Interop.SizeOf(argType);
-                            byte[] bytes = new byte[structSize];
+                            int paddedSize = (int)WebGPUAlignment.AlignTo4(structSize);
+                            byte[] bytes = new byte[paddedSize];
 
                             // GCHandle.Alloc(Pinned) fails for boxed generic structs in Blazor WASM
                             // (ArgumentException_NotIsomorphic). Use our CopyStructToBytes<T> helper
@@ -1034,6 +1043,14 @@ namespace SpawnDev.ILGPU.WebGPU
                             {
                                 BitConverter.GetBytes((float)dVal).CopyTo(packedData, byteOffset);
                             }
+                        }
+                        else if (arg is global::ILGPU.Half hVal)
+                        {
+                            // Half occupies 2 bytes but is packed into a u32 slot.
+                            // Place the raw f16 bits in the low 16 bits so the WGSL
+                            // bitcast<vec2<f16>>(u32).x pattern extracts the correct value.
+                            ushort rawBits = global::ILGPU.Interop.FloatAsInt(hVal);
+                            BitConverter.GetBytes(rawBits).CopyTo(packedData, byteOffset);
                         }
                         else if (arg is byte bVal)
                             BitConverter.GetBytes((uint)bVal).CopyTo(packedData, byteOffset);

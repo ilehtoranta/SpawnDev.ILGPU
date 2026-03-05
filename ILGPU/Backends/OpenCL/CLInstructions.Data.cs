@@ -1,4 +1,4 @@
-﻿// ---------------------------------------------------------------------------------------
+// ---------------------------------------------------------------------------------------
 //                                        ILGPU
 //                        Copyright (c) 2019-2023 ILGPU Project
 //                                    www.ilgpu.net
@@ -220,6 +220,7 @@ namespace ILGPU.Backends.OpenCL
             string> ShuffleOperations =
             new Dictionary<(CLDeviceVendor, ShuffleKind), string>()
             {
+                // Intel: intel_sub_group_shuffle* (3-arg for Down/Up)
                 {
                     (CLDeviceVendor.Intel, ShuffleKind.Generic),
                     "intel_sub_group_shuffle"
@@ -235,6 +236,55 @@ namespace ILGPU.Backends.OpenCL
                 {
                     (CLDeviceVendor.Intel, ShuffleKind.Xor),
                     "intel_sub_group_shuffle_xor"
+                },
+                // Khronos: sub_group_shuffle* (2-arg for Down/Up) — AMD, NVIDIA, Other
+                {
+                    (CLDeviceVendor.AMD, ShuffleKind.Generic),
+                    "sub_group_shuffle"
+                },
+                {
+                    (CLDeviceVendor.AMD, ShuffleKind.Down),
+                    "sub_group_shuffle_down"
+                },
+                {
+                    (CLDeviceVendor.AMD, ShuffleKind.Up),
+                    "sub_group_shuffle_up"
+                },
+                {
+                    (CLDeviceVendor.AMD, ShuffleKind.Xor),
+                    "sub_group_shuffle_xor"
+                },
+                {
+                    (CLDeviceVendor.Nvidia, ShuffleKind.Generic),
+                    "sub_group_shuffle"
+                },
+                {
+                    (CLDeviceVendor.Nvidia, ShuffleKind.Down),
+                    "sub_group_shuffle_down"
+                },
+                {
+                    (CLDeviceVendor.Nvidia, ShuffleKind.Up),
+                    "sub_group_shuffle_up"
+                },
+                {
+                    (CLDeviceVendor.Nvidia, ShuffleKind.Xor),
+                    "sub_group_shuffle_xor"
+                },
+                {
+                    (CLDeviceVendor.Other, ShuffleKind.Generic),
+                    "sub_group_shuffle"
+                },
+                {
+                    (CLDeviceVendor.Other, ShuffleKind.Down),
+                    "sub_group_shuffle_down"
+                },
+                {
+                    (CLDeviceVendor.Other, ShuffleKind.Up),
+                    "sub_group_shuffle_up"
+                },
+                {
+                    (CLDeviceVendor.Other, ShuffleKind.Xor),
+                    "sub_group_shuffle_xor"
                 },
             };
 

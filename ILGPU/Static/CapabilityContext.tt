@@ -1,4 +1,4 @@
-﻿// ---------------------------------------------------------------------------------------
+// ---------------------------------------------------------------------------------------
 //                                        ILGPU
 //                        Copyright (c) 2016-2023 ILGPU Project
 //                                    www.ilgpu.net
@@ -207,6 +207,14 @@ namespace ILGPU.Runtime.OpenCL
         }
     }
 #>
+        /// <summary>
+        /// Extensions for Khronos subgroup shuffle (sub_group_shuffle, sub_group_shuffle_up/down/xor).
+        /// </summary>
+        internal static readonly ImmutableArray<string> SubGroupShuffleExtensions =
+            ImmutableArray.Create(
+                "cl_khr_subgroup_shuffle",
+                "cl_khr_subgroup_shuffle_relative");
+
         #endregion
 
         #region Instance
@@ -266,7 +274,7 @@ namespace ILGPU.Runtime.OpenCL
         /// <summary>
         /// List of OpenCL extensions.
         /// </summary>
-        public ImmutableArray<string> Extensions { get; }
+        public ImmutableArray<string> Extensions { get; internal set; }
 
 <# foreach (var c in clCapabilities) { #>
         /// <summary>
@@ -289,6 +297,23 @@ namespace ILGPU.Runtime.OpenCL
                     "<#= c.FeatureName #>"));
 
 <# } #>
+        /// <summary>
+        /// Appends subgroup-related extension pragmas to Extensions. Call from InitSubGroupSupport
+        /// when SubGroups and/or SubGroupShuffle are enabled.
+        /// </summary>
+        /// <param name="subgroupExts">Extensions for base subgroups (e.g. cl_khr_subgroups).</param>
+        /// <param name="shuffleExts">Extensions for shuffle (cl_khr_subgroup_shuffle, etc.). Empty for Intel.</param>
+        internal void AddSubGroupExtensions(
+            ImmutableArray<string> subgroupExts,
+            ImmutableArray<string> shuffleExts)
+        {
+            var builder = ImmutableArray.CreateBuilder<string>();
+            builder.AddRange(Extensions);
+            builder.AddRange(subgroupExts);
+            builder.AddRange(shuffleExts);
+            Extensions = builder.ToImmutable();
+        }
+
         #endregion
     }
 }

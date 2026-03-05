@@ -31,6 +31,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         /// Returns the underlying WebGPU byte buffer. Virtual so subclasses can provide an external buffer.
         /// </summary>
         public virtual WebGPUBuffer<byte> NativeBuffer => _buffer!;
+
         // Implementation of abstract members
         protected override void CopyFrom(AcceleratorStream stream, in ArrayView<byte> source, in ArrayView<byte> destination)
         {
@@ -52,6 +53,10 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 accelerator.FlushPendingCommands();
 
                 var destContiguous = (IContiguousArrayView)destination;
+                // WebGPU writeBuffer requires the number of bytes to write to be a multiple of 4
+                var paddedLength = (int)WebGPUAlignment.AlignTo4(length);
+                if (paddedLength > length)
+                    System.Array.Resize(ref byteArray, paddedLength);
                 using var typedArray = new Uint8Array(byteArray);
                 accelerator.NativeAccelerator.Queue!.WriteBuffer(_buffer.NativeBuffer!, (long)destContiguous.Index, typedArray);
             }
@@ -72,11 +77,13 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 var device = accelerator.NativeAccelerator.NativeDevice
                     ?? throw new InvalidOperationException("GPU device not initialized");
 
+                var copyBytes = source.Length;
+                var paddedBytes = WebGPUAlignment.AlignTo4(copyBytes);
                 using var encoder = device.CreateCommandEncoder();
                 encoder.CopyBufferToBuffer(
                     srcGpuBuffer, (ulong)srcContiguous.Index,
                     _buffer!.NativeBuffer!, (ulong)destContiguous.Index,
-                    (ulong)source.Length);
+                    (ulong)paddedBytes);
                 using var commandBuffer = encoder.Finish();
                 accelerator.NativeAccelerator.Queue?.Submit(new[] { commandBuffer });
             }
@@ -93,13 +100,15 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         protected override void MemSet(AcceleratorStream stream, byte value, in ArrayView<byte> view)
         {
             // Use GPU queue WriteBuffer with filled array
-            var data = new byte[view.Length];
+            var length = (int)view.Length;
+            var paddedLength = (int)WebGPUAlignment.AlignTo4(length);
+            var data = new byte[paddedLength];
             if (value != 0) global::System.Array.Fill(data, value);
             var accelerator = (WebGPUAccelerator)Accelerator;
-            // Flush pending dispatches before writing to the buffer
             accelerator.FlushPendingCommands();
             var viewContiguous = (IContiguousArrayView)view;
-            accelerator.NativeAccelerator.Queue!.WriteBuffer(_buffer.NativeBuffer!, (long)viewContiguous.Index, data);
+            using var typedArray = new Uint8Array(data);
+            accelerator.NativeAccelerator.Queue!.WriteBuffer(_buffer.NativeBuffer!, (long)viewContiguous.Index, typedArray);
         }
 
         // DisposeAcceleratorObject is protected (not protected internal) in base AcceleratorObject

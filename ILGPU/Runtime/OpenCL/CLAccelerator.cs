@@ -1,4 +1,4 @@
-﻿// ---------------------------------------------------------------------------------------
+// ---------------------------------------------------------------------------------------
 //                                        ILGPU
 //                        Copyright (c) 2019-2023 ILGPU Project
 //                                    www.ilgpu.net
@@ -87,12 +87,20 @@ namespace ILGPU.Runtime.OpenCL
             "   a[i] = sub_group_broadcast(j, n);\n}";
 
         /// <summary>
-        /// All subgroup extensions.
+        /// All subgroup extensions (base: broadcast, get_sub_group_size, etc.).
         /// </summary>
         private static readonly ImmutableArray<string> SubGroupExtensions =
             ImmutableArray.Create(
                 "cl_khr_subgroups",
                 "cl_intel_subgroups");
+
+        /// <summary>
+        /// Khronos subgroup shuffle extensions (sub_group_shuffle, sub_group_shuffle_up/down/xor).
+        /// </summary>
+        private static readonly ImmutableArray<string> SubGroupShuffleExtensions =
+            ImmutableArray.Create(
+                "cl_khr_subgroup_shuffle",
+                "cl_khr_subgroup_shuffle_relative");
 
         #endregion
 
@@ -174,11 +182,16 @@ namespace ILGPU.Runtime.OpenCL
             if (!Capabilities.SubGroups)
                 return;
 
-            // Verify support using a simple kernel
+            // Verify support using a simple kernel; prefix with extension pragma for compilation
+            string subgroupPragma = acceleratorId.HasExtension("cl_intel_subgroups")
+                ? "#pragma OPENCL EXTENSION cl_intel_subgroups : enable\n"
+                : "#pragma OPENCL EXTENSION cl_khr_subgroups : enable\n";
+            string dummySubGroupSource = subgroupPragma + DummySubGroupKernelSource;
+
             if (CLKernel.LoadKernel(
                 this,
                 DummyKernelName,
-                DummySubGroupKernelSource,
+                dummySubGroupSource,
                 CVersion,
                 out IntPtr programPtr,
                 out IntPtr kernelPtr,
@@ -208,6 +221,7 @@ namespace ILGPU.Runtime.OpenCL
                     // on several platforms -> we will just disable sub-group
                     // support for these platforms
                     Capabilities.SubGroups = false;
+                    return;
                 }
                 finally
                 {
@@ -216,6 +230,21 @@ namespace ILGPU.Runtime.OpenCL
                     CLException.ThrowIfFailed(
                         CurrentAPI.ReleaseProgram(programPtr));
                 }
+
+                // Shuffle: Intel has it in cl_intel_subgroups; others need Khronos extensions
+                bool hasKhronosShuffle = acceleratorId.HasAnyExtension(SubGroupShuffleExtensions);
+                bool hasIntelShuffle = Device.Vendor == CLDeviceVendor.Intel;
+                Capabilities.SubGroupShuffle = hasIntelShuffle || hasKhronosShuffle;
+
+                // Add extension pragmas for codegen
+                var subgroupExts = Device.Vendor == CLDeviceVendor.Intel &&
+                    acceleratorId.HasExtension("cl_intel_subgroups")
+                    ? ImmutableArray.Create("cl_intel_subgroups")
+                    : ImmutableArray.Create("cl_khr_subgroups");
+                var shuffleExts = Capabilities.SubGroupShuffle && !hasIntelShuffle
+                    ? CLCapabilityContext.SubGroupShuffleExtensions
+                    : ImmutableArray<string>.Empty;
+                Capabilities.AddSubGroupExtensions(subgroupExts, shuffleExts);
             }
         }
 

@@ -1,4 +1,4 @@
-﻿// ---------------------------------------------------------------------------------------
+// ---------------------------------------------------------------------------------------
 //                                        ILGPU
 //                        Copyright (c) 2019-2023 ILGPU Project
 //                                    www.ilgpu.net
@@ -753,9 +753,16 @@ namespace ILGPU.Backends.OpenCL
         /// <summary cref="IBackendCodeGenerator.GenerateCode(WarpShuffle)"/>
         public void GenerateCode(WarpShuffle shuffle)
         {
+            if (!Backend.Capabilities.SubGroupShuffle)
+            {
+                throw new InvalidCodeGenerationException(
+                    "Subgroup shuffle requires SubGroupShuffle capability (cl_intel_subgroups or cl_khr_subgroup_shuffle)");
+            }
+
             if (!CLInstructions.TryGetShuffleOperation(
                 Backend.Vendor,
                 shuffle.Kind,
+                Backend.Capabilities.SubGroupShuffle,
                 out string? operation))
             {
                 throw new InvalidCodeGenerationException();
@@ -770,13 +777,11 @@ namespace ILGPU.Backends.OpenCL
             statement.BeginArguments();
 
             statement.AppendArgument(source);
-            // TODO: create a generic version that does not need this switch
-            switch (shuffle.Kind)
+            // Intel intel_sub_group_shuffle_down/up take (current, next, delta); Khronos sub_group_shuffle_down/up take (value, delta)
+            bool useIntelApi = Backend.Vendor == CLDeviceVendor.Intel;
+            if (useIntelApi && (shuffle.Kind == ShuffleKind.Down || shuffle.Kind == ShuffleKind.Up))
             {
-                case ShuffleKind.Down:
-                case ShuffleKind.Up:
-                    statement.AppendArgument(source);
-                    break;
+                statement.AppendArgument(source); // Intel "next" param
             }
             statement.AppendArgument(origin);
 
