@@ -62,6 +62,12 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             /// </summary>
             public int DynamicSharedElementSize { get; set; }
 
+            /// <summary>
+            /// Helper function methods and their allocas, keyed by Method.
+            /// Populated during compilation so the kernel generator can inline them.
+            /// </summary>
+            public Dictionary<Method, Allocas> HelperMethods { get; } = new();
+
             public GeneratorArgs(
                 WasmBackend backend,
                 EntryPoint entryPoint,
@@ -254,6 +260,23 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         }
 
         /// <summary>
+        /// Gets the actual Wasm type of a local variable by its index.
+        /// Parameters (indices < _paramCount) are always i32.
+        /// Declared locals are looked up from _locals.
+        /// </summary>
+        protected byte GetLocalType(uint localIndex)
+        {
+            if (localIndex < (uint)_paramCount)
+                return WasmOpCodes.I32; // All Wasm function params are i32 (pointers/indices)
+            
+            int localOffset = (int)localIndex - (int)_paramCount;
+            if (localOffset >= 0 && localOffset < _locals.Count)
+                return _locals[localOffset].Type;
+            
+            return WasmOpCodes.I32; // fallback
+        }
+
+        /// <summary>
         /// Allocates a new anonymous local variable (not tied to an IR Value).
         /// </summary>
         protected uint AllocateNewLocal(byte wasmType)
@@ -424,6 +447,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 case UnaryArithmeticKind.Exp2F:
                 case UnaryArithmeticKind.LogF:
                 case UnaryArithmeticKind.Log2F:
+                case UnaryArithmeticKind.Log10F:
                     {
                         string mathName = value.Kind switch
                         {
@@ -440,6 +464,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                             UnaryArithmeticKind.Exp2F => "exp2",
                             UnaryArithmeticKind.LogF => "log",
                             UnaryArithmeticKind.Log2F => "log2",
+                            UnaryArithmeticKind.Log10F => "log", // log10(x) = log(x) / log(10)
                             _ => "sin"
                         };
                         EmitGetLocal(src);
@@ -449,6 +474,12 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                         if (MathImports.TryGetValue(mathName, out var funcIdx))
                             WasmModuleBuilder.EmitCall(Code, funcIdx);
                         // Convert result back to f32 if needed
+                        // For Log10F, divide by ln(10) ≈ 2.302585092994046
+                        if (value.Kind == UnaryArithmeticKind.Log10F)
+                        {
+                            WasmModuleBuilder.EmitF64Const(Code, 2.302585092994046);
+                            Code.Add(WasmOpCodes.F64Div);
+                        }
                         if (wasmType == WasmOpCodes.F32)
                             Code.Add(WasmOpCodes.F32DemoteF64);
                         break;
@@ -505,6 +536,70 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                         Code.Add(WasmOpCodes.F32Eq);
                     }
                     break;
+                // PopCount: native i32.popcnt / i64.popcnt
+                case UnaryArithmeticKind.PopC:
+                    EmitGetLocal(src);
+                    if (wasmType == WasmOpCodes.I64)
+                    {
+                        Code.Add(WasmOpCodes.I64Popcnt);
+                        // PopC always returns i32, wrap i64 result
+                        Code.Add(WasmOpCodes.I32WrapI64);
+                    }
+                    else
+                    {
+                        Code.Add(WasmOpCodes.I32Popcnt);
+                    }
+                    break;
+                // Count Leading Zeros: native i32.clz / i64.clz
+                case UnaryArithmeticKind.CLZ:
+                    EmitGetLocal(src);
+                    if (wasmType == WasmOpCodes.I64)
+                    {
+                        Code.Add(WasmOpCodes.I64Clz);
+                        Code.Add(WasmOpCodes.I32WrapI64);
+                    }
+                    else
+                    {
+                        Code.Add(WasmOpCodes.I32Clz);
+                    }
+                    break;
+                // Count Trailing Zeros: native i32.ctz / i64.ctz
+                case UnaryArithmeticKind.CTZ:
+                    EmitGetLocal(src);
+                    if (wasmType == WasmOpCodes.I64)
+                    {
+                        Code.Add(WasmOpCodes.I64Ctz);
+                        Code.Add(WasmOpCodes.I32WrapI64);
+                    }
+                    else
+                    {
+                        Code.Add(WasmOpCodes.I32Ctz);
+                    }
+                    break;
+                // IsFinite: !(isnan || isinf) → (x == x) && (abs(x) != inf)
+                case UnaryArithmeticKind.IsFinF:
+                    {
+                        // Step 1: x == x (false if NaN)
+                        EmitGetLocal(src);
+                        EmitGetLocal(src);
+                        Code.Add(wasmType == WasmOpCodes.F64 ? WasmOpCodes.F64Eq : WasmOpCodes.F32Eq);
+                        // Step 2: abs(x) != inf (false if ±Inf)
+                        EmitGetLocal(src);
+                        Code.Add(wasmType == WasmOpCodes.F64 ? WasmOpCodes.F64Abs : WasmOpCodes.F32Abs);
+                        if (wasmType == WasmOpCodes.F64)
+                        {
+                            WasmModuleBuilder.EmitF64Const(Code, double.PositiveInfinity);
+                            Code.Add(WasmOpCodes.F64Ne);
+                        }
+                        else
+                        {
+                            WasmModuleBuilder.EmitF32Const(Code, float.PositiveInfinity);
+                            Code.Add(WasmOpCodes.F32Ne);
+                        }
+                        // AND both conditions: isNotNaN && isNotInf
+                        Code.Add(WasmOpCodes.I32And);
+                        break;
+                    }
                 default:
                     EmitGetLocal(src);
                     break;
@@ -566,42 +661,81 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             }
 
             // For i64 operations, Wasm requires both operands to be i64.
-            // ILGPU IR may provide operands (especially shift amounts) as i32.
-            // Insert i64.extend_i32_s coercion when needed.
-            var leftWasmType = GetWasmTypeFromIR(left.Type);
-            var rightWasmType = GetWasmTypeFromIR(right.Type);
+            // ILGPU IR may provide operands (especially shift amounts) as i32,
+            // or struct decomposition may store i64 values in i32 locals.
+            // Check the ACTUAL local type to determine if coercion is needed.
+            var coerceLeftLocal = GetLocal(left);
+            var coerceRightLocal = GetLocal(right);
+            var leftActualType = GetLocalType(coerceLeftLocal);
+            var rightActualType = GetLocalType(coerceRightLocal);
 
-            EmitGetLocal(left);
-            if (wasmType == WasmOpCodes.I64 && leftWasmType == WasmOpCodes.I32)
+            EmitGetLocalByIndex(coerceLeftLocal);
+            if (wasmType == WasmOpCodes.I64 && leftActualType == WasmOpCodes.I32)
                 Code.Add(WasmOpCodes.I64ExtendI32S);
+            else if (wasmType == WasmOpCodes.I32 && leftActualType == WasmOpCodes.I64)
+                Code.Add(WasmOpCodes.I32WrapI64);
 
-            EmitGetLocal(right);
-            if (wasmType == WasmOpCodes.I64 && rightWasmType == WasmOpCodes.I32)
+            EmitGetLocalByIndex(coerceRightLocal);
+            if (wasmType == WasmOpCodes.I64 && rightActualType == WasmOpCodes.I32)
                 Code.Add(WasmOpCodes.I64ExtendI32S);
+            else if (wasmType == WasmOpCodes.I32 && rightActualType == WasmOpCodes.I64)
+                Code.Add(WasmOpCodes.I32WrapI64);
 
-            // Handle PowF and Atan2F via math imports
-            if (value.Kind == BinaryArithmeticKind.PowF || value.Kind == BinaryArithmeticKind.Atan2F)
+            // Handle PowF, Atan2F, and BinaryLogF via math imports
+            if (value.Kind == BinaryArithmeticKind.PowF || value.Kind == BinaryArithmeticKind.Atan2F ||
+                value.Kind == BinaryArithmeticKind.BinaryLogF)
             {
-                string mathName = value.Kind == BinaryArithmeticKind.PowF ? "pow" : "atan2";
-                if (MathImports.TryGetValue(mathName, out var funcIdx))
+                // BinaryLogF = log(left) / log(right), both args need "log" import
+                if (value.Kind == BinaryArithmeticKind.BinaryLogF)
                 {
-                    // Left and right are already on stack. The imports expect (f64, f64) -> f64.
-                    if (wasmType == WasmOpCodes.F32)
+                    if (MathImports.TryGetValue("log", out var logIdx))
                     {
-                        // Promote both f32 → f64, call, demote back
-                        WasmModuleBuilder.EmitLocalSet(Code, target); // pop right to target temporarily
-                        Code.Add(WasmOpCodes.F64PromoteF32); // promote left
-                        WasmModuleBuilder.EmitLocalGet(Code, target);
-                        Code.Add(WasmOpCodes.F64PromoteF32); // promote right
-                        WasmModuleBuilder.EmitCall(Code, funcIdx);
-                        Code.Add(WasmOpCodes.F32DemoteF64);
+                        // Pop right into temp, call log on left, store; call log on right; divide
+                        var rightTemp = AllocateNewLocal(wasmType == WasmOpCodes.F32 ? WasmOpCodes.F64 : wasmType);
+                        var leftTemp = AllocateNewLocal(wasmType == WasmOpCodes.F32 ? WasmOpCodes.F64 : wasmType);
+
+                        // Right is on top of stack, left underneath
+                        if (wasmType == WasmOpCodes.F32) Code.Add(WasmOpCodes.F64PromoteF32);
+                        WasmModuleBuilder.EmitLocalSet(Code, rightTemp);
+                        if (wasmType == WasmOpCodes.F32) Code.Add(WasmOpCodes.F64PromoteF32);
+                        WasmModuleBuilder.EmitLocalSet(Code, leftTemp);
+
+                        // log(left)
+                        WasmModuleBuilder.EmitLocalGet(Code, leftTemp);
+                        WasmModuleBuilder.EmitCall(Code, logIdx);
+                        // log(right)
+                        WasmModuleBuilder.EmitLocalGet(Code, rightTemp);
+                        WasmModuleBuilder.EmitCall(Code, logIdx);
+                        // divide
+                        Code.Add(WasmOpCodes.F64Div);
+                        if (wasmType == WasmOpCodes.F32) Code.Add(WasmOpCodes.F32DemoteF64);
+                        WasmModuleBuilder.EmitLocalSet(Code, target);
+                        return;
                     }
-                    else
+                }
+                else
+                {
+                    string mathName = value.Kind == BinaryArithmeticKind.PowF ? "pow" : "atan2";
+                    if (MathImports.TryGetValue(mathName, out var funcIdx))
                     {
-                        WasmModuleBuilder.EmitCall(Code, funcIdx);
+                        // Left and right are already on stack. The imports expect (f64, f64) -> f64.
+                        if (wasmType == WasmOpCodes.F32)
+                        {
+                            // Promote both f32 → f64, call, demote back
+                            WasmModuleBuilder.EmitLocalSet(Code, target); // pop right to target temporarily
+                            Code.Add(WasmOpCodes.F64PromoteF32); // promote left
+                            WasmModuleBuilder.EmitLocalGet(Code, target);
+                            Code.Add(WasmOpCodes.F64PromoteF32); // promote right
+                            WasmModuleBuilder.EmitCall(Code, funcIdx);
+                            Code.Add(WasmOpCodes.F32DemoteF64);
+                        }
+                        else
+                        {
+                            WasmModuleBuilder.EmitCall(Code, funcIdx);
+                        }
+                        WasmModuleBuilder.EmitLocalSet(Code, target);
+                        return;
                     }
-                    WasmModuleBuilder.EmitLocalSet(Code, target);
-                    return;
                 }
             }
 
@@ -705,12 +839,17 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             // Use the wider type for comparison opcode selection
             var srcType = (leftType == WasmOpCodes.I64 || rightType == WasmOpCodes.I64) ? WasmOpCodes.I64 : leftType;
 
-            // If comparing i64 values, ensure both operands are i64
-            EmitGetLocal(left);
-            if (srcType == WasmOpCodes.I64 && leftType == WasmOpCodes.I32)
+            // Check ACTUAL local types for coercion (struct decomposition may store i64 in i32 locals)
+            var leftLocalIdx = GetLocal(left);
+            var rightLocalIdx = GetLocal(right);
+            var leftActualType = GetLocalType(leftLocalIdx);
+            var rightActualType = GetLocalType(rightLocalIdx);
+
+            EmitGetLocalByIndex(leftLocalIdx);
+            if (srcType == WasmOpCodes.I64 && leftActualType == WasmOpCodes.I32)
                 Code.Add(WasmOpCodes.I64ExtendI32S);
-            EmitGetLocal(right);
-            if (srcType == WasmOpCodes.I64 && rightType == WasmOpCodes.I32)
+            EmitGetLocalByIndex(rightLocalIdx);
+            if (srcType == WasmOpCodes.I64 && rightActualType == WasmOpCodes.I32)
                 Code.Add(WasmOpCodes.I64ExtendI32S);
 
             byte opcode = (srcType, value.Kind) switch
@@ -1509,6 +1648,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             }
 
             // Non-intrinsic call - return zero for now
+            WasmBackend.Log($"[Wasm] WARNING: Unhandled non-intrinsic MethodCall returning 0: {(methodCall.Target.HasSource ? methodCall.Target.Source.Name : methodCall.Target.Name)} (void={methodCall.Type.IsVoidType})");
             if (!methodCall.Type.IsVoidType)
             {
                 var target2 = AllocateLocal(methodCall, GetWasmType(methodCall));

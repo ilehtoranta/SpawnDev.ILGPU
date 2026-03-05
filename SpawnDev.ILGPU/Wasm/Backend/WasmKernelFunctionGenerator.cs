@@ -1233,6 +1233,208 @@ namespace SpawnDev.ILGPU.Wasm.Backend
 
         #endregion
 
+        #region Override: MethodCall (Inline Helper Functions)
+
+        /// <summary>
+        /// Overrides MethodCall to inline helper functions (e.g., redirected algorithm intrinsics)
+        /// directly into the kernel. The Wasm backend produces a single-function module, so
+        /// helper function calls must be inlined rather than emitted as separate functions.
+        /// 
+        /// For multi-block helpers, generates a nested state machine with its own
+        /// block map, state local, and dispatch loop.
+        /// </summary>
+        public override void GenerateCode(MethodCall methodCall)
+        {
+            var targetMethod = methodCall.Target;
+
+            // Check if this is a helper function we can inline
+            if (_generatorArgs.HelperMethods.TryGetValue(targetMethod, out var helperAllocas))
+            {
+                WasmBackend.Log($"[Wasm-Inline] Inlining helper: {targetMethod.Name} ({targetMethod.Parameters.Count} params, {methodCall.Nodes.Length} args)");
+
+                // Step 1: Set up the helper's shared memory allocations
+                SetupSharedAllocations(helperAllocas.SharedAllocations, isDynamic: false);
+                SetupSharedAllocations(helperAllocas.DynamicSharedAllocations, isDynamic: true);
+
+                // Step 2: Map call arguments to helper's parameters
+                for (int i = 0; i < targetMethod.Parameters.Count && i < methodCall.Nodes.Length; i++)
+                {
+                    var param = targetMethod.Parameters[i];
+                    var arg = methodCall.Nodes[i].Resolve();
+                    var paramKey = GetValueKey(param);
+                    
+                    if (_localMap.TryGetValue(GetValueKey(arg), out uint argLocal))
+                    {
+                        _localMap[paramKey] = argLocal;
+                        WasmBackend.Log($"[Wasm-Inline]   param[{i}] '{paramKey}' -> existing local_{argLocal}");
+                    }
+                    else
+                    {
+                        var paramWasmType = GetWasmType(param);
+                        var local = AllocateLocal(param, paramWasmType);
+                        EmitGetLocal(arg);
+                        WasmModuleBuilder.EmitLocalSet(Code, local);
+                        WasmBackend.Log($"[Wasm-Inline]   param[{i}] '{paramKey}' -> new local_{local} (copied)");
+                    }
+                }
+
+                // Step 3: Allocate result local if non-void
+                uint? resultLocal = null;
+                if (!methodCall.Type.IsVoidType)
+                {
+                    resultLocal = AllocateLocal(methodCall, GetWasmType(methodCall));
+                }
+
+                // Step 4: Visit the helper's IR blocks
+                var blocks = targetMethod.Blocks;
+                var blockList = blocks.ToList();
+
+                if (blockList.Count <= 1)
+                {
+                    // Single block: visit inline (no state machine needed)
+                    if (blockList.Count == 1)
+                    {
+                        var block = blockList[0];
+                        foreach (var value in block)
+                            GenerateCodeFor(value);
+
+                        // Handle return terminator
+                        if (block.Terminator is ReturnTerminator ret && resultLocal.HasValue && !ret.IsVoidReturn)
+                        {
+                            EmitGetLocal(ret.ReturnValue.Resolve());
+                            WasmModuleBuilder.EmitLocalSet(Code, resultLocal.Value);
+                        }
+                    }
+                }
+                else
+                {
+                    // Multi-block: nested state machine
+                    // Save the kernel's state machine context
+                    var savedBlockMap = new Dictionary<BasicBlock, int>(_blockMap);
+                    var savedStateLocal = _stateLocal;
+                    var savedBlockCount = _blockCount;
+                    var savedIsStateMachine = _isStateMachine;
+                    var savedCurrentBlockEmitIndex = _currentBlockEmitIndex;
+
+                    // Set up a new state machine for the helper
+                    _blockMap.Clear();
+                    _isStateMachine = true;
+                    _stateLocal = AllocateNewLocal(WasmOpCodes.I32);
+                    int helperBlockCount = blockList.Count;
+                    _blockCount = helperBlockCount;
+
+                    int blockIndex = 0;
+                    foreach (var block in blockList)
+                    {
+                        _blockMap[block] = blockIndex++;
+                    }
+
+                    WasmBackend.Log($"[Wasm-Inline] Nested state machine with {helperBlockCount} blocks, stateLocal=local_{_stateLocal}");
+
+                    // Initialize state to 0
+                    WasmModuleBuilder.EmitI32Const(Code, 0);
+                    WasmModuleBuilder.EmitLocalSet(Code, _stateLocal);
+
+                    // block $exit
+                    Code.Add(WasmOpCodes.Block);
+                    Code.Add(WasmOpCodes.Void);
+
+                    // loop $loop
+                    Code.Add(WasmOpCodes.Loop);
+                    Code.Add(WasmOpCodes.Void);
+
+                    // Nested dispatch blocks
+                    for (int i = 0; i < helperBlockCount; i++)
+                    {
+                        Code.Add(WasmOpCodes.Block);
+                        Code.Add(WasmOpCodes.Void);
+                    }
+
+                    // br_table dispatch
+                    WasmModuleBuilder.EmitLocalGet(Code, _stateLocal);
+                    Code.Add(WasmOpCodes.BrTable);
+                    WasmModuleBuilder.EmitU32Leb128(Code, (uint)helperBlockCount);
+                    for (int i = 0; i < helperBlockCount; i++)
+                        WasmModuleBuilder.EmitU32Leb128(Code, (uint)i);
+                    WasmModuleBuilder.EmitU32Leb128(Code, (uint)(helperBlockCount + 1)); // default -> exit
+
+                    // Generate code for each block
+                    int blockIdx = 0;
+                    foreach (var block in blockList)
+                    {
+                        Code.Add(WasmOpCodes.End); // end of dispatch block
+
+                        // CRITICAL: update _currentBlockEmitIndex so GetBrDepthToLoop() works
+                        _currentBlockEmitIndex = blockIdx;
+
+                        WasmBackend.Log($"[Wasm-Inline] Block {blockIdx}: {block.Id}");
+
+                        // Visit all values
+                        foreach (var value in block)
+                            GenerateCodeFor(value);
+
+                        // Handle terminator
+                        if (block.Terminator is ReturnTerminator ret)
+                        {
+                            // Capture return value and break out of the state machine
+                            if (resultLocal.HasValue && !ret.IsVoidReturn)
+                            {
+                                EmitGetLocal(ret.ReturnValue.Resolve());
+                                WasmModuleBuilder.EmitLocalSet(Code, resultLocal.Value);
+                            }
+                            // br $exit: After closing dispatch block k, remaining nesting is:
+                            //   $block(k+1)...$block(N-1) = N-k-1 scopes
+                            //   + $loop = 1 scope
+                            //   + $exit = target
+                            // So depth to $exit = (N-k-1) + 1 + 0 = N-k
+                            Code.Add(WasmOpCodes.Br);
+                            WasmModuleBuilder.EmitU32Leb128(Code, (uint)(helperBlockCount - blockIdx)); // br to $exit
+                        }
+                        else if (block.Terminator != null)
+                        {
+                            // The terminator handlers (IfBranch, UnconditionalBranch)
+                            // already emit EmitBranchToBlock which includes br $loop.
+                            // Do NOT add an extra br here.
+                            GenerateCodeFor(block.Terminator);
+                        }
+
+                        blockIdx++;
+                    }
+
+                    // end loop $loop
+                    Code.Add(WasmOpCodes.End);
+                    // end block $exit
+                    Code.Add(WasmOpCodes.End);
+
+                    // Restore the kernel's state machine context
+                    _blockMap.Clear();
+                    foreach (var kv in savedBlockMap)
+                        _blockMap[kv.Key] = kv.Value;
+                    _stateLocal = savedStateLocal;
+                    _blockCount = savedBlockCount;
+                    _isStateMachine = savedIsStateMachine;
+                    _currentBlockEmitIndex = savedCurrentBlockEmitIndex;
+                }
+
+                WasmBackend.Log($"[Wasm-Inline] Done inlining {targetMethod.Name}");
+                return;
+            }
+
+            // Fall through to base class for non-helper calls
+            base.GenerateCode(methodCall);
+        }
+
+        /// <summary>
+        /// Emits phi value assignments for a block (used during inlining).
+        /// </summary>
+        private void EmitPhiValues(BasicBlock block)
+        {
+            // Phi values are handled by PushPhiValues calls in branch terminators.
+            // Nothing extra needed here.
+        }
+
+        #endregion
+
         #region Override: Device Constants
 
         public override void GenerateCode(GroupIndexValue value)

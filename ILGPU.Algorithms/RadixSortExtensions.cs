@@ -1,4 +1,4 @@
-﻿// ---------------------------------------------------------------------------------------
+// ---------------------------------------------------------------------------------------
 //                                   ILGPU Algorithms
 //                        Copyright (c) 2019-2023 ILGPU Project
 //                                    www.ilgpu.net
@@ -400,7 +400,12 @@ namespace ILGPU.Algorithms
             var tempBufferSize = XMath.DivRoundUp(
                 Interop.SizeOf<RadixSortPair<TKey, TValue>>() * dataLength,
                 sizeof(int));
-            return tempSortSize + tempBufferSize;
+            // CreateRadixSortPairs allocates the pairs buffer first; TempViewManager adds up to
+            // 63 ints of padding (256-byte alignment). That padding consumes from the remainder
+            // passed to the inner radix sort, so we must add it to the total.
+            const int maxPaddingPerAlloc = 63; // 256/sizeof(int) - 1
+            var extraPadding = maxPaddingPerAlloc; // 1 alloc in outer CreateRadixSortPairs
+            return tempSortSize + tempBufferSize + extraPadding;
         }
 
         /// <summary>
@@ -443,7 +448,15 @@ namespace ILGPU.Algorithms
             int numIntTElements = (int)numIntTElementsLong;
 
             const int unrollFactor = 4;
-            return numGroups * unrollFactor * 2 + numIntTElements + tempScanMemory;
+            int baseSize = numGroups * unrollFactor * 2 + numIntTElements + tempScanMemory;
+            // Add padding for TempViewManager 256-byte alignment.
+            // VerifyArguments makes 4 Allocate() calls, each potentially adding up to
+            // 63 ints of padding. For CreateRadixSortPairs, the first TempViewManager
+            // also does 1 alloc before passing the remainder to the inner radixSort,
+            // so that first alloc's padding (up to 63) consumes from the remainder.
+            const int maxAllocations = 5;
+            const int maxPaddingPerAlloc = 63; // 256/sizeof(int) - 1
+            return baseSize + maxAllocations * maxPaddingPerAlloc;
         }
 
         /// <summary>
@@ -832,8 +845,14 @@ namespace ILGPU.Algorithms
         /// <param name="counter">The counter view.</param>
         /// <returns>The exclusive sum.</returns>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private static int GetExclusiveCount(Index1D index, ArrayView<int> counter) =>
-            index < Index1D.One ? 0 : counter[index - Index1D.One];
+        private static int GetExclusiveCount(Index1D index, ArrayView<int> counter)
+        {
+            // Clamp to avoid OOB: WGSL select() evaluates both arms unconditionally
+            // after IfConversion, so counter[index-1] executes even when index==0.
+            int idx = (int)index - 1;
+            if (idx < 0) idx = 0;
+            return index < Index1D.One ? 0 : counter[idx];
+        }
 
         /// <summary>
         /// Performs the second radix-sort pass.
@@ -1256,7 +1275,6 @@ namespace ILGPU.Algorithms
                     int numVirtualGroups = gridDim * numIterationsPerGroup;
                     int lengthInformation = XMath.DivRoundUp(input.IntLength, groupDim) *
                         groupDim;
-
                     VerifyArguments<T, TStride, TRadixSortOperation>(
                         accelerator,
                         input,
@@ -1271,11 +1289,9 @@ namespace ILGPU.Algorithms
                     // Perform the first step writing to the temp scan view
                     TRadixSortOperation radixSortOperation = default;
 
-                    // Use loop peeling to avoid swapping input and tempOutputView
-                    // variables
+                    int loopIter = 0;
                     for (int bitIdx = 0; bitIdx < radixSortOperation.NumBits;)
                     {
-                        // Write to the temp output view
                         initializer(stream, counterView, 0);
                         pass1Kernel(
                             stream,
@@ -1304,7 +1320,6 @@ namespace ILGPU.Algorithms
                         bitIdx += specialization.BitIncrement;
                         Debug.Assert(bitIdx < radixSortOperation.NumBits);
 
-                        // Write to the actual output view
                         initializer(stream, counterView, 0);
                         pass1DenseKernel(
                             stream,
@@ -1331,6 +1346,7 @@ namespace ILGPU.Algorithms
                             lengthInformation,
                             bitIdx);
                         bitIdx += specialization.BitIncrement;
+                        loopIter++;
                     }
                 };
             }

@@ -47,6 +47,11 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         public static string? LastGeneratedWGSL { get; set; }
 
         /// <summary>
+        /// Stores ALL generated WGSL sources for multi-kernel debugging. Temporary.
+        /// </summary>
+        public static List<string> AllGeneratedWGSL { get; set; } = new List<string>();
+
+        /// <summary>
         /// Enables shader pipeline caching. Disable for debugging shader compilation issues.
         /// When enabled, compiled shaders are cached and reused across kernel invocations.
         /// </summary>
@@ -96,6 +101,13 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
         /// <summary>Returns true if timestamp queries are enabled.</summary>
         public bool HasTimestampQuery => EnabledFeatures.Contains("timestamp-query");
+
+        /// <summary>
+        /// The device's maximum invocations per workgroup. Set by the accelerator after
+        /// initialization. Used as the default @workgroup_size for explicitly grouped
+        /// kernels that don't specify one via KernelSpecialization.
+        /// </summary>
+        public int? DefaultMaxWorkgroupSize { get; set; }
 
         /// <summary>
         /// Creates a new WebGPU backend with default options.
@@ -554,12 +566,22 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
             var typeGenerator = new WGSLTypeGenerator(this, Context.TypeContext);
 
+            // For explicitly grouped kernels, use the specialization's MaxNumThreadsPerGroup
+            // if available. Do NOT fall back to DefaultMaxWorkgroupSize (the device's max,
+            // e.g. 1024) — that would bake a too-large @workgroup_size into the WGSL, causing
+            // Group.DimX to return the wrong value and spawning more threads than the dispatch
+            // intends. The default path in GetWorkgroupSize() (64 for 1D, etc.) is safe.
+            int? maxWorkgroupSize = specialization.MaxNumThreadsPerGroup;
+            if (VerboseLogging)
+                Log($"[CreateKernelBuilder] spec.MaxNumThreads={specialization.MaxNumThreadsPerGroup}, IsExplicitlyGrouped={entryPoint.IsExplicitlyGrouped}, DefaultMax={DefaultMaxWorkgroupSize}, final={maxWorkgroupSize}");
+
             data = new WGSLCodeGenerator.GeneratorArgs(
                 this,
                 typeGenerator,
                 entryPoint,
                 backendContext.SharedAllocations,
-                backendContext.DynamicSharedAllocations);
+                backendContext.DynamicSharedAllocations,
+                maxWorkgroupSize);
 
             return builder;
         }
@@ -570,8 +592,12 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         protected override WGSLCodeGenerator CreateFunctionCodeGenerator(
             Method method,
             Allocas allocas,
-            WGSLCodeGenerator.GeneratorArgs data) =>
-            new WGSLFunctionGenerator(data, method, allocas);
+            WGSLCodeGenerator.GeneratorArgs data)
+        {
+            // Store helper methods so the kernel generator can inline them
+            data.HelperMethods[method] = allocas;
+            return new WGSLFunctionGenerator(data, method, allocas);
+        }
 
         /// <summary>
         /// Creates a kernel-code generator for the main entry point.
@@ -621,7 +647,33 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 }
             }
 
+            // Resolve the const workgroup_size placeholder.
+            // The placeholder was emitted in GenerateModuleHeader() before shared memory
+            // allocations were known. Now extract the actual workgroup size from the
+            // @compute @workgroup_size(...) annotation and use it for the const declaration.
+            if (wgslSource.Contains("/*__WGSL_CONST_WORKGROUP_SIZE_PLACEHOLDER__*/"))
+            {
+                string wgConst = "const workgroup_size : vec3<u32> = vec3<u32>(64u, 1u, 1u);";
+                var wgMatch = System.Text.RegularExpressions.Regex.Match(
+                    wgslSource, @"@workgroup_size\((\d+)(?:\s*,\s*(\d+))?(?:\s*,\s*(\d+))?\)");
+                if (wgMatch.Success)
+                {
+                    string x = wgMatch.Groups[1].Value;
+                    string y = wgMatch.Groups[2].Success ? wgMatch.Groups[2].Value : "1";
+                    string z = wgMatch.Groups[3].Success ? wgMatch.Groups[3].Value : "1";
+                    wgConst = $"const workgroup_size : vec3<u32> = vec3<u32>({x}u, {y}u, {z}u);";
+                }
+                wgslSource = wgslSource.Replace("/*__WGSL_CONST_WORKGROUP_SIZE_PLACEHOLDER__*/", wgConst);
+            }
+
+            // NOTE: FixGridStrideLoopUniformity is now called inside WGSLKernelFunctionGenerator
+            // during code generation, where it has access to __UNIFORMITY_HINT__ markers from
+            // the IR-level analysis. Do NOT call it again here — a second pass would re-process
+            // the already-transformed WGSL without markers, causing the fallback regex path
+            // to corrupt the output.
+
             LastGeneratedWGSL = wgslSource;
+            AllGeneratedWGSL.Add(wgslSource);
             WebGPUBackend.Log("--- GENERATED WGSL ---");
             WebGPUBackend.Log(wgslSource);
             WebGPUBackend.Log("-----------------------");
@@ -630,7 +682,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 entryPoint,
                 wgslSource,
                 data.DynamicSharedOverrides.Count > 0 ? data.DynamicSharedOverrides : null,
-                data.ScalarPackingManifest.Count > 0 ? data.ScalarPackingManifest : null);
+                data.ScalarPackingManifest.Count > 0 ? data.ScalarPackingManifest : null,
+                data.ExpectedBindingCountHolder.Count > 0 ? data.ExpectedBindingCountHolder[0] : 0);
         }
 
         #endregion
@@ -669,6 +722,12 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         public bool HasScalarPacking => ScalarPackingManifest.Count > 0;
 
         /// <summary>
+        /// The number of @group(0) bindings emitted in the WGSL. Used to validate
+        /// that the bind group entry count matches the shader layout.
+        /// </summary>
+        public int ExpectedBindingCount { get; }
+
+        /// <summary>
         /// Creates a new compiled WebGPU kernel.
         /// </summary>
         public WebGPUCompiledKernel(
@@ -676,12 +735,14 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             EntryPoint entryPoint,
             string wgslSource,
             IReadOnlyList<DynamicSharedOverrideInfo>? dynamicSharedOverrides = null,
-            IReadOnlyList<ScalarPackingEntry>? scalarPackingManifest = null)
+            IReadOnlyList<ScalarPackingEntry>? scalarPackingManifest = null,
+            int expectedBindingCount = 0)
             : base(context, entryPoint, null)
         {
             WGSLSource = wgslSource;
             DynamicSharedOverrides = dynamicSharedOverrides ?? Array.Empty<DynamicSharedOverrideInfo>();
             ScalarPackingManifest = scalarPackingManifest ?? Array.Empty<ScalarPackingEntry>();
+            ExpectedBindingCount = expectedBindingCount;
         }
     }
 
@@ -754,6 +815,19 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
         /// <summary>True if this is a struct parameter.</summary>
         public bool IsStruct { get; set; }
+
+        /// <summary>
+        /// True if this entry represents the element offset of a buffer view binding.
+        /// When true, the runtime packs contiguous.Index (element count) at this slot
+        /// so the WGSL shader can offset array accesses for sub-views.
+        /// </summary>
+        public bool IsViewOffset { get; set; }
+
+        /// <summary>
+        /// For IsViewOffset entries: the binding index of the associated buffer.
+        /// This lets the runtime correlate the packed scalar slot with the correct buffer binding.
+        /// </summary>
+        public int ViewBindingIndex { get; set; } = -1;
 
         /// <summary>Number of u32 slots this scalar occupies (1 for 4-byte, 2 for 8-byte).</summary>
         public int SlotCount => (ByteSize + 3) / 4;

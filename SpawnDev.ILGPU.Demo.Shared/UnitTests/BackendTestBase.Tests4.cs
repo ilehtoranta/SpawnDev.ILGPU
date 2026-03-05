@@ -799,6 +799,134 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                 throw new Exception($"BVH ray traversal: expected 0 hits (all miss), got {hits} hits out of {numberOfPoints}. Hit indices: [{string.Join(", ", hitIndices)}]");
         });
 
+        // --- Math Intrinsics Extended Test ---
+        // Tests operations that were previously missing or broken in browser backends:
+        // - MathF.Truncate (Wasm/WebGPU were missing TruncF)
+        // - MathF.Floor / MathF.Ceiling (regression test)
+        // - MathF.Pow (WebGL stub was broken, returned x instead of x^y)
+        // - MathF.Atan2 (WebGL stub was broken, returned y instead of atan2(y,x))
+        // - MathF.Sqrt / MathF.Log (regression test)
+        static void MathIntrinsicsExtendedKernel(Index1D index, ArrayView<float> output)
+        {
+            float val = (index + 1) * 1.7f; // 1.7, 3.4, 5.1, 6.8, 8.5, 10.2, 11.9, 13.6
+
+            // Trunc: remove fractional part toward zero
+            float truncVal = (float)(int)val; // cast to int truncates toward zero in ILGPU IR → compiles to TruncF
+            
+            // Floor: round toward negative infinity
+            float floorVal = MathF.Floor(val);
+
+            // Ceil: round toward positive infinity
+            float ceilVal = MathF.Ceiling(val);
+
+            // Pow: x^2
+            float powVal = MathF.Pow(val, 2.0f);
+
+            // Atan2: should give correct quadrant angle
+            float atan2Val = MathF.Atan2(val, 1.0f);
+
+            // Sqrt
+            float sqrtVal = MathF.Sqrt(val);
+
+            // Log (natural log)
+            float logVal = MathF.Log(val);
+
+            // Store all results packed: each index gets 7 floats at index*7
+            // But since we have 1 output per thread, combine them into a single checksum
+            output[index] = truncVal + floorVal + ceilVal + powVal + atan2Val + sqrtVal + logVal;
+        }
+
+        [TestMethod]
+        public async Task MathIntrinsicsExtendedTest() => await RunTest(async accelerator =>
+        {
+            int len = 8;
+            using var buf = accelerator.Allocate1D<float>(len);
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<float>>(MathIntrinsicsExtendedKernel);
+            kernel((Index1D)len, buf.View);
+            await accelerator.SynchronizeAsync();
+            var result = await buf.CopyToHostAsync<float>();
+
+            for (int i = 0; i < len; i++)
+            {
+                float val = (i + 1) * 1.7f;
+
+                float truncVal = (float)(int)val;
+                float floorVal = MathF.Floor(val);
+                float ceilVal = MathF.Ceiling(val);
+                float powVal = MathF.Pow(val, 2.0f);
+                float atan2Val = MathF.Atan2(val, 1.0f);
+                float sqrtVal = MathF.Sqrt(val);
+                float logVal = MathF.Log(val);
+                float expected = truncVal + floorVal + ceilVal + powVal + atan2Val + sqrtVal + logVal;
+
+                if (MathF.Abs(result[i] - expected) > 0.05f * MathF.Abs(expected) + 0.05f)
+                    throw new Exception($"MathIntrinsicsExtended failed at {i}. val={val}, Expected {expected}, got {result[i]}");
+            }
+        });
+
+        // --- Bit Operations Intrinsics Test ---
+        // Tests PopCount, LeadingZeroCount, TrailingZeroCount which compile to
+        // UnaryArithmeticKind.PopC, CLZ, CTZ IR nodes.
+        static void BitOpsIntrinsicsKernel(Index1D index, ArrayView<int> input, ArrayView<int> output)
+        {
+            int val = input[index];
+            // PopCount: number of set bits
+            int popc = IntrinsicMath.PopCount(val);
+            // LeadingZeroCount: number of leading zero bits
+            int clz = IntrinsicMath.BitOperations.LeadingZeroCount(val);
+            // TrailingZeroCount: number of trailing zero bits
+            int ctz = IntrinsicMath.BitOperations.TrailingZeroCount(val);
+            // Pack results: popc in bits 0-7, clz in bits 8-15, ctz in bits 16-23
+            output[index] = popc | (clz << 8) | (ctz << 16);
+        }
+
+        [TestMethod]
+        public async Task BitOpsIntrinsicsTest() => await RunTest(async accelerator =>
+        {
+            var input = new int[]
+            {
+                0,          // popc=0, clz=32, ctz=32
+                1,          // popc=1, clz=31, ctz=0
+                -1,         // popc=32, clz=0, ctz=0  (0xFFFFFFFF)
+                0x80,       // popc=1, clz=24, ctz=7   (128)
+                0xFF00,     // popc=8, clz=16, ctz=8
+                0x12345678, // popc=13, clz=3, ctz=3
+                int.MinValue, // popc=1, clz=0, ctz=31  (0x80000000)
+                0x7FFFFFFF, // popc=31, clz=1, ctz=0  (int.MaxValue)
+            };
+            int len = input.Length;
+
+            using var bufIn = accelerator.Allocate1D(input);
+            using var bufOut = accelerator.Allocate1D<int>(len);
+
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<
+                Index1D, ArrayView<int>, ArrayView<int>>(BitOpsIntrinsicsKernel);
+            kernel((Index1D)len, bufIn.View, bufOut.View);
+            await accelerator.SynchronizeAsync();
+            var result = await bufOut.CopyToHostAsync<int>();
+
+            for (int i = 0; i < len; i++)
+            {
+                int val = input[i];
+                int expectedPopC = System.Numerics.BitOperations.PopCount((uint)val);
+                int expectedCLZ = System.Numerics.BitOperations.LeadingZeroCount((uint)val);
+                int expectedCTZ = System.Numerics.BitOperations.TrailingZeroCount((uint)val);
+                int expected = expectedPopC | (expectedCLZ << 8) | (expectedCTZ << 16);
+
+                if (result[i] != expected)
+                {
+                    int gotPopC = result[i] & 0xFF;
+                    int gotCLZ = (result[i] >> 8) & 0xFF;
+                    int gotCTZ = (result[i] >> 16) & 0xFF;
+                    throw new Exception(
+                        $"BitOps failed at {i} (val=0x{val:X8}). " +
+                        $"PopC: expected {expectedPopC} got {gotPopC}, " +
+                        $"CLZ: expected {expectedCLZ} got {gotCLZ}, " +
+                        $"CTZ: expected {expectedCTZ} got {gotCTZ}");
+                }
+            }
+        });
+
         #endregion
     }
 }

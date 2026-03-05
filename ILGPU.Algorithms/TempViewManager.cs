@@ -1,4 +1,4 @@
-﻿// ---------------------------------------------------------------------------------------
+// ---------------------------------------------------------------------------------------
 //                                   ILGPU Algorithms
 //                        Copyright (c) 2019-2021 ILGPU Project
 //                                    www.ilgpu.net
@@ -108,6 +108,15 @@ namespace ILGPU.Algorithms
 
             var tempView = TempView.SubView(NumInts, viewLength);
             NumInts += viewLength;
+
+            // Pad NumInts to the next 256-byte boundary (64 ints).
+            // WebGPU requires GPUBufferBinding.Offset to be a multiple of
+            // minStorageBufferOffsetAlignment (256 bytes). Without this padding,
+            // TempViewManager sub-views have 4-byte-aligned offsets which violate
+            // WebGPU's alignment constraint. Harmless for CUDA/OpenCL (tiny memory waste).
+            const long alignmentInInts = 256 / sizeof(int); // 64
+            NumInts = (NumInts + alignmentInInts - 1) / alignmentInInts * alignmentInInts;
+
             return tempView.Cast<T>().SubView(0, length);
         }
 

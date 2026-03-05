@@ -70,6 +70,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             Options = options ?? new WasmBackendOptions();
 
             InitIntrinsicProvider();
+            RegisterMathIntrinsics();
 
             InitializeKernelTransformers(builder =>
             {
@@ -77,7 +78,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             });
 
             // Hard reference for bundling
-            // XMath reference removed - not available in core ILGPU
+            _ = typeof(global::ILGPU.Algorithms.XMath);
         }
 
         #endregion
@@ -161,6 +162,101 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             }
         }
 
+        private void RegisterRedirect(MethodInfo original, MethodInfo target)
+        {
+            if (original == null || target == null) return;
+            Log($"Wasm: Redirecting {original.DeclaringType?.Name}.{original.Name} -> {target.DeclaringType?.Name}.{target.Name}");
+            GetIntrinsicManager(Context).RegisterMethod(
+                original,
+                new global::ILGPU.Backends.Wasm.WasmIntrinsic(
+                    target,
+                    IntrinsicImplementationMode.Redirect));
+        }
+
+        private void RegisterMathIntrinsics()
+        {
+            var t = typeof(WasmIntrinsics);
+
+            void RegAll(Type type, string name)
+            {
+                var methods = type.GetMethods(BindingFlags.Public | BindingFlags.Static)
+                    .Where(m => m.Name == name);
+
+                foreach (var m in methods)
+                {
+                    MethodInfo target = m;
+                    if (m.IsGenericMethod)
+                    {
+                        var gArgs = m.GetGenericArguments();
+                        if (gArgs.Length == 1)
+                        {
+                            try { target = m.MakeGenericMethod(typeof(float)); } catch { continue; }
+                        }
+                        else continue;
+                    }
+
+                    var pTypes = target.GetParameters().Select(p => p.ParameterType).ToArray();
+                    var wrapper = t.GetMethod(
+                        name,
+                        BindingFlags.Public | BindingFlags.Static,
+                        null, pTypes, null);
+
+                    if (wrapper != null)
+                    {
+                        Log($"Wasm: Mapping {type.Name}.{name}({string.Join(",", pTypes.Select(pt => pt.Name))}) to {t.Name}.{name}");
+                        RegisterRedirect(target, wrapper);
+                    }
+                }
+            }
+
+            // Unary — redirect Math.Round/Truncate/Sign to throw-free wrappers
+            RegAll(typeof(Math), "Abs");
+            RegAll(typeof(MathF), "Abs");
+            RegAll(typeof(Math), "Sign");
+            RegAll(typeof(MathF), "Sign");
+            RegAll(typeof(Math), "Round");
+            RegAll(typeof(MathF), "Round");
+            RegAll(typeof(Math), "Truncate");
+            RegAll(typeof(MathF), "Truncate");
+
+            // Binary
+            RegAll(typeof(Math), "Atan2");
+            RegAll(typeof(MathF), "Atan2");
+            RegAll(typeof(Math), "Max");
+            RegAll(typeof(MathF), "Max");
+            RegAll(typeof(Math), "Min");
+            RegAll(typeof(MathF), "Min");
+            RegAll(typeof(Math), "Pow");
+            RegAll(typeof(MathF), "Pow");
+
+            // Ternary
+            RegAll(typeof(Math), "Clamp");
+            RegAll(typeof(MathF), "Clamp");
+            RegAll(typeof(Math), "FusedMultiplyAdd");
+            RegAll(typeof(MathF), "FusedMultiplyAdd");
+
+            // IntrinsicMath (targets of RemappedIntrinsics)
+            RegAll(typeof(IntrinsicMath), "Abs");
+            RegAll(typeof(IntrinsicMath), "Min");
+            RegAll(typeof(IntrinsicMath), "Max");
+
+            // XMath Rsqrt/Rcp
+            try
+            {
+                var xmathType = Type.GetType("ILGPU.Algorithms.XMath, ILGPU.Algorithms");
+                if (xmathType != null)
+                {
+                    RegAll(xmathType, "Rsqrt");
+                    RegAll(xmathType, "Rcp");
+                    Log("Wasm: Registered XMath intrinsics (Rsqrt, Rcp)");
+                }
+            }
+            catch (Exception ex)
+            {
+                Log($"Wasm: Error registering XMath intrinsics: {ex.Message}");
+            }
+        }
+
         protected override EntryPoint CreateEntryPoint(
             in EntryPointDescription entry,
             in BackendContext backendContext,
@@ -196,8 +292,12 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         protected override WasmCodeGenerator CreateFunctionCodeGenerator(
             Method method,
             Allocas allocas,
-            WasmCodeGenerator.GeneratorArgs data) =>
-            new WasmFunctionGenerator(data, method, allocas);
+            WasmCodeGenerator.GeneratorArgs data)
+        {
+            // Store helper methods so the kernel generator can inline them
+            data.HelperMethods[method] = allocas;
+            return new WasmFunctionGenerator(data, method, allocas);
+        }
 
         /// <summary>
         /// Math function names that will be imported into every Wasm module.

@@ -14,6 +14,7 @@ using global::ILGPU.IR.Analyses.ControlFlowDirection;
 using global::ILGPU.IR.Analyses.TraversalOrders;
 using global::ILGPU.IR.Types;
 using global::ILGPU.IR.Values;
+using System.Linq;
 using System.Text;
 
 namespace SpawnDev.ILGPU.WebGPU.Backend
@@ -40,6 +41,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         private HashSet<int> _emulatedI64Params = new HashSet<int>();
         private List<DynamicSharedOverrideInfo> _dynamicSharedOverrides = new List<DynamicSharedOverrideInfo>();
         private bool _usesBroadcast = false;
+        private string _broadcastType = "i32"; // WGSL type for _broadcast_temp (set by ScanForSubgroupAndBroadcastUsage)
         private bool _usesSubgroups = false;
         // Set to true by GenerateGroupAllReduce so the module-scope atomic<i32> workgroup var is emitted.
         // The static handler sets this via the public property to signal the need for _grp_reduce_i32.
@@ -53,8 +55,18 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         private Dictionary<string, string> _crossBlockPointerExprs = new Dictionary<string, string>();
         // Set of LoadElementAddress Values that cross block boundaries
         private HashSet<Value> _crossBlockPointers = new HashSet<Value>();
+        // Tracks `let` bindings already emitted (e.g. shared memory pointers from NewView).
+        // SEPARATE from declaredVariables to avoid poisoning Declare() — see NV1080 audit.
+        private readonly HashSet<string> _emittedLetBindings = new HashSet<string>();
+        // Counter for unique inlining namespaces — each inlining gets a unique offset
+        // to avoid variable name collisions with kernel-scope declarations.
+        private int _inlineCounter = 0;
         // Scalar packing manifest — populated during GenerateHeader(), used by SetupParameterBindings()
         private List<ScalarPackingEntry> _scalarManifest = new List<ScalarPackingEntry>();
+        // View offset scalar slots — maps param.Index → slot index in _scalar_params
+        // where the element offset for that buffer binding is stored.
+        // Used by GetField to read ArrayView Field 1 (Index) from _scalar_params instead of hardcoding 0.
+        private Dictionary<int, int> _viewOffsetScalarSlots = new Dictionary<int, int>();
         private CFG<ReversePostOrder, Forwards> _cfg;
         private Dominators<Backwards> _postDominators;
         private Loops<ReversePostOrder, Forwards> _loops;
@@ -79,6 +91,13 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         // the reduction's final write uses a plain store instead of an atomic operation.
         private HashSet<(int paramIdx, int fieldIdx)> _bodyStructEmulated64AtomicFields = new HashSet<(int, int)>();
 
+        // Deferred var declarations for structured multi-block code gen.
+        // In WGSL, 'var' inside if/else/loop is block-scoped, so declaring inside
+        // one branch makes the variable invisible to sibling branches. We collect
+        // declarations here and insert them at function scope after code gen.
+        private readonly List<string> _deferredVarDeclarations = new List<string>();
+        private bool _useDeferredDeclarations = false;
+
         /// <summary>
         /// Describes one field of a decomposed body struct parameter.
         /// </summary>
@@ -99,6 +118,9 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             public string AssociatedViewBindingName { get; set; } = "";
             // True if this is a length field (Int64 following a view), false if flag (Int8 following a view)
             public bool IsLengthField { get; set; } = false;
+            // For view fields: the scalar slot index for the view offset (-1 if none)
+            // Populated during GenerateHeader so LoadElementAddress can inject _scalar_params[slot]
+            public int ViewOffsetSlot { get; set; } = -1;
         }
         // _bodyStructFieldVars: (paramIndex, fieldIndex) → WGSL variable name
         // Used by GetField code generation to redirect field accesses to the appropriate binding.
@@ -335,6 +357,62 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                         int slotCount = (isEmuF64 || isEmuI64) ? 2 : 1;
                         globalScalarSlotOffset += slotCount;
                     }
+                }
+            }
+
+            // --- Pre-compute view offset scalar slots ---
+            // GenerateHeader (which runs AFTER body generation) will add one scalar slot per
+            // buffer/view param for the element offset. We must pre-compute these slot indices
+            // here so the body's GetField handler (Field 1) can emit _scalar_params[slot]
+            // instead of hardcoded 0. If the dict is empty during body gen, the auto-layout
+            // drops the unused _scalar_params binding → bind group layout mismatch.
+            foreach (var param in Method.Parameters)
+            {
+                if (param.Index < paramOffset) continue;
+
+                var elemType = GetBufferElementType(param.ParameterType);
+                var wType = TypeGenerator[elemType];
+                bool emuF64 = Backend.Options.EnableF64Emulation && wType == "emu_f64";
+                bool emuI64 = Backend.Options.EnableI64Emulation && (wType == "emu_i64" || wType == "emu_u64");
+
+                IsMultiDim(param.ParameterType, out _, out var isView, out _, out _, out _);
+                bool isStruct = param.ParameterType is global::ILGPU.IR.Types.StructureType && !isView;
+                bool isAtomic = _atomicParameters.Contains(param.Index);
+                bool ownBinding = isView || isStruct || isAtomic;
+
+                // Body structs are handled separately (their view fields get bindings too)
+                IsMultiDim(param.ParameterType, out var isMultiDimCheck, out _, out _, out _, out _);
+                bool isBodyStruct = param.ParameterType is global::ILGPU.IR.Types.StructureType bsType2
+                    && IsBodyStruct(bsType2)
+                    && (KernelParamOffset == 0 || !isMultiDimCheck);
+
+                if (isBodyStruct)
+                {
+                    // Body struct view fields also need view offset slots.
+                    // Allocate a slot for each view field and pre-populate ViewOffsetSlot
+                    // so LoadElementAddress (during body generation) can inject the offset.
+                    if (_bodyStructParams.TryGetValue(param.Index, out var bsFields))
+                    {
+                        foreach (var fieldInfo in bsFields)
+                        {
+                            if (fieldInfo.IsView)
+                            {
+                                fieldInfo.ViewOffsetSlot = globalScalarSlotOffset;
+                                // Use synthetic param index matching GenerateHeader's encoding
+                                int syntheticIdx = (param.Index + 1) * 1000 + fieldInfo.FieldIndex;
+                                _viewOffsetScalarSlots[syntheticIdx] = globalScalarSlotOffset;
+                                globalScalarSlotOffset++;
+                            }
+                        }
+                    }
+                    continue;
+                }
+
+                if (ownBinding && isView)
+                {
+                    // This param gets a buffer binding → reserve a view offset slot
+                    _viewOffsetScalarSlots[param.Index] = globalScalarSlotOffset;
+                    globalScalarSlotOffset++;
                 }
             }
         }
@@ -574,16 +652,16 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
             // Emit WGSL enable directives at the very top of the module
             // These must appear before any other declarations
-            // For subgroups: emit a placeholder that will be resolved after body generation.
-            // The IR pre-scan may flag subgroup usage for nodes that are later handled
-            // via shared-memory emulation (e.g., 64-bit reductions), so we defer the
-            // decision until we can inspect the generated body.
-            bool mayUseSubgroups = Backend.HasSubgroups && _usesSubgroups;
-            if (mayUseSubgroups)
+            // For subgroups: ALWAYS emit a placeholder when the backend supports subgroups.
+            // The IR pre-scan may miss subgroup usage that gets injected during body generation
+            // (e.g., algorithm helper functions like reduce that emit subgroupAdd).
+            // The placeholder is resolved AFTER full body generation by WebGPUBackend.Compile(),
+            // which checks if the final WGSL actually contains subgroup builtins.
+            if (Backend.HasSubgroups)
                 builder.AppendLine("/*__WGSL_ENABLE_SUBGROUPS_PLACEHOLDER__*/");
             if (Backend.HasShaderF16)
                 builder.AppendLine("enable f16;");
-            if (mayUseSubgroups || Backend.HasShaderF16)
+            if (Backend.HasSubgroups || Backend.HasShaderF16)
                 builder.AppendLine();
 
             // Pre-scan parameters to detect if any actually use f64/i64 types.
@@ -626,6 +704,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
             var scalarManifest = new List<ScalarPackingEntry>();
             int scalarSlotOffset = 0; // current u32 slot index in packed buffer
+            // Track view (buffer) params and their binding indices for view offset entries
+            var viewParamBindingIndices = new List<(int paramIndex, int bindingIndex)>();
 
             foreach (var param in Method.Parameters)
             {
@@ -792,6 +872,10 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
                             builder.AppendLine($"// Body struct field {fi}: {fieldType} (view)");
                             builder.AppendLine($"@group(0) @binding({bindingIdx}) var<storage, read_write> {bindingName} : array<{bindingWgslType}>;");
+                            // Track this body struct view field for view offset allocation
+                            // Use a synthetic param index: (paramIndex + 1) * 1000 + fieldIndex
+                            int syntheticViewParamIdx = (param.Index + 1) * 1000 + fi;
+                            viewParamBindingIndices.Add((syntheticViewParamIdx, bindingIdx));
                             bindingIdx++;
                         }
                         else if (isViewMetadata)
@@ -895,6 +979,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
                     var bindingDecl = $"@group(0) @binding({bindingIdx}) var<storage, {accessMode}> param{param.Index} : array<{bindingWgslType}>;";
                     builder.AppendLine(bindingDecl);
+                    viewParamBindingIndices.Add((param.Index, bindingIdx));
                     bindingIdx++;
 
                     // Stride buffer for 2D/3D views
@@ -944,20 +1029,69 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 }
             }
 
+            // --- View Offset Entries ---
+            // For each buffer binding, add a scalar packing entry to store the element offset.
+            // This supports sub-views: the runtime packs contiguous.Index (element count) 
+            // and the WGSL reads it from _scalar_params instead of hardcoding offset to 0.
+            foreach (var (viewParamIndex, viewBindIdx) in viewParamBindingIndices)
+            {
+                var viewOffsetEntry = new ScalarPackingEntry
+                {
+                    ParamIndex = viewParamIndex,
+                    ByteOffset = scalarSlotOffset * 4,
+                    ByteSize = 4,
+                    WgslType = "i32",
+                    IsViewOffset = true,
+                    ViewBindingIndex = viewBindIdx,
+                };
+                scalarManifest.Add(viewOffsetEntry);
+                _viewOffsetScalarSlots[viewParamIndex] = scalarSlotOffset;
+                builder.AppendLine($"// View offset for param{viewParamIndex} at scalar slot {scalarSlotOffset}");
+
+                // If this is a body struct view field (synthetic param index >= 1000),
+                // propagate the slot to BodyStructFieldInfo so LoadElementAddress can use it.
+                if (viewParamIndex >= 1000)
+                {
+                    int realParamIndex = (viewParamIndex / 1000) - 1;
+                    int fieldIndex = viewParamIndex % 1000;
+                    if (_bodyStructParams.TryGetValue(realParamIndex, out var bsFields)
+                        && fieldIndex < bsFields.Count)
+                    {
+                        bsFields[fieldIndex].ViewOffsetSlot = scalarSlotOffset;
+                    }
+                }
+                scalarSlotOffset++;
+            }
+
             // Emit the single packed scalar binding (if any scalars were packed)
+            // GenerateHeader runs AFTER body generation, so Builder already contains
+            // the full function body. If _scalar_params[ is never referenced in the
+            // body, Chrome's WebGPU auto-layout will strip the unused binding from the
+            // bind group layout, causing a mismatch when the runtime creates entries
+            // for it. Skip the declaration entirely to keep layout and bind group in sync.
             if (scalarManifest.Count > 0)
             {
-                builder.AppendLine($"@group(0) @binding({bindingIdx}) var<storage, read> _scalar_params : array<u32>;");
-                bindingIdx++;
+                bool bodyUsesScalarParams = Builder.ToString().Contains("_scalar_params[");
+                if (bodyUsesScalarParams)
+                {
+                    builder.AppendLine($"@group(0) @binding({bindingIdx}) var<storage, read> _scalar_params : array<u32>;");
+                    bindingIdx++;
 
-                // Store manifest in generator args for the compiled kernel
-                foreach (var entry in scalarManifest)
-                    _generatorArgs.ScalarPackingManifest.Add(entry);
+                    // Store manifest in generator args for the compiled kernel
+                    foreach (var entry in scalarManifest)
+                        _generatorArgs.ScalarPackingManifest.Add(entry);
 
-                // DIAGNOSTIC: dump manifest entries so we can verify ParamIndex values
-                foreach (var entry in scalarManifest)
-                    WebGPUBackend.Log($"[WGSL-Manifest] ParamIndex={entry.ParamIndex}, ByteOffset={entry.ByteOffset}, ByteSize={entry.ByteSize}, WgslType={entry.WgslType}");
+                    foreach (var entry in scalarManifest)
+                        WebGPUBackend.Log($"[WGSL-Manifest] ParamIndex={entry.ParamIndex}, ByteOffset={entry.ByteOffset}, ByteSize={entry.ByteSize}, WgslType={entry.WgslType}");
+                }
+                else
+                {
+                    WebGPUBackend.Log("[WGSL] Skipping unused _scalar_params binding — body does not reference it");
+                }
             }
+
+            // Record expected binding count for runtime validation (bind group must match WGSL layout)
+            _generatorArgs.ExpectedBindingCountHolder[0] = bindingIdx;
 
             // Store manifest locally for SetupParameterBindings()
             _scalarManifest = scalarManifest;
@@ -965,16 +1099,63 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             builder.AppendLine();
 
             // Emit shared memory allocations (static)
+            // Use SharedMemoryVarNames (from backendContext.SharedAllocations) instead of
+            // Allocas.SharedAllocations because the kernel's own Allocas may be EMPTY
+            // when shared memory is allocated inside helper functions (e.g., reduction).
+            foreach (var kvp in _generatorArgs.SharedMemoryVarNames)
+            {
+                var allocaNode = kvp.Key;
+                var (varName, declaration) = kvp.Value;
+
+                // Register the variable in valueVariables so Load(alloca) returns it
+                var wgslType = TypeGenerator[allocaNode.Type];
+                var sharedVar = new Variable(varName, wgslType);
+                valueVariables[allocaNode] = sharedVar;
+                declaredVariables.Add(varName);
+
+                if (WebGPU.Backend.WebGPUBackend.VerboseLogging) Console.WriteLine($"[DIAG-KERNEL-SHARED] Emitting shared_mem: name={varName}, alloca hash={allocaNode.GetHashCode()}");
+
+                builder.AppendLine(declaration);
+            }
+
+            // Also iterate kernel's own Allocas.SharedAllocations to register those instances
+            // (they may be different object references from the ones in SharedMemoryVarNames).
+            // When TryGetValue fails (reference inequality), match by element type + array size
+            // to find the correct SharedMemoryVarNames entry. Without this, Load()'s fallback
+            // grabs the first unassigned entry which may be the WRONG allocation — e.g. mapping
+            // RadixSort's groupSize*4 histogram to ExclusiveScan's groupSize workspace.
             foreach (var alloca in Allocas.SharedAllocations)
             {
-                var variable = Load(alloca.Alloca);
-                declaredVariables.Add(variable.Name);
-
-                var elementType = alloca.ElementType;
-                int entryCount = (int)alloca.ArraySize;
-
-                var wgslType = TypeGenerator[elementType];
-                builder.AppendLine($"var<workgroup> {variable.Name} : array<{wgslType}, {entryCount}>;");
+                if (_generatorArgs.SharedMemoryVarNames.TryGetValue(alloca.Alloca, out var preAssigned))
+                {
+                    var wgslType = TypeGenerator[alloca.Alloca.Type];
+                    valueVariables[alloca.Alloca] = new Variable(preAssigned.Name, wgslType);
+                }
+                else
+                {
+                    // Reference mismatch: find a SharedMemoryVarNames entry with matching
+                    // element type and array size that isn't already mapped to a different Alloca.
+                    long allocaArraySize = alloca.ArraySize;
+                    string allocaElemStr = alloca.ElementType.ToString();
+                    foreach (var kvp in _generatorArgs.SharedMemoryVarNames)
+                    {
+                        if (!(kvp.Key is Alloca candidateAlloca)) continue;
+                        // Compare element type by string (safe across object instances)
+                        if (candidateAlloca.AllocaType.ToString() != allocaElemStr) continue;
+                        // Compare array size by resolving the constant ArrayLength
+                        if (!(candidateAlloca.ArrayLength.Resolve() is global::ILGPU.IR.Values.PrimitiveValue pv)
+                            || pv.Int64Value != allocaArraySize)
+                            continue;
+                        // Skip if this entry is already registered for a DIFFERENT kernel alloca
+                        if (valueVariables.Any(kv => kv.Value.Name == kvp.Value.Name && kv.Key != alloca.Alloca))
+                            continue;
+                        var wgslType = TypeGenerator[alloca.Alloca.Type];
+                        valueVariables[alloca.Alloca] = new Variable(kvp.Value.Name, wgslType);
+                        if (WebGPU.Backend.WebGPUBackend.VerboseLogging)
+                            Console.WriteLine($"[DIAG-KERNEL-SHARED] Matched kernel alloca (hash={alloca.Alloca.GetHashCode()}, size={allocaArraySize}) to '{kvp.Value.Name}' by type+size");
+                        break;
+                    }
+                }
             }
 
             // Emit dynamic shared memory allocations using pipeline-overridable constants
@@ -1014,7 +1195,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             {
                 builder.AppendLine();
                 builder.AppendLine("// Workgroup broadcast shared memory");
-                builder.AppendLine("var<workgroup> _broadcast_temp : i32;");
+                builder.AppendLine($"var<workgroup> _broadcast_temp : {_broadcastType};");
             }
 
             // Emit warp shuffle shared memory buffer when:
@@ -1039,6 +1220,20 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 builder.AppendLine("var<workgroup> _grp_sg_results : array<u32, 64>; // per-subgroup partial results (2 slots per sg for 64-bit types)");
             }
 
+            // NOTE: ALL builtins use 'let' bindings inside main() instead of var<private>.
+            // var<private> is treated as "possibly non-uniform" by WGSL's uniformity analysis,
+            // which breaks workgroupBarrier() calls in kernels branching on these values.
+            // Since all helper functions are inlined into main(), let bindings are accessible
+            // everywhere. 'let' preserves uniformity from @builtin params (for group_id,
+            // num_workgroups) and gives the validator better tracking for local_id etc.
+            // workgroup_size MUST be a const (not var<private>) for WGSL uniformity analysis.
+            // var<private> is considered non-uniform, which breaks workgroupBarrier() calls.
+            // Use the actual group size from KernelSpecialization when available.
+            // Emit a placeholder for const workgroup_size. The actual value is resolved in
+            // GenerateCode() AFTER shared memory allocations are known (needed for inference).
+            // Both @workgroup_size and the const workgroup_size variable MUST agree.
+            builder.AppendLine("/*__WGSL_CONST_WORKGROUP_SIZE_PLACEHOLDER__*/");
+
             builder.AppendLine();
         }
 
@@ -1059,7 +1254,10 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     {
                         case global::ILGPU.IR.Values.Broadcast broadcast:
                             if (broadcast.Kind == global::ILGPU.IR.Values.BroadcastKind.GroupLevel)
+                            {
                                 _usesBroadcast = true;
+                                _broadcastType = TypeGenerator[broadcast.Type];
+                            }
                             else
                                 _usesSubgroups = true; // warp-level broadcast uses subgroupBroadcastFirst
                             break;
@@ -1071,6 +1269,544 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                             break;
                     }
                 }
+            }
+        }
+
+        /// <summary>
+        /// Override MethodCall to inline helper functions (e.g., scan/reduce algorithm helpers)
+        /// directly into the kernel. Helper functions that use workgroupBarrier() cannot be
+        /// called as separate WGSL functions because WGSL requires all threads to reach barriers
+        /// uniformly. Calling a barrier-using function from conditional code causes GPU deadlock.
+        /// 
+        /// This mirrors the Wasm backend's inlining approach: instead of emitting a function call,
+        /// we walk the helper method's IR blocks and emit their code inline at the call site.
+        /// </summary>
+        public override void GenerateCode(MethodCall methodCall)
+        {
+            var targetMethod = methodCall.Target;
+
+            // Check if this is a helper function we should inline
+            if (_generatorArgs.HelperMethods.TryGetValue(targetMethod, out var helperAllocas))
+            {
+                WebGPUBackend.Log($"[WGSL-Inline] Inlining helper: {targetMethod.Name} (id={targetMethod.Id}, {targetMethod.Parameters.Count} params, {methodCall.Nodes.Length} args)");
+
+                // Step 1: Map call arguments to helper's parameters in valueVariables.
+                // This ensures that when the inlined code calls Load(param), it resolves
+                // to the caller's argument variable.
+                for (int i = 0; i < targetMethod.Parameters.Count && i < methodCall.Nodes.Length; i++)
+                {
+                    var param = targetMethod.Parameters[i];
+                    var arg = methodCall.Nodes[i].Resolve();
+
+                    // Load the argument to get its Variable, then register the parameter
+                    // to point to the same Variable
+                    var argVar = Load(arg);
+                    valueVariables[param] = argVar;
+                    WebGPUBackend.Log($"[WGSL-Inline]   param[{i}] '{param}' -> {argVar.Name}");
+                }
+
+                // Step 2: Allocate result variable if the call has a non-void return
+                Variable? resultVar = null;
+                if (!methodCall.Type.IsVoidType)
+                {
+                    resultVar = Load(methodCall);
+                    Declare(resultVar);
+                    WebGPUBackend.Log($"[WGSL-Inline]   result -> {resultVar.Name}");
+                }
+
+                // Step 2.5: Set up the helper's local allocations (accumulators, loop counters, etc.)
+                // Without this, the helper's local variables would not be registered in valueVariables,
+                // causing the inlined code to create fresh variables instead of using the correct ones.
+                if (helperAllocas.LocalAllocations.Length > 0)
+                {
+                    WebGPUBackend.Log($"[WGSL-Inline]   Setting up {helperAllocas.LocalAllocations.Length} local allocations");
+                    SetupAllocations(helperAllocas.LocalAllocations, MemoryAddressSpace.Local);
+                }
+
+                // Step 2.6: Register helper's shared memory alloca references.
+                // The helper's IR may reference shared Alloca nodes that are different object
+                // instances from those in SharedMemoryVarNames. Pre-register them here so that
+                // Load() finds the correct module-scope variable without relying on the fallback.
+                foreach (var sharedAlloca in helperAllocas.SharedAllocations)
+                {
+                    if (_generatorArgs.SharedMemoryVarNames.TryGetValue(sharedAlloca.Alloca, out var preAssigned))
+                    {
+                        var wgslType = TypeGenerator[sharedAlloca.Alloca.Type];
+                        valueVariables[sharedAlloca.Alloca] = new Variable(preAssigned.Name, wgslType);
+                        WebGPUBackend.Log($"[WGSL-Inline]   Registered shared alloca -> {preAssigned.Name}");
+                    }
+                    else
+                    {
+                        WebGPUBackend.Log($"[WGSL-Inline]   WARNING: shared alloca not found in SharedMemoryVarNames (hash={sharedAlloca.Alloca.GetHashCode()})");
+                    }
+                }
+
+                // Step 3: Walk the helper's IR blocks and emit their code inline.
+                // We handle single-block helpers directly, and multi-block helpers
+                // using the same GenerateStructuredCode approach as the kernel.
+                var blocks = targetMethod.Blocks;
+                var blockList = blocks.ToList();
+
+                // CRITICAL: Disable state machine mode during inlining.
+                // When IsStateMachineActive=true, Declare() defers vars to VariableBuilder.
+                // But the kernel's hoisting pass already flushed VariableBuilder, so new vars
+                // added during inlining would be lost (never emitted in WGSL).
+                // Setting to false makes Declare() emit 'var' declarations inline.
+                var savedStateMachineActive = IsStateMachineActive;
+                IsStateMachineActive = false;
+
+                // CRITICAL FIX: Save declaredVariables state before inlining.
+                // When a helper is inlined multiple times in the same kernel, the { } block-
+                // scoped `var` declarations from the first inlining are invisible to later blocks.
+                // But declaredVariables persists across inlinings, so Declare() skips the `var`
+                // on the 2nd+ inlining → "unresolved value" errors (v_199, v_64, v_195).
+                // Fix: snapshot declaredVariables before each inlining and restore after,
+                // so scoped `var` declarations can be re-emitted in subsequent inlinings.
+                var savedDeclaredVariables = new HashSet<string>(declaredVariables);
+                var savedEmittedLetBindings = new HashSet<string>(_emittedLetBindings);
+
+                // CRITICAL FIX: Offset varCounter to avoid namespace collisions.
+                // The kernel's hoisting pass pre-declares vars at function scope (e.g. var v_214 : bool).
+                // If the inlined helper's Allocate() generates the same name (v_214) for an i32,
+                // the function-scope bool declaration is visible inside the { } block → type mismatch.
+                // Fix: jump varCounter to a high offset so inlined vars get unique names.
+                var savedVarCounter = varCounter;
+                _inlineCounter++;
+                varCounter = 10000 * _inlineCounter;
+
+                // Also remove helper's IR values from valueVariables so Load() allocates
+                // fresh variable names for each inlining (avoids name collisions in { } scopes).
+                foreach (var block in blockList)
+                    foreach (var valueEntry in block)
+                        valueVariables.Remove(valueEntry.Value);
+
+                AppendLine($"// --- BEGIN inlined helper: {targetMethod.Name} ---");
+                AppendLine("{"); // Block-scope all let bindings to prevent redeclaration
+
+                if (blockList.Count <= 1)
+                {
+                    // Single block: emit values inline
+                    if (blockList.Count == 1)
+                    {
+                        var block = blockList[0];
+                        foreach (var valueEntry in block)
+                        {
+                            GenerateCodeFor(valueEntry.Value);
+                        }
+                        // Handle terminator separately (not in enumeration)
+                        if (block.Terminator is ReturnTerminator ret)
+                        {
+                            if (resultVar != null && !ret.IsVoidReturn)
+                            {
+                                var retVal = Load(ret.ReturnValue.Resolve());
+                                AppendLine($"{resultVar} = {retVal}; // inlined return");
+                            }
+                            // Don't emit the actual return — we're inlining, not returning
+                        }
+                    }
+                }
+                else
+                {
+                    // Multi-block helper: use post-dominator-based structured code generation.
+                    // This maintains uniform control flow for barriers.
+                    WebGPUBackend.Log($"[WGSL-Inline] Multi-block helper with {blockList.Count} blocks");
+
+                    // Save the current Method context — GenerateStructuredCode uses Method
+                    // internally, but we need to process the helper's blocks, not the kernel's.
+                    // Since GenerateStructuredCode takes explicit block parameters, we
+                    // generate code by walking blocks directly with the same approach.
+                    InlineMultiBlockHelper(targetMethod, blockList, resultVar);
+                }
+
+                AppendLine("}"); // End block scope for inlined helper
+                AppendLine($"// --- END inlined helper: {targetMethod.Name} ---");
+
+                // Restore state machine mode
+                IsStateMachineActive = savedStateMachineActive;
+
+                // Restore declaredVariables and _emittedLetBindings so the next inlining
+                // of the same helper can re-emit { }-scoped var/let declarations.
+                // Both are readonly, so we remove entries added during inlining.
+                declaredVariables.ExceptWith(declaredVariables.Except(savedDeclaredVariables).ToList());
+                _emittedLetBindings.ExceptWith(_emittedLetBindings.Except(savedEmittedLetBindings).ToList());
+
+                // Restore varCounter so the kernel's own code gen continues from
+                // where it left off, without gaps from the inlined variable names.
+                varCounter = savedVarCounter;
+
+                WebGPUBackend.Log($"[WGSL-Inline] Done inlining {targetMethod.Name}");
+                return;
+            }
+
+            // Fall through to base class for non-helper calls (intrinsics, math, etc.)
+            base.GenerateCode(methodCall);
+        }
+
+        /// <summary>
+        /// Inline a multi-block helper method using STRUCTURED control flow.
+        /// 
+        /// CRITICAL: We CANNOT use a loop/switch state machine here because it violates
+        /// WGSL's barrier uniformity requirement. Different threads would reach
+        /// workgroupBarrier() at different loop iterations (e.g., thread 0 doing a 
+        /// sequential reduction loop vs threads 1-63 skipping to the final barrier).
+        /// 
+        /// Instead, we use the same recursive structured code generation approach as 
+        /// the kernel's GenerateStructuredCode: build post-dominators for the helper's
+        /// CFG, then recursively emit if/else for IfBranch terminators, 
+        /// loop { } for back-edges, and flat code for UnconditionalBranch.
+        /// This ensures barriers appear at the SAME textual depth for ALL threads.
+        /// </summary>
+        private void InlineMultiBlockHelper(Method helperMethod, List<BasicBlock> blockList, Variable? resultVar)
+        {
+            // Build post-dominators from the helper's blocks to find merge points
+            var helperCfg = helperMethod.Blocks.CreateCFG();
+            var helperPostDom = helperCfg.Blocks.CreatePostDominators();
+            
+            // Track which blocks have been visited to avoid double-emission
+            var helperVisited = new HashSet<BasicBlock>();
+            
+            // Track loop headers: a back-edge from B→A where A dominates B means A is a loop header
+            var loopHeaders = new HashSet<BasicBlock>();
+            foreach (var block in blockList)
+            {
+                if (block.Terminator is UnconditionalBranch ub && blockList.IndexOf(ub.Target) <= blockList.IndexOf(block))
+                    loopHeaders.Add(ub.Target);
+                if (block.Terminator is IfBranch ifb)
+                {
+                    if (blockList.IndexOf(ifb.TrueTarget) <= blockList.IndexOf(block))
+                        loopHeaders.Add(ifb.TrueTarget);
+                    if (blockList.IndexOf(ifb.FalseTarget) <= blockList.IndexOf(block))
+                        loopHeaders.Add(ifb.FalseTarget);
+                }
+            }
+            
+            // Pre-declare ALL phi variables from the helper's blocks.
+            // CRITICAL: Phi variables are shared across branches (e.g., used in both
+            // if and else sides of a structured if/else). If we rely on lazy declaration
+            // inside PushPhiValues, the var may be declared inside one branch scope
+            // but referenced from the other branch or after the merge — a WGSL scoping
+            // violation. Pre-declaring them here ensures they're at the correct outer scope.
+            foreach (var block in blockList)
+            {
+                foreach (var valueEntry in block)
+                {
+                    if (valueEntry.Value is PhiValue phi)
+                    {
+                        var phiVar = Load(phi);
+                        Declare(phiVar);
+                    }
+                    else break; // Phis are always at the start of a block
+                }
+            }
+            
+            // Recursively emit structured code starting from the entry block
+            InlineStructuredBlock(blockList[0], null, helperPostDom, helperVisited, loopHeaders, resultVar);
+        }
+        
+        /// <summary>
+        /// Recursively generates structured WGSL code for an inlined helper block.
+        /// This mirrors the kernel's GenerateStructuredCode pattern.
+        /// </summary>
+        private void InlineStructuredBlock(
+            BasicBlock current, 
+            BasicBlock? stop,
+            global::ILGPU.IR.Analyses.Dominators<global::ILGPU.IR.Analyses.ControlFlowDirection.Backwards> postDom,
+            HashSet<BasicBlock> visited,
+            HashSet<BasicBlock> loopHeaders,
+            Variable? resultVar)
+        {
+            if (current == null || current == stop || visited.Contains(current)) return;
+            visited.Add(current);
+            
+            // If this is a loop header, wrap in a WGSL loop
+            bool isLoopHeader = loopHeaders.Contains(current);
+            if (isLoopHeader)
+            {
+                AppendLine("loop {");
+                PushIndent();
+            }
+            
+            // Emit the block's non-terminator values
+            foreach (var valueEntry in current)
+            {
+                GenerateCodeFor(valueEntry.Value);
+            }
+            
+            // Handle the block's terminator
+            var terminator = current.Terminator;
+            
+            if (terminator is ReturnTerminator ret)
+            {
+                if (resultVar != null && !ret.IsVoidReturn)
+                {
+                    var retVal = Load(ret.ReturnValue.Resolve());
+                    AppendLine($"{resultVar} = {retVal}; // inlined return");
+                }
+                // No code needed after return — structured flow naturally ends
+                if (isLoopHeader)
+                {
+                    AppendLine("break;");
+                    PopIndent();
+                    AppendLine("}");
+                }
+            }
+            else if (terminator is UnconditionalBranch ub)
+            {
+                PushPhiValues(ub);
+                
+                // Check if this is a back-edge (target already visited = loop)
+                if (visited.Contains(ub.Target))
+                {
+                    // Back-edge: continue the loop (implicit in WGSL loop)
+                    AppendLine("// loop continue (back-edge)");
+                    if (isLoopHeader)
+                    {
+                        PopIndent();
+                        AppendLine("}");
+                    }
+                }
+                else
+                {
+                    // Forward edge: continue structured flow
+                    if (isLoopHeader)
+                    {
+                        PopIndent();
+                        AppendLine("}");
+                    }
+                    InlineStructuredBlock(ub.Target, stop, postDom, visited, loopHeaders, resultVar);
+                }
+            }
+            else if (terminator is IfBranch ifb)
+            {
+                var trueTarget = ifb.TrueTarget;
+                var falseTarget = ifb.FalseTarget;
+                
+                // Find the merge point where both branches converge
+                var merge = postDom.GetImmediateDominator(current);
+                
+                var cond = Load(ifb.Condition.Resolve());
+                
+                // LOOP HEADER with IfBranch: one branch is the loop body (back-edge),
+                // the other exits the loop. Emit as: if(!exitCond){break;} bodyCode;
+                if (isLoopHeader)
+                {
+                    bool trueIsBackEdge = visited.Contains(trueTarget) || loopHeaders.Contains(trueTarget);
+                    bool falseIsBackEdge = visited.Contains(falseTarget) || loopHeaders.Contains(falseTarget);
+                    
+                    BasicBlock bodyTarget, exitTarget;
+                    string breakCond;
+                    
+                    if (!trueIsBackEdge && falseIsBackEdge)
+                    {
+                        // True exits, false continues → break if condition is true
+                        bodyTarget = falseTarget;
+                        exitTarget = trueTarget;
+                        breakCond = $"{cond}";
+                    }
+                    else if (trueIsBackEdge && !falseIsBackEdge)
+                    {
+                        // False exits, true continues → break if condition is false
+                        bodyTarget = trueTarget;
+                        exitTarget = falseTarget;
+                        breakCond = $"!{cond}";
+                    }
+                    else
+                    {
+                        // Both or neither are back-edges (unusual) — figure out by
+                        // checking which target has already been visited
+                        // Default: treat true as body
+                        bodyTarget = trueTarget;
+                        exitTarget = falseTarget;
+                        breakCond = $"!{cond}";
+                    }
+                    
+                    // Emit break condition
+                    PushPhiValues(ifb, exitTarget);
+                    AppendLine($"if ({breakCond}) {{ break; }}");
+                    
+                    // Emit phi values for loop body
+                    PushPhiValues(ifb, bodyTarget);
+                    
+                    // Emit loop body (recurse into body target, stop at this loop header)
+                    if (!visited.Contains(bodyTarget))
+                    {
+                        InlineStructuredBlock(bodyTarget, current, postDom, visited, loopHeaders, resultVar);
+                    }
+                    
+                    // Close the loop
+                    PopIndent();
+                    AppendLine("}"); // end loop { }
+                    
+                    // Emit exit path code AFTER the loop
+                    if (!visited.Contains(exitTarget))
+                    {
+                        InlineStructuredBlock(exitTarget, stop, postDom, visited, loopHeaders, resultVar);
+                    }
+                    
+                    // Continue from merge point (if different from exit target)
+                    if (merge != null && merge != stop && !visited.Contains(merge))
+                    {
+                        InlineStructuredBlock(merge, stop, postDom, visited, loopHeaders, resultVar);
+                    }
+                }
+                else
+                {
+                    // Non-loop IfBranch: standard structured if/else
+                    // Save visited state before true branch for short-circuit patterns
+                    var visitedBeforeTrueBranch = new HashSet<BasicBlock>(visited);
+                    
+                    // Push phi values for true branch
+                    PushPhiValues(ifb, trueTarget);
+                    AppendLine($"if ({cond}) {{");
+                    PushIndent();
+                    
+                    // Check if true target is a back-edge
+                    if (visited.Contains(trueTarget))
+                    {
+                        AppendLine("// loop continue (true branch back-edge)");
+                    }
+                    else
+                    {
+                        InlineStructuredBlock(trueTarget, merge, postDom, visited, loopHeaders, resultVar);
+                    }
+                    
+                    PopIndent();
+                    AppendLine("} else {");
+                    PushIndent();
+                    
+                    // Push phi values for false branch
+                    PushPhiValues(ifb, falseTarget);
+                    
+                    // Restore visited state for false branch
+                    visited.IntersectWith(visitedBeforeTrueBranch);
+                    
+                    // Check if false target is a back-edge
+                    if (visited.Contains(falseTarget))
+                    {
+                        AppendLine("// loop continue (false branch back-edge)");
+                    }
+                    else
+                    {
+                        InlineStructuredBlock(falseTarget, merge, postDom, visited, loopHeaders, resultVar);
+                    }
+                    
+                    PopIndent();
+                    AppendLine("}");
+                    
+                    // Continue from merge point
+                    if (merge != null && merge != stop)
+                    {
+                        InlineStructuredBlock(merge, stop, postDom, visited, loopHeaders, resultVar);
+                    }
+                }
+            }
+            else if (terminator is SwitchBranch sb)
+            {
+                var selector = Load(sb.Condition.Resolve());
+                var merge = postDom.GetImmediateDominator(current);
+                
+                AppendLine($"switch (i32({selector})) {{");
+                PushIndent();
+                
+                for (int i = 0; i < sb.NumCasesWithoutDefault; i++)
+                {
+                    AppendLine($"case {i}: {{");
+                    PushIndent();
+                    var caseTarget = sb.GetCaseTarget(i);
+                    if (!visited.Contains(caseTarget))
+                    {
+                        InlineStructuredBlock(caseTarget, merge, postDom, visited, loopHeaders, resultVar);
+                    }
+                    PopIndent();
+                    AppendLine("}");
+                }
+                
+                AppendLine("default: {");
+                PushIndent();
+                if (!visited.Contains(sb.DefaultBlock))
+                {
+                    InlineStructuredBlock(sb.DefaultBlock, merge, postDom, visited, loopHeaders, resultVar);
+                }
+                PopIndent();
+                AppendLine("}");
+                
+                PopIndent();
+                AppendLine("}");
+                
+                if (isLoopHeader)
+                {
+                    PopIndent();
+                    AppendLine("}");
+                }
+                
+                if (merge != null && merge != stop)
+                {
+                    InlineStructuredBlock(merge, stop, postDom, visited, loopHeaders, resultVar);
+                }
+            }
+            else if (terminator != null)
+            {
+                // Fallback
+                GenerateCodeFor(terminator);
+                if (isLoopHeader)
+                {
+                    PopIndent();
+                    AppendLine("}");
+                }
+            }
+        }
+
+        /// <summary>
+        /// Push phi values for a branch terminator (unconditional branch).
+        /// Phi values in ILGPU represent SSA merge points — when branching to a block,
+        /// we assign the branch's source values to the phi destination variables.
+        /// </summary>
+        private void PushPhiValues(UnconditionalBranch branch)
+        {
+            var targetBlock = branch.Target;
+            foreach (var valueEntry in targetBlock)
+            {
+                if (valueEntry.Value is PhiValue phi)
+                {
+                    // Find the source value for this phi from the current block
+                    for (int i = 0; i < phi.Nodes.Length; i++)
+                    {
+                        if (phi.Sources[i] == branch.BasicBlock)
+                        {
+                            var srcValue = phi.Nodes[i].Resolve();
+                            var phiVar = Load(phi);
+                            Declare(phiVar); // Ensure phi var is declared (Allocate doesn't call Declare)
+                            var srcVar = Load(srcValue);
+                            AppendLine($"{phiVar} = {srcVar};");
+                        }
+                    }
+                }
+                else break; // Phis are always at the start of a block
+            }
+        }
+
+        /// <summary>
+        /// Push phi values for a conditional branch (IfBranch) to a specific target block.
+        /// </summary>
+        private void PushPhiValues(IfBranch branch, BasicBlock targetBlock)
+        {
+            foreach (var valueEntry in targetBlock)
+            {
+                if (valueEntry.Value is PhiValue phi)
+                {
+                    for (int i = 0; i < phi.Nodes.Length; i++)
+                    {
+                        if (phi.Sources[i] == branch.BasicBlock)
+                        {
+                            var srcValue = phi.Nodes[i].Resolve();
+                            var phiVar = Load(phi);
+                            Declare(phiVar); // Ensure phi var is declared (Allocate doesn't call Declare)
+                            var srcVar = Load(srcValue);
+                            AppendLine($"{phiVar} = {srcVar};");
+                        }
+                    }
+                }
+                else break;
             }
         }
 
@@ -1094,15 +1830,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
             PushIndent();
 
-            // Declare workgroup_size constant for access by intrinsics
-            string wgDims = EntryPoint.IndexType switch
-            {
-                IndexType.Index1D => "64, 1, 1",
-                IndexType.Index2D => "8, 8, 1",
-                IndexType.Index3D => "4, 4, 4",
-                _ => "64, 1, 1"
-            };
-            AppendLine($"let workgroup_size = vec3<u32>({wgDims});");
+            // workgroup_size is a module-scope const — no runtime assignment needed.
 
             // 0. Pre-scan parameters to identify emulated 64-bit types
             // This MUST happen before hoisting so that Load/Store know which buffers are emulated
@@ -1115,6 +1843,13 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             SetupIndexVariables();
             SetupParameterBindings();
 
+            // FIX: Set up kernel's own local allocations (e.g., Alloca for `out` parameters).
+            // These are NOT handled by HoistCrossBlockVariables (skips pointers) and NOT
+            // handled by the inlining code (which only sets up the HELPER's local allocations).
+            // Without this, alloca-backed variables (like `v_22` for `out ScanBoundaries<T>`)
+            // are used but never declared, causing WGSL compilation errors.
+            SetupAllocations(Allocas.LocalAllocations, MemoryAddressSpace.Local);
+
             // 3. START CONTROL FLOW
             // Save position before code generation for post-processing
             int codeGenStartPosition = Builder.Length;
@@ -1125,20 +1860,36 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             }
             else if (_loops.Count == 0) // No Loops -> Acyclic
             {
-                // ACYCLIC KERNEL: Use Structured Control Flow (Nested IFs)
+                // Enable deferred declarations: in WGSL, 'var' inside if/else/loop is
+                // block-scoped. Variables first encountered in one branch would be invisible
+                // to sibling branches. Deferring declarations to function scope fixes this.
+                _useDeferredDeclarations = true;
+                _deferredVarDeclarations.Clear();
                 var pd = global::ILGPU.IR.Analyses.Dominators.CreatePostDominators(Method.Blocks);
                 GenerateStructuredCode(Method.EntryBlock, null, pd);
+                _useDeferredDeclarations = false;
+                // Insert deferred declarations at the start of code gen (function scope)
+                if (_deferredVarDeclarations.Count > 0)
+                {
+                    var deferred = string.Join(Environment.NewLine, _deferredVarDeclarations) + Environment.NewLine;
+                    Builder.Insert(codeGenStartPosition, deferred);
+                    codeGenStartPosition += deferred.Length;
+                }
             }
             else
             {
-                // CYCLIC KERNEL: Use Structured Control Flow with Loop constructs
-                // Instead of the state machine (loop { switch { case: ... } }) which is
-                // incompatible with workgroupBarrier() due to WGSL's uniform control flow
-                // requirements, we generate proper WGSL loop {} constructs using the
-                // loop analysis data from ILGPU. This allows barriers to be in uniform
-                // control flow (inside the loop body at the top level, not inside a switch).
+                // Enable deferred declarations (same rationale as acyclic path above)
+                _useDeferredDeclarations = true;
+                _deferredVarDeclarations.Clear();
                 var pd = global::ILGPU.IR.Analyses.Dominators.CreatePostDominators(Method.Blocks);
                 GenerateStructuredCode(Method.EntryBlock, null, pd);
+                _useDeferredDeclarations = false;
+                if (_deferredVarDeclarations.Count > 0)
+                {
+                    var deferred = string.Join(Environment.NewLine, _deferredVarDeclarations) + Environment.NewLine;
+                    Builder.Insert(codeGenStartPosition, deferred);
+                    codeGenStartPosition += deferred.Length;
+                }
             }
 
             // CRITICAL: Post-process to fix variable scoping issues.
@@ -1213,7 +1964,17 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                             }
                         }
 
-                        missingDeclarations.Add($"    var {varName} : {inferredType};");
+                        // WGSL: pointer types are not constructible and can't be declared
+                        // as 'var'. They will be bound as 'let' at their point of use.
+                        if (!inferredType.StartsWith("ptr<"))
+                        {
+                            if (WebGPU.Backend.WebGPUBackend.VerboseLogging) Console.WriteLine($"[DIAG-MISSING-DECL] Adding var {varName} : {inferredType}");
+                            missingDeclarations.Add($"    var {varName} : {inferredType};");
+                        }
+                        else
+                        {
+                            if (WebGPU.Backend.WebGPUBackend.VerboseLogging) Console.WriteLine($"[DIAG-MISSING-SKIP] Skipping ptr var {varName} : {inferredType}");
+                        }
                         declaredVariables.Add(varName);
                     }
 
@@ -1248,6 +2009,55 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
             }
 
+            // PHASE 3: Hoist ALL 'var v_N' declarations to function scope.
+            //
+            // WGSL block-scopes 'var' declarations: a variable declared inside an
+            // if/else/loop body is invisible to sibling scopes. The structured code
+            // generator can emit the same IR block in multiple WGSL scopes (via
+            // UnvisitSharedTargets), and separate IR PrimitiveValue nodes for the
+            // same constant get the same variable name via Load() caching. This
+            // causes "unresolved value" errors when one scope's 'var' is referenced
+            // from a sibling scope.
+            //
+            // Fix: unconditionally move every 'var v_N' declaration to function
+            // scope. Only v_N-prefixed variables are touched — local arrays, structs,
+            // and other naming conventions are left in place.
+            if (Method.Blocks.Count > 1)
+            {
+                string code = Builder.ToString(codeGenStartPosition, Builder.Length - codeGenStartPosition);
+
+                var varHoistPattern = new System.Text.RegularExpressions.Regex(
+                    @"^(\s*)var\s+(v_\d+\w*)\s*:\s*([^;=]+?)\s*(?:=\s*(.+?))?\s*;\s*$",
+                    System.Text.RegularExpressions.RegexOptions.Multiline);
+
+                var hoistedVars = new Dictionary<string, string>();
+
+                string hoisted = varHoistPattern.Replace(code, match =>
+                {
+                    string indent = match.Groups[1].Value;
+                    string varName = match.Groups[2].Value;
+                    string varType = match.Groups[3].Value.Trim();
+                    bool hasInit = match.Groups[4].Success && match.Groups[4].Value.Length > 0;
+                    string initExpr = hasInit ? match.Groups[4].Value : null;
+
+                    if (!hoistedVars.ContainsKey(varName))
+                        hoistedVars[varName] = varType;
+
+                    if (hasInit)
+                        return $"{indent}{varName} = {initExpr};";
+
+                    return "";
+                });
+
+                if (hoistedVars.Count > 0)
+                {
+                    Builder.Remove(codeGenStartPosition, Builder.Length - codeGenStartPosition);
+                    foreach (var kvp in hoistedVars)
+                        Builder.AppendLine($"    var {kvp.Key} : {kvp.Value};");
+                    Builder.Append(hoisted);
+                }
+            }
+
             PopIndent();
             Builder.AppendLine("}"); // End Function
 
@@ -1261,22 +2071,42 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                  bodyText.Contains("subgroupShuffle") || bodyText.Contains("subgroupAdd") ||
                  bodyText.Contains("subgroupBroadcastFirst") || bodyText.Contains("subgroup_id"));
 
-            // Include subgroup_id builtin when group reduce or subgroup ops are used.
-            // subgroup_id is needed by GenerateGroupAllReduce to index the per-subgroup results array.
-            bool bodyNeedsSubgroupId = bodyUsesSubgroups || _usesGroupReduce;
+            // Determine which subgroup builtins to include in the entry point signature.
+            // @builtin(subgroup_id) requires 'chromium_experimental_subgroup_matrix' which
+            // is NOT part of the standard 'subgroups' extension. We compute subgroup_id
+            // from available builtins instead: local_invocation_index / subgroup_size.
+            bool bodyNeedsSubgroups = bodyUsesSubgroups || _usesGroupReduce;
 
+            // Rename entry point builtins to _ep_xxx to avoid clashing with module-scope var<private>
             string signature = $"@compute @workgroup_size({workgroupSize})\n" +
-                "fn main(@builtin(global_invocation_id) global_id : vec3<u32>, " +
-                "@builtin(local_invocation_id) local_id : vec3<u32>, " +
-                "@builtin(workgroup_id) group_id : vec3<u32>, " +
-                "@builtin(num_workgroups) num_workgroups : vec3<u32>, " +
-                "@builtin(local_invocation_index) local_index : u32" +
-                (bodyNeedsSubgroupId ? ", @builtin(subgroup_invocation_id) subgroup_invocation_id : u32, @builtin(subgroup_size) subgroup_size : u32, @builtin(subgroup_id) subgroup_id : u32" : "") +
+                "fn main(@builtin(global_invocation_id) _ep_global_id : vec3<u32>, " +
+                "@builtin(local_invocation_id) _ep_local_id : vec3<u32>, " +
+                "@builtin(workgroup_id) _ep_group_id : vec3<u32>, " +
+                "@builtin(num_workgroups) _ep_num_workgroups : vec3<u32>, " +
+                "@builtin(local_invocation_index) _ep_local_index : u32" +
+                (bodyNeedsSubgroups ? ", @builtin(subgroup_invocation_id) subgroup_invocation_id : u32, @builtin(subgroup_size) subgroup_size : u32" : "") +
                 ") {";
 
-            // Replace the sentinel with the real signature
+            string builtinCopies = "\n" +
+                "    // All builtins use 'let' (not var<private>) for WGSL uniformity analysis.\n" +
+                "    // 'let' preserves uniformity tracking from @builtin parameters.\n" +
+                "    let global_id = _ep_global_id;\n" +
+                "    let local_id = _ep_local_id;\n" +
+                "    let group_id = _ep_group_id;\n" +
+                "    let num_workgroups = _ep_num_workgroups;\n" +
+                "    let local_index = _ep_local_index;\n" +
+                (bodyNeedsSubgroups ? "    let subgroup_id = _ep_local_index / subgroup_size;\n" : "");
+
+            // Replace the sentinel with the real signature + builtin copies
             string fullOutput = Builder.ToString(signatureInsertPosition, Builder.Length - signatureInsertPosition);
-            fullOutput = fullOutput.Replace(signatureSentinel, signature);
+            fullOutput = fullOutput.Replace(signatureSentinel, signature + builtinCopies);
+
+            // Post-process: Fix grid-stride loop uniformity.
+            // NOTE: FixGridStrideLoopUniformity is no longer needed — uniform breaks
+            // are now emitted DIRECTLY during code generation in GenerateLoopConstruct.
+            // The old post-processor is retained in the codebase as reference but disabled.
+            // fullOutput = FixGridStrideLoopUniformity(fullOutput);
+
             Builder.Remove(signatureInsertPosition, Builder.Length - signatureInsertPosition);
             Builder.Append(fullOutput);
             // NOTE: The enable subgroups placeholder is resolved in WebGPUBackend.CreateKernel()
@@ -1288,6 +2118,461 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             // and we must use a direct assignment (no prefix).
             // Otherwise, we use 'let ' to declare it locally.
             return _hoistedPrimitives.Contains(value) ? "" : "let ";
+        }
+
+        /// <summary>
+        /// Post-processing pass: fixes grid-stride loop uniformity violations.
+        /// WGSL requires workgroupBarrier() to be called from uniform control flow.
+        /// Grid-stride loops use a per-thread index (non-uniform: local_id + group_id * workgroup_size)
+        /// as the break condition, but also maintain a parallel group counter (uniform: group_id, += num_workgroups).
+        /// This method detects such loops and transforms the break condition to use the group counter,
+        /// which is uniform within a workgroup.
+        /// </summary>
+        public static string FixGridStrideLoopUniformity(string wgsl)
+        {
+            // Only process if there are barriers inside loops to worry about
+            if (!wgsl.Contains("workgroupBarrier()"))
+                return wgsl;
+
+            var lines = wgsl.Split('\n');
+            var result = new System.Text.StringBuilder(wgsl.Length);
+            if (WebGPU.Backend.WebGPUBackend.VerboseLogging)
+                Console.WriteLine($"[GridStrideFix] Processing WGSL ({lines.Length} lines, has barriers: {wgsl.Contains("workgroupBarrier()")})");
+
+            // Strategy: 
+            // 1. PRIMARY: Look for "// __UNIFORMITY_HINT__" markers emitted by the code generator.
+            //    These contain exact variable names from IR analysis (group counter, thread counter).
+            // 2. FALLBACK: For loops without markers (e.g., from inlined helpers), use regex detection.
+
+            // First, find all loop blocks with barriers
+            for (int i = 0; i < lines.Length; i++)
+            {
+                string trimmed = lines[i].TrimEnd('\r').Trim();
+
+                // ─── PRIMARY: Check for IR-emitted uniformity markers ───
+                // Pattern: "// __UNIFORMITY_HINT__ has_barriers group=v_XX thread=v_YY"
+                // followed by "loop {"
+                if (trimmed.StartsWith("// __UNIFORMITY_HINT__"))
+                {
+                    // Parse the marker fields
+                    string markerGroupCounter = null;
+                    string markerThreadCounter = null;
+                    bool markerHasBarriers = trimmed.Contains("has_barriers");
+                    
+                    var groupMatch = System.Text.RegularExpressions.Regex.Match(trimmed, @"group=(\w+)");
+                    if (groupMatch.Success) markerGroupCounter = groupMatch.Groups[1].Value;
+                    
+                    var threadMatch = System.Text.RegularExpressions.Regex.Match(trimmed, @"thread=(\w+)");
+                    if (threadMatch.Success) markerThreadCounter = threadMatch.Groups[1].Value;
+
+                    if (WebGPU.Backend.WebGPUBackend.VerboseLogging)
+                        Console.WriteLine($"[GridStrideFix] Found __UNIFORMITY_HINT__ at line {i}: barriers={markerHasBarriers} group={markerGroupCounter} thread={markerThreadCounter}");
+
+                    // Don't emit the marker comment into the output — it was only needed for analysis
+                    // Skip to the next line which should be "loop {"
+                    if (i + 1 < lines.Length && lines[i + 1].TrimEnd('\r').Trim() == "loop {")
+                    {
+                        if (markerGroupCounter != null)
+                        {
+                            // We have a code-gen-identified group counter — use it!
+                            // Barrier detection is done by text-based scan below (not IR-level).
+                            i++; // advance to the "loop {" line
+                            
+                            // Find loop bounds
+                            int loopStart = i;
+                            int braceCount = 1;
+                            int loopEnd = -1;
+                            for (int j = i + 1; j < lines.Length && braceCount > 0; j++)
+                            {
+                                string lt = lines[j].TrimEnd('\r');
+                                foreach (char c in lt) { if (c == '{') braceCount++; else if (c == '}') braceCount--; }
+                                if (braceCount == 0) loopEnd = j;
+                            }
+                            if (loopEnd < 0) { result.AppendLine(lines[i].TrimEnd('\r')); continue; }
+
+                            // Find the break condition pattern (v_X = v_Y < v_Z; followed by if (!v_X) { break; })
+                            string breakCondVar = null, threadCounterVar = null, limitVar = null, compOp = null;
+                            int breakCondLine = -1;
+                            bool breakIsNegated = false; // true = "if (!v_X) { break; }", false = "if (v_X) { break; }"
+                            for (int j = loopStart + 1; j < Math.Min(loopStart + 100, loopEnd); j++)
+                            {
+                                string lt = lines[j].TrimEnd('\r').Trim();
+                                // Match any comparison: v_X = v_Y <op> v_Z;
+                                var compareMatch = System.Text.RegularExpressions.Regex.Match(lt, @"^(?:let\s+)?(\w+)\s*=\s*(\w+)\s*(<|<=|>|>=)\s*(\w+)\s*;$");
+                                if (compareMatch.Success)
+                                {
+                                    for (int k = j + 1; k < Math.Min(j + 5, loopEnd); k++)
+                                    {
+                                        string kt = lines[k].TrimEnd('\r').Trim();
+                                        if (kt.Contains("break;"))
+                                        {
+                                            breakCondVar = compareMatch.Groups[1].Value;
+                                            threadCounterVar = compareMatch.Groups[2].Value;
+                                            compOp = compareMatch.Groups[3].Value;
+                                            limitVar = compareMatch.Groups[4].Value;
+                                            breakCondLine = j;
+                                            // Detect negation by scanning ALL lines from compare to break
+                                            // The if statement might be on a different line than break;
+                                            for (int n = j + 1; n <= k; n++)
+                                            {
+                                                string nt = lines[n].TrimEnd('\r').Trim();
+                                                if (nt.Contains($"!{breakCondVar}") || nt.Contains($"! {breakCondVar}"))
+                                                {
+                                                    breakIsNegated = true;
+                                                    break;
+                                                }
+                                            }
+                                            break;
+                                        }
+                                    }
+                                    if (breakCondLine >= 0) break;
+                                }
+                            }
+
+                            if (breakCondLine >= 0)
+                            {
+                                string uniformExpr = $"({markerGroupCounter} * i32(workgroup_size.x)) {compOp} {limitVar}";
+                                string ufBreakVar = $"_uf_break_{breakCondVar}";
+                                
+                                if (WebGPU.Backend.WebGPUBackend.VerboseLogging)
+                                    Console.WriteLine($"[GridStrideFix] MARKER-BASED TRANSFORM: {breakCondVar} -> let {ufBreakVar} = {uniformExpr} (negated={breakIsNegated})");
+
+                                // Emit the transformed loop
+                                for (int j = loopStart; j <= loopEnd; j++)
+                                {
+                                    string lineContent = lines[j].TrimEnd('\r');
+                                    if (j == breakCondLine)
+                                    {
+                                        int contentStart = lineContent.Length - lineContent.TrimStart().Length;
+                                        string indentStr = lineContent.Substring(0, contentStart);
+                                        result.AppendLine($"{indentStr}let {ufBreakVar} = {uniformExpr};");
+                                    }
+                                    else if (breakIsNegated && (lineContent.Contains($"!{breakCondVar}") || lineContent.Contains($"! {breakCondVar}")))
+                                    {
+                                        // Negated pattern: if (!v_X) { break; } -> if (!_uf_break_v_X) { break; }
+                                        string replaced = lineContent.Replace($"!{breakCondVar}", $"!{ufBreakVar}");
+                                        replaced = replaced.Replace($"! {breakCondVar}", $"! {ufBreakVar}");
+                                        result.AppendLine(replaced);
+                                    }
+                                    else if (!breakIsNegated && lineContent.Contains($"if ({breakCondVar})")
+                                             && !lineContent.Contains($"if (!{breakCondVar})"))
+                                    {
+                                        // Non-negated pattern: if (v_X) { break; } -> if (_uf_break_v_X) { break; }
+                                        string replaced = lineContent.Replace($"if ({breakCondVar})", $"if ({ufBreakVar})");
+                                        result.AppendLine(replaced);
+                                    }
+                                    else
+                                    {
+                                        result.AppendLine(lineContent);
+                                    }
+                                }
+                                i = loopEnd;
+                                continue;
+                            }
+                            else
+                            {
+                                if (WebGPU.Backend.WebGPUBackend.VerboseLogging)
+                                    Console.WriteLine($"[GridStrideFix] MARKER found but no break condition pattern in loop {loopStart}-{loopEnd}");
+                                // Fall through to emit the loop as-is
+                                result.AppendLine(lines[i].TrimEnd('\r'));
+                                continue;
+                            }
+                        }
+                    }
+                    // If marker didn't match expected pattern, skip the comment line
+                    // (don't emit it to output)
+                    continue;
+                }
+
+                // ─── FALLBACK: Original regex-based detection for unmarked loops ───
+                // Detect "loop {"
+                if (trimmed == "loop {")
+                {
+                    // Find the matching closing brace by counting braces
+                    int loopStart = i;
+                    int braceCount = 1;
+                    int loopEnd = -1;
+                    for (int j = i + 1; j < lines.Length && braceCount > 0; j++)
+                    {
+                        string lt = lines[j].TrimEnd('\r');
+                        foreach (char c in lt)
+                        {
+                            if (c == '{') braceCount++;
+                            else if (c == '}') braceCount--;
+                        }
+                        if (braceCount == 0) loopEnd = j;
+                    }
+
+                    if (loopEnd < 0)
+                    {
+                        result.AppendLine(lines[i].TrimEnd('\r'));
+                        continue;
+                    }
+
+                    // Check if this loop contains workgroupBarrier()
+                    bool hasBarrier = false;
+                    for (int j = loopStart + 1; j < loopEnd; j++)
+                    {
+                        if (lines[j].Contains("workgroupBarrier()"))
+                        {
+                            hasBarrier = true;
+                            break;
+                        }
+                    }
+
+                    if (!hasBarrier)
+                    {
+                        // No barrier in this loop, output as-is
+                        result.AppendLine(lines[i].TrimEnd('\r'));
+                        continue;
+                    }
+                    if (WebGPU.Backend.WebGPUBackend.VerboseLogging)
+                        Console.WriteLine($"[GridStrideFix] Found barrier loop at lines {loopStart}-{loopEnd}");
+
+                    // This loop has barriers. Find the break condition pattern and group counter.
+                    // Pattern: "v_X = v_Y < v_Z;" (the compare, within first ~5 lines of loop body)
+                    // Followed by: "if (!v_X) {" ... "break;" ... "}" 
+                    string breakCondVar = null;
+                    string threadCounterVar = null;
+                    string limitVar = null;
+                    string compOp = null;
+                    int breakCondLine = -1;
+                    bool breakIsNegated = false;
+
+                    // Look for the compare + break pattern in the first ~100 lines of the loop
+                    // (can be far from loop { due to inlined code blocks)
+                    for (int j = loopStart + 1; j < Math.Min(loopStart + 100, loopEnd); j++)
+                    {
+                        string lt = lines[j].TrimEnd('\r').Trim();
+                        // Match any comparison: v_X = v_Y <op> v_Z;
+                        var compareMatch = System.Text.RegularExpressions.Regex.Match(lt,
+                            @"^(?:let\s+)?(\w+)\s*=\s*(\w+)\s*(<|<=|>|>=)\s*(\w+)\s*;$");
+                        if (compareMatch.Success)
+                        {
+                            // Check if the next few lines have "if (!<var>) { break; }" or "if (<var>) { break; }"
+                            for (int k = j + 1; k < Math.Min(j + 5, loopEnd); k++)
+                            {
+                                string kt = lines[k].TrimEnd('\r').Trim();
+                                if (kt.Contains("break;") || kt.Contains("break ;"))
+                                {
+                                    breakCondVar = compareMatch.Groups[1].Value;
+                                    threadCounterVar = compareMatch.Groups[2].Value;
+                                    compOp = compareMatch.Groups[3].Value;
+                                    limitVar = compareMatch.Groups[4].Value;
+                                    breakCondLine = j;
+                                    // Detect negation by scanning ALL lines from compare to break
+                                    for (int n = j + 1; n <= k; n++)
+                                    {
+                                        string nt = lines[n].TrimEnd('\r').Trim();
+                                        if (nt.Contains($"!{breakCondVar}") || nt.Contains($"! {breakCondVar}"))
+                                        {
+                                            breakIsNegated = true;
+                                            break;
+                                        }
+                                    }
+                                    break;
+                                }
+                            }
+                            if (breakCondLine >= 0) break;
+                        }
+                    }
+
+                    if (breakCondLine < 0)
+                    {
+                        // No break condition found, output as-is
+                        if (WebGPU.Backend.WebGPUBackend.VerboseLogging)
+                        {
+                            Console.WriteLine($"[GridStrideFix] NO break condition found in first 10 lines of barrier loop {loopStart}-{loopEnd}");
+                            for (int dbg = loopStart + 1; dbg < Math.Min(loopStart + 10, loopEnd); dbg++)
+                                Console.WriteLine($"  line {dbg}: {lines[dbg].TrimEnd('\r').Trim()}");
+                        }
+                        result.AppendLine(lines[i].TrimEnd('\r'));
+                        continue;
+                    }
+                    if (WebGPU.Backend.WebGPUBackend.VerboseLogging)
+                        Console.WriteLine($"[GridStrideFix] Found break: {breakCondVar} = {threadCounterVar} < {limitVar} at line {breakCondLine}");
+
+                    // Now find the group counter near the end of the loop.
+                    // Two patterns to detect:
+                    // 1. Direct: "v_G = v_G + v_N;" (self-increment)
+                    // 2. Indirect: "v_T = v_G + v_N;" then "v_G = v_T;" (via temp var)
+                    string groupCounterVar = null;
+
+                    // Scan BACKWARDS from loopEnd using brace-depth tracking.
+                    // Only consider variables at brace depth 0 (direct loop scope).
+                    // This prevents picking up variables from inlined helper blocks
+                    // (e.g., ExclusiveScan) that are scoped inside nested { } blocks.
+                    var simpleAssignments = new Dictionary<string, string>(); // target -> source
+                    var additionSources = new Dictionary<string, string>(); // tempResult -> leftOperand
+                    int scanDepth = 0; // tracks nesting depth (going backwards: } increments, { decrements)
+                    for (int j = loopEnd - 1; j >= Math.Max(loopStart + 1, loopEnd - 100); j--)
+                    {
+                        string lt = lines[j].TrimEnd('\r').Trim();
+                        
+                        // Update brace depth (scanning backwards)
+                        foreach (char c in lt)
+                        {
+                            if (c == '}') scanDepth++;
+                            else if (c == '{') scanDepth--;
+                        }
+                        // Skip lines inside nested scopes
+                        if (scanDepth > 0) continue;
+
+                        // Direct self-increment: "v_G = v_G + v_N;"
+                        var directMatch = System.Text.RegularExpressions.Regex.Match(lt,
+                            @"^(\w+)\s*=\s*\1\s*\+\s*(\w+)\s*;$");
+                        if (directMatch.Success)
+                        {
+                            string candidate = directMatch.Groups[1].Value;
+                            if (candidate == threadCounterVar) continue;
+                            groupCounterVar = candidate;
+                            break;
+                        }
+                        // Addition: "v_T = v_X + v_N;"
+                        var addMatch = System.Text.RegularExpressions.Regex.Match(lt,
+                            @"^(?:let\s+)?(\w+)\s*=\s*(\w+)\s*\+\s*(\w+)\s*;$");
+                        if (addMatch.Success)
+                        {
+                            additionSources[addMatch.Groups[1].Value] = addMatch.Groups[2].Value;
+                            continue;
+                        }
+                        // Simple assignment: "v_G = v_T;"
+                        var assignMatch = System.Text.RegularExpressions.Regex.Match(lt,
+                            @"^(\w+)\s*=\s*(\w+)\s*;$");
+                        if (assignMatch.Success)
+                        {
+                            simpleAssignments[assignMatch.Groups[1].Value] = assignMatch.Groups[2].Value;
+                        }
+                    }
+
+                    // If no direct self-increment found, check for indirect pattern:
+                    // v_T = v_G + v_N; then v_G = v_T; → means v_G is the counter
+                    if (groupCounterVar == null)
+                    {
+                        foreach (var assign in simpleAssignments)
+                        {
+                            string target = assign.Key;    // v_G
+                            string source = assign.Value;  // v_T
+                            // Skip the thread counter
+                            if (target == threadCounterVar)
+                                continue;
+                            // Check if v_T = v_G + v_N was seen (i.e., source was computed from target)
+                            if (additionSources.TryGetValue(source, out string addLeft) && addLeft == target)
+                            {
+                                groupCounterVar = target;
+                                break;
+                            }
+                        }
+                    }
+                    if (WebGPU.Backend.WebGPUBackend.VerboseLogging)
+                    {
+                        if (groupCounterVar != null)
+                        {
+                            Console.WriteLine($"[GridStrideFix] Found group counter: {groupCounterVar} (thread={threadCounterVar})");
+                        }
+                        else
+                        {
+                            Console.WriteLine($"[GridStrideFix] NO group counter found. assigns={simpleAssignments.Count}, additions={additionSources.Count}, thread={threadCounterVar}");
+                            foreach (var a in simpleAssignments)
+                                Console.WriteLine($"[GridStrideFix]   assign: {a.Key} = {a.Value}");
+                            foreach (var a in additionSources)
+                                Console.WriteLine($"[GridStrideFix]   add: {a.Key} = {a.Value} + ...");
+                        }
+                    }
+
+                    // Determine the uniform expression for the break condition
+                    string uniformExpr;
+                    if (groupCounterVar != null)
+                    {
+                        // Grid-stride loop: use group counter * workgroup_size for uniform check
+                        uniformExpr = $"({groupCounterVar} * i32(workgroup_size.x)) {compOp} {limitVar}";
+                        if (WebGPU.Backend.WebGPUBackend.VerboseLogging)
+                            Console.WriteLine($"[GridStrideFix] TRANSFORMING (grid-stride): {breakCondVar} -> ({groupCounterVar} * workgroup_size.x) {compOp} {limitVar}");
+                    }
+                    else
+                    {
+                        // No SEPARATE group counter found.
+                        // Check if the thread counter itself self-increments by a uniform stride.
+                        // If so, we can derive a uniform break by subtracting local_id.x:
+                        //   thread_counter = local_id.x + iteration * (num_workgroups * workgroup_size)
+                        //   uniform_base = thread_counter - local_id.x  (same for all threads)
+                        //   uniform_break = uniform_base < limit
+                        bool threadSelfIncrements = false;
+                        if (threadCounterVar != null)
+                        {
+                            // Check the additionSources: is there v_T = v_33 + ... ?
+                            foreach (var add in additionSources)
+                            {
+                                if (add.Value == threadCounterVar)
+                                {
+                                    // v_T = threadCounter + stride
+                                    // Check if threadCounter = v_T (assignment)
+                                    if (simpleAssignments.TryGetValue(threadCounterVar, out string assignSource) && 
+                                        assignSource == add.Key)
+                                    {
+                                        threadSelfIncrements = true;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+
+                        if (threadSelfIncrements)
+                        {
+                            // Thread counter self-increments by uniform stride.
+                            // Derive uniform break: (thread_counter - i32(local_id.x)) < limit
+                            uniformExpr = $"({threadCounterVar} - i32(local_id.x)) {compOp} {limitVar}";
+                            if (WebGPU.Backend.WebGPUBackend.VerboseLogging)
+                                Console.WriteLine($"[GridStrideFix] TRANSFORMING (local_id-subtract): {breakCondVar} -> ({threadCounterVar} - local_id.x) {compOp} {limitVar}");
+                        }
+                        else
+                        {
+                            // Can't determine uniform expression — skip transform.
+                            if (WebGPU.Backend.WebGPUBackend.VerboseLogging)
+                                Console.WriteLine($"[GridStrideFix] SKIPPING (no group counter, no self-increment for thread={threadCounterVar})");
+                            result.AppendLine(lines[i].TrimEnd('\r'));
+                            continue;
+                        }
+                    }
+
+                    // Transform: replace the break condition with a fresh `let` binding.
+                    string ufBreakVar = $"_uf_break_{breakCondVar}";
+                    for (int j = loopStart; j <= loopEnd; j++)
+                    {
+                        string lineContent = lines[j].TrimEnd('\r');
+                        if (j == breakCondLine)
+                        {
+                            int contentStart = lineContent.Length - lineContent.TrimStart().Length;
+                            string indentStr = lineContent.Substring(0, contentStart);
+                            result.AppendLine($"{indentStr}let {ufBreakVar} = {uniformExpr};");
+                        }
+                        else if (breakIsNegated && (lineContent.Contains($"!{breakCondVar}") || lineContent.Contains($"! {breakCondVar}")))
+                        {
+                            string replaced = lineContent.Replace($"!{breakCondVar}", $"!{ufBreakVar}");
+                            replaced = replaced.Replace($"! {breakCondVar}", $"! {ufBreakVar}");
+                            result.AppendLine(replaced);
+                        }
+                        else if (!breakIsNegated && lineContent.Contains($"if ({breakCondVar})")
+                                 && !lineContent.Contains($"if (!{breakCondVar})"))
+                        {
+                            string replaced = lineContent.Replace($"if ({breakCondVar})", $"if ({ufBreakVar})");
+                            result.AppendLine(replaced);
+                        }
+                        else
+                        {
+                            result.AppendLine(lineContent);
+                        }
+                    }
+
+                    // Skip the lines we already output
+                    i = loopEnd;
+                    continue;
+                }
+
+                result.AppendLine(lines[i].TrimEnd('\r'));
+            }
+
+            return result.ToString();
         }
 
         /// <summary>
@@ -1303,10 +2588,24 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 expr.Contains("u64_lt") || expr.Contains("u64_le") || expr.Contains("u64_gt") ||
                 expr.Contains("u64_ge"))
                 return "bool";
+            // Comparison operators produce bool
             if (expr.Contains(" != ") || expr.Contains(" == ") || expr.Contains(" >= ") ||
-                expr.Contains(" <= ") || expr.Contains(" > ") || expr.Contains(" < ") ||
-                expr.Contains(" | ") || expr.Contains(" & "))
+                expr.Contains(" <= ") || expr.Contains(" > ") || expr.Contains(" < "))
                 return "bool";
+            // Bitwise ops: result type depends on operand types.
+            // If wrapped in select() (from emit-site bool→i32 conversion), result is i32.
+            // Otherwise, in MISSING-DECL path (inlined helpers), bool & bool is more common
+            // than integer bitwise AND (which is handled by IR-aware hoisting path).
+            if (expr.Contains(" | ") || expr.Contains(" & ") || expr.Contains(" ^ "))
+            {
+                if (expr.Contains("select("))
+                    return "i32";
+                return "bool";
+            }
+            // Arithmetic operators return integers
+            if (expr.Contains(" * ") || expr.Contains(" / ") || expr.Contains(" % ") ||
+                expr.Contains(" + ") || expr.Contains(" - "))
+                return "i32";
             // emu_f64 emulation functions return vec2<f32>
             if (expr.Contains("f64_from_f32") || expr.Contains("f64_add") || expr.Contains("f64_sub") ||
                 expr.Contains("f64_mul") || expr.Contains("f64_div") || expr.Contains("f64_neg") ||
@@ -1332,12 +2631,70 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 return "i32";
             if (expr.Contains("u32("))
                 return "u32";
-            // Default to bool (most common for unlisted patterns like comparisons)
-            return "bool";
+            // Default to i32 (most common for unlisted arithmetic patterns)
+            return "i32";
         }
 
         private string GetWorkgroupSize()
         {
+            // If the kernel was compiled with a specific MaxWorkgroupSize
+            // (from KernelSpecialization.MaxNumThreadsPerGroup, passed via
+            // SpecializedValue<int>(groupDim)), use that exact value.
+            // This is critical for explicitly grouped kernels where the
+            // shared memory layout and ExclusiveScan thread count depend
+            // on the compiled group size matching @workgroup_size.
+            if (WebGPU.Backend.WebGPUBackend.VerboseLogging)
+            {
+                Console.WriteLine($"[WorkgroupSize] MaxWorkgroupSize={_generatorArgs.MaxWorkgroupSize}, IsExplicitlyGrouped={EntryPoint.IsExplicitlyGrouped}, IndexType={EntryPoint.IndexType}");
+                Console.WriteLine($"[WorkgroupSize] SharedAllocations count={_generatorArgs.SharedAllocations.Length}");
+                foreach (var alloca in _generatorArgs.SharedAllocations)
+                {
+                    Console.WriteLine($"[WorkgroupSize]   SharedAlloc: type={alloca.ElementType}, arraySize={alloca.ArraySize}");
+                }
+            }
+
+            if (_generatorArgs.MaxWorkgroupSize.HasValue)
+            {
+                int wgSize = _generatorArgs.MaxWorkgroupSize.Value;
+                if (WebGPU.Backend.WebGPUBackend.VerboseLogging) Console.WriteLine($"[WorkgroupSize] Using MaxWorkgroupSize={wgSize}");
+                return EntryPoint.IndexType switch
+                {
+                    IndexType.Index1D => $"{wgSize}",
+                    IndexType.Index2D => $"{(int)Math.Sqrt(wgSize)}, {(int)Math.Sqrt(wgSize)}",
+                    IndexType.Index3D => $"{(int)Math.Cbrt(wgSize)}, {(int)Math.Cbrt(wgSize)}, {(int)Math.Cbrt(wgSize)}",
+                    _ => $"{wgSize}"
+                };
+            }
+
+            // For explicitly grouped kernels with shared memory, try to infer the workgroup
+            // size from the largest shared memory allocation. ILGPU's algorithms (like RadixSort)
+            // typically size shared memory proportional to groupSize * factor, and the allocation
+            // size is known at compile time from the inlined SpecializedValue constant.
+            if (EntryPoint.IsExplicitlyGrouped && _generatorArgs.SharedAllocations.Length > 0)
+            {
+                // Find the largest shared allocation
+                long maxSharedElements = _generatorArgs.SharedAllocations.Allocas.Max(a => a.ArraySize);
+                if (WebGPU.Backend.WebGPUBackend.VerboseLogging) Console.WriteLine($"[WorkgroupSize] ExplicitlyGrouped with shared memory. Max shared elements={maxSharedElements}");
+                
+                // Common ILGPU patterns: shared memory = groupSize * N where N is a small factor (1, 2, 4, 8, 16)
+                // Try to find the largest power-of-2 factor that gives a reasonable groupSize (32..1024)
+                for (int factor = 1; factor <= 16; factor *= 2)
+                {
+                    long candidateGroupSize = maxSharedElements / factor;
+                    if (candidateGroupSize >= 32 && candidateGroupSize <= 1024 && (candidateGroupSize & (candidateGroupSize - 1)) == 0)
+                    {
+                        if (WebGPU.Backend.WebGPUBackend.VerboseLogging) Console.WriteLine($"[WorkgroupSize] Inferred groupSize={candidateGroupSize} from shared[{maxSharedElements}]/factor={factor}");
+                        return EntryPoint.IndexType switch
+                        {
+                            IndexType.Index1D => $"{candidateGroupSize}",
+                            _ => $"{candidateGroupSize}"
+                        };
+                    }
+                }
+            }
+
+            if (WebGPU.Backend.WebGPUBackend.VerboseLogging) Console.WriteLine($"[WorkgroupSize] Using default fallback (64)");
+            // Default fallback for auto-grouped kernels where no specialization is provided
             return EntryPoint.IndexType switch
             {
                 IndexType.Index1D => "64",
@@ -1607,7 +2964,6 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 }
             }
 
-            AppendLine("// HOIST-FIX-V2-ACTIVE");
             foreach (var val in _hoistedPrimitives)
             {
                 var variable = Allocate(val);
@@ -1640,6 +2996,16 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                         init = " = 0";
                 }
 
+                // WGSL: pointer types are not constructible — skip 'var' declaration for them.
+                // The IR-level IsPointerType filter earlier may not catch all cases because some
+                // IR types (StructureType containing pointers) are mapped to ptr<> by TypeGenerator.
+                if (wgslType.StartsWith("ptr<"))
+                {
+                    if (WebGPU.Backend.WebGPUBackend.VerboseLogging) Console.WriteLine($"[DIAG-HOIST-SKIP] Skipping ptr type hoist for {variable.Name} : {wgslType}, IR type={val.Type}, kind={val.GetType().Name}");
+                    continue;
+                }
+
+                if (WebGPU.Backend.WebGPUBackend.VerboseLogging) Console.WriteLine($"[DIAG-HOIST-EMIT] Emitting hoisted var {variable.Name} : {wgslType}, IR type={val.Type}, kind={val.GetType().Name}");
                 AppendLine($"var {variable.Name} : {wgslType}{init};");
                 declaredVariables.Add(variable.Name);
             }
@@ -1916,6 +3282,15 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             var target = Load(value);
             var source = Load(value.Pointer);
 
+            // GUARD: Prevent duplicate `let` emissions when the same NewView is processed
+            // multiple times (e.g., shared memory pointers in helpers inlined multiple times).
+            // WGSL `let` bindings cannot be redeclared — emitting the same `let v_200 = &shared_1;`
+            // twice causes a compilation error.
+            // CRITICAL: Use _emittedLetBindings NOT declaredVariables — adding to declaredVariables
+            // poisons Declare() and prevents var emissions for same-named variables.
+            if (_emittedLetBindings.Contains(target.Name))
+                return;
+
             // NewView result is strictly a pointer (reference) in WGSL
             string refPrefix = "";
             if (value.Pointer.Type is global::ILGPU.IR.Types.PointerType ptrType &&
@@ -1928,7 +3303,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             // Optimization: If source is already a pointer (likely), we might not need &
             // But for Shared Memory (var<workgroup> arr), it's treated as value, so we need &
 
-            declaredVariables.Add(target.Name);
+            _emittedLetBindings.Add(target.Name);
 
             if (IsStateMachineActive)
             {
@@ -2010,14 +3385,24 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                         return;
                     }
 
+                    // --- View offset adjustment for body struct view fields ---
+                    // Body struct view fields may be sub-views with non-zero aligned offsets.
+                    // The element offset is packed into _scalar_params by the runtime.
+                    string adjustedOffsetExprBS = offsetExpr;
+                    if (bsFields[fieldIdx].ViewOffsetSlot >= 0)
+                    {
+                        int voSlot = bsFields[fieldIdx].ViewOffsetSlot;
+                        adjustedOffsetExprBS = $"(i32(_scalar_params[{voSlot}]) + {offsetExpr})";
+                    }
+
                     if (_crossBlockPointers.Contains(value))
                     {
-                        _crossBlockPointerExprs[target.Name] = $"{bindingName}[{offsetExpr}]";
-                        AppendLine($"let {target.Name} = &{bindingName}[{offsetExpr}];");
+                        _crossBlockPointerExprs[target.Name] = $"{bindingName}[{adjustedOffsetExprBS}]";
+                        AppendLine($"let {target.Name} = &{bindingName}[{adjustedOffsetExprBS}];");
                     }
                     else
                     {
-                        AppendLine($"let {target.Name} = &{bindingName}[{offsetExpr}];");
+                        AppendLine($"let {target.Name} = &{bindingName}[{adjustedOffsetExprBS}];");
                     }
                     return;
                 }
@@ -2027,6 +3412,17 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 int paramOffset = KernelParamOffset;
                 if (param.Index >= paramOffset)
                 {
+                    // --- View offset adjustment ---
+                    // With offset=0 binding, the buffer starts at byte 0 (not sub-view start).
+                    // ILGPU IR assumes LoadElementAddress addresses relative to the sub-view.
+                    // Add the view element offset from _scalar_params so the WGSL accesses
+                    // the correct region: paramN[viewOffset + localIndex].
+                    string adjustedOffsetExpr = offsetExpr;
+                    if (_viewOffsetScalarSlots.TryGetValue(param.Index, out int voSlot))
+                    {
+                        adjustedOffsetExpr = $"(i32(_scalar_params[{voSlot}]) + {offsetExpr})";
+                    }
+
                     // Check if this is an emulated 64-bit buffer
                     if (_emulatedF64Params.Contains(param.Index) || _emulatedI64Params.Contains(param.Index))
                     {
@@ -2037,7 +3433,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                         // For emulated buffers, we need to address 2 u32 per element
                         // Store the base index (multiplied by 2) for later use in Load/Store
                         AppendIndent();
-                        Builder.Append($"let {target.Name}_base_idx = i32({offsetExpr}) * 2;");
+                        Builder.Append($"let {target.Name}_base_idx = i32({adjustedOffsetExpr}) * 2;");
                         Builder.AppendLine();
                         // Also create an alias for compatibility
                         AppendIndent();
@@ -2053,16 +3449,16 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     if (_crossBlockPointers.Contains(value))
                     {
                         // Register the inline array access expression
-                        _crossBlockPointerExprs[target.Name] = $"param{param.Index}[{offsetExpr}]";
+                        _crossBlockPointerExprs[target.Name] = $"param{param.Index}[{adjustedOffsetExpr}]";
                         // Still emit a local declaration for same-block uses
                         AppendIndent();
-                        Builder.Append($"let {target.Name} = &param{param.Index}[{offsetExpr}];");
+                        Builder.Append($"let {target.Name} = &param{param.Index}[{adjustedOffsetExpr}];");
                         Builder.AppendLine();
                         return;
                     }
 
                     AppendIndent();
-                    Builder.Append($"let {target.Name} = &param{param.Index}[{offsetExpr}];");
+                    Builder.Append($"let {target.Name} = &param{param.Index}[{adjustedOffsetExpr}];");
                     Builder.AppendLine();
                     return;
                 }
@@ -2148,16 +3544,20 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 return;
             }
 
+            // Local alloca variables are WGSL 'var' value types, not pointers — no dereference.
+            bool isAllocaVar = _localAllocaVarNames.Contains(source.Name);
+            string rhs = isAllocaVar ? $"{source}" : $"*{source}";
+
             // Check if we already declared this at the top
             if (_hoistedPrimitives.Contains(loadVal))
             {
-                AppendLine($"{target} = *{source};");
+                AppendLine($"{target} = {rhs};");
             }
             else
             {
                 // Fallback to your stable declaration logic
                 Declare(target);
-                AppendLine($"{target} = *{source};");
+                AppendLine($"{target} = {rhs};");
             }
         }
 
@@ -2193,7 +3593,11 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 return;
             }
 
-            AppendLine($"*{address} = {val};");
+            // Local alloca variables are WGSL 'var' value types, not pointers — no dereference.
+            if (_localAllocaVarNames.Contains(address.Name))
+                AppendLine($"{address} = {val};");
+            else
+                AppendLine($"*{address} = {val};");
         }
 
         public override void GenerateCode(global::ILGPU.IR.Values.GenericAtomic value)
@@ -2377,13 +3781,14 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             }
 
             // Standard (non-emulated) path
-            if (value.Kind == BinaryArithmeticKind.Min || value.Kind == BinaryArithmeticKind.Max || value.Kind == BinaryArithmeticKind.PowF)
+            if (value.Kind == BinaryArithmeticKind.Min || value.Kind == BinaryArithmeticKind.Max || value.Kind == BinaryArithmeticKind.PowF || value.Kind == BinaryArithmeticKind.Atan2F)
             {
                 string func = value.Kind switch
                 {
                     BinaryArithmeticKind.Min => "min",
                     BinaryArithmeticKind.Max => "max",
                     BinaryArithmeticKind.PowF => "pow",
+                    BinaryArithmeticKind.Atan2F => "atan2",
                     _ => "min"
                 };
                 // For unsigned integer min/max, WGSL's min()/max() are type-overloaded:
@@ -2402,12 +3807,31 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 return;
             }
 
+            // BinaryLogF: log(left) / log(right)
+            if (value.Kind == BinaryArithmeticKind.BinaryLogF)
+            {
+                AppendLine($"{prefix}{target} = log({left}) / log({right});");
+                return;
+            }
+
             // CopySign: WGSL has no copysign built-in.
-            // Can't use abs(x)*sign(y) because sign(0)=0 which zeroes the result.
-            // Use select() to handle the zero case correctly.
             if (value.Kind == BinaryArithmeticKind.CopySignF)
             {
                 AppendLine($"{prefix}{target} = select(-abs({left}), abs({left}), {right} >= 0.0);");
+                return;
+            }
+
+            // When AND/OR/XOR operates on bool (Int1) operands, WGSL returns bool.
+            // If the IR result type is Int32, we must convert: select(0, 1, bool_expr)
+            if ((value.Kind == BinaryArithmeticKind.And ||
+                 value.Kind == BinaryArithmeticKind.Or ||
+                 value.Kind == BinaryArithmeticKind.Xor) &&
+                value.Left.BasicValueType == BasicValueType.Int1 &&
+                value.Right.BasicValueType == BasicValueType.Int1 &&
+                value.BasicValueType != BasicValueType.Int1)
+            {
+                var boolOp = GetArithmeticOp(value.Kind);
+                AppendLine($"{prefix}{target} = select(0, 1, {left} {boolOp} {right});");
                 return;
             }
 
@@ -2427,6 +3851,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 if (value.Value is PhiValue phi)
                 {
                     var targetVar = Load(phi);
+                    Declare(targetVar); // Ensure phi var is declared (Allocate doesn't call Declare)
                     // PhiValue in ILGPU implements a collection of (SourceBlock, Value) pairs
                     for (int i = 0; i < phi.Count; i++)
                     {
@@ -2507,6 +3932,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 UnaryArithmeticKind.RcpF => $"1.0 / {source}",
                 UnaryArithmeticKind.FloorF => $"floor({source})",
                 UnaryArithmeticKind.CeilingF => $"ceil({source})",
+                UnaryArithmeticKind.Log10F => $"(log({source}) / 2.302585093)",
                 // IsNaN: NaN is the only value where x != x
                 UnaryArithmeticKind.IsNaNF => $"({source} != {source})",
                 // IsInf: infinity is unchanged by abs and equals itself
@@ -3061,8 +4487,11 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             }
 
             // 2. Identify if the object being accessed is DIRECTLY a Parameter (likely an ArrayView)
-            // We use direct type check to avoid confusing hierarchical access (View.Stride.X) with Root access (View.Stride)
-            if (ResolveToParameter(value.ObjectValue) is global::ILGPU.IR.Values.Parameter param)
+            // CRITICAL: Use Resolve() NOT ResolveToParameter() here. ResolveToParameter walks
+            // through Load→LEA→GetField chains and would resolve a struct loaded from a
+            // decomposed view buffer back to the original parameter. That causes
+            // GetField(loadedStruct, 0) to emit &param0[0] instead of v_173.field_0.
+            if (value.ObjectValue.Resolve() is global::ILGPU.IR.Values.Parameter param)
             {
                 int paramOffset = KernelParamOffset;
                 if (param.Index >= paramOffset)
@@ -3150,7 +4579,17 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
                                     switch (value.FieldSpan.Index)
                                     {
-                                        case 1: AppendLine($"{prefix}{target} = {WrapI32("0")};"); return;       // Index (Assume 0 for base view)
+                                        case 1:
+                                        {
+                                            // Index/Offset: read from packed scalars if a view offset slot exists.
+                                            // The runtime packs the element offset (contiguous.Index) at this slot
+                                            // so sub-views correctly offset array accesses.
+                                            if (_viewOffsetScalarSlots.TryGetValue(param.Index, out int viewOffSlot))
+                                                AppendLine($"{prefix}{target} = i32(_scalar_params[{viewOffSlot}]);");
+                                            else
+                                                AppendLine($"{prefix}{target} = {WrapI32("0")};");
+                                            return;
+                                        }
                                         case 2: AppendLine($"{prefix}{target} = {WrapI32(totalLen)};"); return; // Length
                                     }
                                 }
@@ -3239,8 +4678,11 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
             // Define the result value to maintain connectivity for downstream users (like Phi)
             // Since we mutated 'target' in place, the result 'value' is logically equivalent to 'target'
+            // Use Declare() which checks declaredVariables to avoid duplicate declarations
+            // when the variable was already hoisted by the phi pre-scan pass.
             var res = Allocate(value);
-            AppendLine($"let {res.Name} = {target};");
+            Declare(res);
+            AppendLine($"{res.Name} = {target};");
         }
 
         private static string GetArithmeticOp(BinaryArithmeticKind kind)
@@ -3297,6 +4739,19 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
 
 
+
+        protected override void Declare(Variable variable)
+        {
+            if (_useDeferredDeclarations)
+            {
+                if (declaredVariables.Contains(variable.Name)) return;
+                declaredVariables.Add(variable.Name);
+                if (variable.Type.StartsWith("ptr<")) return;
+                _deferredVarDeclarations.Add($"    var {variable.Name} : {variable.Type};");
+                return;
+            }
+            base.Declare(variable);
+        }
 
         public override void GenerateCode(PhiValue phiValue)
         {
@@ -3840,13 +5295,130 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             global::ILGPU.IR.Analyses.Dominators<global::ILGPU.IR.Analyses.ControlFlowDirection.Backwards> pd,
             HashSet<BasicBlock> visited)
         {
+            // ═══════════════════════════════════════════════════════════════════
+            // IR-Level Uniformity Analysis
+            // ═══════════════════════════════════════════════════════════════════
+            // Analyze the loop to detect grid-stride patterns and emit semantic
+            // markers that the WGSL post-processor can use for precise uniformity
+            // transforms. This replaces fragile regex-based detection.
+            //
+            // Grid-stride loops have paired phi counters:
+            //   - Thread counter: initialized from GroupIndexValue (local_id) → NON-UNIFORM
+            //   - Group counter: initialized from GridIndexValue (group_id) → UNIFORM
+            //
+            // By emitting markers with variable names, the post-processor knows
+            // exactly which variable to use for the uniform break condition.
+            // ═══════════════════════════════════════════════════════════════════
+
+            bool loopHasIRBarriers = LoopContainsBarrier(loopNode);
+
+            // ═══════════════════════════════════════════════════════════════════
+            // IR-Level Uniformity Analysis — Direct Emission
+            // ═══════════════════════════════════════════════════════════════════
+            // Classify each phi in the loop header by tracing to its builtin source.
+            // Store the results so we can use them at the break emission point to
+            // emit a uniform break condition directly — no post-processing needed.
+            // ═══════════════════════════════════════════════════════════════════
+            
+            // Maps phi Value → classification result
+            var phiClassifications = new Dictionary<Value, BuiltinTraceResult>();
+            // Maps phi Value → emitted WGSL variable name
+            var phiVarNames = new Dictionary<Value, string>();
+            // Track identified group/thread counters
+            Value groupCounterPhi = null;
+            Value threadCounterPhi = null;
+            string groupCounterName = null;
+            string threadCounterName = null;
+            
+            if (WebGPU.Backend.WebGPUBackend.VerboseLogging)
+                Console.WriteLine($"[UniformityDirect] Analyzing loop header block {headerBlock.Id} ({headerBlock.Count} values, IR barriers={loopHasIRBarriers})");
+            
+            foreach (var valueEntry in headerBlock)
+            {
+                if (valueEntry.Value is PhiValue phi)
+                {
+                    string varName = Load(phi).ToString();
+                    
+                    if (WebGPU.Backend.WebGPUBackend.VerboseLogging)
+                        Console.WriteLine($"[UniformityDirect]   Found phi: {varName} with {phi.Nodes.Length} nodes");
+                    
+                    // Combine ALL phi node results before classifying.
+                    BuiltinTraceResult phiResult = BuiltinTraceResult.Unknown;
+                    for (int phiIdx = 0; phiIdx < phi.Nodes.Length; phiIdx++)
+                    {
+                        var resolved = phi.Nodes[phiIdx].Resolve();
+                        if (resolved == phi) continue;
+                        var traceResult = TraceToBuiltinSource(resolved, 8);
+                        
+                        if (WebGPU.Backend.WebGPUBackend.VerboseLogging)
+                            Console.WriteLine($"[UniformityDirect]     Node[{phiIdx}] type={resolved.GetType().Name} -> {traceResult}");
+                        
+                        phiResult = CombineTraceResults(phiResult, traceResult);
+                    }
+                    
+                    if (WebGPU.Backend.WebGPUBackend.VerboseLogging)
+                        Console.WriteLine($"[UniformityDirect]   Phi combined result: {phiResult}");
+                    
+                    phiClassifications[phi] = phiResult;
+                    phiVarNames[phi] = varName;
+                    
+                    if (phiResult == BuiltinTraceResult.GridIndex ||
+                        phiResult == BuiltinTraceResult.GridDimension)
+                    {
+                        groupCounterPhi = phi;
+                        groupCounterName = varName;
+                    }
+                    else if (phiResult == BuiltinTraceResult.GroupIndex ||
+                             phiResult == BuiltinTraceResult.MixedNonUniform)
+                    {
+                        threadCounterPhi = phi;
+                        threadCounterName = varName;
+                    }
+                }
+            }
+            
+            if (WebGPU.Backend.WebGPUBackend.VerboseLogging)
+                Console.WriteLine($"[UniformityDirect] Result: group={groupCounterName ?? "null"}, thread={threadCounterName ?? "null"}");
+
+            // ─── Pre-loop analysis: determine if synthetic group counter is needed ───
+            // We must analyze the break condition BEFORE emitting `loop {` so we can
+            // emit the synthetic counter initialization before the loop opens.
+            bool needsSyntheticGroupCounter = false;
+            string syntheticGroupCounterVar = null;
+            
+            var terminator = headerBlock.Terminator;
+            if (terminator is global::ILGPU.IR.Values.IfBranch preCheckBranch && 
+                threadCounterName != null && groupCounterName == null)
+            {
+                var condValue = preCheckBranch.Condition.Resolve();
+                if (condValue is global::ILGPU.IR.Values.CompareValue preCompare)
+                {
+                    string preLeftVar = Load(preCompare.Left).ToString();
+                    string preRightVar = Load(preCompare.Right).ToString();
+                    bool leftIsThread = (preLeftVar == threadCounterName);
+                    bool rightIsThread = (preRightVar == threadCounterName);
+                    
+                    if (leftIsThread || rightIsThread)
+                    {
+                        string threadType = threadCounterPhi != null ? TypeGenerator[threadCounterPhi.Type] : null;
+                        if (threadType == "i32" || threadType == "u32")
+                        {
+                            needsSyntheticGroupCounter = true;
+                            syntheticGroupCounterVar = "_uf_group_iter";
+                            AppendLine($"var {syntheticGroupCounterVar} : i32 = i32(group_id.x);");
+                            
+                            if (WebGPU.Backend.WebGPUBackend.VerboseLogging)
+                                Console.WriteLine($"[UniformityDirect] SYNTHETIC counter: var {syntheticGroupCounterVar} = i32(group_id.x)");
+                        }
+                    }
+                }
+            }
+            
             AppendLine("loop {");
             PushIndent();
 
             // Emit the header block's body (instructions)
             GenerateBasicBlockCode(headerBlock);
-
-            var terminator = headerBlock.Terminator;
 
             if (terminator is global::ILGPU.IR.Values.IfBranch headerBranch)
             {
@@ -3857,10 +5429,89 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 bool trueIsExit = ExitsLoopTransitively(trueTarget, loopNode, out var trueHeaderExit);
                 bool falseIsExit = ExitsLoopTransitively(falseTarget, loopNode, out var falseHeaderExit);
 
+                // ─── Uniform break emission ─────────────────────────────────
+                // If the break condition uses a non-uniform counter, emit a
+                // uniform replacement directly. This avoids the need for
+                // post-processing regex. The uniform break is always safe to
+                // emit — if the loop doesn't actually contain barriers, the
+                // uniform break is still correct (just unnecessary).
+                // We ONLY emit for loops where we identified a thread counter
+                // AND the condition actually compares against it.
+                string breakConditionExpr = null;
+                if ((trueIsExit || falseIsExit) && threadCounterName != null)
+                {
+                    // Check if the condition traces through a comparison
+                    // involving the thread counter phi
+                    var condValue = headerBranch.Condition.Resolve();
+                    if (condValue is global::ILGPU.IR.Values.CompareValue compare)
+                    {
+                        // Check if either operand traces to a phi we classified
+                        string leftVar = Load(compare.Left).ToString();
+                        string rightVar = Load(compare.Right).ToString();
+                        string compOp = GetCompareOp(compare.Kind);
+                        
+                        // Determine which side is the thread counter and which is the limit
+                        bool leftIsThread = (leftVar == threadCounterName);
+                        bool rightIsThread = (rightVar == threadCounterName);
+                        
+                        if (leftIsThread || rightIsThread)
+                        {
+                            string limitVar = leftIsThread ? rightVar : leftVar;
+                            string uniformExpr = null;
+                            
+                            if (groupCounterName != null)
+                            {
+                                // Has a separate uniform group counter
+                                // Use: (groupCounter * workgroup_size) op limit
+                                if (leftIsThread)
+                                    uniformExpr = $"({groupCounterName} * i32(workgroup_size.x)) {compOp} {limitVar}";
+                                else
+                                    uniformExpr = $"{limitVar} {compOp} ({groupCounterName} * i32(workgroup_size.x))";
+                            }
+                            else
+                            {
+                                // No separate group counter — inject a SYNTHETIC one.
+                                // We emit a new variable that uses ONLY uniform builtins
+                                // (group_id, num_workgroups, workgroup_size) so the WGSL
+                                // validator sees no local_id in the break condition.
+                                // GUARD: Only valid for scalar i32 counters (not vec2/vec3)
+                                string threadType = threadCounterPhi != null ? TypeGenerator[threadCounterPhi.Type] : null;
+                                bool isScalarInt = threadType == "i32" || threadType == "u32";
+                                
+                                if (isScalarInt)
+                                {
+                                    // We need the synthetic counter — mark for init and increment
+                                    needsSyntheticGroupCounter = true;
+                                    syntheticGroupCounterVar = "_uf_group_iter";
+                                    if (leftIsThread)
+                                        uniformExpr = $"({syntheticGroupCounterVar} * i32(workgroup_size.x)) {compOp} {limitVar}";
+                                    else
+                                        uniformExpr = $"{limitVar} {compOp} ({syntheticGroupCounterVar} * i32(workgroup_size.x))";
+                                }
+                                else if (WebGPU.Backend.WebGPUBackend.VerboseLogging)
+                                {
+                                    Console.WriteLine($"[UniformityDirect] SKIP: thread counter {threadCounterName} is {threadType ?? "unknown"}, not scalar i32");
+                                }
+                            }
+                            
+                            if (uniformExpr != null)
+                            {
+                                string origCondVar = Load(headerBranch.Condition).ToString();
+                                breakConditionExpr = $"_uf_break_{origCondVar}";
+                                AppendLine($"let {breakConditionExpr} = {uniformExpr};");
+                                
+                                if (WebGPU.Backend.WebGPUBackend.VerboseLogging)
+                                    Console.WriteLine($"[UniformityDirect] EMIT uniform break: let {breakConditionExpr} = {uniformExpr}");
+                            }
+                        }
+                    }
+                }
+
                 if (trueIsExit)
                 {
                     // True branch exits → break when condition is true
-                    AppendLine($"if ({Load(headerBranch.Condition)}) {{");
+                    string condExpr = breakConditionExpr ?? Load(headerBranch.Condition).ToString();
+                    AppendLine($"if ({condExpr}) {{");
                     PushIndent();
                     EmitIntermediateBlocksToExit(trueTarget, trueHeaderExit, headerBlock, loopNode, visited);
                     AppendLine("break;");
@@ -3874,7 +5525,10 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 else if (falseIsExit)
                 {
                     // False branch exits → break when condition is false
-                    AppendLine($"if (!{Load(headerBranch.Condition)}) {{");
+                    string condExpr = breakConditionExpr != null 
+                        ? $"!{breakConditionExpr}" 
+                        : $"!{Load(headerBranch.Condition)}";
+                    AppendLine($"if ({condExpr}) {{");
                     PushIndent();
                     EmitIntermediateBlocksToExit(falseTarget, falseHeaderExit, headerBlock, loopNode, visited);
                     AppendLine("break;");
@@ -3908,10 +5562,175 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 GenerateStructuredCodeRecursive(uBranch.Target, headerBlock, pd, visited, loopNode);
             }
 
+            // If we used a synthetic group counter, emit its increment
+            // at the end of the loop body (before PopIndent/closing brace).
+            if (needsSyntheticGroupCounter && syntheticGroupCounterVar != null)
+            {
+                AppendLine($"{syntheticGroupCounterVar} = {syntheticGroupCounterVar} + i32(num_workgroups.x);");
+            }
+
             PopIndent();
             AppendLine("}");
         }
 
+
+        // ═══════════════════════════════════════════════════════════════════
+        // IR-Level Uniformity Analysis Helpers
+        // ═══════════════════════════════════════════════════════════════════
+
+        /// <summary>
+        /// Result of tracing an IR value to its builtin source.
+        /// Used to classify loop counter variables for uniformity analysis.
+        /// </summary>
+        private enum BuiltinTraceResult
+        {
+            /// <summary>No builtin source found (e.g., parameter, constant, or trace depth exceeded).</summary>
+            Unknown,
+            /// <summary>Traces to GridIndexValue (group_id) — UNIFORM within a workgroup.</summary>
+            GridIndex,
+            /// <summary>Traces to GroupIndexValue (local_id) — NON-UNIFORM (per-thread).</summary>
+            GroupIndex,
+            /// <summary>Traces to GridDimensionValue (num_workgroups) — UNIFORM.</summary>
+            GridDimension,
+            /// <summary>Traces to GroupDimensionValue (workgroup_size) — UNIFORM.</summary>
+            GroupDimension,
+            /// <summary>Traces to mixed sources including at least one non-uniform source.</summary>
+            MixedNonUniform
+        }
+
+        /// <summary>
+        /// Recursively traces an IR value to find if it originates from a device builtin.
+        /// This is used to determine whether a loop counter phi variable derives from
+        /// group_id (uniform) or local_id (non-uniform).
+        /// </summary>
+        /// <param name="value">The IR value to trace.</param>
+        /// <param name="maxDepth">Maximum recursion depth to prevent infinite loops.</param>
+        /// <returns>The builtin classification of the value's origin.</returns>
+        private BuiltinTraceResult TraceToBuiltinSource(global::ILGPU.IR.Value value, int maxDepth)
+        {
+            if (maxDepth <= 0) return BuiltinTraceResult.Unknown;
+
+            // Direct builtin matches
+            if (value is global::ILGPU.IR.Values.GridIndexValue)
+                return BuiltinTraceResult.GridIndex;
+            if (value is global::ILGPU.IR.Values.GroupIndexValue)
+                return BuiltinTraceResult.GroupIndex;
+            if (value is global::ILGPU.IR.Values.GridDimensionValue)
+                return BuiltinTraceResult.GridDimension;
+            if (value is global::ILGPU.IR.Values.GroupDimensionValue)
+                return BuiltinTraceResult.GroupDimension;
+
+            // Unary operations preserve the source classification
+            if (value is global::ILGPU.IR.Values.UnaryArithmeticValue unary)
+                return TraceToBuiltinSource(unary.Value.Resolve(), maxDepth - 1);
+
+            // Convert operations preserve the source
+            if (value is global::ILGPU.IR.Values.ConvertValue convert)
+                return TraceToBuiltinSource(convert.Value.Resolve(), maxDepth - 1);
+
+            // Binary operations: combine both operands' classifications
+            if (value is global::ILGPU.IR.Values.BinaryArithmeticValue binary)
+            {
+                var left = TraceToBuiltinSource(binary.Left.Resolve(), maxDepth - 1);
+                var right = TraceToBuiltinSource(binary.Right.Resolve(), maxDepth - 1);
+                return CombineTraceResults(left, right);
+            }
+
+            // CompareValue: check both sides
+            if (value is global::ILGPU.IR.Values.CompareValue compare)
+            {
+                var left = TraceToBuiltinSource(compare.Left.Resolve(), maxDepth - 1);
+                var right = TraceToBuiltinSource(compare.Right.Resolve(), maxDepth - 1);
+                return CombineTraceResults(left, right);
+            }
+
+            // PhiValue: check all node values (not Sources, which are predecessor blocks)
+            if (value is PhiValue phi)
+            {
+                BuiltinTraceResult combined = BuiltinTraceResult.Unknown;
+                for (int idx = 0; idx < phi.Nodes.Length; idx++)
+                {
+                    var nodeVal = phi.Nodes[idx].Resolve();
+                    // Skip self-references to avoid infinite recursion in loops
+                    if (nodeVal == phi) continue;
+                    var result = TraceToBuiltinSource(nodeVal, maxDepth - 1);
+                    combined = CombineTraceResults(combined, result);
+                }
+                return combined;
+            }
+
+            // MethodCall: trace through all arguments (result is uniform if all args are uniform)
+            // This handles grid stride computations like num_workgroups * workgroup_size
+            if (value is global::ILGPU.IR.Values.MethodCall methodCall)
+            {
+                BuiltinTraceResult combined = BuiltinTraceResult.Unknown;
+                for (int idx = 0; idx < methodCall.Nodes.Length; idx++)
+                {
+                    var argVal = methodCall.Nodes[idx].Resolve();
+                    var result = TraceToBuiltinSource(argVal, maxDepth - 1);
+                    combined = CombineTraceResults(combined, result);
+                }
+                return combined;
+            }
+
+            // Broadcast: output is UNIFORM by definition (broadcasts a single value to all threads)
+            // Trace through the source value to determine the classification
+            if (value is global::ILGPU.IR.Values.Broadcast broadcast)
+                return TraceToBuiltinSource(broadcast.Variable.Resolve(), maxDepth - 1);
+
+            // GetField: trace through the source object
+            if (value is GetField getField)
+                return TraceToBuiltinSource(getField.ObjectValue.Resolve(), maxDepth - 1);
+
+            // PrimitiveValue (constants): always uniform
+            if (value is global::ILGPU.IR.Values.PrimitiveValue)
+                return BuiltinTraceResult.Unknown; // Unknown = no builtin source, but not non-uniform
+
+            // Constants and parameters are Unknown (not builtin-sourced)
+            return BuiltinTraceResult.Unknown;
+        }
+
+        /// <summary>
+        /// Combines two trace results. If either contains GroupIndex (non-uniform),
+        /// the result is MixedNonUniform. Otherwise, returns the more specific result.
+        /// </summary>
+        private static BuiltinTraceResult CombineTraceResults(BuiltinTraceResult a, BuiltinTraceResult b)
+        {
+            // If either is explicitly non-uniform, the combination is non-uniform
+            if (a == BuiltinTraceResult.GroupIndex || a == BuiltinTraceResult.MixedNonUniform ||
+                b == BuiltinTraceResult.GroupIndex || b == BuiltinTraceResult.MixedNonUniform)
+                return BuiltinTraceResult.MixedNonUniform;
+
+            // If one is unknown, return the other
+            if (a == BuiltinTraceResult.Unknown) return b;
+            if (b == BuiltinTraceResult.Unknown) return a;
+
+            // Both are uniform builtins — if they're the same type, keep it; 
+            // otherwise return the first (both are uniform, doesn't matter which)
+            return a;
+        }
+
+        /// <summary>
+        /// Checks if any block within a loop node contains a memory barrier instruction.
+        /// This is used to determine if a loop needs uniformity analysis for its break condition.
+        /// </summary>
+        /// <param name="loopNode">The loop analysis node containing all blocks in the loop.</param>
+        /// <returns>True if any block in the loop contains a MemoryBarrier.</returns>
+        private bool LoopContainsBarrier(Loops<ReversePostOrder, Forwards>.Node loopNode)
+        {
+            foreach (var block in loopNode.AllMembers)
+            {
+                foreach (var valueEntry in block)
+                {
+                    if (valueEntry.Value is global::ILGPU.IR.Values.MemoryBarrier)
+                        return true;
+                }
+            }
+            // Note: Barriers in inlined helpers won't appear as IR MemoryBarrier here,
+            // since inlining happens during WGSL code emission (not at the IR level).
+            // The post-processor's text-based "workgroupBarrier()" detection handles those.
+            return false;
+        }
 
     }
 

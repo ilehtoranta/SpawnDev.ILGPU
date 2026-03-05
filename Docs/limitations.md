@@ -159,11 +159,13 @@ Not all ILGPU features work on all backends:
 | Warp/Subgroup ops | ✅² | ❌ | ❌ | ❌ | ✅ | ✅¹ | ✅ |
 | f64 emulation | ✅ | ✅ | N/A (native) | N/A (native) | N/A (native) | N/A (native) | N/A (native) |
 | i64 emulation | ✅ | ✅ | N/A (native) | N/A (native) | N/A (native) | N/A (native) | N/A (native) |
-| ILGPU Algorithms | ✅ | ❌³ | ✅ | ⚠️ | ✅ | ✅ | ✅ |
+| ILGPU Algorithms | ✅⁴ | ❌³ | ⚠️⁵ | ⚠️ | ✅ | ✅ | ✅ |
 
 ¹ Requires device subgroup support (dynamically detected; some OpenCL 3.0 devices like NVIDIA may lack subgroups)  
 ² Requires `subgroups` WebGPU extension  
 ³ Most algorithms require shared memory or atomics  
+⁴ WebGPU: RadixSort, Scan, Reduce, Histogram fully supported and tested  
+⁵ Wasm: Scan and Reduce work; RadixSort excluded (infinite-loop bug in generated Wasm)  
 ⚠️ CPU backend works in theory but may crash or have limitations in Blazor WASM single-threaded environment
 
 ## Browser Compatibility

@@ -938,6 +938,20 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 return;
             }
 
+            if (value.Kind == BinaryArithmeticKind.BinaryLogF)
+            {
+                // log_base(x) = log(x) / log(base)
+                AppendLine($"{target} = log({left}) / log({right});");
+                return;
+            }
+
+            if (value.Kind == BinaryArithmeticKind.CopySignF)
+            {
+                // copysign(x, y) = abs(x) * sign(y)
+                AppendLine($"{target} = abs({left}) * sign({right});");
+                return;
+            }
+
             // Check if this is a boolean operation. GLSL requires logical operators
             // (&&, ||) for booleans, not bitwise (&, |).
             // The target variable's Type is set from TypeGenerator[value.Type] in Allocate().
@@ -1005,8 +1019,22 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 UnaryArithmeticKind.CeilingF => $"ceil({operand})",
                 UnaryArithmeticKind.IsNaNF => $"(isnan({operand}) ? 1 : 0)",
                 UnaryArithmeticKind.IsInfF => $"(isinf({operand}) ? 1 : 0)",
+                UnaryArithmeticKind.IsFinF => $"((!isnan({operand}) && !isinf({operand})) ? 1 : 0)",
+                UnaryArithmeticKind.Log10F => $"(log({operand}) / log(10.0))",
+                // PopC: Hamming weight via Kernighan's algorithm — not available in all WebGL2 vertex shader implementations
+                UnaryArithmeticKind.PopC => EmitPopC(target, operand),
+                // CLZ: count leading zeros via binary search
+                UnaryArithmeticKind.CLZ => EmitCLZ(target, operand),
+                // CTZ: count trailing zeros via binary search 
+                UnaryArithmeticKind.CTZ => EmitCTZ(target, operand),
                 _ => "DEBUG_MISSING"
             };
+
+            if (result == null)
+            {
+                // Multi-line emission (PopC/CLZ/CTZ) already assigned target directly
+                return;
+            }
 
             if (result == "DEBUG_MISSING")
             {
@@ -1017,6 +1045,68 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             // GLSL ES 3.0: cast result to target type if needed
             string castResult = CastIfNeeded(result, target.Type);
             AppendLine($"{target} = {castResult};");
+        }
+
+        /// <summary>
+        /// Emits PopCount (Hamming weight) using the parallel bit-count algorithm.
+        /// bitCount/popcount is not reliably available in WebGL2 ANGLE vertex shaders.
+        /// </summary>
+        private string EmitPopC(Variable target, Variable operand)
+        {
+            // Parallel bit-count (Hamming weight) — works entirely with int math
+            var tmp = $"_popc_{operand}";
+            AppendLine($"int {tmp} = int({operand});");
+            AppendLine($"{tmp} = {tmp} - (({tmp} >> 1) & 0x55555555);");
+            AppendLine($"{tmp} = ({tmp} & 0x33333333) + (({tmp} >> 2) & 0x33333333);");
+            AppendLine($"{tmp} = ({tmp} + ({tmp} >> 4)) & 0x0F0F0F0F;");
+            AppendLine($"{tmp} = {tmp} + ({tmp} >> 8);");
+            AppendLine($"{tmp} = {tmp} + ({tmp} >> 16);");
+            AppendLine($"{target} = {tmp} & 0x3F;");
+            return null; // Signal that we already assigned target
+        }
+
+        /// <summary>
+        /// Emits count-leading-zeros using a binary search approach.
+        /// findMSB is not reliably available in WebGL2 ANGLE vertex shaders.
+        /// </summary>
+        private string EmitCLZ(Variable target, Variable operand)
+        {
+            var tmp = $"_clz_{operand}";
+            var n = $"_clzn_{operand}";
+            AppendLine($"int {tmp} = int({operand});");
+            AppendLine($"int {n} = 32;");
+            AppendLine($"if ({tmp} != 0) {{");
+            AppendLine($"  {n} = 0;");
+            AppendLine($"  if (({tmp} & 0xFFFF0000) == 0) {{ {n} += 16; {tmp} <<= 16; }}");
+            AppendLine($"  if (({tmp} & 0xFF000000) == 0) {{ {n} += 8; {tmp} <<= 8; }}");
+            AppendLine($"  if (({tmp} & 0xF0000000) == 0) {{ {n} += 4; {tmp} <<= 4; }}");
+            AppendLine($"  if (({tmp} & 0xC0000000) == 0) {{ {n} += 2; {tmp} <<= 2; }}");
+            AppendLine($"  if (({tmp} & 0x80000000) == 0) {{ {n} += 1; }}");
+            AppendLine($"}}");
+            AppendLine($"{target} = {n};");
+            return null; // Signal that we already assigned target
+        }
+
+        /// <summary>
+        /// Emits count-trailing-zeros using a binary search approach.
+        /// findLSB is not reliably available in WebGL2 ANGLE vertex shaders.
+        /// </summary>
+        private string EmitCTZ(Variable target, Variable operand)
+        {
+            var tmp = $"_ctz_{operand}";
+            var n = $"_ctzn_{operand}";
+            AppendLine($"int {tmp} = int({operand});");
+            AppendLine($"int {n} = 32;");
+            AppendLine($"if ({tmp} != 0) {{");
+            AppendLine($"  {n} = 0;");
+            AppendLine($"  if (({tmp} & 0x0000FFFF) == 0) {{ {n} += 16; {tmp} >>= 16; }}");
+            AppendLine($"  if (({tmp} & 0x000000FF) == 0) {{ {n} += 8; {tmp} >>= 8; }}");
+            AppendLine($"  if (({tmp} & 0x0000000F) == 0) {{ {n} += 4; {tmp} >>= 4; }}");
+            AppendLine($"  if (({tmp} & 0x00000003) == 0) {{ {n} += 2; {tmp} >>= 2; }}");
+            AppendLine($"  if (({tmp} & 0x00000001) == 0) {{ {n} += 1; }}");
+            AppendLine($"}}");
+            AppendLine($"{target} = {n};");
+            return null; // Signal that we already assigned target
         }
 
         public virtual void GenerateCode(TernaryArithmeticValue value)

@@ -95,6 +95,8 @@ namespace SpawnDev.ILGPU.WebGPU
             MaxSharedMemoryPerGroup = device.MaxComputeWorkgroupStorageSize;
             MaxConstantMemory = 65536; // WebGPU uniform buffer limit
 
+            CapGroupSizeForSharedMemory();
+
             // Create basic capability context
             Capabilities = new WebGPUCapabilityContext();
         }
@@ -143,7 +145,45 @@ namespace SpawnDev.ILGPU.WebGPU
             MaxSharedMemoryPerGroup = maxSharedMem;
             MaxConstantMemory = 65536;
 
+            CapGroupSizeForSharedMemory();
+
             Capabilities = new WebGPUCapabilityContext();
+        }
+
+        /// <summary>
+        /// Caps MaxNumThreadsPerGroup to avoid exceeding the device's workgroup storage
+        /// limit when kernels use GroupExtensions.ExclusiveScan (which is compiled via
+        /// ILGroupExtensions.InclusiveScanImplementation and always allocates a fixed
+        /// 2048-element shared memory array). RadixSortKernel1 additionally allocates
+        /// groupSize * UnrollFactor (4) elements. The total shared memory must fit within
+        /// MaxSharedMemoryPerGroup.
+        /// </summary>
+        private void CapGroupSizeForSharedMemory()
+        {
+            const int ScanFixedElements = 2048;
+            const int RadixSortUnrollFactor = 4;
+            const int ElementSize = sizeof(int); // 4 bytes
+
+            int scanOverheadBytes = ScanFixedElements * ElementSize;
+            int availableBytes = MaxSharedMemoryPerGroup - scanOverheadBytes;
+            if (availableBytes <= 0)
+            {
+                MaxNumThreadsPerGroup = 64;
+                if (Backend.WebGPUBackend.VerboseLogging) Console.WriteLine($"[WebGPUILGPUDevice] SharedMem={MaxSharedMemoryPerGroup}B too small, capping group size to {MaxNumThreadsPerGroup}");
+                return;
+            }
+
+            int maxGroupForSharedMem = availableBytes / (RadixSortUnrollFactor * ElementSize);
+            int original = MaxNumThreadsPerGroup;
+            if (maxGroupForSharedMem < MaxNumThreadsPerGroup)
+            {
+                // Round down to nearest power of 2 for clean workgroup sizes
+                int capped = 1;
+                while (capped * 2 <= maxGroupForSharedMem) capped *= 2;
+                MaxNumThreadsPerGroup = Math.Max(64, capped);
+            }
+
+            if (Backend.WebGPUBackend.VerboseLogging) Console.WriteLine($"[WebGPUILGPUDevice] SharedMem={MaxSharedMemoryPerGroup}B, maxGroupForSharedMem={maxGroupForSharedMem}, MaxNumThreadsPerGroup: {original} -> {MaxNumThreadsPerGroup}");
         }
 
         /// <summary>

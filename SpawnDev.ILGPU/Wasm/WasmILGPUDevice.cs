@@ -65,7 +65,7 @@ namespace SpawnDev.ILGPU.Wasm
             MaxGroupSize = new Index3D(1024, 1024, 1024);
             MaxNumThreadsPerGroup = 1024;
             NumMultiprocessors = HardwareConcurrency;
-            MaxNumThreadsPerMultiprocessor = 1;
+            MaxNumThreadsPerMultiprocessor = 1024;  // Must be >= MaxNumThreadsPerGroup for GridExtensions
             MaxGridSize = new Index3D(int.MaxValue, 1, 1);
             MemorySize = 2L * 1024 * 1024 * 1024;
             MaxSharedMemoryPerGroup = 65536;

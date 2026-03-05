@@ -1,4 +1,4 @@
-﻿// ---------------------------------------------------------------------------------------
+// ---------------------------------------------------------------------------------------
 //                                   ILGPU Algorithms
 //                        Copyright (c) 2019-2022 ILGPU Project
 //                                    www.ilgpu.net
@@ -163,9 +163,16 @@ namespace ILGPU.Algorithms
             return accelerator.AcceleratorType switch
             {
                 AcceleratorType.CPU => 1,
-                AcceleratorType.Cuda => ComputeNumIntElementsForSinglePassScan<T>(),
+                // Single-pass scan: CreateSinglePassScan makes 2 Allocate() calls
+                // (Allocate<T>, Allocate<int>). Each adds up to 63 ints of 256-byte padding.
+                AcceleratorType.Cuda => ComputeNumIntElementsForSinglePassScan<T>()
+                    + 2 * 63, // 2 allocations × 63 ints max padding
+                // Multi-pass scan: add padding for TempViewManager 256-byte alignment.
+                // CreateMultiPassScan makes 1 Allocate() call from TempViewManager,
+                // plus the internal scan chain may add 1 more.
                 _ => Interop.ComputeRelativeSizeOf<int, T>(
-                    accelerator.MaxNumGroupsExtent.Item1 + 1),
+                    accelerator.MaxNumGroupsExtent.Item1 + 1)
+                    + 2 * 63, // 2 allocations × 63 ints max padding
             };
         }
 
@@ -898,9 +905,15 @@ namespace ILGPU.Algorithms
                         offsetView,
                         numIterationsPerGroup);
 
-                    using var resultBuffer = accelerator.Allocate1D<T>(tempView.Length);
-                    resultBuffer.View.CopyFrom(stream, tempView);
-                    stream.Synchronize();
+                    // Fence between scan passes: pass 2 reads boundary values written by
+                    // pass 1. All backends need this barrier — even WebGPU, where multiple
+                    // dispatchWorkgroups() within the same compute pass share no implicit
+                    // storage-buffer barrier. The copy+sync forces a pipeline flush.
+                    {
+                        using var resultBuffer = accelerator.Allocate1D<T>(tempView.Length);
+                        resultBuffer.View.CopyFrom(stream, tempView);
+                        stream.Synchronize();
+                    }
                 }
 
                 pass2Kernel(
@@ -954,7 +967,11 @@ namespace ILGPU.Algorithms
                     CreateSinglePassScan<T, TStrideIn, TStrideOut, TScanOperation>(
                         accelerator,
                         kind),
-                _ => throw new NotSupportedException(),
+                // WebGPU/WebGL: use multi-pass scan (safe without device-wide atomics)
+                _ =>
+                    CreateMultiPassScan<T, TStrideIn, TStrideOut, TScanOperation>(
+                        accelerator,
+                        kind),
             };
         }
 

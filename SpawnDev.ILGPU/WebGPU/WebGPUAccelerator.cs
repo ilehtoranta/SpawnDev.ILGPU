@@ -7,6 +7,7 @@ using System.Collections.Concurrent;
 using System.Reflection;
 using System.Reflection.Emit;
 using System.Runtime.InteropServices;
+using System.Text.RegularExpressions;
 using Array = System.Array;
 
 namespace SpawnDev.ILGPU.WebGPU
@@ -261,6 +262,8 @@ namespace SpawnDev.ILGPU.WebGPU
             var accelerator = new WebGPUAccelerator(context, device);
             accelerator.NativeAccelerator = await device.NativeDevice.CreateAcceleratorAsync();
             accelerator.Backend = new WebGPUBackend(context, options ?? WebGPUBackendOptions.Default, accelerator.NativeAccelerator.EnabledFeatures);
+            accelerator.Backend.DefaultMaxWorkgroupSize = accelerator.MaxNumThreadsPerGroup;
+            WebGPUBackend.Log($"[WebGPU-Init] DefaultMaxWorkgroupSize set to {accelerator.Backend.DefaultMaxWorkgroupSize} (MaxNumThreadsPerGroup={accelerator.MaxNumThreadsPerGroup})");
             accelerator.Init(accelerator.Backend);
             accelerator.DefaultStream = accelerator.CreateStreamInternal();
             // Wire flush callback so WebGPUBuffer readback operations auto-flush pending dispatches
@@ -291,6 +294,7 @@ namespace SpawnDev.ILGPU.WebGPU
             var accelerator = new WebGPUAccelerator(context, ilgpuDevice);
             accelerator.NativeAccelerator = WebGPUNativeAccelerator.CreateFromExternalDevice(externalDevice);
             accelerator.Backend = new WebGPUBackend(context, options ?? WebGPUBackendOptions.Default, accelerator.NativeAccelerator.EnabledFeatures);
+            accelerator.Backend.DefaultMaxWorkgroupSize = accelerator.MaxNumThreadsPerGroup;
             accelerator.Init(accelerator.Backend);
             accelerator.DefaultStream = accelerator.CreateStreamInternal();
             accelerator.NativeAccelerator.FlushPendingCommands = () => accelerator.FlushPendingCommands();
@@ -519,7 +523,50 @@ namespace SpawnDev.ILGPU.WebGPU
                 }
             }
 
-            var shader = nativeAccel.GetOrCreateComputeShader(compiledKernel.WGSLSource, "main", overrideConstants);
+            // For explicitly grouped kernels (KernelConfig), the dispatch's GroupDim
+            // specifies the number of threads per workgroup. WebGPU bakes this into the
+            // shader as @workgroup_size at compile time, but the ILGPU algorithm kernels
+            // (RadixSort, Scan, etc.) choose GroupDim at runtime based on device limits.
+            // If the compiled @workgroup_size doesn't match the dispatch's GroupDim, patch
+            // the WGSL source so @workgroup_size and the const workgroup_size variable agree
+            // with the actual dispatch dimensions. The shader cache handles deduplication.
+            string wgslSource = compiledKernel.WGSLSource;
+            if (dimension is KernelConfig kcWg)
+            {
+                int reqX = kcWg.GroupDim.X;
+                int reqY = kcWg.GroupDim.Y;
+                int reqZ = kcWg.GroupDim.Z;
+
+                var wgMatch = Regex.Match(
+                    wgslSource, @"@workgroup_size\((\d+)(?:\s*,\s*(\d+))?(?:\s*,\s*(\d+))?\)");
+                if (wgMatch.Success)
+                {
+                    int compiledX = int.Parse(wgMatch.Groups[1].Value);
+                    int compiledY = wgMatch.Groups[2].Success ? int.Parse(wgMatch.Groups[2].Value) : 1;
+                    int compiledZ = wgMatch.Groups[3].Success ? int.Parse(wgMatch.Groups[3].Value) : 1;
+
+                    if (compiledX != reqX || compiledY != reqY || compiledZ != reqZ)
+                    {
+                        if (WebGPUBackend.VerboseLogging)
+                            WebGPUBackend.Log($"[WebGPU] @workgroup_size mismatch: compiled=({compiledX},{compiledY},{compiledZ}), dispatch=({reqX},{reqY},{reqZ}). Patching WGSL.");
+
+                        wgslSource = wgslSource.Replace(
+                            wgMatch.Value,
+                            $"@workgroup_size({reqX}, {reqY}, {reqZ})");
+
+                        var constMatch = Regex.Match(
+                            wgslSource, @"const workgroup_size : vec3<u32> = vec3<u32>\(\d+u, \d+u, \d+u\);");
+                        if (constMatch.Success)
+                        {
+                            wgslSource = wgslSource.Replace(
+                                constMatch.Value,
+                                $"const workgroup_size : vec3<u32> = vec3<u32>({reqX}u, {reqY}u, {reqZ}u);");
+                        }
+                    }
+                }
+            }
+
+            var shader = nativeAccel.GetOrCreateComputeShader(wgslSource, "main", overrideConstants);
             var device = nativeAccel.NativeDevice!;
 
             // Track scalar buffers for pool return (reuse list to avoid per-frame allocation)
@@ -533,6 +580,11 @@ namespace SpawnDev.ILGPU.WebGPU
                 _reusableEntryList ??= new List<GPUBindGroupEntry>();
                 _reusableEntryList.Clear();
                 var entries = _reusableEntryList;
+
+                // Track element offsets per binding index for view offset packing.
+                // When binding at offset=0 for sub-views, the element offset needs
+                // to be packed into the scalar buffer so the WGSL can read it.
+                var viewElementOffsets = new Dictionary<int, int>();
 
                 // Build a lookup of packed scalar params by their args-array index.
                 // ScalarPackingManifest stores IR param.Index (0-based, includes implicit index param).
@@ -662,7 +714,7 @@ namespace SpawnDev.ILGPU.WebGPU
                     var manifestCountPerBodyStructParam = new Dictionary<int, int>();
                     foreach (var e in compiledKernel.ScalarPackingManifest)
                     {
-                        if (e.ParamIndex >= 1000)
+                        if (e.ParamIndex >= 1000 && !e.IsViewOffset)
                         {
                             int bsIdx = (e.ParamIndex / 1000) - 1; // true IR param index
                             manifestCountPerBodyStructParam.TryGetValue(bsIdx, out int c);
@@ -674,16 +726,21 @@ namespace SpawnDev.ILGPU.WebGPU
                     {
                         if (entry.ParamIndex >= 1000)
                         {
+                            // View offset entries for body struct fields are handled in a
+                            // separate phase — don't try to map them to C# struct fields.
+                            if (entry.IsViewOffset) continue;
+
                             // Synthetic param index: body struct scalar field
                             // Decoded: bodyStructIRParamIdx = (entry.ParamIndex / 1000) - 1
                             int bodyStructIRParamIdx = (entry.ParamIndex / 1000) - 1;
                             int bodyStructArgsIdx = bodyStructIRParamIdx - kernelParamOffset;
 
-                            // Count how many scalar manifest entries for this body struct come before this one.
+                            // Count how many non-view-offset scalar manifest entries for this
+                            // body struct come before this one (by ByteOffset order).
                             int nthManifestEntry = 0;
                             foreach (var e2 in compiledKernel.ScalarPackingManifest)
                             {
-                                if (e2.ParamIndex >= 1000 && (e2.ParamIndex / 1000) - 1 == bodyStructIRParamIdx)
+                                if (e2.ParamIndex >= 1000 && !e2.IsViewOffset && (e2.ParamIndex / 1000) - 1 == bodyStructIRParamIdx)
                                 {
                                     if (e2.ByteOffset < entry.ByteOffset)
                                         nthManifestEntry++;
@@ -717,6 +774,8 @@ namespace SpawnDev.ILGPU.WebGPU
                         else
                         {
                             // Regular param: map IR param index to effectiveArgs index
+                            // Skip IsViewOffset entries — they're packed separately after the scalar loop
+                            if (entry.IsViewOffset) continue;
                             int effectiveArgsIdx = entry.ParamIndex - kernelParamOffset;
                             if (effectiveArgsIdx >= 0 && effectiveArgsIdx < effectiveArgsCount)
                                 packedScalarLookup[effectiveArgsIdx] = entry;
@@ -784,12 +843,42 @@ namespace SpawnDev.ILGPU.WebGPU
                         if (WebGPUBackend.VerboseLogging)
                             WebGPUBackend.Log($"[WebGPU-Debug] Arg {i}: Binding Buffer. Size={contiguous.LengthInBytes}, Offset={contiguous.IndexInBytes}");
 
+                        // WebGPU requires storage buffer binding offsets to be aligned
+                        // to minStorageBufferOffsetAlignment (256 bytes). ILGPU sub-views
+                        // may have arbitrary element-aligned offsets (e.g., 4612 bytes).
+                        //
+                        // FIX: Round the byte offset DOWN to the nearest 256-byte boundary.
+                        // The remainder (padding) becomes an element offset packed into
+                        // _scalar_params so the WGSL reads the correct slice.
+                        //
+                        // This avoids aliasing: two sub-views of the same buffer at
+                        // different 256-aligned positions get NON-OVERLAPPING binding ranges,
+                        // satisfying WebGPU's writable storage buffer aliasing rules.
+                        ulong rawOffset = (ulong)((long)contiguous.IndexInBytes);
+                        ulong alignedOffset = rawOffset & ~255UL; // round DOWN to 256
+                        ulong padding = rawOffset - alignedOffset;
+                        ulong bindingSize = padding + (ulong)contiguous.LengthInBytes;
+                        // Clamp to actual buffer size (safety for edge cases)
+                        ulong bufferSize = (ulong)nativeBuffer.LengthInBytes;
+                        if (alignedOffset + bindingSize > bufferSize)
+                            bindingSize = bufferSize - alignedOffset;
+                        
                         resource = new GPUBufferBinding
                         {
                             Buffer = gpuBuffer,
-                            Offset = (ulong)((long)contiguous.IndexInBytes),
-                            Size = (ulong)((long)contiguous.LengthInBytes)
+                            Offset = alignedOffset,
+                            Size = bindingSize
                         };
+
+                        // Record element offset for this binding so Phase 2 can pack it.
+                        // The element offset = padding bytes / element size (the residual
+                        // elements between the aligned binding start and the actual sub-view start).
+                        int elementSize = contiguous.ElementSize > 0 ? contiguous.ElementSize : 1;
+                        int elementOffset = (int)(padding / (ulong)elementSize);
+                        viewElementOffsets[currentBindingIndex] = elementOffset;
+                        
+                        if (WebGPUBackend.VerboseLogging)
+                            WebGPUBackend.Log($"[WebGPU-Debug] Arg {i}: rawOffset={rawOffset}, alignedOffset={alignedOffset}, padding={padding}, elemOffset={elementOffset}, bindingSize={bindingSize}");
                     }
                     else
                     {
@@ -873,6 +962,13 @@ namespace SpawnDev.ILGPU.WebGPU
                         if (WebGPUBackend.VerboseLogging)
                             WebGPUBackend.Log($"[WebGPU-Debug] Packing scalar param {entry.ParamIndex} (effectiveArgs[{effectiveArgsIdx}]) at byte offset {byteOffset}: {arg}");
 
+                        // Unwrap SpecializedValue<T> to extract the inner T value
+                        if (arg != null && arg.GetType().IsGenericType && 
+                            arg.GetType().Name.StartsWith("SpecializedValue"))
+                        {
+                            arg = arg.GetType().GetProperty("Value")!.GetValue(arg);
+                        }
+
                         if (arg is int iVal)
                             BitConverter.GetBytes(iVal).CopyTo(packedData, byteOffset);
                         else if (arg is float fVal)
@@ -943,9 +1039,57 @@ namespace SpawnDev.ILGPU.WebGPU
                             BitConverter.GetBytes((uint)bVal).CopyTo(packedData, byteOffset);
                         else if (arg is bool blVal)
                             BitConverter.GetBytes(blVal ? 1u : 0u).CopyTo(packedData, byteOffset);
+                        else if (arg is Index1D idx1)
+                            BitConverter.GetBytes(idx1.X).CopyTo(packedData, byteOffset);
+                        else if (arg is Index2D idx2)
+                        {
+                            BitConverter.GetBytes(idx2.X).CopyTo(packedData, byteOffset);
+                            if (byteOffset + 4 < packedData.Length)
+                                BitConverter.GetBytes(idx2.Y).CopyTo(packedData, byteOffset + 4);
+                        }
+                        else if (arg is Index3D idx3)
+                        {
+                            BitConverter.GetBytes(idx3.X).CopyTo(packedData, byteOffset);
+                            if (byteOffset + 4 < packedData.Length)
+                                BitConverter.GetBytes(idx3.Y).CopyTo(packedData, byteOffset + 4);
+                            if (byteOffset + 8 < packedData.Length)
+                                BitConverter.GetBytes(idx3.Z).CopyTo(packedData, byteOffset + 8);
+                        }
+                        else if (arg != null && arg.GetType().IsValueType)
+                        {
+                            // Fallback for any other value type: serialize struct bytes directly
+                            int structSize = global::ILGPU.Interop.SizeOf(arg.GetType());
+                            byte[] bytes = new byte[structSize];
+                            GetCopyStructMethod(arg.GetType()).Invoke(null, new object[] { arg, bytes });
+                            int copyLen = Math.Min(structSize, packedData.Length - byteOffset);
+                            Array.Copy(bytes, 0, packedData, byteOffset, copyLen);
+                            if (WebGPUBackend.VerboseLogging)
+                                WebGPUBackend.Log($"[WebGPU-Debug] Packed fallback struct {arg.GetType().Name}, {structSize} bytes at offset {byteOffset}");
+                        }
                         else if (arg != null)
                             throw new NotSupportedException($"Unsupported packed scalar type: {arg.GetType()}");
 
+                    }
+
+                    // --- Pack view element offsets ---
+                    // For each IsViewOffset entry in the manifest, pack the element offset
+                    // (from binding Phase 1) into the packed scalar buffer. The WGSL reads
+                    // this via _scalar_params[slot] in ArrayView Field 1 (Index).
+                    foreach (var entry in manifest)
+                    {
+                        if (!entry.IsViewOffset) continue;
+                        int byteOffset = entry.ByteOffset;
+                        if (byteOffset + 4 > packedData.Length)
+                        {
+                            // Extend packedData if needed (view offsets may extend beyond user scalars)
+                            var newData = new byte[byteOffset + 4];
+                            Array.Copy(packedData, newData, packedData.Length);
+                            packedData = newData;
+                        }
+                        int elemOffset = viewElementOffsets.TryGetValue(entry.ViewBindingIndex, out int eo) ? eo : 0;
+                        BitConverter.GetBytes(elemOffset).CopyTo(packedData, byteOffset);
+                        if (WebGPUBackend.VerboseLogging)
+                            WebGPUBackend.Log($"[WebGPU-Debug] Packed view offset: binding={entry.ViewBindingIndex}, elemOffset={elemOffset}, byteOffset={byteOffset}");
                     }
 
                     var packedBuffer = GetPooledScalarBuffer(device);
@@ -963,6 +1107,52 @@ namespace SpawnDev.ILGPU.WebGPU
                         WebGPUBackend.Log($"[WebGPU-Debug] Packed {packedScalarLookup.Count} scalars into 1 buffer ({totalBytes} bytes used, binding {currentBindingIndex - 1})");
                 }
 
+
+                // Validate/fix entry count to match WGSL layout (avoids "binding index N not present" errors)
+                int expectedCount = compiledKernel.ExpectedBindingCount;
+                // When WGSL declares only 1 binding (the _scalar_params buffer) but the runtime
+                // built 2 entries [view, scalar], the view was folded into _scalar_params at
+                // compile time. Only apply this workaround when expectedCount confirms the
+                // layout truly has 1 binding — otherwise we'd drop legitimate view bindings.
+                bool applyScalarOnlyWorkaround = entries.Count == 2
+                    && compiledKernel.HasScalarPacking
+                    && expectedCount == 1;
+                if (applyScalarOnlyWorkaround)
+                {
+                    // Layout expects 1 binding (scalar-only) but runtime built 2 [view, scalar].
+                    // This happens when WGSL packs a view's offset into _scalar_params but omits
+                    // the view buffer (e.g. certain body-struct or length-only cases). Use only
+                    // the scalar buffer at binding 0.
+                    var scalarEntry = entries[1]; // Phase 2 adds scalar buffer after Phase 1's views
+                    entries.Clear();
+                    entries.Add(new GPUBindGroupEntry { Binding = 0, Resource = scalarEntry.Resource });
+                    if (WebGPUBackend.VerboseLogging)
+                        WebGPUBackend.Log($"[WebGPU-BindGroup] Workaround: using scalar-only bindings for kernel '{compiledKernel.Name}'");
+                }
+                else if (expectedCount > 0 && entries.Count > expectedCount)
+                {
+                    // The WGSL binding count is the source of truth. The runtime may create
+                    // extra entries (e.g. Phase 2 scalar buffer for ArrayView extents that the
+                    // WGSL handles via arrayLength()). Trim to match the WGSL layout.
+                    var kernelName = compiledKernel.Name ?? "unknown";
+                    Console.WriteLine($"[WebGPU-BindGroup] Trimming entries from {entries.Count} to {expectedCount} for kernel '{kernelName}' (HasScalarPacking={compiledKernel.HasScalarPacking})");
+                    while (entries.Count > expectedCount)
+                        entries.RemoveAt(entries.Count - 1);
+                }
+                else if (expectedCount > 0 && entries.Count < expectedCount)
+                {
+                    var kernelName = compiledKernel.Name ?? "unknown";
+                    throw new InvalidOperationException(
+                        $"[WebGPU] Bind group mismatch for kernel '{kernelName}': " +
+                        $"layout expects {expectedCount} binding(s), but only {entries.Count} entries were built.");
+                }
+
+                if (WebGPUBackend.VerboseLogging)
+                {
+                    WebGPUBackend.Log($"[WebGPU-BindGroup] Creating bind group with {entries.Count} entries (expected={expectedCount}) for kernel: {compiledKernel.Name}");
+                    for (int ei = 0; ei < entries.Count; ei++)
+                        WebGPUBackend.Log($"  entries[{ei}]: binding={entries[ei].Binding}");
+                }
 
                 var bindGroupDesc = new GPUBindGroupDescriptor
                 {
@@ -1028,6 +1218,8 @@ namespace SpawnDev.ILGPU.WebGPU
         {
             // Flush any pending batched commands on the default stream
             ((WebGPUStream)DefaultStream).Flush();
+            // Surface any GPU validation errors that occurred during dispatch
+            NativeAccelerator.ThrowIfGpuErrors();
         }
         protected override void OnBind() { }
         protected override void OnUnbind() { }

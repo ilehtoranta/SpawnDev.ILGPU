@@ -521,7 +521,6 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
         [TestMethod]
         public async Task ILGPUReduceLongTest() => await RunEmulatedTest(async accelerator =>
         {
-            SpawnDev.ILGPU.WebGPU.Backend.WebGPUBackend.VerboseLogging = true;
             const int count = 256;
             var data = new long[count];
             for (int i = 0; i < count; i++) data[i] = (long)(i + 1);

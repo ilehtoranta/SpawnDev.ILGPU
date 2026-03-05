@@ -52,6 +52,15 @@ namespace SpawnDev.ILGPU.WebGPU
         private bool _isInitialized;
         private bool _disposed;
 
+        // Accumulated GPU validation errors surfaced via ThrowIfGpuErrors()
+        private readonly List<string> _pendingGpuErrors = new();
+
+        // Known-benign error substrings that should be logged but not propagated
+        private static readonly string[] _benignErrorSubstrings = new[]
+        {
+            "powerPreference",
+        };
+
         // Shader cache: key is WGSL source, value is compiled shader
         private readonly Dictionary<string, WebGPUComputeShader> _shaderCache = new();
 
@@ -104,25 +113,45 @@ namespace SpawnDev.ILGPU.WebGPU
             var requestedFeatures = Device.SupportedFeatures.ToList();
 
             // Query the adapter's actual limits so we can request the maximum supported.
-            // WebGPU defaults to 8 maxStorageBuffersPerShaderStage, but ILGPU kernels
-            // use one storage buffer per parameter, so complex kernels need much more.
-            int maxStorageBuffers = 10; // safe fallback
+            // WebGPU defaults are conservative (e.g. 256 for workgroup size, 8 for storage buffers).
+            // ILGPU reads adapter limits to determine kernel compilation parameters like workgroup_size,
+            // so we MUST request those same limits when creating the device — otherwise the device
+            // falls back to defaults and rejects shaders compiled for the adapter's capabilities.
+            int maxStorageBuffers = 10;
+            int maxComputeInvocations = 256;
+            int maxWorkgroupSizeX = 256;
+            int maxWorkgroupSizeY = 256;
+            int maxWorkgroupSizeZ = 64;
+            int maxWorkgroupStorageSize = 16384;
+            long maxBufferSize = 268435456;
             try
             {
                 using var adapterLimits = adapter.Limits;
                 maxStorageBuffers = adapterLimits.MaxStorageBuffersPerShaderStage ?? 10;
+                maxComputeInvocations = (int)(adapterLimits.MaxComputeInvocationsPerWorkgroup ?? 256);
+                maxWorkgroupSizeX = (int)(adapterLimits.MaxComputeWorkgroupSizeX ?? 256);
+                maxWorkgroupSizeY = (int)(adapterLimits.MaxComputeWorkgroupSizeY ?? 256);
+                maxWorkgroupSizeZ = (int)(adapterLimits.MaxComputeWorkgroupSizeZ ?? 64);
+                maxWorkgroupStorageSize = (int)(adapterLimits.MaxComputeWorkgroupStorageSize ?? 16384);
+                maxBufferSize = (long)(adapterLimits.MaxBufferSize ?? 268435456);
             }
             catch
             {
                 // Limits query failed — use fallback
             }
-            WebGPUBackend.Log($"[WebGPU] Adapter maxStorageBuffersPerShaderStage: {maxStorageBuffers}");
+            WebGPUBackend.Log($"[WebGPU] Adapter limits: maxStorageBuffers={maxStorageBuffers}, maxComputeInvocations={maxComputeInvocations}, maxWorkgroupSizeX={maxWorkgroupSizeX}, maxWorkgroupStorageSize={maxWorkgroupStorageSize}");
 
             // Use Dictionary for RequiredLimits to ensure reliable JS interop serialization.
             // Anonymous objects may not serialize correctly through BlazorJS's interop layer.
             var requiredLimits = new Dictionary<string, object>
             {
-                ["maxStorageBuffersPerShaderStage"] = maxStorageBuffers
+                ["maxStorageBuffersPerShaderStage"] = maxStorageBuffers,
+                ["maxComputeInvocationsPerWorkgroup"] = maxComputeInvocations,
+                ["maxComputeWorkgroupSizeX"] = maxWorkgroupSizeX,
+                ["maxComputeWorkgroupSizeY"] = maxWorkgroupSizeY,
+                ["maxComputeWorkgroupSizeZ"] = maxWorkgroupSizeZ,
+                ["maxComputeWorkgroupStorageSize"] = maxWorkgroupStorageSize,
+                ["maxBufferSize"] = maxBufferSize,
             };
 
             // Request device with detected features and the adapter's max storage buffer limit.
@@ -181,20 +210,52 @@ namespace SpawnDev.ILGPU.WebGPU
             try
             {
                 var message = e.Error?.Message ?? "Unknown GPU error";
-                WebGPUBackend.Log($"[WebGPU ERROR] {message}");
-                if (WebGPUBackend.VerboseLogging && _lastCompiledWGSL != null)
+                Console.WriteLine($"[WebGPU ERROR] {message}");
+
+                bool isShaderError = message.Contains("unresolved") || message.Contains("parsing") || message.Contains("WGSL")
+                    || message.Contains("binding") || message.Contains("BindGroup");
+                if (_lastCompiledWGSL != null && (isShaderError || WebGPUBackend.VerboseLogging))
                 {
-                    var snippet = _lastCompiledWGSL.Length > 2000
-                        ? _lastCompiledWGSL.Substring(0, 2000) + "\n...TRUNCATED..."
-                        : _lastCompiledWGSL;
-                    WebGPUBackend.Log($"[WebGPU ERROR] Last WGSL source ({_lastCompiledWGSL.Length} chars):");
-                    WebGPUBackend.Log(snippet);
+                    Console.Error.WriteLine($"[WebGPU ERROR] WGSL source ({_lastCompiledWGSL.Length} chars):");
+                    Console.Error.WriteLine(_lastCompiledWGSL);
                 }
+
+                // Capture non-benign errors for propagation via ThrowIfGpuErrors()
+                bool isBenign = false;
+                foreach (var substr in _benignErrorSubstrings)
+                {
+                    if (message.Contains(substr, StringComparison.OrdinalIgnoreCase))
+                    {
+                        isBenign = true;
+                        break;
+                    }
+                }
+                if (!isBenign)
+                    _pendingGpuErrors.Add(message);
             }
             catch
             {
                 // Swallow any exceptions to avoid triggering Blazor's unhandled error banner
             }
+        }
+
+        /// <summary>
+        /// Throws an <see cref="InvalidOperationException"/> if any GPU validation errors
+        /// have been captured since the last call. Clears the error list after throwing.
+        /// Called by <see cref="WebGPUAccelerator.SynchronizeInternal"/> to surface GPU
+        /// errors to the caller (e.g. test framework) instead of silently swallowing them.
+        /// </summary>
+        internal void ThrowIfGpuErrors()
+        {
+            if (_pendingGpuErrors.Count == 0)
+                return;
+
+            var errors = new List<string>(_pendingGpuErrors);
+            _pendingGpuErrors.Clear();
+
+            var combined = string.Join("\n", errors);
+            throw new InvalidOperationException(
+                $"[WebGPU] {errors.Count} GPU error(s) during dispatch:\n{combined}");
         }
 
         /// <summary>

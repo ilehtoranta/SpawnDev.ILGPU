@@ -13,7 +13,7 @@
 		<ProjectReference Include="..\SpawnDev.ILGPU.Demo.Shared\SpawnDev.ILGPU.Demo.Shared.csproj" />
 		<ProjectReference Include="..\ILGPU\ILGPU.csproj" />
 		<ProjectReference Include="..\ILGPU.Algorithms\ILGPU.Algorithms.csproj" />
-		<PackageReference Include="SpawnDev.UnitTesting" Version="1.0.0" />
+		<PackageReference Include="SpawnDev.UnitTesting" Version="2.0.0" />
 	</ItemGroup>
 
 </Project>

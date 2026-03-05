@@ -1,0 +1,447 @@
+using ILGPU;
+using ILGPU.Algorithms;
+using ILGPU.Algorithms.RadixSortOperations;
+using ILGPU.Algorithms.ScanReduceOperations;
+using ILGPU.Runtime;
+using SpawnDev.UnitTesting;
+
+namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
+{
+    // Part 6: Algorithm tests (scan, reduce, radix sort)
+    // These tests require EnableAlgorithms() + EnableWebGPUAlgorithms() on the context.
+    public abstract partial class BackendTestBase
+    {
+        /// <summary>
+        /// Test ILGPU.Algorithms ExclusiveScan via a GPU kernel that uses
+        /// GroupExtensions.ExclusiveScan. This validates the algorithm intrinsic
+        /// registration for each backend.
+        /// </summary>
+        [TestMethod]
+        public async Task AlgorithmExclusiveScanTest() => await RunTest(async accelerator =>
+        {
+            int groupSize = Math.Min(64, accelerator.Device.MaxNumThreadsPerGroup);
+            using var inputBuf = accelerator.Allocate1D<int>(groupSize);
+            using var outputBuf = accelerator.Allocate1D<int>(groupSize);
+
+            // Initialize: each thread contributes value 1
+            var inputData = new int[groupSize];
+            for (int i = 0; i < groupSize; i++) inputData[i] = 1;
+            inputBuf.CopyFromCPU(inputData);
+
+            var kernel = accelerator.LoadStreamKernel<Index1D, ArrayView<int>, ArrayView<int>>(
+                ExclusiveScanKernel);
+            kernel(new KernelConfig(1, groupSize), (Index1D)groupSize, inputBuf.View, outputBuf.View);
+            await accelerator.SynchronizeAsync();
+
+            var result = await outputBuf.CopyToHostAsync<int>();
+            // Exclusive scan of all 1s: [0, 1, 2, 3, ...]
+            for (int i = 0; i < groupSize; i++)
+            {
+                if (result[i] != i)
+                    throw new Exception($"ExclusiveScan failed at {i}. Expected {i}, got {result[i]}");
+            }
+        });
+
+        /// <summary>
+        /// Test ILGPU.Algorithms InclusiveScan via a GPU kernel.
+        /// </summary>
+        [TestMethod]
+        public async Task AlgorithmInclusiveScanTest() => await RunTest(async accelerator =>
+        {
+            int groupSize = Math.Min(64, accelerator.Device.MaxNumThreadsPerGroup);
+            using var inputBuf = accelerator.Allocate1D<int>(groupSize);
+            using var outputBuf = accelerator.Allocate1D<int>(groupSize);
+
+            var inputData = new int[groupSize];
+            for (int i = 0; i < groupSize; i++) inputData[i] = 1;
+            inputBuf.CopyFromCPU(inputData);
+
+            var kernel = accelerator.LoadStreamKernel<Index1D, ArrayView<int>, ArrayView<int>>(
+                InclusiveScanKernel);
+            kernel(new KernelConfig(1, groupSize), (Index1D)groupSize, inputBuf.View, outputBuf.View);
+            await accelerator.SynchronizeAsync();
+
+            var result = await outputBuf.CopyToHostAsync<int>();
+            // Inclusive scan of all 1s: [1, 2, 3, 4, ...]
+            for (int i = 0; i < groupSize; i++)
+            {
+                int expected = i + 1;
+                if (result[i] != expected)
+                    throw new Exception($"InclusiveScan failed at {i}. Expected {expected}, got {result[i]}");
+            }
+        });
+
+        /// <summary>
+        /// Test ILGPU.Algorithms AllReduce via a GPU kernel.
+        /// </summary>
+        [TestMethod]
+        public async Task AlgorithmAllReduceTest() => await RunTest(async accelerator =>
+        {
+            int groupSize = Math.Min(64, accelerator.Device.MaxNumThreadsPerGroup);
+            using var inputBuf = accelerator.Allocate1D<int>(groupSize);
+            using var outputBuf = accelerator.Allocate1D<int>(groupSize);
+
+            var inputData = new int[groupSize];
+            for (int i = 0; i < groupSize; i++) inputData[i] = i + 1; // 1..64
+            inputBuf.CopyFromCPU(inputData);
+
+            var kernel = accelerator.LoadStreamKernel<Index1D, ArrayView<int>, ArrayView<int>>(
+                AllReduceKernel);
+            kernel(new KernelConfig(1, groupSize), (Index1D)groupSize, inputBuf.View, outputBuf.View);
+            await accelerator.SynchronizeAsync();
+
+            var result = await outputBuf.CopyToHostAsync<int>();
+            int expectedSum = groupSize * (groupSize + 1) / 2; // 2080
+            // AllReduce: every thread gets the same sum
+            for (int i = 0; i < groupSize; i++)
+            {
+                if (result[i] != expectedSum)
+                    throw new Exception($"AllReduce failed at {i}. Expected {expectedSum}, got {result[i]}");
+            }
+        });
+
+        /// <summary>
+        /// Test ILGPU.Algorithms RadixSortPairs — the key operation needed for
+        /// the Gaussian splat renderer. Sorts float keys with int value indices.
+        /// </summary>
+        [TestMethod]
+        public async Task AlgorithmRadixSortPairsTest() => await RunTest(async accelerator =>
+        {
+            int n = 256;
+            // Create reverse-sorted distances and sequential indices
+            var keys = new float[n];
+            var values = new int[n];
+            for (int i = 0; i < n; i++)
+            {
+                keys[i] = (float)(n - i); // Reverse order: 256, 255, ..., 1
+                values[i] = i;
+            }
+
+            using var keysBuf = accelerator.Allocate1D(keys);
+            using var valuesBuf = accelerator.Allocate1D(values);
+            var tempSize = accelerator.ComputeRadixSortPairsTempStorageSize<float, int, AscendingFloat>(n);
+            using var tempBuf = accelerator.Allocate1D<int>(tempSize);
+
+            var radixSort = accelerator.CreateRadixSortPairs<float, Stride1D.Dense, int, Stride1D.Dense, AscendingFloat>();
+            radixSort(
+                accelerator.DefaultStream,
+                keysBuf.View,
+                valuesBuf.View,
+                tempBuf.View.AsContiguous());
+            await accelerator.SynchronizeAsync();
+
+            var sortedKeys = await keysBuf.CopyToHostAsync<float>();
+            var sortedValues = await valuesBuf.CopyToHostAsync<int>();
+
+            for (int i = 0; i < n; i++)
+            {
+                float expectedKey = (float)(i + 1);
+                int expectedValue = n - 1 - i;
+                if (MathF.Abs(sortedKeys[i] - expectedKey) > 0.001f)
+                    throw new Exception($"RadixSort key mismatch at [{i}]: expected={expectedKey}, got={sortedKeys[i]}");
+                if (sortedValues[i] != expectedValue)
+                    throw new Exception($"RadixSort value mismatch at [{i}]: expected={expectedValue}, got={sortedValues[i]}");
+            }
+        });
+
+        /// <summary>
+        /// Test RadixSort with non-power-of-2 count — important for real-world
+        /// Gaussian splat rendering where splat count is arbitrary.
+        /// </summary>
+        [TestMethod]
+        public async Task AlgorithmRadixSortNonPow2Test() => await RunTest(async accelerator =>
+        {
+            int n = 137; // Non-power-of-2
+            var keys = new float[n];
+            var values = new int[n];
+            var rng = new Random(42);
+            for (int i = 0; i < n; i++)
+            {
+                keys[i] = (float)(rng.NextDouble() * 1000.0);
+                values[i] = i;
+            }
+
+            using var keysBuf = accelerator.Allocate1D(keys);
+            using var valuesBuf = accelerator.Allocate1D(values);
+            var tempSize = accelerator.ComputeRadixSortPairsTempStorageSize<float, int, AscendingFloat>(n);
+            using var tempBuf = accelerator.Allocate1D<int>(tempSize);
+
+            var radixSort = accelerator.CreateRadixSortPairs<float, Stride1D.Dense, int, Stride1D.Dense, AscendingFloat>();
+            radixSort(
+                accelerator.DefaultStream,
+                keysBuf.View,
+                valuesBuf.View,
+                tempBuf.View.AsContiguous());
+            await accelerator.SynchronizeAsync();
+
+            var sortedKeys = await keysBuf.CopyToHostAsync<float>();
+
+            // Verify ascending order
+            for (int i = 1; i < n; i++)
+            {
+                if (sortedKeys[i] < sortedKeys[i - 1])
+                    throw new Exception($"RadixSort non-pow2 order failed at {i}. {sortedKeys[i-1]} > {sortedKeys[i]}");
+            }
+        });
+
+        /// <summary>
+        /// Test ExclusiveScan with varying values (not just 1s).
+        /// </summary>
+        [TestMethod]
+        public async Task AlgorithmExclusiveScanVaryingTest() => await RunTest(async accelerator =>
+        {
+            int groupSize = Math.Min(32, accelerator.Device.MaxNumThreadsPerGroup);
+            using var inputBuf = accelerator.Allocate1D<int>(groupSize);
+            using var outputBuf = accelerator.Allocate1D<int>(groupSize);
+
+            // Each thread contributes its index: [0, 1, 2, ..., 31]
+            var inputData = new int[groupSize];
+            for (int i = 0; i < groupSize; i++) inputData[i] = i;
+            inputBuf.CopyFromCPU(inputData);
+
+            var kernel = accelerator.LoadStreamKernel<Index1D, ArrayView<int>, ArrayView<int>>(
+                ExclusiveScanKernel);
+            kernel(new KernelConfig(1, groupSize), (Index1D)groupSize, inputBuf.View, outputBuf.View);
+            await accelerator.SynchronizeAsync();
+
+            var result = await outputBuf.CopyToHostAsync<int>();
+            // Exclusive scan of [0,1,2,...,31]: [0, 0, 1, 3, 6, 10, ...]
+            int runningSum = 0;
+            for (int i = 0; i < groupSize; i++)
+            {
+                if (result[i] != runningSum)
+                    throw new Exception($"ExclusiveScan varying failed at {i}. Expected {runningSum}, got {result[i]}");
+                runningSum += inputData[i];
+            }
+        });
+
+        /// <summary>
+        /// Test ExclusiveScanWithBoundaries — validates that boundary values
+        /// are correctly returned alongside the scan result.
+        /// </summary>
+        [TestMethod]
+        public async Task AlgorithmScanWithBoundariesTest() => await RunTest(async accelerator =>
+        {
+            int groupSize = Math.Min(32, accelerator.Device.MaxNumThreadsPerGroup);
+            using var inputBuf = accelerator.Allocate1D<int>(groupSize);
+            using var outputBuf = accelerator.Allocate1D<int>(groupSize);
+            using var boundaryBuf = accelerator.Allocate1D<int>(2); // [leftBoundary, rightBoundary]
+
+            // Each thread contributes value 2
+            var inputData = new int[groupSize];
+            for (int i = 0; i < groupSize; i++) inputData[i] = 2;
+            inputBuf.CopyFromCPU(inputData);
+
+            var kernel = accelerator.LoadStreamKernel<Index1D, ArrayView<int>, ArrayView<int>, ArrayView<int>>(
+                ExclusiveScanWithBoundariesKernel);
+            kernel(new KernelConfig(1, groupSize), (Index1D)groupSize, inputBuf.View, outputBuf.View, boundaryBuf.View);
+            await accelerator.SynchronizeAsync();
+
+            var result = await outputBuf.CopyToHostAsync<int>();
+            var bounds = await boundaryBuf.CopyToHostAsync<int>();
+
+            // Exclusive scan of all 2s: [0, 2, 4, 6, ...]
+            for (int i = 0; i < groupSize; i++)
+            {
+                int expected = i * 2;
+                if (result[i] != expected)
+                    throw new Exception($"ScanWithBoundaries value failed at {i}. Expected {expected}, got {result[i]}");
+            }
+
+            // Boundaries: for ExclusiveScan, left=identity (0), right=sum of all but last.
+            // For all-2s with 32 threads: exclusive scan = [0, 2, 4, ..., 62], so left=0, right=62.
+            int totalSum = groupSize * 2; // 64 (inclusive) or 62 (exclusive right)
+            if (bounds[0] < 0 || bounds[0] > totalSum)
+                throw new Exception($"ScanWithBoundaries left boundary out of range. Got {bounds[0]}, expected 0..{totalSum}");
+            if (bounds[1] < 0 || bounds[1] > totalSum)
+                throw new Exception($"ScanWithBoundaries right boundary out of range. Got {bounds[1]}, expected 0..{totalSum}");
+        });
+
+
+        /// <summary>
+        /// Test RadixSort with descending order — validates DescendingFloat operation.
+        /// </summary>
+        [TestMethod]
+        public async Task AlgorithmRadixSortDescendingTest() => await RunTest(async accelerator =>
+        {
+            int n = 128;
+            var keys = new float[n];
+            var values = new int[n];
+            for (int i = 0; i < n; i++)
+            {
+                keys[i] = (float)(i + 1); // Ascending: 1, 2, ..., 128
+                values[i] = i;
+            }
+
+            using var keysBuf = accelerator.Allocate1D(keys);
+            using var valuesBuf = accelerator.Allocate1D(values);
+            var tempSize = accelerator.ComputeRadixSortPairsTempStorageSize<float, int, DescendingFloat>(n);
+            using var tempBuf = accelerator.Allocate1D<int>(tempSize);
+
+            var radixSort = accelerator.CreateRadixSortPairs<float, Stride1D.Dense, int, Stride1D.Dense, DescendingFloat>();
+            radixSort(
+                accelerator.DefaultStream,
+                keysBuf.View,
+                valuesBuf.View,
+                tempBuf.View.AsContiguous());
+            await accelerator.SynchronizeAsync();
+
+            var sortedKeys = await keysBuf.CopyToHostAsync<float>();
+
+            // After descending sort, keys should be 128, 127, ..., 1
+            for (int i = 0; i < n; i++)
+            {
+                float expectedKey = (float)(n - i);
+                if (MathF.Abs(sortedKeys[i] - expectedKey) > 0.001f)
+                    throw new Exception($"RadixSort descending failed at {i}. Expected {expectedKey}, got {sortedKeys[i]}");
+            }
+        });
+
+        /// <summary>
+        /// Stress test: RadixSort with 1024+ elements to exercise multi-group dispatch.
+        /// </summary>
+        [TestMethod]
+        public async Task AlgorithmRadixSortLargeTest() => await RunTest(async accelerator =>
+        {
+            int n = 2048;
+            var keys = new float[n];
+            var values = new int[n];
+            var rng = new Random(123);
+            for (int i = 0; i < n; i++)
+            {
+                keys[i] = (float)(rng.NextDouble() * 10000.0);
+                values[i] = i;
+            }
+
+            using var keysBuf = accelerator.Allocate1D(keys);
+            using var valuesBuf = accelerator.Allocate1D(values);
+            var tempSize = accelerator.ComputeRadixSortPairsTempStorageSize<float, int, AscendingFloat>(n);
+            using var tempBuf = accelerator.Allocate1D<int>(tempSize);
+
+            var radixSort = accelerator.CreateRadixSortPairs<float, Stride1D.Dense, int, Stride1D.Dense, AscendingFloat>();
+            radixSort(
+                accelerator.DefaultStream,
+                keysBuf.View,
+                valuesBuf.View,
+                tempBuf.View.AsContiguous());
+            await accelerator.SynchronizeAsync();
+
+            var sortedKeys = await keysBuf.CopyToHostAsync<float>();
+            var sortedValues = await valuesBuf.CopyToHostAsync<int>();
+
+            // Verify ascending order
+            for (int i = 1; i < n; i++)
+            {
+                if (sortedKeys[i] < sortedKeys[i - 1])
+                    throw new Exception($"RadixSort large order failed at {i}. {sortedKeys[i-1]} > {sortedKeys[i]}");
+            }
+
+            // Verify value tracking — each sorted value should point to its original key
+            for (int i = 0; i < n; i++)
+            {
+                int origIdx = sortedValues[i];
+                if (MathF.Abs(sortedKeys[i] - keys[origIdx]) > 0.001f)
+                    throw new Exception($"RadixSort large tracking failed at {i}. Key={sortedKeys[i]}, OrigKey={keys[origIdx]}");
+            }
+        });
+
+        /// <summary>
+        /// Test Reduce (non-AllReduce) — only first thread gets the result.
+        /// Uses GroupExtensions.Reduce which returns value only to group leader.
+        /// </summary>
+        [TestMethod]
+        public async Task AlgorithmGroupReduceTest() => await RunTest(async accelerator =>
+        {
+            int groupSize = Math.Min(64, accelerator.Device.MaxNumThreadsPerGroup);
+            using var inputBuf = accelerator.Allocate1D<int>(groupSize);
+            using var outputBuf = accelerator.Allocate1D<int>(1); // only first thread writes
+
+            var inputData = new int[groupSize];
+            for (int i = 0; i < groupSize; i++) inputData[i] = i + 1;
+            inputBuf.CopyFromCPU(inputData);
+            outputBuf.MemSetToZero();
+
+            var kernel = accelerator.LoadStreamKernel<Index1D, ArrayView<int>, ArrayView<int>>(
+                GroupReduceKernel);
+            kernel(new KernelConfig(1, groupSize), (Index1D)groupSize, inputBuf.View, outputBuf.View);
+            await accelerator.SynchronizeAsync();
+
+            var result = await outputBuf.CopyToHostAsync<int>();
+            int expectedSum = groupSize * (groupSize + 1) / 2; // 2080
+            if (result[0] != expectedSum)
+                throw new Exception($"GroupReduce failed. Expected {expectedSum}, got {result[0]}");
+        });
+
+        #region Algorithm Kernel Methods
+
+
+        static void ExclusiveScanKernel(
+            Index1D index,
+            ArrayView<int> input,
+            ArrayView<int> output)
+        {
+            int gid = Grid.GlobalIndex.X;
+            int val = input[gid];
+            int scanned = GroupExtensions.ExclusiveScan<int, AddInt32>(val);
+            output[gid] = scanned;
+        }
+
+        static void InclusiveScanKernel(
+            Index1D index,
+            ArrayView<int> input,
+            ArrayView<int> output)
+        {
+            int gid = Grid.GlobalIndex.X;
+            int val = input[gid];
+            int scanned = GroupExtensions.InclusiveScan<int, AddInt32>(val);
+            output[gid] = scanned;
+        }
+
+        static void AllReduceKernel(
+            Index1D index,
+            ArrayView<int> input,
+            ArrayView<int> output)
+        {
+            int gid = Grid.GlobalIndex.X;
+            int val = input[gid];
+            int reduced = GroupExtensions.AllReduce<int, AddInt32>(val);
+            output[gid] = reduced;
+        }
+
+        static void ExclusiveScanWithBoundariesKernel(
+            Index1D index,
+            ArrayView<int> input,
+            ArrayView<int> output,
+            ArrayView<int> boundaryOutput)
+        {
+            int gid = Grid.GlobalIndex.X;
+            int val = input[gid];
+            int scanned = GroupExtensions.ExclusiveScanWithBoundaries<int, AddInt32>(
+                val, out ScanBoundaries<int> boundaries);
+            output[gid] = scanned;
+
+            // First thread writes boundaries
+            if (Group.IsFirstThread)
+            {
+                boundaryOutput[0] = boundaries.LeftBoundary;
+                boundaryOutput[1] = boundaries.RightBoundary;
+            }
+        }
+
+        static void GroupReduceKernel(
+            Index1D index,
+            ArrayView<int> input,
+            ArrayView<int> output)
+        {
+            int gid = Grid.GlobalIndex.X;
+            int val = input[gid];
+            int reduced = GroupExtensions.Reduce<int, AddInt32>(val);
+            // Only first thread writes the result
+            if (Group.IsFirstThread)
+                output[0] = reduced;
+        }
+
+        #endregion
+    }
+}
+

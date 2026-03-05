@@ -16,6 +16,7 @@ SpawnDev.ILGPU supports multiple backends for running ILGPU kernels. In the brow
 | **Group.Barrier()** | ✅ | ❌ | ✅ | ❌ |
 | **Dynamic Shared Memory** | ✅ | ❌ | ✅ | ❌ |
 | **Atomics** | ✅ | ❌ | ✅ | ⚠️ Crashes in WASM |
+| **ILGPU Algorithms** | ✅ RadixSort, Scan, Reduce, Histogram | ❌ | ⚠️ Scan/Reduce only (RadixSort excluded) | ❌ |
 | **64-bit (f64/i64)** | ✅ Emulated | ✅ Emulated | ✅ Native | ✅ Native |
 | **Browser support** | Chrome/Edge 113+ | All modern browsers | All modern browsers | All modern browsers |
 
@@ -122,8 +123,26 @@ using var accelerator = await devices[0].CreateAcceleratorAsync(context, options
 - **Shared memory** — `SharedMemory.Allocate<T>()` maps to `var<workgroup>`
 - **Barriers** — `Group.Barrier()` maps to `workgroupBarrier()`
 - **Atomics** — `Atomic.Add`, `Atomic.Min`, `Atomic.Max`, `Atomic.CompareExchange`
+- **ILGPU Algorithms** — RadixSort, Scan, Reduce, Histogram, and other algorithm extensions are fully supported and tested. Use `CreateRadixSortPairs<TKey, TValue>()`, `CreateScan()`, `CreateReduce()`, etc. the same way as on desktop backends
 - **Subgroups** — `Group.Broadcast`, `Warp.Shuffle` (when the `subgroups` extension is available)
 - **Auto-detected extensions** — probes adapter for `shader-f16`, `subgroups`, `timestamp-query`, etc.
+
+### ILGPU Algorithms (WebGPU)
+
+The WebGPU backend fully supports ILGPU.Algorithms, including RadixSort, Scan, Reduce, and Histogram. All algorithm tests pass in the browser test suite. Example:
+
+```csharp
+using ILGPU;
+using ILGPU.Algorithms;
+using ILGPU.Algorithms.RadixSortOperations;
+
+var radixSort = accelerator.CreateRadixSortPairs<float, Stride1D.Dense, int, Stride1D.Dense, AscendingFloat>();
+var tempSize = accelerator.ComputeRadixSortPairsTempStorageSize<float, int, AscendingFloat>(keys.Length);
+using var tempBuf = accelerator.Allocate1D<int>(tempSize);
+
+radixSort(stream, keys.View, values.View, tempBuf.View);
+await accelerator.SynchronizeAsync();
+```
 
 ### Browser Support
 
@@ -210,6 +229,7 @@ if (devices.Count > 0)
 - **Dynamic shared memory** — runtime-sized workgroup memory via `SharedMemory.GetDynamic()`
 - **Group.Broadcast** — intra-group value sharing
 - **Atomics** — supported via `SharedArrayBuffer`
+- **ILGPU Algorithms** — Scan and Reduce are supported. RadixSort is currently excluded due to a known infinite-loop bug in generated Wasm bytecode
 
 ### SharedArrayBuffer Requirement
 

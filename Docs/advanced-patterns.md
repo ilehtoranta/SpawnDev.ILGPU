@@ -135,6 +135,51 @@ static void AtomicCountKernel(Index1D index, ArrayView<int> data, ArrayView<int>
 | `Interop.FloatAsInt(float)` | Reinterpret float bits as int | Bitcast |
 | `Interop.IntAsFloat(int)` | Reinterpret int bits as float | Bitcast |
 
+## ILGPU Algorithms in the Browser
+
+ILGPU.Algorithms provides high-level primitives like RadixSort, Scan, Reduce, and Histogram. **WebGPU** fully supports these in the browser — same API as desktop, zero code changes.
+
+### RadixSort (WebGPU)
+
+RadixSort is ideal for GPU-based sorting of key-value pairs (e.g., for Gaussian splat rendering). Works with arbitrary element counts and ascending/descending order:
+
+```csharp
+using ILGPU;
+using ILGPU.Algorithms;
+using ILGPU.Algorithms.RadixSortOperations;
+
+var radixSort = accelerator.CreateRadixSortPairs<float, Stride1D.Dense, int, Stride1D.Dense, AscendingFloat>();
+var tempSize = accelerator.ComputeRadixSortPairsTempStorageSize<float, int, AscendingFloat>(keys.Length);
+using var tempBuf = accelerator.Allocate1D<int>(tempSize);
+
+radixSort(stream, keys.View, values.View, tempBuf.View);
+await accelerator.SynchronizeAsync();
+```
+
+### Reduce & Scan (WebGPU, Wasm)
+
+Reduce and inclusive/exclusive scan work on WebGPU and Wasm:
+
+```csharp
+var reduce = accelerator.CreateReduce<int, Stride1D.Dense, AddInt32>();
+var result = await reduce(stream, input.View);
+await accelerator.SynchronizeAsync();
+
+var scan = accelerator.CreateScan<int, Stride1D.Dense, Stride1D.Dense, AddInt32>(ScanKind.Inclusive);
+scan(stream, input.View, output.View, tempView);
+```
+
+### Backend Support
+
+| Algorithm | WebGPU | WebGL | Wasm |
+|-----------|--------|-------|------|
+| RadixSort | ✅ | ❌ | ❌ (excluded) |
+| Scan | ✅ | ❌ | ✅ |
+| Reduce | ✅ | ❌ | ✅ |
+| Histogram | ✅ | ❌ | ✅ |
+
+WebGL lacks shared memory and barriers, so algorithm extensions are not available there.
+
 ## GPUDevice Sharing
 
 Share a `GPUDevice` between SpawnDev.ILGPU and another WebGPU library (e.g., ONNX Runtime Web, Three.js). This allows both libraries to access the same GPU buffers without copying.

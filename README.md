@@ -79,6 +79,7 @@ Comprehensive documentation is available in the [Docs](Docs/) folder:
 | **Shared Memory** | ✅ | ❌ | ✅ | ⚠️ Single-threaded |
 | **Group.Barrier()** | ✅ | ❌ | ✅ | ❌ |
 | **Dynamic Shared Memory** | ✅ | ❌ | ✅ | ❌ |
+| **ILGPU Algorithms** | ✅ RadixSort, Scan, Reduce, etc. | ❌ | ⚠️ RadixSort excluded (Wasm bug) | ⚠️ Barriers unsupported |
 | **Atomics** | ✅ | ❌ | ✅ | ⚠️ Crashes in WASM |
 | **64-bit (f64/i64)** | ✅ Emulated | ✅ Emulated | ✅ Native | ✅ Native |
 | **Browser support** | Chrome/Edge 113+ | All modern browsers | All modern browsers | All modern browsers |
@@ -118,6 +119,7 @@ SpawnDev.ILGPU bundles ILGPU's native backends, so the same NuGet package works 
 - **Multi-worker dispatch** — Wasm backend distributes work across all available CPU cores via SharedArrayBuffer; falls back to a single off-thread worker when SAB is unavailable
 - **Blazor WebAssembly** — Seamless integration via [SpawnDev.BlazorJS](https://github.com/LostBeard/SpawnDev.BlazorJS)
 - **Shared memory & barriers** — Static and dynamic workgroup memory with `Group.Barrier()` synchronization (WebGPU, Wasm, Cuda, OpenCL)
+- **ILGPU Algorithms** — RadixSort, Scan, Reduce, Histogram, and other algorithm extensions are fully supported on WebGPU and tested in-browser; Wasm supports Scan/Reduce (RadixSort has a known bug)
 - **Broadcast** — `Group.Broadcast` for intra-group value sharing (WebGPU, Wasm)
 - **GpuMatrix4x4** — GPU-friendly 4×4 matrix struct that auto-transposes from .NET's row-major `Matrix4x4` to GPU column-major order. Use `TransformPoint` and `TransformDirection` directly inside kernels for 3D transformations
 - **No native dependencies** — Entirely written in C#
@@ -302,6 +304,7 @@ _test.bat
 | **Shared Memory** | Static and dynamic workgroup memory with `Group.Barrier()` | ✅ |
 | **Broadcast & Subgroups** | `Group.Broadcast`, `Warp.Shuffle` (WebGPU with subgroups extension) | ✅ |
 | **Dynamic Shared Memory** | Runtime-sized workgroup memory via `SharedMemory.GetDynamic()` | ✅ |
+| **ILGPU Algorithms** | RadixSort (pairs, non-pow2, descending, large), Scan, Reduce, Histogram | ✅ WebGPU, Wasm (RadixSort excluded on Wasm) |
 | **Special Values** | NaN, Infinity detection | ✅ |
 | **Backend Selection** | Auto-discovery, priority, cross-backend kernel execution | ✅ |
 | **GpuMatrix4x4** | Identity, translation, LookAt transforms across all backends | ✅ |

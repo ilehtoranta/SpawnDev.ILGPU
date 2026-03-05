@@ -40,15 +40,36 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 WGSLTypeGenerator typeGenerator,
                 EntryPoint entryPoint,
                 AllocaKindInformation sharedAllocations,
-                AllocaKindInformation dynamicSharedAllocations)
+                AllocaKindInformation dynamicSharedAllocations,
+                int? maxWorkgroupSize = null)
             {
                 Backend = backend;
                 TypeGenerator = typeGenerator;
                 EntryPoint = entryPoint;
                 SharedAllocations = sharedAllocations;
                 DynamicSharedAllocations = dynamicSharedAllocations;
+                MaxWorkgroupSize = maxWorkgroupSize;
                 DynamicSharedOverrides = new List<DynamicSharedOverrideInfo>();
                 ScalarPackingManifest = new List<ScalarPackingEntry>();
+                HelperMethods = new Dictionary<Method, Allocas>();
+                
+                // Pre-populate SharedMemoryVarNames with deterministic names.
+                // This MUST happen before helper function generators run (which is
+                // before the kernel generator), so both can use the same names.
+                // We store both the var name AND the full declaration string because
+                // the helper function generator needs to emit the declaration but
+                // doesn't have access to AllocaKindInformation metadata.
+                SharedMemoryVarNames = new Dictionary<Value, (string Name, string Declaration)>();
+                int sharedIdx = 0;
+                foreach (var alloca in sharedAllocations)
+                {
+                    var name = $"shared_{sharedIdx}";
+                    var wgslType = typeGenerator[alloca.ElementType];
+                    int entryCount = (int)alloca.ArraySize;
+                    var declaration = $"var<workgroup> {name} : array<{wgslType}, {entryCount}>;";
+                    SharedMemoryVarNames[alloca.Alloca] = (name, declaration);
+                    sharedIdx++;
+                }
             }
 
             /// <summary>The parent backend.</summary>
@@ -67,6 +88,15 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             public AllocaKindInformation DynamicSharedAllocations { get; }
 
             /// <summary>
+            /// The maximum workgroup size for this kernel, derived from KernelSpecialization.
+            /// When set, this overrides the hardcoded default workgroup sizes (64 for 1D, etc.)
+            /// to match the actual group dimension used during kernel compilation.
+            /// This is critical for explicitly grouped kernels where SpecializedValue<int>(groupDim)
+            /// triggers recompilation with a specific group size that must match @workgroup_size.
+            /// </summary>
+            public int? MaxWorkgroupSize { get; }
+
+            /// <summary>
             /// Populated by the kernel code generator during GenerateHeader() with
             /// the WGSL override constant names for dynamic shared memory.
             /// </summary>
@@ -77,6 +107,27 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             /// the scalar parameter packing layout for this kernel.
             /// </summary>
             public List<ScalarPackingEntry> ScalarPackingManifest { get; }
+
+            /// <summary>
+            /// Populated by the kernel code generator at the end of GenerateHeader() with
+            /// the total number of @group(0) bindings emitted. Used at runtime to validate
+            /// that the bind group entry count matches the WGSL layout. List with 1 element (mutable in readonly struct).
+            /// </summary>
+            public List<int> ExpectedBindingCountHolder { get; } = new() { 0 };
+
+            /// <summary>
+            /// Maps shared memory Alloca IR values to their module-scope WGSL variable names
+            /// and full declarations. Pre-populated in constructor from backendContext.
+            /// The tuple contains (VarName, FullDeclaration) where Declaration is
+            /// the complete WGSL var<workgroup> statement ready to emit.
+            /// </summary>
+            public Dictionary<Value, (string Name, string Declaration)> SharedMemoryVarNames { get; }
+
+            /// <summary>
+            /// Maps helper methods to their allocas for inlining at call sites.
+            /// Populated by WebGPUBackend.CreateFunctionCodeGenerator().
+            /// </summary>
+            public Dictionary<Method, Allocas> HelperMethods { get; }
         }
 
         /// <summary>
@@ -107,10 +158,15 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         protected int labelCounter = 0;
         protected readonly Dictionary<Value, Variable> valueVariables = new();
         private readonly Dictionary<BasicBlock, string> blockLabels = new();
+        protected readonly GeneratorArgs _baseArgs;
 
         // Local array support (NewArray + LoadArrayElementAddress)
         protected readonly Dictionary<string, string> _allocaArrayNames = new();
         protected int _localArrayCounter = 0;
+
+        // Track local alloca variable names (declared as WGSL 'var', NOT pointers).
+        // Store/Load/LoadFieldAddress must NOT use pointer dereference (*) on these.
+        protected readonly HashSet<string> _localAllocaVarNames = new();
 
         // Flag to tracking if we are generating code within the state machine loop
         protected bool IsStateMachineActive { get; set; } = false;
@@ -127,6 +183,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             TypeGenerator = args.TypeGenerator;
             Method = method;
             Allocas = allocas;
+            _baseArgs = args;
 
             Builder = prefixBuilder;
         }
@@ -215,6 +272,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         {
             var name = $"v_{varCounter++}";
             var type = TypeGenerator[value.Type];
+            if (type.StartsWith("ptr<"))
+                if (WebGPUBackend.VerboseLogging) Console.WriteLine($"[DIAG-ALLOCATE] Allocated {name} with ptr type '{type}' for IR value type={value.Type} kind={value.GetType().Name} hash={value.GetHashCode()}");
             var variable = new Variable(name, type);
             valueVariables[value] = variable;
             return variable;
@@ -237,6 +296,51 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         {
             if (!valueVariables.TryGetValue(value, out var variable))
             {
+                // CRITICAL: Intercept shared-address-space Alloca values.
+                // The Alloca node from backendContext.SharedAllocations (stored in
+                // SharedMemoryVarNames) may be a DIFFERENT object instance from the one
+                // referenced in the function body's IR. We detect shared Alloca values
+                // by type and redirect them to the pre-registered module-scope variable.
+                if (value is Alloca alloca && alloca.AddressSpace == MemoryAddressSpace.Shared)
+                {
+                    // Match by element type + array size to find the correct SharedMemoryVarNames
+                    // entry. The old "first unassigned" strategy can grab the wrong entry when
+                    // multiple shared allocations exist (e.g. RadixSort's histogram buffer vs
+                    // ExclusiveScan's workspace), swapping their array sizes.
+                    string allocaElemStr = alloca.AllocaType.ToString();
+                    long allocaSize = alloca.ArrayLength.Resolve() is global::ILGPU.IR.Values.PrimitiveValue pv
+                        ? pv.Int64Value : -1;
+                    // First pass: try to match by element type + array size
+                    foreach (var kvp in _baseArgs.SharedMemoryVarNames)
+                    {
+                        var (varName, declaration) = kvp.Value;
+                        if (valueVariables.Any(kv => kv.Value.Name == varName && kv.Key != value))
+                            continue;
+                        if (kvp.Key is Alloca candidate
+                            && candidate.AllocaType.ToString() == allocaElemStr
+                            && candidate.ArrayLength.Resolve() is global::ILGPU.IR.Values.PrimitiveValue cpv
+                            && cpv.Int64Value == allocaSize)
+                        {
+                            var wgslType = TypeGenerator[value.Type];
+                            var sharedVar = new Variable(varName, wgslType);
+                            valueVariables[value] = sharedVar;
+                            if (WebGPUBackend.VerboseLogging) Console.WriteLine($"[DIAG-LOAD-SHARED] Matched shared Alloca (hash={value.GetHashCode()}, size={allocaSize}) to '{varName}' by type+size");
+                            return sharedVar;
+                        }
+                    }
+                    // Second pass: fall back to first unassigned entry (single-allocation case)
+                    foreach (var kvp in _baseArgs.SharedMemoryVarNames)
+                    {
+                        var (varName, declaration) = kvp.Value;
+                        if (valueVariables.Any(kv => kv.Value.Name == varName && kv.Key != value))
+                            continue;
+                        var wgslType = TypeGenerator[value.Type];
+                        var sharedVar = new Variable(varName, wgslType);
+                        valueVariables[value] = sharedVar;
+                        if (WebGPUBackend.VerboseLogging) Console.WriteLine($"[DIAG-LOAD-SHARED] Fallback: redirected shared Alloca (hash={value.GetHashCode()}) to '{varName}'");
+                        return sharedVar;
+                    }
+                }
                 variable = Allocate(value);
             }
             return variable;
@@ -257,10 +361,19 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         /// <summary>
         /// Declares a variable in the current scope.
         /// </summary>
-        protected void Declare(Variable variable)
+        protected virtual void Declare(Variable variable)
         {
             if (declaredVariables.Contains(variable.Name)) return;
             declaredVariables.Add(variable.Name);
+
+            // WGSL: pointer types (ptr<workgroup, ...>, ptr<storage, ...>, ptr<function, ...>)
+            // are not constructible and cannot be declared with 'var'. Skip declaration — these
+            // are bound via 'let' at the point of assignment or come from function parameters.
+            if (variable.Type.StartsWith("ptr<"))
+            {
+                if (WebGPUBackend.VerboseLogging) Console.WriteLine($"[DIAG-DECLARE] Skipping ptr type declaration for {variable.Name} : {variable.Type}");
+                return;
+            }
 
             if (IsStateMachineActive)
             {
@@ -412,6 +525,9 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 // though logic should ensure assignment before exit.
                 string zeroVal = returnType.StartsWith("bool") ? "false" : (returnType.StartsWith("f") ? "0.0" : "0");
                 if (returnType.StartsWith("vec")) zeroVal = $"{returnType}()"; // zero init vector
+                // emu_i64/emu_u64/emu_f64 are type aliases for vec types — use the alias as constructor
+                // which automatically matches the correct component count (vec2 or vec4 depending on mode)
+                if (returnType == "emu_i64" || returnType == "emu_u64" || returnType == "emu_f64") zeroVal = $"{returnType}()";
 
                 AppendLine($"var _ilgpu_return_val : {returnType} = {zeroVal};");
             }
@@ -467,18 +583,48 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
                     // Infer type from the expression for the var declaration
                     string inferredType = "bool"; // default for comparisons
-                    if (expr.Contains("&param") || expr.Contains("&temp_") || expr.Contains("&local_arr_"))
+                    // Pointer aliases — expressions starting with '&' create references
+                    // that can't be declared as 'var'. Handle based on complexity:
+                    // - Simple refs (&identifier): hoist to function scope
+                    // - Complex refs (&identifier[index]): keep in block (index may be block-local)
+                    if (expr.TrimStart().StartsWith("&"))
                     {
-                        // Pointer aliases — keep as let (they can't be var since var can't hold references)
+                        var trimmed = expr.TrimStart();
+                        bool isSimpleRef = System.Text.RegularExpressions.Regex.IsMatch(trimmed, @"^&\w+$");
+                        if (isSimpleRef)
+                        {
+                            VariableBuilder.AppendLine($"    let {varName} = {trimmed};");
+                            return ""; // Remove from case block; hoisted to function scope
+                        }
+                        // Complex pointer ref — keep as 'let' in the block
                         return match.Value;
                     }
-                    else if (expr.Contains("f64_from_f32") || expr.Contains("f64_add") || expr.Contains("f64_sub") || expr.Contains("f64_mul") || expr.Contains("f64_div"))
+                    else if (expr.Contains("f64_from_f32") || expr.Contains("f64_add") || expr.Contains("f64_sub") || expr.Contains("f64_mul") || expr.Contains("f64_div") ||
+                             expr.Contains("f64_neg") || expr.Contains("f64_from_ieee754") || expr.Contains("emu_f64(") ||
+                             expr.Contains("f64_abs") || expr.Contains("f64_min") || expr.Contains("f64_max"))
                     {
                         inferredType = "emu_f64"; // vec2<f32> alias
                     }
-                    else if (expr.Contains("f32(") || expr.Contains("f64_to_f32"))
+                    else if (expr.Contains("i64_from_i32") || expr.Contains("u64_from_u32") ||
+                             expr.Contains("i64_add") || expr.Contains("i64_sub") || expr.Contains("i64_mul") ||
+                             expr.Contains("u64_mul") || expr.Contains("i64_neg") || expr.Contains("i64_abs") ||
+                             expr.Contains("i64_and") || expr.Contains("i64_or") || expr.Contains("i64_xor") ||
+                             expr.Contains("i64_shl") || expr.Contains("i64_shr") || expr.Contains("u64_shr") ||
+                             expr.Contains("i64_not") || expr.Contains("emu_i64(") || expr.Contains("emu_u64("))
+                    {
+                        inferredType = "emu_i64"; // vec2<u32> alias
+                    }
+                    else if (expr.Contains("f64_to_f32") || expr.Contains("f32("))
                     {
                         inferredType = "f32";
+                    }
+                    else if (expr.Contains("i64_to_i32"))
+                    {
+                        inferredType = "i32";
+                    }
+                    else if (expr.Contains("u64_to_u32"))
+                    {
+                        inferredType = "u32";
                     }
                     else if (expr.Contains("i32("))
                     {
@@ -499,6 +645,19 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                                 break;
                             }
                         }
+                    }
+
+                    // WGSL: pointer types are not constructible and can't be declared as 'var'.
+                    // Hoist simple identifier pointers; keep complex expressions in block.
+                    if (inferredType.StartsWith("ptr<"))
+                    {
+                        bool isSimpleIdent = System.Text.RegularExpressions.Regex.IsMatch(expr.Trim(), @"^\w+$");
+                        if (isSimpleIdent)
+                        {
+                            VariableBuilder.AppendLine($"    let {varName} = {expr.Trim()};");
+                            return ""; // Remove from case block; hoisted to function scope
+                        }
+                        return match.Value; // Keep complex pointer expressions in block
                     }
 
                     if (!hoistedVars.ContainsKey(varName))
@@ -562,6 +721,10 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             {
                 var variable = Allocate(allocaInfo.Alloca);
                 var elementType = TypeGenerator[allocaInfo.ElementType];
+
+                // Track this variable as a local alloca value type (not a pointer).
+                // Store/Load/LoadFieldAddress must NOT dereference these with '*'.
+                _localAllocaVarNames.Add(variable.Name);
 
                 if (allocaInfo.IsArray)
                 {
@@ -848,6 +1011,10 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 BinaryArithmeticKind.Max => "max",
                 BinaryArithmeticKind.Rem when TypeGenerator[value.Left.Type].StartsWith("f") => "frem",
                 BinaryArithmeticKind.Rem => "%",
+                BinaryArithmeticKind.PowF => "pow_func",
+                BinaryArithmeticKind.Atan2F => "atan2_func",
+                BinaryArithmeticKind.BinaryLogF => "binarylog_func",
+                BinaryArithmeticKind.CopySignF => "copysign_func",
                 _ => "+"
             };
 
@@ -926,6 +1093,23 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     AppendLine($"{target} = {op}({left}, {right});");
                 }
             }
+            else if (op == "pow_func")
+            {
+                AppendLine($"{target} = pow({left}, {right});");
+            }
+            else if (op == "atan2_func")
+            {
+                AppendLine($"{target} = atan2({left}, {right});");
+            }
+            else if (op == "binarylog_func")
+            {
+                AppendLine($"{target} = log({left}) / log({right});");
+            }
+            else if (op == "copysign_func")
+            {
+                // WGSL has no copysign builtin; emulate: sign(right) * abs(left)
+                AppendLine($"{target} = sign({right}) * abs({left});");
+            }
             else
             {
                 AppendLine($"{target} = {left} {op} {right};");
@@ -976,6 +1160,15 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 UnaryArithmeticKind.RcpF => $"1.0 / {operand}",
                 UnaryArithmeticKind.FloorF => $"floor({operand})",
                 UnaryArithmeticKind.CeilingF => $"ceil({operand})",
+                UnaryArithmeticKind.Log10F => $"(log({operand}) / 2.302585093)",
+                UnaryArithmeticKind.IsNaNF => $"({operand} != {operand})",
+                UnaryArithmeticKind.IsInfF => $"(abs({operand}) == (1.0 / 0.0))",
+                UnaryArithmeticKind.IsFinF => $"(({operand} == {operand}) && (abs({operand}) != (1.0 / 0.0)))",
+
+                // Bit Operations
+                UnaryArithmeticKind.PopC => $"i32(countOneBits({operand}))",
+                UnaryArithmeticKind.CLZ => $"i32(countLeadingZeros({operand}))",
+                UnaryArithmeticKind.CTZ => $"i32(countTrailingZeros({operand}))",
 
                 _ => "DEBUG_MISSING"
             };
@@ -1025,6 +1218,34 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 _ => "=="
             };
 
+            // Check for emulated 64-bit operands
+            string leftType = TypeGenerator[value.Left.Type];
+            string rightType = TypeGenerator[value.Right.Type];
+            bool isEmulatedI64 = (leftType == "emu_i64" || leftType == "emu_u64" ||
+                                  rightType == "emu_i64" || rightType == "emu_u64");
+
+            if (isEmulatedI64)
+            {
+                // Use 64-bit emulation comparison functions instead of raw operators
+                // (raw >= on vec2<u32> returns vec2<bool>, not bool)
+                bool isUnsigned = leftType == "emu_u64" || rightType == "emu_u64" || value.IsUnsignedOrUnordered;
+                string? emulFunc = value.Kind switch
+                {
+                    CompareKind.LessThan => isUnsigned ? "u64_lt" : "i64_lt",
+                    CompareKind.LessEqual => isUnsigned ? "u64_le" : "i64_le",
+                    CompareKind.GreaterThan => isUnsigned ? "u64_gt" : "i64_gt",
+                    CompareKind.GreaterEqual => isUnsigned ? "u64_ge" : "i64_ge",
+                    CompareKind.Equal => "i64_eq",
+                    CompareKind.NotEqual => "i64_ne",
+                    _ => null
+                };
+                if (emulFunc != null)
+                {
+                    AppendLine($"{target} = {emulFunc}({left}, {right});");
+                    return;
+                }
+            }
+
             // For unsigned integer comparisons, WGSL operators are type-sensitive:
             // i32 < i32 is signed, u32 < u32 is unsigned.
             // When ILGPU flags the comparison as unsigned, bitcast operands to u32.
@@ -1049,8 +1270,36 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             var target = Load(value);
             var source = Load(value.Value);
             var targetType = TypeGenerator[value.Type];
+            var sourceType = TypeGenerator[value.Value.Type];
             Declare(target);
-            AppendLine($"{target} = {targetType}({source});");
+
+            // Handle emulated 64-bit type conversions.
+            // emu_i64/emu_u64 are type aliases for vec2<u32> (lo, hi).
+            bool targetIsEmu64 = targetType == "emu_i64" || targetType == "emu_u64";
+            bool sourceIsEmu64 = sourceType == "emu_i64" || sourceType == "emu_u64";
+
+            if (targetIsEmu64 && !sourceIsEmu64)
+            {
+                // Widening: i32/u32/f32 → emu_i64/emu_u64
+                // Convert source to u32, then zero-extend to vec2<u32>(lo, 0u)
+                AppendLine($"{target} = vec2<u32>(u32({source}), 0u);");
+            }
+            else if (!targetIsEmu64 && sourceIsEmu64)
+            {
+                // Narrowing: emu_i64/emu_u64 → i32/u32/f32
+                // Take low word (.x) and cast to target type
+                AppendLine($"{target} = {targetType}({source}.x);");
+            }
+            else if (targetType == "emu_f64" && !sourceIsEmu64)
+            {
+                // emu_f64 widening from f32: use vec2<u32> with bitcast
+                AppendLine($"{target} = vec2<u32>(bitcast<u32>(f32({source})), 0u);");
+            }
+            else
+            {
+                // Standard conversion (or emu_i64 → emu_u64 which are same repr)
+                AppendLine($"{target} = {targetType}({source});");
+            }
         }
 
         // Memory Operations
@@ -1070,9 +1319,16 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 sourceType = TypeGenerator[elemType];
             }
 
+            // Local alloca variables are WGSL 'var' value types, not pointers — no dereference needed.
+            bool isAllocaVar = _localAllocaVarNames.Contains(source.Name);
+
             if (isAtomic)
             {
                 AppendLine($"{target} = atomicLoad({source});");
+            }
+            else if (isAllocaVar)
+            {
+                AppendLine($"{target} = {source};");
             }
             else if (targetType != sourceType)
             {
@@ -1096,9 +1352,16 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             if (storeVal.Target.Type is global::ILGPU.IR.Types.PointerType storePtrType)
                 targetElemType = TypeGenerator[storePtrType.ElementType];
 
+            // Local alloca variables are WGSL 'var' value types, not pointers — no dereference needed.
+            bool isAllocaVar = _localAllocaVarNames.Contains(address.Name);
+
             if (isAtomic)
             {
                 AppendLine($"atomicStore({address}, {val});");
+            }
+            else if (isAllocaVar)
+            {
+                AppendLine($"{address} = {val};");
             }
             else
             {
@@ -1136,8 +1399,41 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         {
             var target = Load(value);
             var source = Load(value.Pointer);
-            Declare(target);
-            AppendLine($"{target} = {source}; // newView");
+            // Detect shared memory by checking if the resolved source name
+            // matches any shared variable name from SharedMemoryVarNames.
+            bool isSharedSource = false;
+            foreach (var kvp in _baseArgs.SharedMemoryVarNames)
+            {
+                if (kvp.Value.Name == source.Name)
+                {
+                    isSharedSource = true;
+                    break;
+                }
+            }
+
+            if (isSharedSource)
+            {
+                // For shared memory: alias the target to the source array name (no WGSL emission).
+                // LoadElementAddress will then directly produce &shared_0[idx].
+                valueVariables[value] = new Variable(source.Name, source.Type);
+                if (WebGPUBackend.VerboseLogging) Console.WriteLine($"[DIAG-NEWVIEW-SHARED] Aliased {target} -> {source.Name} (no WGSL emit)");
+            }
+            else
+            {
+                // For non-shared buffer sources: emit a let binding to alias the pointer.
+                // CRITICAL: if a state machine is active, the let must be hoisted to
+                // function scope (VariableBuilder) so it's accessible across all case
+                // blocks. Without hoisting, v_22 declared in case 3 is unresolved in case 5.
+                declaredVariables.Add(target.Name);
+                if (IsStateMachineActive)
+                {
+                    VariableBuilder.AppendLine($"    let {target.Name} = {source}; // newView (hoisted)");
+                }
+                else
+                {
+                    AppendLine($"let {target.Name} = {source}; // newView");
+                }
+            }
         }
 
         /// <summary>
@@ -1178,7 +1474,11 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 };
             }
 
-            Builder.Append($"&(*{source}).{fieldName};");
+            // Local alloca variables are WGSL 'var' value types — use &source.field, not &(*source).field
+            if (_localAllocaVarNames.Contains(source.Name))
+                Builder.Append($"&{source}.{fieldName};");
+            else
+                Builder.Append($"&(*{source}).{fieldName};");
             Builder.AppendLine();
         }
 
@@ -1890,6 +2190,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 }
             }
 
+
             // Final fallback: emit a type-correct zero value to avoid WGSL type errors.
             // The 12345.0 literal previously used caused 'abstract-float to i32' type errors.
             AppendLine($"// Call: {methodCall.Target.Name} (Unmapped)");
@@ -2245,10 +2546,27 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         {
             var target = Load(value);
             var cond = Load(value.Condition);
-            var trueVal = Load(value.TrueValue);
-            var falseVal = Load(value.FalseValue);
             Declare(target);
-            AppendLine($"{target} = select({falseVal}, {trueVal}, {cond});");
+
+            bool trueHasLoad = value.TrueValue is global::ILGPU.IR.Values.Load;
+            bool falseHasLoad = value.FalseValue is global::ILGPU.IR.Values.Load;
+
+            if (trueHasLoad || falseHasLoad)
+            {
+                var trueVal = Load(value.TrueValue);
+                var falseVal = Load(value.FalseValue);
+                AppendLine($"if ({cond}) {{");
+                AppendLine($"    {target} = {trueVal};");
+                AppendLine($"}} else {{");
+                AppendLine($"    {target} = {falseVal};");
+                AppendLine($"}}");
+            }
+            else
+            {
+                var trueVal = Load(value.TrueValue);
+                var falseVal = Load(value.FalseValue);
+                AppendLine($"{target} = select({falseVal}, {trueVal}, {cond});");
+            }
         }
 
         public virtual void GenerateCode(DynamicMemoryLengthValue value)

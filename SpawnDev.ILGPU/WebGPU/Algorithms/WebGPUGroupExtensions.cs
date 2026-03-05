@@ -1,0 +1,177 @@
+// ---------------------------------------------------------------------------------------
+//                               SpawnDev.ILGPU
+//                    Copyright (c) 2024-2026 SpawnDev / LostBeard
+//
+// File: WebGPUGroupExtensions.cs
+//
+// WebGPU-specific group-level scan and reduce implementations.
+// Uses SharedMemory + Group.Barrier() approach (no warp shuffle needed).
+// ---------------------------------------------------------------------------------------
+
+using ILGPU;
+using ILGPU.Algorithms;
+using ILGPU.Algorithms.ScanReduceOperations;
+using System;
+using System.Runtime.CompilerServices;
+
+namespace SpawnDev.ILGPU.WebGPU.Algorithms
+{
+    /// <summary>
+    /// Custom WebGPU-specific group-level implementations.
+    /// Uses shared memory and barriers — all supported by the WebGPU backend.
+    /// </summary>
+    static class WebGPUGroupExtensions
+    {
+        #region Reduce
+
+        /// <summary cref="GroupExtensions.Reduce{T, TReduction}(T)"/>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static T Reduce<T, TReduction>(T value)
+            where T : unmanaged
+            where TReduction : struct, IScanReduceOperation<T> =>
+            AllReduce<T, TReduction>(value);
+
+        /// <summary cref="GroupExtensions.AllReduce{T, TReduction}(T)"/>
+        public static T AllReduce<T, TReduction>(T value)
+            where T : unmanaged
+            where TReduction : struct, IScanReduceOperation<T>
+        {
+            // Use shared memory approach — no warp shuffle needed.
+            // Every thread writes its value, then first thread reduces.
+            var sharedMemory = SharedMemory.Allocate<T>(1024);
+            sharedMemory[Group.LinearIndex] = value;
+            Group.Barrier();
+
+            // First thread performs sequential reduction
+            if (Group.IsFirstThread)
+            {
+                TReduction reduction = default;
+                T result = sharedMemory[0];
+                for (int i = 1; i < Group.Dimension.Size; ++i)
+                    result = reduction.Apply(result, sharedMemory[i]);
+                sharedMemory[0] = result;
+            }
+            Group.Barrier();
+
+            return sharedMemory[0];
+        }
+
+        #endregion
+
+        #region Scan
+
+        /// <summary cref="GroupExtensions.ExclusiveScan{T, TScanOperation}(T)"/>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static T ExclusiveScan<T, TScanOperation>(T value)
+            where T : unmanaged
+            where TScanOperation : struct, IScanReduceOperation<T> =>
+            ExclusiveScanWithBoundaries<T, TScanOperation>(value, out var _);
+
+        /// <summary cref="GroupExtensions.InclusiveScan{T, TScanOperation}(T)"/>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static T InclusiveScan<T, TScanOperation>(T value)
+            where T : unmanaged
+            where TScanOperation : struct, IScanReduceOperation<T> =>
+            InclusiveScanWithBoundaries<T, TScanOperation>(value, out var _);
+
+        /// <summary cref="GroupExtensions.ExclusiveScanWithBoundaries{T, TScanOperation}(
+        /// T, out ScanBoundaries{T})"/>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static T ExclusiveScanWithBoundaries<T, TScanOperation>(
+            T value,
+            out ScanBoundaries<T> boundaries)
+            where T : unmanaged
+            where TScanOperation : struct, IScanReduceOperation<T>
+        {
+            var sharedMemory = InclusiveScanImplementation<T, TScanOperation>(value);
+            boundaries = new ScanBoundaries<T>(
+                sharedMemory[0],
+                sharedMemory[Group.Dimension.Size - 1]);
+            return Group.IsFirstThread
+                ? default(TScanOperation).Identity
+                : sharedMemory[Group.LinearIndex - 1];
+        }
+
+        /// <summary cref="GroupExtensions.InclusiveScanWithBoundaries{T, TScanOperation}(
+        /// T, out ScanBoundaries{T})"/>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static T InclusiveScanWithBoundaries<T, TScanOperation>(
+            T value,
+            out ScanBoundaries<T> boundaries)
+            where T : unmanaged
+            where TScanOperation : struct, IScanReduceOperation<T>
+        {
+            var sharedMemory = InclusiveScanImplementation<T, TScanOperation>(
+                value);
+            boundaries = new ScanBoundaries<T>(
+                sharedMemory[0],
+                sharedMemory[Group.Dimension.Size - 1]);
+            return sharedMemory[Group.LinearIndex];
+        }
+
+        /// <summary>
+        /// Performs a group-wide inclusive scan using shared memory.
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static ArrayView<T> InclusiveScanImplementation<T, TScanOperation>(
+            T value)
+            where T : unmanaged
+            where TScanOperation : struct, IScanReduceOperation<T>
+        {
+            // Load values into shared memory
+            var sharedMemory = SharedMemory.Allocate<T>(1024);
+            sharedMemory[Group.LinearIndex] = value;
+            Group.Barrier();
+
+            // First thread performs sequential inclusive scan
+            if (Group.IsFirstThread)
+            {
+                TScanOperation scanOperation = default;
+                for (int i = 1; i < Group.Dimension.Size; ++i)
+                {
+                    sharedMemory[i] = scanOperation.Apply(
+                        sharedMemory[i - 1],
+                        sharedMemory[i]);
+                }
+            }
+            Group.Barrier();
+
+            return sharedMemory;
+        }
+
+        /// <summary>
+        /// Prepares for the next iteration of a group-wide exclusive scan.
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static T ExclusiveScanNextIteration<T, TScanOperation>(
+            T leftBoundary,
+            T rightBoundary,
+            T currentValue)
+            where T : unmanaged
+            where TScanOperation : struct, IScanReduceOperation<T>
+        {
+            var scanOperation = default(TScanOperation);
+            var nextBoundary = scanOperation.Apply(leftBoundary, rightBoundary);
+            return scanOperation.Apply(
+                nextBoundary,
+                Group.Broadcast(currentValue, Group.DimX - 1));
+        }
+
+        /// <summary>
+        /// Prepares for the next iteration of a group-wide inclusive scan.
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static T InclusiveScanNextIteration<T, TScanOperation>(
+            T leftBoundary,
+            T rightBoundary,
+            T currentValue)
+            where T : unmanaged
+            where TScanOperation : struct, IScanReduceOperation<T>
+        {
+            var scanOperation = default(TScanOperation);
+            return scanOperation.Apply(leftBoundary, rightBoundary);
+        }
+
+        #endregion
+    }
+}

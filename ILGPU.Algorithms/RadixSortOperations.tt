@@ -1,4 +1,4 @@
-﻿// ---------------------------------------------------------------------------------------
+// ---------------------------------------------------------------------------------------
 //                                   ILGPU Algorithms
 //                        Copyright (c) 2019-2023 ILGPU Project
 //                                    www.ilgpu.net
@@ -81,11 +81,11 @@ namespace ILGPU.Algorithms.RadixSortOperations
 <# } else if (type.IsFloat && type.Name == "Half") { #>
             var signMask = 1U << (NumBits - 1);
             var onesComplementMask =
-                ((uint)~(Interop.FloatAsInt(value)) >> (NumBits - 1));
+                ((uint)(Interop.FloatAsInt(value)) >> (NumBits - 1));
             var bits = Interop.FloatAsInt(value) ^ (signMask | onesComplementMask);
 <# } else if (type.IsFloat) { #>
             var signMask = 1<#= type.Name == "Double" ? "UL" : "U" #> << (NumBits - 1);
-            var onesComplementMask = (~(Interop.FloatAsInt(value)) >> (NumBits - 1));
+            var onesComplementMask = (Interop.FloatAsInt(value) >> (NumBits - 1));
             var bits = Interop.FloatAsInt(value) ^ (signMask | onesComplementMask);
 <# } else { #>
             var bits = value;

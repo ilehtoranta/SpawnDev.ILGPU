@@ -138,5 +138,47 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
         public new async Task MapReduceTest() =>
             throw new UnsupportedTestException("CPU: reduce kernel requires barriers (single-threaded WASM)");
 
+        // --- Part 6: Algorithm tests (scan, reduce, radix sort) ---
+        // These require barriers which CPU backend can't do in WASM.
+        [TestMethod]
+        public new async Task AlgorithmExclusiveScanTest() =>
+            throw new UnsupportedTestException("CPU: algorithm tests require barriers (single-threaded WASM)");
+
+        [TestMethod]
+        public new async Task AlgorithmInclusiveScanTest() =>
+            throw new UnsupportedTestException("CPU: algorithm tests require barriers (single-threaded WASM)");
+
+        [TestMethod]
+        public new async Task AlgorithmAllReduceTest() =>
+            throw new UnsupportedTestException("CPU: algorithm tests require barriers (single-threaded WASM)");
+
+        [TestMethod]
+        public new async Task AlgorithmRadixSortPairsTest() =>
+            throw new UnsupportedTestException("CPU: algorithm tests require barriers (single-threaded WASM)");
+
+        [TestMethod]
+        public new async Task AlgorithmRadixSortNonPow2Test() =>
+            throw new UnsupportedTestException("CPU: algorithm tests require barriers (single-threaded WASM)");
+
+        [TestMethod]
+        public new async Task AlgorithmExclusiveScanVaryingTest() =>
+            throw new UnsupportedTestException("CPU: algorithm tests require barriers (single-threaded WASM)");
+
+        [TestMethod]
+        public new async Task AlgorithmScanWithBoundariesTest() =>
+            throw new UnsupportedTestException("CPU: algorithm tests require barriers (single-threaded WASM)");
+
+        [TestMethod]
+        public new async Task AlgorithmRadixSortDescendingTest() =>
+            throw new UnsupportedTestException("CPU: algorithm tests require barriers (single-threaded WASM)");
+
+        [TestMethod]
+        public new async Task AlgorithmRadixSortLargeTest() =>
+            throw new UnsupportedTestException("CPU: algorithm tests require barriers (single-threaded WASM)");
+
+        [TestMethod]
+        public new async Task AlgorithmGroupReduceTest() =>
+            throw new UnsupportedTestException("CPU: algorithm tests require barriers (single-threaded WASM)");
+
     }
 }

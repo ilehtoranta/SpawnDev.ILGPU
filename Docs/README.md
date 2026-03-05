@@ -15,7 +15,7 @@ Comprehensive documentation for SpawnDev.ILGPU — run ILGPU C# kernels on WebGP
 - **[Memory & Buffers](memory-and-buffers.md)** — Allocation, data transfer, async readback, and buffer lifecycle
 
 ### Advanced
-- **[Advanced Patterns](advanced-patterns.md)** — GPU device sharing, external buffers, rendering pipelines, canvas blitting, and real-time render loops
+- **[Advanced Patterns](advanced-patterns.md)** — ILGPU Algorithms (RadixSort, Scan, Reduce), GPU device sharing, external buffers, rendering pipelines, canvas blitting
 - **[Limitations & Constraints](limitations.md)** — Blazor WASM restrictions, unsupported features, precision, and browser compatibility
 
 ### Reference

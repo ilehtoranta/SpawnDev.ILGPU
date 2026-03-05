@@ -412,7 +412,27 @@ namespace SpawnDev.ILGPU.Wasm
                             int structSize = global::ILGPU.Interop.SizeOf(value.GetType());
                             byte[] bytes = new byte[structSize];
                             var handle = System.Runtime.InteropServices.GCHandle.Alloc(bytes, System.Runtime.InteropServices.GCHandleType.Pinned);
-                            try { System.Runtime.InteropServices.Marshal.StructureToPtr(value, handle.AddrOfPinnedObject(), false); }
+                            try
+                            {
+                                // Marshal.StructureToPtr doesn't support generic types.
+                                // Use Unsafe.Write as fallback for generic structs (e.g. ReductionImplementation<T,TStride,TReduction>).
+                                if (value.GetType().IsGenericType)
+                                {
+                                    unsafe
+                                    {
+                                        byte* ptr = (byte*)handle.AddrOfPinnedObject();
+                                        // Use reflection to call Unsafe.Write<T> with the correct closed generic type
+                                        var unsafeWriteMethod = typeof(System.Runtime.CompilerServices.Unsafe)
+                                            .GetMethod("Write", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)!
+                                            .MakeGenericMethod(value.GetType());
+                                        unsafeWriteMethod.Invoke(null, new object[] { (IntPtr)ptr, value });
+                                    }
+                                }
+                                else
+                                {
+                                    System.Runtime.InteropServices.Marshal.StructureToPtr(value, handle.AddrOfPinnedObject(), false);
+                                }
+                            }
                             finally { handle.Free(); }
 
                             // Align to 4 bytes within scratch

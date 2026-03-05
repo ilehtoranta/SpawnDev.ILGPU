@@ -22,7 +22,9 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
 
         private async Task<(Context context, Accelerator accelerator)> CreateAcceleratorAsync(bool enableEmulation)
         {
-            var builder = Context.Create();
+            var builder = Context.Create()
+                .EnableAlgorithms();
+            builder.EnableWebGPUAlgorithms();
             await builder.WebGPU();
             var context = builder.ToContext();
             var devices = context.GetWebGPUDevices();
@@ -396,7 +398,9 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
 
         protected override async Task<(Context context, Accelerator accelerator)> CreateAcceleratorAsync()
         {
-            var builder = Context.Create();
+            var builder = Context.Create()
+                .EnableAlgorithms();
+            builder.EnableWebGPUAlgorithms();
             await builder.WebGPU();
             var context = builder.ToContext();
             var devices = context.GetWebGPUDevices();

@@ -1,15 +1,28 @@
+// ---------------------------------------------------------------------------------------
+//                               SpawnDev.ILGPU.Wasm
+//                    Copyright (c) 2024-2026 SpawnDev / LostBeard
+//
+// File: WasmIntrinsics.cs
+//
+// Provides throw-free wrapper stubs for .NET Math methods that contain
+// argument-validation throws. ILGPU inlines Math.Round/Truncate/Sign/Clamp
+// bodies which emit Throw instructions the Wasm transpiler cannot handle.
+// These wrappers are registered via RegisterRedirect so the compiler uses
+// them instead of the throwing .NET implementations.
+// ---------------------------------------------------------------------------------------
+
 using System.Runtime.CompilerServices;
 
-namespace SpawnDev.ILGPU.WebGL.Backend
+namespace SpawnDev.ILGPU.Wasm.Backend
 {
     /// <summary>
-    /// Provides WebGL-specific mathematical intrinsic implementations.
-    /// These methods are used as fallbacks during ILGPU-to-GLSL transpilation
-    /// when the standard math operations require special handling.
+    /// Wasm-specific math intrinsic wrappers.
+    /// All methods are marked NoInlining so ILGPU treats them as opaque call targets
+    /// whose bodies are transpiled by the Wasm code generator (no throw instructions).
     /// </summary>
-    public static class WebGLIntrinsics
+    public static class WasmIntrinsics
     {
-        // Unary float operations
+        // ── Unary float ──
 
         /// <summary>Returns the absolute value of a float.</summary>
         [MethodImpl(MethodImplOptions.NoInlining)]
@@ -21,13 +34,13 @@ namespace SpawnDev.ILGPU.WebGL.Backend
 
         /// <summary>Rounds a float to the nearest integer value.</summary>
         [MethodImpl(MethodImplOptions.NoInlining)]
-        public static float Round(float val) => MathF.Round(val, MidpointRounding.AwayFromZero);
+        public static float Round(float val) => MathF.Floor(val + 0.5f);
 
         /// <summary>Truncates a float toward zero.</summary>
         [MethodImpl(MethodImplOptions.NoInlining)]
-        public static float Truncate(float val) => MathF.Truncate(val);
+        public static float Truncate(float val) => val >= 0 ? MathF.Floor(val) : MathF.Ceiling(val);
 
-        // Binary float operations
+        // ── Binary float ──
 
         /// <summary>Returns the angle whose tangent is the quotient of y and x.</summary>
         [MethodImpl(MethodImplOptions.NoInlining)]
@@ -45,7 +58,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         [MethodImpl(MethodImplOptions.NoInlining)]
         public static float Pow(float x, float y) => MathF.Pow(x, y);
 
-        // Ternary float operations
+        // ── Ternary float ──
 
         /// <summary>Clamps a float value to the specified range.</summary>
         [MethodImpl(MethodImplOptions.NoInlining)]
@@ -55,7 +68,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         [MethodImpl(MethodImplOptions.NoInlining)]
         public static float FusedMultiplyAdd(float x, float y, float z) => x * y + z;
 
-        // Unary int operations
+        // ── Unary int ──
 
         /// <summary>Returns the absolute value of an int.</summary>
         [MethodImpl(MethodImplOptions.NoInlining)]
@@ -65,7 +78,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         [MethodImpl(MethodImplOptions.NoInlining)]
         public static int Sign(int val) => val > 0 ? 1 : val < 0 ? -1 : 0;
 
-        // Binary int operations
+        // ── Binary int ──
 
         /// <summary>Returns the larger of two int values.</summary>
         [MethodImpl(MethodImplOptions.NoInlining)]
@@ -79,7 +92,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         [MethodImpl(MethodImplOptions.NoInlining)]
         public static int Clamp(int value, int min, int max) => value < min ? min : value > max ? max : value;
 
-        // Rsqrt and Rcp for XMath compatibility
+        // ── XMath compatibility ──
 
         /// <summary>Returns the reciprocal square root (1/sqrt(x)) of a float.</summary>
         [MethodImpl(MethodImplOptions.NoInlining)]
@@ -97,15 +110,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         [MethodImpl(MethodImplOptions.NoInlining)]
         public static double Rcp(double val) => 1.0 / val;
 
-        // Additional integer types for IntrinsicMath compatibility
-
-        /// <summary>Returns the absolute value of an sbyte.</summary>
-        [MethodImpl(MethodImplOptions.NoInlining)]
-        public static sbyte Abs(sbyte val) => val < 0 ? (sbyte)(-val) : val;
-
-        /// <summary>Returns the absolute value of a short.</summary>
-        [MethodImpl(MethodImplOptions.NoInlining)]
-        public static short Abs(short val) => val < 0 ? (short)(-val) : val;
+        // ── Additional integer types for IntrinsicMath compatibility ──
 
         /// <summary>Returns the absolute value of a long.</summary>
         [MethodImpl(MethodImplOptions.NoInlining)]
@@ -115,14 +120,6 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         [MethodImpl(MethodImplOptions.NoInlining)]
         public static double Abs(double val) => val < 0 ? -val : val;
 
-        /// <summary>Returns the smaller of two sbyte values.</summary>
-        [MethodImpl(MethodImplOptions.NoInlining)]
-        public static sbyte Min(sbyte val1, sbyte val2) => val1 < val2 ? val1 : val2;
-
-        /// <summary>Returns the smaller of two short values.</summary>
-        [MethodImpl(MethodImplOptions.NoInlining)]
-        public static short Min(short val1, short val2) => val1 < val2 ? val1 : val2;
-
         /// <summary>Returns the smaller of two long values.</summary>
         [MethodImpl(MethodImplOptions.NoInlining)]
         public static long Min(long val1, long val2) => val1 < val2 ? val1 : val2;
@@ -130,14 +127,6 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         /// <summary>Returns the smaller of two double values.</summary>
         [MethodImpl(MethodImplOptions.NoInlining)]
         public static double Min(double val1, double val2) => val1 < val2 ? val1 : val2;
-
-        /// <summary>Returns the larger of two sbyte values.</summary>
-        [MethodImpl(MethodImplOptions.NoInlining)]
-        public static sbyte Max(sbyte val1, sbyte val2) => val1 > val2 ? val1 : val2;
-
-        /// <summary>Returns the larger of two short values.</summary>
-        [MethodImpl(MethodImplOptions.NoInlining)]
-        public static short Max(short val1, short val2) => val1 > val2 ? val1 : val2;
 
         /// <summary>Returns the larger of two long values.</summary>
         [MethodImpl(MethodImplOptions.NoInlining)]

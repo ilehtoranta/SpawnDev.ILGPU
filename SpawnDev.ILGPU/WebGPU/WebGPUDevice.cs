@@ -99,6 +99,17 @@ namespace SpawnDev.ILGPU.WebGPU
 
         #region Instance
 
+        private static T ReadLimit<T>(GPUAdapter adapter, Func<GPUSupportedLimits, T> reader, T fallback)
+        {
+            try
+            {
+                using var limits = adapter.Limits;
+                if (limits != null) return reader(limits);
+            }
+            catch { }
+            return fallback;
+        }
+
         private readonly GPUAdapter _adapter;
         private readonly int _deviceIndex;
         private bool _disposed;
@@ -175,29 +186,17 @@ namespace SpawnDev.ILGPU.WebGPU
                 // Features detection failed — leave empty set
             }
 
-            // Get limits safely
-            try
-            {
-                var limits = adapter.Limits;
-                MaxComputeWorkgroupSizeX = (int)(limits?.MaxComputeWorkgroupSizeX ?? 256);
-                MaxComputeWorkgroupSizeY = (int)(limits?.MaxComputeWorkgroupSizeY ?? 256);
-                MaxComputeWorkgroupSizeZ = (int)(limits?.MaxComputeWorkgroupSizeZ ?? 64);
-                MaxComputeInvocationsPerWorkgroup = (int)(limits?.MaxComputeInvocationsPerWorkgroup ?? 256);
-                MaxComputeWorkgroupsPerDimension = (int)(limits?.MaxComputeWorkgroupsPerDimension ?? 65535);
-                MaxComputeWorkgroupStorageSize = (int)(limits?.MaxComputeWorkgroupStorageSize ?? 16384);
-                MaxBufferSize = (long)(limits?.MaxBufferSize ?? 268435456); // 256 MB fallback
-            }
-            catch
-            {
-                // Use safe defaults if limits cannot be read
-                MaxComputeWorkgroupSizeX = 256;
-                MaxComputeWorkgroupSizeY = 256;
-                MaxComputeWorkgroupSizeZ = 64;
-                MaxComputeInvocationsPerWorkgroup = 256;
-                MaxComputeWorkgroupsPerDimension = 65535;
-                MaxComputeWorkgroupStorageSize = 16384;
-                MaxBufferSize = 268435456;
-            }
+            // Read limits individually so a single property failure doesn't reset all limits.
+            // Some WebGPU limits (e.g. maxBufferSize) are unsigned long long in the spec and
+            // may overflow int32 on certain adapters.
+            MaxComputeWorkgroupSizeX = ReadLimit(adapter, l => (int)(l.MaxComputeWorkgroupSizeX ?? 256), 256);
+            MaxComputeWorkgroupSizeY = ReadLimit(adapter, l => (int)(l.MaxComputeWorkgroupSizeY ?? 256), 256);
+            MaxComputeWorkgroupSizeZ = ReadLimit(adapter, l => (int)(l.MaxComputeWorkgroupSizeZ ?? 64), 64);
+            MaxComputeInvocationsPerWorkgroup = ReadLimit(adapter, l => (int)(l.MaxComputeInvocationsPerWorkgroup ?? 256), 256);
+            MaxComputeWorkgroupsPerDimension = ReadLimit(adapter, l => (int)(l.MaxComputeWorkgroupsPerDimension ?? 65535), 65535);
+            MaxComputeWorkgroupStorageSize = ReadLimit(adapter, l => (int)(l.MaxComputeWorkgroupStorageSize ?? 16384), 16384);
+            MaxBufferSize = ReadLimit(adapter, l => l.MaxBufferSize ?? 268435456L, 268435456L);
+            Backend.WebGPUBackend.Log($"[WebGPUDevice] Limits: Invocations={MaxComputeInvocationsPerWorkgroup}, WorkgroupSizeX={MaxComputeWorkgroupSizeX}, SharedMem={MaxComputeWorkgroupStorageSize}, MaxBuf={MaxBufferSize}, MaxBufType={typeof(GPUSupportedLimits).GetProperty("MaxBufferSize")?.PropertyType.Name ?? "?"}");
         }
 
         #endregion
