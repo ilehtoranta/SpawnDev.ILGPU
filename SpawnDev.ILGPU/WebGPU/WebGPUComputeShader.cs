@@ -53,6 +53,9 @@ namespace SpawnDev.ILGPU.WebGPU
             };
             _shaderModule = device.CreateShaderModule(shaderDescriptor);
 
+            // Push validation error scope to capture silent pipeline creation failures
+            device.PushErrorScope(GPUErrorFilter.Validation);
+
             // Create compute pipeline with optional override constants
             var programmableStage = new GPUProgrammableStage
             {
@@ -70,6 +73,10 @@ namespace SpawnDev.ILGPU.WebGPU
 
             // Get bind group layout
             _bindGroupLayout = _pipeline.GetBindGroupLayout(0);
+
+            // Fire-and-forget: log WGSL compilation messages and pipeline validation errors
+            var capturedModule = _shaderModule;
+            _ = CheckShaderAsync(capturedModule, entryPoint, device);
         }
 
         #endregion
@@ -140,6 +147,26 @@ namespace SpawnDev.ILGPU.WebGPU
         public void Dispatch(uint workgroupCountX, uint workgroupCountY = 1, uint workgroupCountZ = 1)
         {
             Accelerator.Dispatch(this, workgroupCountX, workgroupCountY, workgroupCountZ);
+        }
+
+        private static async Task CheckShaderAsync(GPUShaderModule shaderModule, string entryPoint, GPUDevice device)
+        {
+            try
+            {
+                using var info = await shaderModule.GetCompilationInfo();
+                foreach (var msg in info.Messages)
+                {
+                    if (msg.Type == "error" || msg.Type == "warning")
+                        Console.Error.WriteLine($"[WGSL-{msg.Type.ToUpper()}] {entryPoint} L{msg.LineNum}:{msg.LinePos} - {msg.Message}");
+                }
+                using var error = await device.PopErrorScope();
+                if (error != null)
+                    Console.Error.WriteLine($"[WebGPU-ValidationError] {entryPoint}: {error.Message}");
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"[WGSL-Check] Exception for {entryPoint}: {ex.Message}");
+            }
         }
 
         private void RebuildBindGroup()

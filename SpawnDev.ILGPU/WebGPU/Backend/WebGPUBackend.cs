@@ -694,6 +694,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             WebGPUBackend.Log("--- GENERATED WGSL ---");
             WebGPUBackend.Log(wgslSource);
             WebGPUBackend.Log("-----------------------");
+
+
             return new WebGPUCompiledKernel(
                 Context,
                 entryPoint,
@@ -845,6 +847,18 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         /// This lets the runtime correlate the packed scalar slot with the correct buffer binding.
         /// </summary>
         public int ViewBindingIndex { get; set; } = -1;
+
+        /// <summary>
+        /// True if this entry represents the element COUNT of a packed-struct body-struct view.
+        /// The runtime packs the actual element count (contiguous.Length) here so the WGSL
+        /// length field reads the true count instead of trying to derive it from arrayLength().
+        /// </summary>
+        public bool IsViewCount { get; set; }
+
+        /// <summary>
+        /// For IsViewCount entries: the binding index of the associated buffer.
+        /// </summary>
+        public int ViewCountBindingIndex { get; set; } = -1;
 
         /// <summary>Number of u32 slots this scalar occupies (1 for 4-byte, 2 for 8-byte).</summary>
         public int SlotCount => (ByteSize + 3) / 4;

@@ -104,19 +104,41 @@ Added `XMath.Min(Half, Half)`, `XMath.Max(Half, Half)`, and `XMath.Clamp(Half, H
 
 ---
 
-## 6. Medium-term: WebGPU WGSLCodeGenerator XOR-Butterfly Fallback
+## 6. ~~Medium-term: WebGPU WGSLCodeGenerator XOR-Butterfly Fallback~~ DONE
 
-**Location:** `SpawnDev.ILGPU/WebGPU/Backend/WGSLCodeGenerator.cs` (line ~2884)
+**Location:** `SpawnDev.ILGPU/WebGPU/Backend/WGSLCodeGenerator.cs`
 
-**TODO:** Implement full XOR-butterfly fallback when subgroups are unavailable. Currently emits passthrough so the shader compiles; shared-memory group reduce aggregates across warps. A proper fallback would improve correctness/performance when subgroups are disabled.
+**Solution implemented:** `GenerateWarpReduce` now emits a full binary-tree shared-memory butterfly reduction when `HasSubgroups` is false, replacing the previous passthrough no-op.
+
+- **`GetWarpReduceAccumOp` helper** — `private static` method mapping `subgroupMax` → `"max"`, `subgroupMin` → `"min"`, all others (add/and/or/xor) → `"+"`.
+- **Scalar path** — Sets `UsesWarpShuffleEmulation = true` (triggers `_warp_shuffle_buf` declaration), writes value to `_warp_shuffle_buf[local_index]`, then runs a loop from `workgroup_size.x / 2` down to 1 where only lanes `< stride` accumulate with their neighbor. All threads read the final result from lane-0 of their warp.
+- **64-bit emulated paths** — Ozaki `emu_f64` uses 4 slots per thread; Dekker `emu_f64` and `emu_i64`/`emu_u64` use 2 slots per thread, matching the existing `GenerateGroupAllReduce` layout. `GetEmulated64BitAccumExpr` handles correct i64/f64/u64 accumulation helpers.
+- **`UsesWarpShuffleEmulation = true`** triggers `var<workgroup> _warp_shuffle_buf : array<u32, 256>` in the kernel preamble (already sized for 64 threads × 4 Ozaki slots).
+
+**Unlocked:** Correct warp reductions on WebGPU when `subgroups` feature is unavailable (`WebGPUNoSubgroupsTests`).
 
 ---
 
-## 7. Future: WebGPU RadixSort Double Investigation
+## 7. ~~Future: WebGPU RadixSort Double/Long Investigation~~ DONE
 
-**Problem:** `AlgorithmRadixSortPairsDoubleTest` is skipped on WebGPU due to RadixSort with double keys being incompatible with f64 emulation (emu_f64).
+**Problem:** `AlgorithmRadixSortPairsDoubleTest` and `AlgorithmRadixSortPairsLongTest` were skipped/failing on WebGPU.
 
-**Scope:** Investigate whether the f64 emulation path can handle the bit-level operations RadixSort requires.
+**Root cause (phase 1 — `got=129`):** `AscendingDouble.ExtractRadixBits` calls `Interop.FloatAsInt(value)` (a `FloatAsIntCast` IR node). The handler emitted `target = bitcast<emu_i64>(emu_f64_value)`, reinterpreting Dekker `vec2<f32>` component bits instead of reconstructing the IEEE-754 64-bit pattern.
+
+**Root cause (phase 2 — `got=0`, memory layout):** `RadixSortPair<double, int>` in WGSL used `std430` 16-byte alignment, but the CPU-side struct is also 16 bytes (8+4+4 padding). A `struct_44 { emu_f64, i32 }` would be padded to 16 bytes in WGSL, causing a layout mismatch where the CPU wrote the `int` value at byte 8 but WGSL read it at byte 16.
+
+**Root cause (phase 3 — `got=0`, incorrect element count):** After fixing memory layout with "packed structs" (flattening struct fields into `array<u32>` with manual u32 offsets), `arrayLength()` on the packed buffer returned the raw `u32` count (`buffer_bytes / 4`). For `RadixSortPair<double, int>` with CPU element size 16 bytes vs GPU-packed element size 12 bytes (3 u32s), `arrayLength() / 3 = (count×4)/3 ≠ count` due to integer truncation (341 ≠ 256), causing kernels to process phantom zero-elements that sorted to position 0.
+
+**Root cause (phase 4 — `got=0`, propagation bug):** The `ViewCountSlot` (new `_scalar_params` slot for the true element count) was assigned on the VIEW field's `BodyStructFieldInfo`, but the length field code checked `ViewCountSlot` on the METADATA (length) field — which defaulted to `-1`, falling back to the incorrect `arrayLength()` calculation.
+
+**Solutions implemented:**
+- **`GenerateCode(FloatAsIntCast/IntAsFloatCast)`** — Added `emu_f64` branch using `f64_to/from_ieee754_bits` helpers.
+- **Packed structs** (`WGSLKernelFunctionGenerator.cs`) — Structs containing `emu_f64`/`emu_i64` fields are flattened to `array<u32>` storage. Fields are accessed via computed `base_idx * stride + field_offset` with `f64_from/to_ieee754_bits` conversions.
+- **`ViewCountSlot` mechanism** — CPU passes true element count to GPU via a dedicated `_scalar_params` slot (`IsViewCount` manifest entry). Eliminates reliance on `arrayLength()` for packed struct views.
+- **`ViewCountSlot` propagation fix** — After assigning `ViewCountSlot` on the view field, it is now propagated to all associated metadata (length) fields via `AssociatedViewBindingName` matching in both `SetupBodyStructParameters` and `GenerateHeader`.
+- **`WebGPUTests.cs`** — Removed skip overrides for `AlgorithmRadixSortPairsDoubleTest` and `AlgorithmRadixSortPairsLongTest` (both regular and NoSubgroups variants).
+
+**Unlocked:** `AlgorithmRadixSortPairsDoubleTest` and `AlgorithmRadixSortPairsLongTest` on WebGPU (both subgroups and no-subgroups variants). All 721 supported tests pass.
 
 ---
 
@@ -127,9 +149,9 @@ Added `XMath.Min(Half, Half)`, `XMath.Max(Half, Half)`, and `XMath.Clamp(Half, H
 | **CPUTests** | ~49 | WASM is single-threaded; barriers, atomics, subgroups impossible |
 | **WebGLTests** | ~52 | Vertex shaders lack shared memory, barriers, atomics |
 | **WasmTests** | ~20 | RadixSort infinite loops, struct decomposition unsupported, no subgroups |
-| **WebGPU** | 1–2 | RadixSort double (f64 emulation) |
+| **WebGPU** | 0 | All previously-skipped tests now pass |
 
-**Conclusion:** Nearly all skips are legitimate hardware/platform limitations, not bugs. Only the WebGPU RadixSort double case may be addressable via f64 emulation investigation.
+**Conclusion:** All skips are legitimate hardware/platform limitations, not bugs. 721 tests pass, 159 skipped, 0 failed.
 
 ---
 
@@ -163,7 +185,7 @@ Browser skip overrides added in `CPUTests.cs` and `WebGLTests.cs` for all 14 new
 
 | Item | Status |
 |------|--------|
-| **"READ-usage buffer was read back without waiting on a fence"** | Investigate adding fence/await to WebGPU read-back path to eliminate performance warnings |
+| **"READ-usage buffer was read back without waiting on a fence"** | Cosmetic — not actionable without per-frame latency regression; de-prioritised. This is a WebGL/ANGLE console warning emitted because ANGLE doesn't recognise `gl.finish()` as a fence signal. The async `fenceSync` alternative adds 4–50 ms per dispatch. WebGPU's own read-back already uses `await MapAsync` (correct fence). |
 | **Console verbosity** | Addressed with `#if DEBUG` and `VerboseLogging` flag |
 
 ---

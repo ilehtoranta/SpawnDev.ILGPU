@@ -2243,6 +2243,13 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 // Pack f16 into the low 16 bits of a u32 via vec2<f16>, then cast to i32.
                 AppendLine($"{target} = i32(bitcast<u32>(vec2<f16>({source}, f16(0.0))));");
             }
+            else if (source.Type == "emu_f64")
+            {
+                // emu_f64 is a Dekker vec2<f32> pair — not the raw IEEE-754 double bits.
+                // f64_to_ieee754_bits reconstructs the original 64-bit bit pattern as vec2<u32>,
+                // which matches the emu_i64/emu_u64 layout RadixSort bit-extraction requires.
+                AppendLine($"{target} = f64_to_ieee754_bits({source});");
+            }
             else
             {
                 AppendLine($"{target} = bitcast<{target.Type}>({source});");
@@ -2259,6 +2266,12 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 // i32 is 4 bytes, target f16 is 2 bytes -- size-mismatched bitcast is invalid in WGSL.
                 // Reinterpret u32 as vec2<f16> and extract the low half.
                 AppendLine($"{target} = bitcast<vec2<f16>>(u32({source})).x;");
+            }
+            else if (target.Type == "emu_f64")
+            {
+                // Reconstruct emu_f64 (Dekker vec2<f32>) from the IEEE-754 64-bit bit pattern
+                // stored as vec2<u32> (emu_i64 / emu_u64 layout).
+                AppendLine($"{target} = f64_from_ieee754_bits({source}.x, {source}.y);");
             }
             else
             {
@@ -2856,35 +2869,130 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         /// <summary>
         /// Generates WGSL code for a warp-level reduction (WarpExtensions.Reduce).
         /// Emits subgroupMax/Min/Add when subgroups are available, otherwise falls back
-        /// to a shared-memory butterfly reduction within the subgroup.
+        /// to a shared-memory butterfly reduction within the warp.
         /// The reduction operation type is determined by TReduction.CLCommand.
         /// </summary>
         public static void GenerateWarpReduce(WebGPUBackend backend, WGSLCodeGenerator codeGenerator, Value value)
         {
-            if (value is MethodCall methodCall)
+            if (value is not MethodCall methodCall) return;
+
+            var target = codeGenerator.LoadIntrinsicValue(value);
+            var operand = codeGenerator.LoadIntrinsicValue(methodCall[0].Resolve());
+            codeGenerator.Declare(target);
+
+            var srcMethodInfo = methodCall.Target.Source as MethodInfo;
+            string wgslOp = GetSubgroupReduceOp(srcMethodInfo);
+
+            if (backend.HasSubgroups && wgslOp != null)
             {
-                var target = codeGenerator.LoadIntrinsicValue(value);
-                var operand = codeGenerator.LoadIntrinsicValue(methodCall[0].Resolve());
-                codeGenerator.Declare(target);
-
-                // Determine the reduction operation from the TReduction type argument.
-                string wgslOp = GetSubgroupReduceOp(methodCall.Target.Source as MethodInfo);
-
-                if (backend.HasSubgroups && wgslOp != null)
-                {
-                    // Use native subgroup reduce intrinsic
-                    codeGenerator.AppendLine($"{target} = {wgslOp}({operand});");
-                }
-                else
-                {
-                    // Fallback: software butterfly warp reduce using shared memory would require
-                    // complex code generation. For now, emit a simple passthrough so the shader
-                    // at least compiles. The shared-memory group reduce (in ILGroupExtensions)
-                    // will aggregate these values across warps in a workgroup barrier.
-                    // TODO: Implement full XOR-butterfly fallback when subgroups are unavailable.
-                    codeGenerator.AppendLine($"{target} = {operand}; // warp reduce (subgroups unavailable)");
-                }
+                codeGenerator.AppendLine($"{target} = {wgslOp}({operand});");
+                return;
             }
+
+            // Shared-memory binary-tree warp reduce (subgroups unavailable).
+            // Each "warp" is workgroup_size.x threads (consistent with WarpShuffle emulation).
+            // Lane 0..workgroup_size.x-1 all contribute; after the loop, lane 0 holds the
+            // final result and all lanes read from their warp's slot 0.
+            string irType = codeGenerator.TypeGenerator[methodCall.Type];
+            string wgslType = codeGenerator.GetReductionWgslType(srcMethodInfo) ?? irType;
+            bool needsBitcast = wgslType != irType;
+            bool is64Bit = wgslType.StartsWith("emu_");
+            bool isOzakiF64 = wgslType == "emu_f64" && backend.Options.UseOzakiF64Emulation;
+            string wgslAccumOp = GetWarpReduceAccumOp(wgslOp);
+            string sfx = target.Name.Replace("v_", "_").TrimStart('_');
+
+            codeGenerator.UsesWarpShuffleEmulation = true;
+
+            // Step 1: all threads write their value into the shared buffer.
+            string storeVal = needsBitcast ? $"bitcast<{wgslType}>({operand})" : $"{operand}";
+            if (isOzakiF64)
+            {
+                codeGenerator.AppendLine($"{{ _warp_shuffle_buf[local_index * 4u] = bitcast<u32>({storeVal}.x); _warp_shuffle_buf[local_index * 4u + 1u] = bitcast<u32>({storeVal}.y); _warp_shuffle_buf[local_index * 4u + 2u] = bitcast<u32>({storeVal}.z); _warp_shuffle_buf[local_index * 4u + 3u] = bitcast<u32>({storeVal}.w); }}");
+            }
+            else if (is64Bit && wgslType == "emu_f64")
+            {
+                codeGenerator.AppendLine($"{{ let _wbits_{sfx} = f64_to_ieee754_bits({storeVal}); _warp_shuffle_buf[local_index * 2u] = _wbits_{sfx}.x; _warp_shuffle_buf[local_index * 2u + 1u] = _wbits_{sfx}.y; }}");
+            }
+            else if (is64Bit)
+            {
+                codeGenerator.AppendLine($"_warp_shuffle_buf[local_index * 2u] = {storeVal}.x;");
+                codeGenerator.AppendLine($"_warp_shuffle_buf[local_index * 2u + 1u] = {storeVal}.y;");
+            }
+            else
+            {
+                codeGenerator.AppendLine($"_warp_shuffle_buf[local_index] = {BitcastToU32(storeVal, wgslType)};");
+            }
+            codeGenerator.AppendLine("workgroupBarrier();");
+
+            // Build load expressions for "self" and "neighbor at local_index + _ws_<sfx>".
+            // These strings are WGSL fragments referencing the loop variable _ws_<sfx>.
+            string loadSelf, loadNeighbor;
+            if (isOzakiF64)
+            {
+                loadSelf     = $"emu_f64(bitcast<f32>(_warp_shuffle_buf[local_index * 4u]), bitcast<f32>(_warp_shuffle_buf[local_index * 4u + 1u]), bitcast<f32>(_warp_shuffle_buf[local_index * 4u + 2u]), bitcast<f32>(_warp_shuffle_buf[local_index * 4u + 3u]))";
+                loadNeighbor = $"emu_f64(bitcast<f32>(_warp_shuffle_buf[(local_index + _ws_{sfx}) * 4u]), bitcast<f32>(_warp_shuffle_buf[(local_index + _ws_{sfx}) * 4u + 1u]), bitcast<f32>(_warp_shuffle_buf[(local_index + _ws_{sfx}) * 4u + 2u]), bitcast<f32>(_warp_shuffle_buf[(local_index + _ws_{sfx}) * 4u + 3u]))";
+            }
+            else if (is64Bit && wgslType == "emu_f64")
+            {
+                loadSelf     = $"f64_from_ieee754_bits(_warp_shuffle_buf[local_index * 2u], _warp_shuffle_buf[local_index * 2u + 1u])";
+                loadNeighbor = $"f64_from_ieee754_bits(_warp_shuffle_buf[(local_index + _ws_{sfx}) * 2u], _warp_shuffle_buf[(local_index + _ws_{sfx}) * 2u + 1u])";
+            }
+            else if (is64Bit)
+            {
+                loadSelf     = $"{wgslType}(_warp_shuffle_buf[local_index * 2u], _warp_shuffle_buf[local_index * 2u + 1u])";
+                loadNeighbor = $"{wgslType}(_warp_shuffle_buf[(local_index + _ws_{sfx}) * 2u], _warp_shuffle_buf[(local_index + _ws_{sfx}) * 2u + 1u])";
+            }
+            else
+            {
+                loadSelf     = BitcastFromU32("_warp_shuffle_buf[local_index]", wgslType);
+                loadNeighbor = BitcastFromU32($"_warp_shuffle_buf[local_index + _ws_{sfx}]", wgslType);
+            }
+
+            // Build write-back expressions for self slot after accumulation.
+            string writeSelf;
+            if (isOzakiF64)
+                writeSelf = $"{{ _warp_shuffle_buf[local_index * 4u] = bitcast<u32>(_wr_{sfx}.x); _warp_shuffle_buf[local_index * 4u + 1u] = bitcast<u32>(_wr_{sfx}.y); _warp_shuffle_buf[local_index * 4u + 2u] = bitcast<u32>(_wr_{sfx}.z); _warp_shuffle_buf[local_index * 4u + 3u] = bitcast<u32>(_wr_{sfx}.w); }}";
+            else if (is64Bit && wgslType == "emu_f64")
+                writeSelf = $"{{ let _wb_{sfx} = f64_to_ieee754_bits(_wr_{sfx}); _warp_shuffle_buf[local_index * 2u] = _wb_{sfx}.x; _warp_shuffle_buf[local_index * 2u + 1u] = _wb_{sfx}.y; }}";
+            else if (is64Bit)
+                writeSelf = $"{{ _warp_shuffle_buf[local_index * 2u] = _wr_{sfx}.x; _warp_shuffle_buf[local_index * 2u + 1u] = _wr_{sfx}.y; }}";
+            else
+                writeSelf = $"_warp_shuffle_buf[local_index] = {BitcastToU32($"_wr_{sfx}", wgslType)};";
+
+            // Build load-result expression that reads from warp base (lane 0 of this warp).
+            string warpBase0 = "(local_index / workgroup_size.x) * workgroup_size.x";
+            string resultExpr;
+            if (isOzakiF64)
+                resultExpr = $"emu_f64(bitcast<f32>(_warp_shuffle_buf[{warpBase0} * 4u]), bitcast<f32>(_warp_shuffle_buf[{warpBase0} * 4u + 1u]), bitcast<f32>(_warp_shuffle_buf[{warpBase0} * 4u + 2u]), bitcast<f32>(_warp_shuffle_buf[{warpBase0} * 4u + 3u]))";
+            else if (is64Bit && wgslType == "emu_f64")
+                resultExpr = $"f64_from_ieee754_bits(_warp_shuffle_buf[{warpBase0} * 2u], _warp_shuffle_buf[{warpBase0} * 2u + 1u])";
+            else if (is64Bit)
+                resultExpr = $"{wgslType}(_warp_shuffle_buf[{warpBase0} * 2u], _warp_shuffle_buf[{warpBase0} * 2u + 1u])";
+            else
+                resultExpr = BitcastFromU32($"_warp_shuffle_buf[{warpBase0}]", wgslType);
+
+            string accumExpr = GetEmulated64BitAccumExpr(is64Bit, wgslType, wgslAccumOp, $"_wr_{sfx}", $"_wn_{sfx}");
+            string assignResult = needsBitcast
+                ? $"    {target} = bitcast<{irType}>({resultExpr});"
+                : $"    {target} = {resultExpr};";
+
+            // Step 2: binary-tree butterfly — upper half contributes to lower half each round.
+            codeGenerator.AppendLine("{");
+            codeGenerator.AppendLine($"    var _wr_{sfx} : {wgslType} = {loadSelf};");
+            codeGenerator.AppendLine($"    let _wl_{sfx} = local_index % workgroup_size.x;");
+            codeGenerator.AppendLine($"    for (var _ws_{sfx} = workgroup_size.x / 2u; _ws_{sfx} > 0u; _ws_{sfx} = _ws_{sfx} / 2u) {{");
+            codeGenerator.AppendLine($"        if (_wl_{sfx} < _ws_{sfx}) {{");
+            codeGenerator.AppendLine($"            let _wn_{sfx} = {loadNeighbor};");
+            codeGenerator.AppendLine($"            _wr_{sfx} = {accumExpr};");
+            codeGenerator.AppendLine("        }");
+            codeGenerator.AppendLine("        workgroupBarrier();");
+            codeGenerator.AppendLine($"        {writeSelf}");
+            codeGenerator.AppendLine("        workgroupBarrier();");
+            codeGenerator.AppendLine("    }");
+            // Step 3: all threads read the final result from their warp's lane-0 slot.
+            codeGenerator.AppendLine(assignResult);
+            codeGenerator.AppendLine("}");
+            codeGenerator.AppendLine("workgroupBarrier();");
         }
 
         /// <summary>
@@ -3225,6 +3333,19 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 return null;
             }
         }
+
+        /// <summary>
+        /// Maps a WGSL subgroup operation name to its accumulation operator/function string
+        /// suitable for use in the shared-memory butterfly emulation.
+        /// Returns "+" for add/and/or/xor (infix), "max" or "min" for comparison ops.
+        /// Falls back to "+" when wgslOp is null or unrecognised.
+        /// </summary>
+        private static string GetWarpReduceAccumOp(string? wgslOp) => wgslOp switch
+        {
+            "subgroupMax" => "max",
+            "subgroupMin" => "min",
+            _ => "+",
+        };
 
         /// <summary>
         /// Determines the effective WGSL element type for a reduction based on the TReduction

@@ -246,6 +246,34 @@ namespace ILGPU.Backends.PTX
         }
 
         /// <summary>
+        /// Wraps a single warp-shuffle operation for Half (f16).
+        /// Widens to uint before the b32 shuffle, then narrows back to f16.
+        /// PTX has no shfl.sync.*.b16; all shuffle instructions operate on 32-bit values.
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static Half WarpShuffleHalf(Half value, int idx)
+        {
+            uint widened = (uint)Interop.FloatAsInt(value);
+            uint shuffled = Warp.Shuffle(widened, idx);
+            return Interop.IntAsFloat((ushort)shuffled);
+        }
+
+        /// <summary>
+        /// Wraps a single sub-warp-shuffle operation for Half (f16).
+        /// Widens to uint before the b32 shuffle, then narrows back to f16.
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static Half SubWarpShuffleHalf(
+            Half value,
+            int idx,
+            int width)
+        {
+            uint widened = (uint)Interop.FloatAsInt(value);
+            uint shuffled = Warp.Shuffle(widened, idx, width);
+            return Interop.IntAsFloat((ushort)shuffled);
+        }
+
+        /// <summary>
         /// Wraps a single warp-shuffle operation.
         /// </summary>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -296,6 +324,34 @@ namespace ILGPU.Backends.PTX
         }
 
         /// <summary>
+        /// Wraps a single warp-shuffle operation for Half (f16).
+        /// Widens to uint before the b32 shuffle, then narrows back to f16.
+        /// PTX has no shfl.sync.*.b16; all shuffle instructions operate on 32-bit values.
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static Half WarpShuffleDownHalf(Half value, int idx)
+        {
+            uint widened = (uint)Interop.FloatAsInt(value);
+            uint shuffled = Warp.ShuffleDown(widened, idx);
+            return Interop.IntAsFloat((ushort)shuffled);
+        }
+
+        /// <summary>
+        /// Wraps a single sub-warp-shuffle operation for Half (f16).
+        /// Widens to uint before the b32 shuffle, then narrows back to f16.
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static Half SubWarpShuffleDownHalf(
+            Half value,
+            int idx,
+            int width)
+        {
+            uint widened = (uint)Interop.FloatAsInt(value);
+            uint shuffled = Warp.ShuffleDown(widened, idx, width);
+            return Interop.IntAsFloat((ushort)shuffled);
+        }
+
+        /// <summary>
         /// Wraps a single warp-shuffle operation.
         /// </summary>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -343,6 +399,34 @@ namespace ILGPU.Backends.PTX
                 idx,
                 width);
             return Interop.IntAsFloat(shuffled);
+        }
+
+        /// <summary>
+        /// Wraps a single warp-shuffle operation for Half (f16).
+        /// Widens to uint before the b32 shuffle, then narrows back to f16.
+        /// PTX has no shfl.sync.*.b16; all shuffle instructions operate on 32-bit values.
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static Half WarpShuffleUpHalf(Half value, int idx)
+        {
+            uint widened = (uint)Interop.FloatAsInt(value);
+            uint shuffled = Warp.ShuffleUp(widened, idx);
+            return Interop.IntAsFloat((ushort)shuffled);
+        }
+
+        /// <summary>
+        /// Wraps a single sub-warp-shuffle operation for Half (f16).
+        /// Widens to uint before the b32 shuffle, then narrows back to f16.
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static Half SubWarpShuffleUpHalf(
+            Half value,
+            int idx,
+            int width)
+        {
+            uint widened = (uint)Interop.FloatAsInt(value);
+            uint shuffled = Warp.ShuffleUp(widened, idx, width);
+            return Interop.IntAsFloat((ushort)shuffled);
         }
 
         /// <summary>
@@ -401,78 +485,6 @@ namespace ILGPU.Backends.PTX
         /// PTX has no shfl.sync.*.b16; all shuffle instructions operate on 32-bit values.
         /// </summary>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private static Half WarpShuffleHalf(Half value, int idx)
-        {
-            uint widened = (uint)Interop.FloatAsInt(value);
-            uint shuffled = Warp.Shuffle(widened, idx);
-            return Interop.IntAsFloat((ushort)shuffled);
-        }
-
-        /// <summary>
-        /// Wraps a single sub-warp-shuffle operation for Half (f16).
-        /// Widens to uint before the b32 shuffle, then narrows back to f16.
-        /// </summary>
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private static Half SubWarpShuffleHalf(Half value, int idx, int width)
-        {
-            uint widened = (uint)Interop.FloatAsInt(value);
-            uint shuffled = Warp.Shuffle(widened, idx, width);
-            return Interop.IntAsFloat((ushort)shuffled);
-        }
-
-        /// <summary>
-        /// Wraps a single warp-shuffle-down operation for Half (f16).
-        /// Widens to uint before the b32 shuffle, then narrows back to f16.
-        /// </summary>
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private static Half WarpShuffleDownHalf(Half value, int idx)
-        {
-            uint widened = (uint)Interop.FloatAsInt(value);
-            uint shuffled = Warp.ShuffleDown(widened, idx);
-            return Interop.IntAsFloat((ushort)shuffled);
-        }
-
-        /// <summary>
-        /// Wraps a single sub-warp-shuffle-down operation for Half (f16).
-        /// Widens to uint before the b32 shuffle, then narrows back to f16.
-        /// </summary>
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private static Half SubWarpShuffleDownHalf(Half value, int idx, int width)
-        {
-            uint widened = (uint)Interop.FloatAsInt(value);
-            uint shuffled = Warp.ShuffleDown(widened, idx, width);
-            return Interop.IntAsFloat((ushort)shuffled);
-        }
-
-        /// <summary>
-        /// Wraps a single warp-shuffle-up operation for Half (f16).
-        /// Widens to uint before the b32 shuffle, then narrows back to f16.
-        /// </summary>
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private static Half WarpShuffleUpHalf(Half value, int idx)
-        {
-            uint widened = (uint)Interop.FloatAsInt(value);
-            uint shuffled = Warp.ShuffleUp(widened, idx);
-            return Interop.IntAsFloat((ushort)shuffled);
-        }
-
-        /// <summary>
-        /// Wraps a single sub-warp-shuffle-up operation for Half (f16).
-        /// Widens to uint before the b32 shuffle, then narrows back to f16.
-        /// </summary>
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private static Half SubWarpShuffleUpHalf(Half value, int idx, int width)
-        {
-            uint widened = (uint)Interop.FloatAsInt(value);
-            uint shuffled = Warp.ShuffleUp(widened, idx, width);
-            return Interop.IntAsFloat((ushort)shuffled);
-        }
-
-        /// <summary>
-        /// Wraps a single warp-shuffle-xor operation for Half (f16).
-        /// Widens to uint before the b32 shuffle, then narrows back to f16.
-        /// </summary>
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private static Half WarpShuffleXorHalf(Half value, int idx)
         {
             uint widened = (uint)Interop.FloatAsInt(value);
@@ -481,16 +493,20 @@ namespace ILGPU.Backends.PTX
         }
 
         /// <summary>
-        /// Wraps a single sub-warp-shuffle-xor operation for Half (f16).
+        /// Wraps a single sub-warp-shuffle operation for Half (f16).
         /// Widens to uint before the b32 shuffle, then narrows back to f16.
         /// </summary>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private static Half SubWarpShuffleXorHalf(Half value, int idx, int width)
+        private static Half SubWarpShuffleXorHalf(
+            Half value,
+            int idx,
+            int width)
         {
             uint widened = (uint)Interop.FloatAsInt(value);
             uint shuffled = Warp.ShuffleXor(widened, idx, width);
             return Interop.IntAsFloat((ushort)shuffled);
         }
+
 
         #endregion
 

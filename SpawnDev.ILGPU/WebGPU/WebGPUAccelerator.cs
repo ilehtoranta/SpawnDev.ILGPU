@@ -593,6 +593,9 @@ namespace SpawnDev.ILGPU.WebGPU
                 // When binding at offset=0 for sub-views, the element offset needs
                 // to be packed into the scalar buffer so the WGSL can read it.
                 var viewElementOffsets = new Dictionary<int, int>();
+                // For packed-struct views, the element COUNT is also sent to the GPU since
+                // arrayLength() returns CPU-allocation-size/4, not the logical element count.
+                var viewElementCounts = new Dictionary<int, int>();
 
                 // Build a lookup of packed scalar params by their args-array index.
                 // ScalarPackingManifest stores IR param.Index (0-based, includes implicit index param).
@@ -722,7 +725,7 @@ namespace SpawnDev.ILGPU.WebGPU
                     var manifestCountPerBodyStructParam = new Dictionary<int, int>();
                     foreach (var e in compiledKernel.ScalarPackingManifest)
                     {
-                        if (e.ParamIndex >= 1000 && !e.IsViewOffset)
+                        if (e.ParamIndex >= 1000 && !e.IsViewOffset && !e.IsViewCount)
                         {
                             int bsIdx = (e.ParamIndex / 1000) - 1; // true IR param index
                             manifestCountPerBodyStructParam.TryGetValue(bsIdx, out int c);
@@ -734,9 +737,9 @@ namespace SpawnDev.ILGPU.WebGPU
                     {
                         if (entry.ParamIndex >= 1000)
                         {
-                            // View offset entries for body struct fields are handled in a
+                            // View offset/count entries for body struct fields are handled in a
                             // separate phase — don't try to map them to C# struct fields.
-                            if (entry.IsViewOffset) continue;
+                            if (entry.IsViewOffset || entry.IsViewCount) continue;
 
                             // Synthetic param index: body struct scalar field
                             // Decoded: bodyStructIRParamIdx = (entry.ParamIndex / 1000) - 1
@@ -748,7 +751,7 @@ namespace SpawnDev.ILGPU.WebGPU
                             int nthManifestEntry = 0;
                             foreach (var e2 in compiledKernel.ScalarPackingManifest)
                             {
-                                if (e2.ParamIndex >= 1000 && !e2.IsViewOffset && (e2.ParamIndex / 1000) - 1 == bodyStructIRParamIdx)
+                                if (e2.ParamIndex >= 1000 && !e2.IsViewOffset && !e2.IsViewCount && (e2.ParamIndex / 1000) - 1 == bodyStructIRParamIdx)
                                 {
                                     if (e2.ByteOffset < entry.ByteOffset)
                                         nthManifestEntry++;
@@ -782,8 +785,8 @@ namespace SpawnDev.ILGPU.WebGPU
                         else
                         {
                             // Regular param: map IR param index to effectiveArgs index
-                            // Skip IsViewOffset entries — they're packed separately after the scalar loop
-                            if (entry.IsViewOffset) continue;
+                            // Skip IsViewOffset/IsViewCount entries — they're packed separately after the scalar loop
+                            if (entry.IsViewOffset || entry.IsViewCount) continue;
                             int effectiveArgsIdx = entry.ParamIndex - kernelParamOffset;
                             if (effectiveArgsIdx >= 0 && effectiveArgsIdx < effectiveArgsCount)
                                 packedScalarLookup[effectiveArgsIdx] = entry;
@@ -884,6 +887,9 @@ namespace SpawnDev.ILGPU.WebGPU
                         int elementSize = contiguous.ElementSize > 0 ? contiguous.ElementSize : 1;
                         int elementOffset = (int)(padding / (ulong)elementSize);
                         viewElementOffsets[currentBindingIndex] = elementOffset;
+                        // Record the logical element count for packed-struct views.
+                        // contiguous.Length gives the exact count regardless of CPU vs GPU element size.
+                        viewElementCounts[currentBindingIndex] = (int)contiguous.Length;
                         
                         if (WebGPUBackend.VerboseLogging)
                             WebGPUBackend.Log($"[WebGPU-Debug] Arg {i}: rawOffset={rawOffset}, alignedOffset={alignedOffset}, padding={padding}, elemOffset={elementOffset}, bindingSize={bindingSize}");
@@ -1088,25 +1094,40 @@ namespace SpawnDev.ILGPU.WebGPU
 
                     }
 
-                    // --- Pack view element offsets ---
-                    // For each IsViewOffset entry in the manifest, pack the element offset
-                    // (from binding Phase 1) into the packed scalar buffer. The WGSL reads
-                    // this via _scalar_params[slot] in ArrayView Field 1 (Index).
+                    // --- Pack view element offsets and counts ---
+                    // For each IsViewOffset entry in the manifest, pack the element offset.
+                    // For each IsViewCount entry, pack the true element count for packed-struct views.
                     foreach (var entry in manifest)
                     {
-                        if (!entry.IsViewOffset) continue;
-                        int byteOffset = entry.ByteOffset;
-                        if (byteOffset + 4 > packedData.Length)
+                        if (entry.IsViewOffset)
                         {
-                            // Extend packedData if needed (view offsets may extend beyond user scalars)
-                            var newData = new byte[byteOffset + 4];
-                            Array.Copy(packedData, newData, packedData.Length);
-                            packedData = newData;
+                            int byteOffset = entry.ByteOffset;
+                            if (byteOffset + 4 > packedData.Length)
+                            {
+                                // Extend packedData if needed (view offsets may extend beyond user scalars)
+                                var newData = new byte[byteOffset + 4];
+                                Array.Copy(packedData, newData, packedData.Length);
+                                packedData = newData;
+                            }
+                            int elemOffset = viewElementOffsets.TryGetValue(entry.ViewBindingIndex, out int eo) ? eo : 0;
+                            BitConverter.GetBytes(elemOffset).CopyTo(packedData, byteOffset);
+                            if (WebGPUBackend.VerboseLogging)
+                                WebGPUBackend.Log($"[WebGPU-Debug] Packed view offset: binding={entry.ViewBindingIndex}, elemOffset={elemOffset}, byteOffset={byteOffset}");
                         }
-                        int elemOffset = viewElementOffsets.TryGetValue(entry.ViewBindingIndex, out int eo) ? eo : 0;
-                        BitConverter.GetBytes(elemOffset).CopyTo(packedData, byteOffset);
-                        if (WebGPUBackend.VerboseLogging)
-                            WebGPUBackend.Log($"[WebGPU-Debug] Packed view offset: binding={entry.ViewBindingIndex}, elemOffset={elemOffset}, byteOffset={byteOffset}");
+                        else if (entry.IsViewCount)
+                        {
+                            int byteOffset = entry.ByteOffset;
+                            if (byteOffset + 4 > packedData.Length)
+                            {
+                                var newData = new byte[byteOffset + 4];
+                                Array.Copy(packedData, newData, packedData.Length);
+                                packedData = newData;
+                            }
+                            int elemCount = viewElementCounts.TryGetValue(entry.ViewCountBindingIndex, out int ec) ? ec : 0;
+                            BitConverter.GetBytes(elemCount).CopyTo(packedData, byteOffset);
+                            if (WebGPUBackend.VerboseLogging)
+                                WebGPUBackend.Log($"[WebGPU-Debug] Packed view count: binding={entry.ViewCountBindingIndex}, elemCount={elemCount}, byteOffset={byteOffset}");
+                        }
                     }
 
                     var packedBuffer = GetPooledScalarBuffer(device);

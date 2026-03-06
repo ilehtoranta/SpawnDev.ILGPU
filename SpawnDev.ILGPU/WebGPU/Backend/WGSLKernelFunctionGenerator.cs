@@ -121,10 +121,39 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             // For view fields: the scalar slot index for the view offset (-1 if none)
             // Populated during GenerateHeader so LoadElementAddress can inject _scalar_params[slot]
             public int ViewOffsetSlot { get; set; } = -1;
+            // For packed-struct view fields: the scalar slot index for the element count (-1 if none)
+            // Used by the length field generator to read the true element count from the CPU.
+            public int ViewCountSlot { get; set; } = -1;
         }
         // _bodyStructFieldVars: (paramIndex, fieldIndex) → WGSL variable name
         // Used by GetField code generation to redirect field accesses to the appropriate binding.
         private Dictionary<(int, int), string> _bodyStructFieldVars = new Dictionary<(int, int), string>();
+
+        // --- Packed Struct Support ---
+        // When a view's element type is a struct containing emulated 64-bit fields (emu_f64, emu_i64, emu_u64),
+        // the WGSL struct's std430 alignment may differ from the CPU struct's layout. For example:
+        //   RadixSortPair<double, int> on CPU: 8 (double) + 4 (int) = 12 bytes
+        //   In WGSL with Ozaki emu_f64=vec4<f32>: stride = roundup(16, 16+4) = 32 bytes  ← mismatch!
+        // Fix: bind such struct arrays as array<u32> using the CPU field layout (packed), so the shader
+        // uses the same byte offsets as the host allocator.
+        private struct PackedStructFieldInfo
+        {
+            public string WgslType;      // e.g. "emu_f64", "emu_i64", "i32", "f32", etc.
+            public int U32Offset;        // offset in u32 units from element start
+            public int U32Count;         // number of u32s this field occupies
+            public bool IsEmuF64;        // field maps to emu_f64 (f64_to/from_ieee754_bits needed)
+            public bool IsEmuI64OrU64;   // field maps to emu_i64 or emu_u64
+        }
+        // Maps param index → packed field layout (for regular view params with struct+emu element type)
+        private Dictionary<int, List<PackedStructFieldInfo>> _packedStructLayouts = new();
+        // Maps (bsParamIdx, fieldIdx) → packed field layout (for body-struct view fields with struct+emu element type)
+        private Dictionary<(int, int), List<PackedStructFieldInfo>> _packedStructBSFieldLayouts = new();
+        // Maps LEA result variable name → (bufferBindingName, fieldLayout)
+        // Populated during LoadElementAddress, consumed by Load and Store.
+        private Dictionary<string, (string BindingName, List<PackedStructFieldInfo> Layout)> _packedStructLEAVars = new();
+        // Maps LoadFieldAddress result var name → (bindingName, field info) for NON-emulated scalar fields
+        // (emu_f64/emu_i64 fields from LoadFieldAddress are registered in _emulatedVarMappings instead)
+        private Dictionary<string, (string BindingName, PackedStructFieldInfo FieldInfo)> _packedScalarFieldPtrs = new();
 
         public WGSLKernelFunctionGenerator(
             in GeneratorArgs args,
@@ -328,6 +357,15 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                         if (fieldIsView)
                         {
                             lastViewBindingName = $"param{param.Index}_f{fi}";
+
+                            // Detect packed struct: view field element type is struct with emu field(s)
+                            var bsViewElemType = GetBufferElementType(fieldType);
+                            if (bsViewElemType is StructureType bsViewStructType)
+                            {
+                                var bsPsLayout = ComputePackedLayout(bsViewStructType);
+                                if (bsPsLayout != null)
+                                    _packedStructBSFieldLayouts[(param.Index, fi)] = bsPsLayout;
+                            }
                         }
                         else if (!isViewMetadata)
                         {
@@ -391,6 +429,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     // Body struct view fields also need view offset slots.
                     // Allocate a slot for each view field and pre-populate ViewOffsetSlot
                     // so LoadElementAddress (during body generation) can inject the offset.
+                    // For packed-struct view fields, also reserve a ViewCountSlot.
                     if (_bodyStructParams.TryGetValue(param.Index, out var bsFields))
                     {
                         foreach (var fieldInfo in bsFields)
@@ -402,6 +441,20 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                                 int syntheticIdx = (param.Index + 1) * 1000 + fieldInfo.FieldIndex;
                                 _viewOffsetScalarSlots[syntheticIdx] = globalScalarSlotOffset;
                                 globalScalarSlotOffset++;
+
+                                // Packed-struct view fields also get a count slot (must match GenerateHeader order)
+                                if (_packedStructBSFieldLayouts.ContainsKey((param.Index, fieldInfo.FieldIndex)))
+                                {
+                                    fieldInfo.ViewCountSlot = globalScalarSlotOffset;
+                                    // Propagate to associated metadata fields (length field, etc.)
+                                    string viewBindName = $"param{param.Index}_f{fieldInfo.FieldIndex}";
+                                    foreach (var metaField in bsFields)
+                                    {
+                                        if (metaField.IsViewMetadata && metaField.AssociatedViewBindingName == viewBindName)
+                                            metaField.ViewCountSlot = globalScalarSlotOffset;
+                                    }
+                                    globalScalarSlotOffset++;
+                                }
                             }
                         }
                     }
@@ -413,8 +466,67 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     // This param gets a buffer binding → reserve a view offset slot
                     _viewOffsetScalarSlots[param.Index] = globalScalarSlotOffset;
                     globalScalarSlotOffset++;
+
+                    // Detect packed struct: view element type is a struct with emu-field(s)
+                    var psElemType = GetBufferElementType(param.ParameterType);
+                    if (psElemType is StructureType psStructType)
+                    {
+                        var psLayout = ComputePackedLayout(psStructType);
+                        if (psLayout != null)
+                            _packedStructLayouts[param.Index] = psLayout;
+                    }
                 }
             }
+        }
+
+        /// <summary>
+        /// Computes the packed u32 layout for a struct type whose fields include emulated 64-bit types.
+        /// Returns null if the struct does not contain any emulated 64-bit fields, or if any field
+        /// has an unsupported type that cannot be packed into u32 slots.
+        /// </summary>
+        private List<PackedStructFieldInfo>? ComputePackedLayout(StructureType structType)
+        {
+            var fields = new List<PackedStructFieldInfo>();
+            int u32Offset = 0;
+            bool hasEmuField = false;
+
+            foreach (var fieldType in structType.Fields)
+            {
+                string wgslType = TypeGenerator[fieldType];
+                bool isEmuF64 = Backend.Options.EnableF64Emulation && wgslType == "emu_f64";
+                bool isEmuI64u64 = Backend.Options.EnableI64Emulation &&
+                                   (wgslType == "emu_i64" || wgslType == "emu_u64");
+                int u32Count;
+
+                if (isEmuF64 || isEmuI64u64)
+                {
+                    u32Count = 2;
+                    hasEmuField = true;
+                }
+                else if (wgslType == "i32" || wgslType == "u32" || wgslType == "f32" ||
+                         wgslType == "f16" || wgslType == "i16" || wgslType == "u16" ||
+                         wgslType == "i8"  || wgslType == "u8"  || wgslType == "bool")
+                {
+                    u32Count = 1;
+                }
+                else
+                {
+                    // Nested struct or unsupported type — skip packed treatment for safety
+                    return null;
+                }
+
+                fields.Add(new PackedStructFieldInfo
+                {
+                    WgslType = wgslType,
+                    U32Offset = u32Offset,
+                    U32Count = u32Count,
+                    IsEmuF64 = isEmuF64,
+                    IsEmuI64OrU64 = isEmuI64u64,
+                });
+                u32Offset += u32Count;
+            }
+
+            return hasEmuField ? fields : null;
         }
 
 
@@ -854,6 +966,11 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                             {
                                 bindingWgslType = "u32";
                             }
+                            else if (_packedStructBSFieldLayouts.ContainsKey((param.Index, fi)))
+                            {
+                                // Packed struct view field: bind as array<u32> using CPU layout packing
+                                bindingWgslType = "u32";
+                            }
 
                             if (fieldIsAtomic)
                             {
@@ -963,6 +1080,10 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     {
                         bindingWgslType = "u32"; // Raw bits storage
                     }
+                    else if (_packedStructLayouts.ContainsKey(param.Index))
+                    {
+                        bindingWgslType = "u32"; // Packed struct: CPU-layout u32 packing
+                    }
 
                     if (isAtomic)
                     {
@@ -1061,6 +1182,44 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     }
                 }
                 scalarSlotOffset++;
+
+                // For packed-struct body-struct view fields, also add an element COUNT slot.
+                // arrayLength() returns CPU-allocation-size/4 u32s, not the logical element count,
+                // because CPU element size != GPU packed element size. So we send the true count
+                // from the CPU in a dedicated scalar slot.
+                if (viewParamIndex >= 1000)
+                {
+                    int realParamIndex2 = (viewParamIndex / 1000) - 1;
+                    int fieldIndex2 = viewParamIndex % 1000;
+                    if (_packedStructBSFieldLayouts.ContainsKey((realParamIndex2, fieldIndex2)))
+                    {
+                        var countEntry = new ScalarPackingEntry
+                        {
+                            ParamIndex = viewParamIndex,
+                            ByteOffset = scalarSlotOffset * 4,
+                            ByteSize = 4,
+                            WgslType = "u32",
+                            IsViewCount = true,
+                            ViewCountBindingIndex = viewBindIdx,
+                        };
+                        scalarManifest.Add(countEntry);
+                        builder.AppendLine($"// View element count for param{viewParamIndex} (packed struct) at scalar slot {scalarSlotOffset}");
+
+                        if (_bodyStructParams.TryGetValue(realParamIndex2, out var bsFields2)
+                            && fieldIndex2 < bsFields2.Count)
+                        {
+                            bsFields2[fieldIndex2].ViewCountSlot = scalarSlotOffset;
+                            // Propagate to associated metadata (length) fields
+                            string viewBindName2 = $"param{realParamIndex2}_f{fieldIndex2}";
+                            foreach (var metaField2 in bsFields2)
+                            {
+                                if (metaField2.IsViewMetadata && metaField2.AssociatedViewBindingName == viewBindName2)
+                                    metaField2.ViewCountSlot = scalarSlotOffset;
+                            }
+                        }
+                        scalarSlotOffset++;
+                    }
+                }
             }
 
             // Emit the single packed scalar binding (if any scalars were packed)
@@ -3146,10 +3305,27 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                                 var scalarElemType = GetBufferElementType(fieldInfo.FieldType);
                                 var scalarWgslType = TypeGenerator[scalarElemType];
                                 bool isEmuI64 = Backend.Options.EnableI64Emulation && (scalarWgslType == "emu_i64" || scalarWgslType == "emu_u64");
-                                if (isEmuI64)
-                                    AppendLine($"var {fieldVarName} = i64_from_i32(i32(arrayLength(&{fieldInfo.AssociatedViewBindingName})));");
+
+                                // For packed-struct view fields, the CPU sends the true element count
+                                // in a dedicated scalar slot (ViewCountSlot). Use that instead of
+                                // arrayLength(), because arrayLength() returns CPU-allocation-bytes/4 u32s
+                                // which does NOT equal element_count when CPU_element_size != GPU_packed_size.
+                                // E.g. RadixSortPair<double,int>: CPU=16 bytes=4 u32s, GPU-packed=3 u32s.
+                                // So arrayLength()/3 = (count*4)/3 ≠ count. Use _scalar_params[slot] instead.
+                                string lengthExpr;
+                                if (fieldInfo.ViewCountSlot >= 0)
+                                {
+                                    lengthExpr = $"i32(_scalar_params[{fieldInfo.ViewCountSlot}])";
+                                }
                                 else
-                                    AppendLine($"var {fieldVarName} = i32(arrayLength(&{fieldInfo.AssociatedViewBindingName}));");
+                                {
+                                    lengthExpr = $"i32(arrayLength(&{fieldInfo.AssociatedViewBindingName}))";
+                                }
+
+                                if (isEmuI64)
+                                    AppendLine($"var {fieldVarName} = i64_from_i32({lengthExpr});");
+                                else
+                                    AppendLine($"var {fieldVarName} = {lengthExpr};");
                             }
                             else
                             {
@@ -3374,14 +3550,42 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     if (isEmuF64Field || isEmuI64Field)
                     {
                         _emulatedVarMappings[target.Name] = (bsParam.Index, isEmuF64Field);
-                        
+
+                        string adjustedOffEmu = offsetExpr;
+                        if (bsFields[fieldIdx].ViewOffsetSlot >= 0)
+                        {
+                            int voSlotEmu = bsFields[fieldIdx].ViewOffsetSlot;
+                            adjustedOffEmu = $"(i32(_scalar_params[{voSlotEmu}]) + {offsetExpr})";
+                        }
+
                         AppendIndent();
-                        Builder.Append($"let {target.Name}_base_idx = i32({offsetExpr}) * 2;");
+                        Builder.Append($"let {target.Name}_base_idx = i32({adjustedOffEmu}) * 2;");
                         Builder.AppendLine();
                         
                         AppendIndent();
                         Builder.Append($"let {target.Name} = &{bindingName};");
                         Builder.AppendLine();
+                        return;
+                    }
+
+                    // Check for packed struct body-struct view field
+                    if (_packedStructBSFieldLayouts.TryGetValue((bsParam.Index, fieldIdx), out var bsPsLayout))
+                    {
+                        int psStrideU32s = bsPsLayout.Sum(f => f.U32Count);
+                        // View offset adjustment for body struct packed struct view fields
+                        string adjustedOffPsBS = offsetExpr;
+                        if (bsFields[fieldIdx].ViewOffsetSlot >= 0)
+                        {
+                            int voSlotBS = bsFields[fieldIdx].ViewOffsetSlot;
+                            adjustedOffPsBS = $"(i32(_scalar_params[{voSlotBS}]) + {offsetExpr})";
+                        }
+                        AppendIndent();
+                        Builder.Append($"let {target.Name}_base_idx = i32({adjustedOffPsBS}) * {psStrideU32s};");
+                        Builder.AppendLine();
+                        AppendIndent();
+                        Builder.Append($"let {target.Name} = &{bindingName};");
+                        Builder.AppendLine();
+                        _packedStructLEAVars[target.Name] = (bindingName, bsPsLayout);
                         return;
                     }
 
@@ -3439,6 +3643,20 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                         AppendIndent();
                         Builder.Append($"let {target.Name} = &param{param.Index};");
                         Builder.AppendLine();
+                        return;
+                    }
+
+                    // Check if this is a packed struct buffer (struct with emu fields, CPU-layout packed)
+                    if (_packedStructLayouts.TryGetValue(param.Index, out var psLayout))
+                    {
+                        int psStrideU32s = psLayout.Sum(f => f.U32Count);
+                        AppendIndent();
+                        Builder.Append($"let {target.Name}_base_idx = i32({adjustedOffsetExpr}) * {psStrideU32s};");
+                        Builder.AppendLine();
+                        AppendIndent();
+                        Builder.Append($"let {target.Name} = &param{param.Index};");
+                        Builder.AppendLine();
+                        _packedStructLEAVars[target.Name] = ($"param{param.Index}", psLayout);
                         return;
                     }
 
@@ -3529,6 +3747,49 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 return;
             }
 
+            // Check for packed struct scalar field pointer (from LoadFieldAddress on a packed struct)
+            if (_packedScalarFieldPtrs.TryGetValue(source.ToString(), out var psScalarLoad))
+            {
+                string baseIdxVar = $"{source}_base_idx";
+                string elemRef = $"(*{source})[u32({baseIdxVar})]";
+                string fieldExpr = psScalarLoad.FieldInfo.WgslType switch
+                {
+                    "i32" => $"bitcast<i32>({elemRef})",
+                    "f32" => $"bitcast<f32>({elemRef})",
+                    "bool" => $"bool({elemRef})",
+                    _ => elemRef  // u32 or other
+                };
+                Declare(target);
+                AppendLine($"{target} = {fieldExpr};");
+                return;
+            }
+
+            // Check for packed struct load (struct with emu fields, stored as CPU-layout u32 array)
+            if (_packedStructLEAVars.TryGetValue(source.ToString(), out var psLoadInfo))
+            {
+                string baseIdxVar = $"{source}_base_idx";
+                Declare(target);
+                for (int fi = 0; fi < psLoadInfo.Layout.Count; fi++)
+                {
+                    var field = psLoadInfo.Layout[fi];
+                    string fieldRef = $"(*{source})[u32({baseIdxVar}) + {field.U32Offset}u]";
+                    string fieldRef1 = $"(*{source})[u32({baseIdxVar}) + {field.U32Offset + 1}u]";
+                    string fieldExpr;
+                    if (field.IsEmuF64)
+                        fieldExpr = $"f64_from_ieee754_bits({fieldRef}, {fieldRef1})";
+                    else if (field.IsEmuI64OrU64)
+                        fieldExpr = $"{field.WgslType}({fieldRef}, {fieldRef1})";
+                    else if (field.WgslType == "f32")
+                        fieldExpr = $"bitcast<f32>({fieldRef})";
+                    else if (field.WgslType == "i32")
+                        fieldExpr = $"bitcast<i32>({fieldRef})";
+                    else
+                        fieldExpr = fieldRef; // u32 or other: raw u32
+                    AppendLine($"{target}.field_{fi} = {fieldExpr};");
+                }
+                return;
+            }
+
             // CROSS-BLOCK POINTER FIX: Use inline expression instead of out-of-scope pointer
             if (_crossBlockPointerExprs.TryGetValue(source.ToString(), out var inlineExpr))
             {
@@ -3582,6 +3843,54 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     // emu_i64: split vec2<u32> into two u32 values
                     AppendLine($"(*{address})[u32({baseIdxVar})] = {val}.x;");
                     AppendLine($"(*{address})[u32({baseIdxVar}) + 1u] = {val}.y;");
+                }
+                return;
+            }
+
+            // Check for packed struct scalar field pointer store (from LoadFieldAddress on a packed struct)
+            if (_packedScalarFieldPtrs.TryGetValue(address.ToString(), out var psScalarStore))
+            {
+                string baseIdxVar = $"{address}_base_idx";
+                string storeExpr = psScalarStore.FieldInfo.WgslType switch
+                {
+                    "i32" => $"bitcast<u32>({val})",
+                    "f32" => $"bitcast<u32>({val})",
+                    "bool" => $"u32({val})",
+                    _ => $"{val}"  // u32 or other
+                };
+                AppendLine($"(*{address})[u32({baseIdxVar})] = {storeExpr};");
+                return;
+            }
+
+            // Check for packed struct store (struct with emu fields, stored as CPU-layout u32 array)
+            if (_packedStructLEAVars.TryGetValue(address.ToString(), out var psStoreInfo))
+            {
+                string baseIdxVar = $"{address}_base_idx";
+                for (int fi = 0; fi < psStoreInfo.Layout.Count; fi++)
+                {
+                    var field = psStoreInfo.Layout[fi];
+                    string slotRef = $"(*{address})[u32({baseIdxVar}) + {field.U32Offset}u]";
+                    string slotRef1 = $"(*{address})[u32({baseIdxVar}) + {field.U32Offset + 1}u]";
+                    if (field.IsEmuF64)
+                    {
+                        string bitsVar = $"_ps_bits_{address}_{fi}";
+                        AppendLine($"let {bitsVar} = f64_to_ieee754_bits({val}.field_{fi});");
+                        AppendLine($"{slotRef} = {bitsVar}.x;");
+                        AppendLine($"{slotRef1} = {bitsVar}.y;");
+                    }
+                    else if (field.IsEmuI64OrU64)
+                    {
+                        AppendLine($"{slotRef} = {val}.field_{fi}.x;");
+                        AppendLine($"{slotRef1} = {val}.field_{fi}.y;");
+                    }
+                    else if (field.WgslType == "f32" || field.WgslType == "i32")
+                    {
+                        AppendLine($"{slotRef} = bitcast<u32>({val}.field_{fi});");
+                    }
+                    else
+                    {
+                        AppendLine($"{slotRef} = {val}.field_{fi};"); // u32 or other: direct
+                    }
                 }
                 return;
             }
@@ -4521,6 +4830,12 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                             if (isMultiDim && rawType is StructureType st1)
                             {
                                 var totalLen = $"i32(arrayLength(&param{param.Index}))";
+                                // For packed struct params, arrayLength() returns u32 count — divide by stride
+                                if (_packedStructLayouts.TryGetValue(param.Index, out var psLenLayout2))
+                                {
+                                    int psStride2 = psLenLayout2.Sum(f => f.U32Count);
+                                    totalLen = $"({totalLen} / {psStride2})";
+                                }
 
                                 // Check hoisting to prevent shadowing
                                 string prefix = _hoistedPrimitives.Contains(value) ? "" : "let ";
@@ -4733,6 +5048,27 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     }
                 }
             }
+            // Handle field address of a packed struct element pointer.
+            // Without this, the default codegen emits (*v_X).field_N on an array<u32> binding → WGSL type error.
+            {
+                var sourceVar = Load(value.Source);
+                if (_packedStructLEAVars.TryGetValue(sourceVar.ToString(), out var psLFA))
+                {
+                    int fieldIdx = value.FieldSpan.Index;
+                    var field = psLFA.Layout[fieldIdx];
+                    var target = Load(value);
+                    string sourceBaseIdx = $"{sourceVar}_base_idx";
+                    AppendLine($"let {target.Name}_base_idx = {sourceBaseIdx} + {field.U32Offset};");
+                    AppendLine($"let {target.Name} = &{psLFA.BindingName};");
+                    if (field.IsEmuF64)
+                        _emulatedVarMappings[target.Name] = (-1, true);
+                    else if (field.IsEmuI64OrU64)
+                        _emulatedVarMappings[target.Name] = (-1, false);
+                    else
+                        _packedScalarFieldPtrs[target.Name] = (psLFA.BindingName, field);
+                    return;
+                }
+            }
             base.GenerateCode(value);
         }
 
@@ -4791,6 +5127,13 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             {
                 string prefix = _hoistedPrimitives.Contains(value) ? "" : "let ";
                 var lengthExpr = $"i32(arrayLength(&param{param.Index}))";
+
+                // For packed struct params, arrayLength() returns u32 count — divide by stride to get logical element count
+                if (_packedStructLayouts.TryGetValue(param.Index, out var psLenLayout))
+                {
+                    int psStridelen = psLenLayout.Sum(f => f.U32Count);
+                    lengthExpr = $"({lengthExpr} / {psStridelen})";
+                }
 
                 // Handle emulated i64 case
                 var targetWgslType = TypeGenerator[value.Type];
