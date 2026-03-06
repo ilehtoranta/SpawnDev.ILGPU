@@ -124,6 +124,8 @@
                     @onmouseleave="OnMouseUp"
                     @ondblclick="OnDoubleClick"></canvas>
         </div>
+
+
     </div>
 </div>
 
@@ -309,8 +311,7 @@
                 _ilgpuContext = await Context.CreateAsync(builder => builder.WebGL());
                 var glDevices = _ilgpuContext.GetWebGLDevices();
                 if (glDevices.Count == 0) throw new Exception("No WebGL2 device found");
-                var glOptions = new WebGLBackendOptions { EnableF64Emulation = false, EnableI64Emulation = false };
-                _ilgpuAccelerator = glDevices[0].CreateAccelerator(_ilgpuContext, glOptions);
+                _ilgpuAccelerator = glDevices[0].CreateAccelerator(_ilgpuContext);
                 break;
             case "Wasm":
                 _ilgpuContext = await Context.CreateAsync(builder => builder.Wasm());

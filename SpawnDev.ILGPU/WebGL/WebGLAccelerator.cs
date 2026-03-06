@@ -26,6 +26,9 @@ namespace SpawnDev.ILGPU.WebGL
     /// </summary>
     public class WebGLAccelerator : KernelAccelerator<WebGLCompiledKernel, WebGLKernel>
     {
+        /// <summary>Last GLSL source dispatched to the worker. Captured for diagnostics.</summary>
+        public static string? LastGeneratedGLSL { get; private set; }
+
         /// <summary>
         /// Gets the WebGL backend used for kernel compilation.
         /// </summary>
@@ -74,6 +77,11 @@ namespace SpawnDev.ILGPU.WebGL
         private int _nextReadbackRequestId;
 
         /// <summary>
+        /// Monotonically increasing blit request ID.
+        /// </summary>
+        private int _nextBlitRequestId;
+
+        /// <summary>
         /// Pending dispatches awaiting worker responses, keyed by dispatch ID.
         /// </summary>
         private readonly ConcurrentDictionary<int, PendingDispatch> _pendingDispatches = new();
@@ -82,6 +90,14 @@ namespace SpawnDev.ILGPU.WebGL
         /// Pending readback requests awaiting worker responses, keyed by request ID.
         /// </summary>
         private readonly ConcurrentDictionary<int, PendingReadback> _pendingReadbacks = new();
+
+        /// <summary>
+        /// Pending blit requests awaiting worker ImageBitmap responses, keyed by request ID.
+        /// The draw action is invoked synchronously inside the message handler so no JS event
+        /// loop turn can clear the canvas between the blit and the DrawImage call.
+        /// </summary>
+        private record PendingBlit(TaskCompletionSource Tcs, Action<ImageBitmap>? Draw);
+        private readonly ConcurrentDictionary<int, PendingBlit> _pendingBlits = new();
 
         /// <summary>
         /// Pending work tasks for fire-and-forget dispatch. Awaited by SynchronizeAsync.
@@ -106,6 +122,33 @@ namespace SpawnDev.ILGPU.WebGL
                     BaseViewProperty = t.GetProperty("BaseView", flags),
                 };
             });
+        }
+
+        /// <summary>
+        /// Resolves any ILGPU buffer or view object to its underlying <see cref="WebGLMemoryBuffer"/>.
+        /// Handles MemoryBuffer, MemoryBuffer2D, ArrayView, ArrayView2D, etc. via the same
+        /// reflection-based BaseView fallback used by kernel argument marshalling.
+        /// </summary>
+        public WebGLMemoryBuffer? GetWebGLMemoryBuffer(object bufferOrView)
+        {
+            IArrayView? arrayView = bufferOrView as IArrayView;
+            if (arrayView == null && bufferOrView != null)
+            {
+                var refCache = GetOrCreateReflectionCache(bufferOrView.GetType());
+                if (refCache.BaseViewProperty != null)
+                    arrayView = refCache.BaseViewProperty.GetValue(bufferOrView) as IArrayView;
+            }
+            if (arrayView == null) return null;
+
+            var contiguous = arrayView as IContiguousArrayView;
+            if (contiguous == null)
+            {
+                var viewRefCache = GetOrCreateReflectionCache(arrayView.GetType());
+                contiguous = (viewRefCache.BaseViewProperty != null
+                    ? viewRefCache.BaseViewProperty.GetValue(arrayView)
+                    : arrayView) as IContiguousArrayView;
+            }
+            return contiguous?.Buffer as WebGLMemoryBuffer;
         }
 
         #region Construction
@@ -178,12 +221,14 @@ namespace SpawnDev.ILGPU.WebGL
         /// <inheritdoc/>
         protected override WebGLKernel CreateKernel(WebGLCompiledKernel compiledKernel)
         {
+            LastGeneratedGLSL = compiledKernel.GLSLSource;
             return new WebGLKernel(this, compiledKernel, null);
         }
 
         /// <inheritdoc/>
         protected override WebGLKernel CreateKernel(WebGLCompiledKernel compiledKernel, MethodInfo launcher)
         {
+            LastGeneratedGLSL = compiledKernel.GLSLSource;
             return new WebGLKernel(this, compiledKernel, launcher);
         }
 
@@ -335,6 +380,46 @@ namespace SpawnDev.ILGPU.WebGL
                 : memBuffer.BackingArray.SubArray(sourceByteOffset, copyBytes.Value + sourceByteOffset);
         }
 
+        /// <summary>
+        /// Requests the GL worker to create an ImageBitmap from the buffer's current pixel data
+        /// and transfer it to the main thread. No GPU→CPU readback — entry.data is always
+        /// current after dispatch. The returned ImageBitmap can be drawn directly via
+        /// CanvasRenderingContext2D.DrawImage without any intermediate WebGL context.
+        /// </summary>
+        /// <summary>
+        /// Sends a blitBuffer message to the worker, then — synchronously inside the
+        /// message handler callback (before any JS event loop turn) — invokes
+        /// <paramref name="draw"/> with the resulting <see cref="ImageBitmap"/>.
+        /// This mirrors WebGPU's synchronous DrawImage pattern so the canvas cannot
+        /// be cleared between the blit and the draw.
+        /// </summary>
+        public async Task BlitAndDrawAsync(WebGLMemoryBuffer memBuffer, int width, int height,
+            Action<ImageBitmap> draw)
+        {
+            EnsureBufferInWorker(memBuffer, memBuffer.GlslType);
+
+            if (PendingWorkTasks.Count > 0)
+            {
+                await Task.WhenAll(PendingWorkTasks);
+                PendingWorkTasks.Clear();
+            }
+
+            var requestId = Interlocked.Increment(ref _nextBlitRequestId);
+            var tcs = new TaskCompletionSource();
+            _pendingBlits[requestId] = new PendingBlit(tcs, draw);
+
+            _glWorker!.PostMessage(new
+            {
+                type = "blitBuffer",
+                bufferId = memBuffer.WorkerBufferId,
+                width,
+                height,
+                requestId
+            });
+
+            await tcs.Task;
+        }
+
         #endregion
 
         #region Kernel Execution
@@ -351,10 +436,6 @@ namespace SpawnDev.ILGPU.WebGL
             var webGlKernel = (WebGLKernel)kernel;
             var compiledKernel = webGlKernel.CompiledKernel;
 
-            Log("\n[WebGL-Debug] ---- GENERATED GLSL ----");
-            Log(compiledKernel.GLSLSource);
-            Log("[WebGL-Debug] ------------------------\n");
-            try { BlazorJS.BlazorJSRuntime.JS.Set("glslDebug", compiledKernel.GLSLSource); } catch { }
 
             // Determine dispatch size
             int totalVertices = 1;
@@ -378,6 +459,7 @@ namespace SpawnDev.ILGPU.WebGL
 
             // Marshal arguments — now returns buffer_ref params, no ArrayBuffer transfers
             var (jsParams, strideMap, outputs) = MarshalArguments(compiledKernel, args, webGlAccel);
+
 
             // Build unique program ID from source hash
             var programId = compiledKernel.GLSLSource.GetHashCode().ToString("X8");
@@ -434,6 +516,12 @@ namespace SpawnDev.ILGPU.WebGL
                     return;
                 }
 
+                if (msgType == "blitResult")
+                {
+                    HandleBlitResponse(data);
+                    return;
+                }
+
                 // Otherwise it's a dispatch completion
                 var dispatchId = data.JSRef!.Get<int>("dispatchId");
 
@@ -458,6 +546,33 @@ namespace SpawnDev.ILGPU.WebGL
             {
                 Log($"[WebGL] Error processing worker response: {ex.Message}");
             }
+        }
+
+        /// <summary>
+        /// Handles a blitResult response from the GL worker, resolving the pending ImageBitmap TCS.
+        /// </summary>
+        private void HandleBlitResponse(JSObject data)
+        {
+            var requestId = data.JSRef!.Get<int>("requestId");
+            if (!_pendingBlits.TryRemove(requestId, out var blit))
+            {
+                Log($"[WebGL] Warning: received blitResult for unknown requestId {requestId}");
+                return;
+            }
+
+            var error = data.JSRef!.Get<string?>("error");
+            if (error != null)
+            {
+                blit.Tcs.TrySetException(new Exception($"[WebGL] Blit error: {error}"));
+                return;
+            }
+
+            // Draw synchronously here, before any await continuation can resume.
+            // This mirrors WebGPU's synchronous DrawImage so no Blazor re-render can
+            // clear the canvas between the blit and the draw.
+            using var bitmap = data.JSRef!.Get<ImageBitmap>("bitmap");
+            blit.Draw?.Invoke(bitmap);
+            blit.Tcs.TrySetResult();
         }
 
         /// <summary>

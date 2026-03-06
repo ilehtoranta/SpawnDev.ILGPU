@@ -445,12 +445,7 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
                     // Shader compile may fail — that's OK, we just want the GLSL
                 }
 
-                // The accelerator sets window.glslDebug during kernel load
-                try
-                {
-                    glslSource = SpawnDev.BlazorJS.BlazorJSRuntime.JS.Get<string>("glslDebug");
-                }
-                catch { }
+                glslSource = WebGLAccelerator.LastGeneratedGLSL;
 
                 if (string.IsNullOrEmpty(glslSource))
                 {
@@ -604,5 +599,676 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
         [TestMethod]
         public new async Task AlgorithmGroupReduceHalfTest() =>
             throw new UnsupportedTestException("WebGL: algorithm tests require shared memory + barriers");
+
+        // ====================================================================
+        // Boids Pipeline Diagnostic Tests
+        // These run sub-components of the Boids3D demo in isolation to pinpoint
+        // which part of the pipeline produces blank output on WebGL.
+        // ====================================================================
+
+        #region Boids Pipeline Tests
+
+        // --- Kernels (copied from Boids3D.razor for isolation) ---
+
+        static void BoidsMathFKernel(Index1D index, ArrayView1D<float, Stride1D.Dense> output)
+        {
+            float v = (int)index * 0.1f;
+            output[index] = MathF.Sin(v) + MathF.Cos(v) + MathF.Sqrt(v + 1.0f);
+        }
+
+        static void BoidsBackground2DKernel(
+            Index2D index,
+            ArrayView2D<uint, Stride2D.DenseX> output,
+            int width, int height)
+        {
+            int px = index.X, py = index.Y;
+            if (px >= width || py >= height) return;
+            float bgV = (float)py / (float)height;
+            float r = 0.02f + 0.04f * (1.0f - bgV);
+            float g = 0.02f + 0.06f * (1.0f - bgV);
+            float b = 0.05f + 0.10f * (1.0f - bgV);
+            r = MathF.Sqrt(r); g = MathF.Sqrt(g); b = MathF.Sqrt(b);
+            int cr = (int)(r * 255f); int cg = (int)(g * 255f); int cb = (int)(b * 255f);
+            if (cr > 255) cr = 255; if (cg > 255) cg = 255; if (cb > 255) cb = 255;
+            output[index] = (uint)(cr | (cg << 8) | (cb << 16) | (0xFF << 24));
+        }
+
+        static void BoidsSimKernelTest(
+            Index1D index,
+            ArrayView1D<float, Stride1D.Dense> boidsIn,
+            ArrayView1D<float, Stride1D.Dense> boidsOut,
+            int count, float speedDt)
+        {
+            int i = index;
+            if (i >= count) return;
+            int bi = i * 6;
+            float px = boidsIn[bi + 0] + boidsIn[bi + 3] * speedDt;
+            float py = boidsIn[bi + 1] + boidsIn[bi + 4] * speedDt;
+            float pz = boidsIn[bi + 2] + boidsIn[bi + 5] * speedDt;
+            boidsOut[bi + 0] = px; boidsOut[bi + 1] = py; boidsOut[bi + 2] = pz;
+            boidsOut[bi + 3] = boidsIn[bi + 3];
+            boidsOut[bi + 4] = boidsIn[bi + 4];
+            boidsOut[bi + 5] = boidsIn[bi + 5];
+        }
+
+        static void BoidsLoopReadKernel(
+            Index1D index,
+            ArrayView1D<float, Stride1D.Dense> input,
+            ArrayView1D<float, Stride1D.Dense> output,
+            int count)
+        {
+            // Sum all elements — exercises a loop with a read-from-buffer inner body.
+            float sum = 0f;
+            for (int j = 0; j < count; j++)
+                sum += input[j];
+            output[index] = sum;
+        }
+
+        static void BoidsLoopIfElseKernel(
+            Index1D index,
+            ArrayView1D<float, Stride1D.Dense> input,
+            ArrayView1D<float, Stride1D.Dense> output,
+            int count)
+        {
+            // Loop with an if/else inside — the construct that regressed.
+            float acc = 0f;
+            for (int j = 0; j < count; j++)
+            {
+                float v = input[j];
+                if (v > 0.5f)
+                    acc += v;
+                else
+                    acc -= v;
+            }
+            output[index] = acc;
+        }
+
+        static void BoidsRenderNoBoidsKernel(
+            Index2D index,
+            ArrayView2D<uint, Stride2D.DenseX> output,
+            int packedSize,
+            float camTheta, float camPhi, float camDist)
+        {
+            int width = packedSize / 65536;
+            int height = packedSize - width * 65536;
+            int px = index.X, py = index.Y;
+            if (px >= width || py >= height) return;
+
+            float sinPhi = MathF.Sin(camPhi);
+            float cosPhi = MathF.Cos(camPhi);
+            float sinTheta = MathF.Sin(camTheta);
+            float cosTheta = MathF.Cos(camTheta);
+            float camX = camDist * sinPhi * cosTheta;
+            float camY = camDist * cosPhi;
+            float camZ = camDist * sinPhi * sinTheta;
+
+            float bgV = (float)py / (float)height;
+            float finalR = MathF.Sqrt(0.02f + 0.04f * (1.0f - bgV));
+            float finalG = MathF.Sqrt(0.02f + 0.06f * (1.0f - bgV));
+            float finalB = MathF.Sqrt(0.05f + 0.10f * (1.0f - bgV));
+            // Use camera values to prevent DCE
+            finalR += camX * 0.0f; finalG += camY * 0.0f; finalB += camZ * 0.0f;
+
+            int cr = (int)(finalR * 255f); int cg = (int)(finalG * 255f); int cb = (int)(finalB * 255f);
+            if (cr > 255) cr = 255; if (cg > 255) cg = 255; if (cb > 255) cb = 255;
+            output[index] = (uint)(cr | (cg << 8) | (cb << 16) | (0xFF << 24));
+        }
+
+        /// <summary>Test 7: 2D kernel reads from a 1D float buffer — minimal coverage for the boids render path.</summary>
+        static void FloatBufferRead2DKernel(
+            Index2D index,
+            ArrayView2D<uint, Stride2D.DenseX> output,
+            ArrayView1D<float, Stride1D.Dense> floatBuf,
+            int width, int height)
+        {
+            if (index.X >= width || index.Y >= height) return;
+            // Read first 3 floats and pack as RGB so the test can detect them.
+            float r = floatBuf[0];
+            float g = floatBuf[1];
+            float b = floatBuf[2];
+            int cr = (int)(r * 255f); if (cr > 255) cr = 255; if (cr < 0) cr = 0;
+            int cg = (int)(g * 255f); if (cg > 255) cg = 255; if (cg < 0) cg = 0;
+            int cb = (int)(b * 255f); if (cb > 255) cb = 255; if (cb < 0) cb = 0;
+            output[index] = (uint)(cr | (cg << 8) | (cb << 16) | (0xFF << 24));
+        }
+
+        /// <summary>Test 8: Full BoidsRenderKernel with one boid at origin — detects blank canvas with real boids buffer.</summary>
+        static void BoidsRenderKernelFull(
+            Index2D index,
+            ArrayView2D<uint, Stride2D.DenseX> output,
+            ArrayView1D<float, Stride1D.Dense> boids,
+            int boidCount, int speciesCount, int packedSize,
+            float camTheta, float camPhi, float camDist,
+            float unused1, float unused2)
+        {
+            int width = packedSize / 65536;
+            int height = packedSize - width * 65536;
+            int px = index.X;
+            int py = index.Y;
+            if (px >= width || py >= height) return;
+
+            float sinPhi = MathF.Sin(camPhi);
+            float cosPhi = MathF.Cos(camPhi);
+            float sinTheta = MathF.Sin(camTheta);
+            float cosTheta = MathF.Cos(camTheta);
+
+            float camX = camDist * sinPhi * cosTheta;
+            float camY = camDist * cosPhi;
+            float camZ = camDist * sinPhi * sinTheta;
+
+            float fwdX = -camX, fwdY = -camY, fwdZ = -camZ;
+            float fwdLen = MathF.Sqrt(fwdX * fwdX + fwdY * fwdY + fwdZ * fwdZ);
+            fwdX /= fwdLen; fwdY /= fwdLen; fwdZ /= fwdLen;
+
+            float rightX = fwdZ, rightZ = -fwdX;
+            float rightLen = MathF.Sqrt(rightX * rightX + rightZ * rightZ);
+            if (rightLen < 0.001f) { rightX = 1; rightZ = 0; rightLen = 1; }
+            rightX /= rightLen; rightZ /= rightLen;
+
+            float upX = -fwdY * fwdX;
+            float upY = fwdX * fwdX + fwdZ * fwdZ;
+            float upZ = -fwdY * fwdZ;
+            float upLen = MathF.Sqrt(upX * upX + upY * upY + upZ * upZ);
+            if (upLen > 0.001f) { upX /= upLen; upY /= upLen; upZ /= upLen; }
+
+            float bgV = (float)py / (float)height;
+            float bgR = 0.02f + 0.04f * (1.0f - bgV);
+            float bgG = 0.02f + 0.06f * (1.0f - bgV);
+            float bgB = 0.05f + 0.1f * (1.0f - bgV);
+
+            float finalR = bgR;
+            float finalG = bgG;
+            float finalB = bgB;
+
+            float aspect = (float)width / (float)height;
+            float fov = 1.2f;
+
+            float screenU = (2.0f * px / width - 1.0f) * aspect;
+            float screenV = 1.0f - 2.0f * py / height;
+
+            int stride = 6;
+            float closestDepth = 999.0f;
+
+            for (int b = 0; b < boidCount; b++)
+            {
+                int bi = b * stride;
+                float bx = boids[bi + 0] - camX;
+                float by = boids[bi + 1] - camY;
+                float bz = boids[bi + 2] - camZ;
+
+                float viewZ = bx * fwdX + by * fwdY + bz * fwdZ;
+                if (viewZ < 0.5f) continue;
+
+                float viewX = bx * rightX + by * 0 + bz * rightZ;
+                float viewY = bx * upX + by * upY + bz * upZ;
+
+                float projX = viewX * fov / viewZ;
+                float projY = viewY * fov / viewZ;
+
+                float ddx = screenU - projX;
+                float ddy = screenV - projY;
+                float pixelDist = ddx * ddx + ddy * ddy;
+
+                float dotSize = 0.012f / (viewZ * 0.08f);
+                float dotSizeSq = dotSize * dotSize;
+
+                if (pixelDist < dotSizeSq && viewZ < closestDepth)
+                {
+                    closestDepth = viewZ;
+                    int species = b % speciesCount;
+                    float intensity = 1.0f - pixelDist / dotSizeSq;
+                    intensity = intensity * intensity;
+                    float depthFade = 1.0f / (1.0f + viewZ * 0.03f);
+
+                    float bvx = boids[bi + 3];
+                    float bvy = boids[bi + 4];
+                    float bvz = boids[bi + 5];
+                    float speed = MathF.Sqrt(bvx * bvx + bvy * bvy + bvz * bvz);
+                    float speedGlow = 0.7f + 0.3f * speed / 4.0f;
+                    if (speedGlow > 1.0f) speedGlow = 1.0f;
+
+                    float br = 0, bg = 0, bb = 0;
+                    if (species == 0) { br = 0.2f; bg = 0.6f; bb = 1.0f; }
+                    else if (species == 1) { br = 1.0f; bg = 0.4f; bb = 0.1f; }
+                    else { br = 0.3f; bg = 1.0f; bb = 0.4f; }
+
+                    float glow = intensity * depthFade * speedGlow;
+                    finalR = br * glow + bgR * (1.0f - glow);
+                    finalG = bg * glow + bgG * (1.0f - glow);
+                    finalB = bb * glow + bgB * (1.0f - glow);
+                }
+            }
+
+            finalR = MathF.Sqrt(finalR);
+            finalG = MathF.Sqrt(finalG);
+            finalB = MathF.Sqrt(finalB);
+
+            int cr = (int)(finalR * 255.0f); if (cr > 255) cr = 255; if (cr < 0) cr = 0;
+            int cg = (int)(finalG * 255.0f); if (cg > 255) cg = 255; if (cg < 0) cg = 0;
+            int cb = (int)(finalB * 255.0f); if (cb > 255) cb = 255; if (cb < 0) cb = 0;
+            output[index] = (uint)(cr | (cg << 8) | (cb << 16) | (0xFF << 24));
+        }
+
+        // --- Test methods ---
+
+        /// <summary>Test 1: MathF.Sin/Cos/Sqrt in a simple 1D kernel.</summary>
+        [TestMethod]
+        public async Task Boids_01_MathFTest()
+        {
+            var (context, accelerator) = await CreateAcceleratorAsync();
+            try
+            {
+                const int n = 16;
+                using var buf = accelerator.Allocate1D<float>(n);
+                var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<float, Stride1D.Dense>>(BoidsMathFKernel);
+                kernel((Index1D)n, buf.View);
+                await accelerator.SynchronizeAsync();
+                var result = await buf.CopyToHostAsync<float>();
+                for (int i = 0; i < n; i++)
+                    if (result[i] == 0f && i > 0)
+                        throw new Exception($"MathF kernel output[{i}] = 0, expected non-zero");
+            }
+            finally { accelerator.Dispose(); context.Dispose(); }
+        }
+
+        /// <summary>Test 2: 2D kernel writes non-zero background gradient pixels.</summary>
+        [TestMethod]
+        public async Task Boids_02_Background2DTest()
+        {
+            var (context, accelerator) = await CreateAcceleratorAsync();
+            try
+            {
+                const int W = 32, H = 32;
+                using var buf = accelerator.Allocate2DDenseX<uint>(new Index2D(W, H));
+                var kernel = accelerator.LoadAutoGroupedStreamKernel<Index2D, ArrayView2D<uint, Stride2D.DenseX>, int, int>(BoidsBackground2DKernel);
+                kernel(buf.IntExtent, buf.View, W, H);
+                await accelerator.SynchronizeAsync();
+                var result = await buf.CopyToHostAsync<uint>();
+                int nonZero = result.Cast<uint>().Count(v => v != 0);
+                if (nonZero < W * H / 2)
+                    throw new Exception($"Expected most pixels non-zero, got {nonZero}/{W * H}");
+            }
+            finally { accelerator.Dispose(); context.Dispose(); }
+        }
+
+        /// <summary>Test 3: Simple position integration (no neighbor loop).</summary>
+        [TestMethod]
+        public async Task Boids_03_SimIntegrationTest()
+        {
+            var (context, accelerator) = await CreateAcceleratorAsync();
+            try
+            {
+                const int count = 8;
+                var data = new float[count * 6];
+                for (int i = 0; i < count; i++) { data[i * 6 + 0] = i; data[i * 6 + 3] = 1f; data[i * 6 + 4] = 0.5f; }
+                using var bufIn = accelerator.Allocate1D(data);
+                using var bufOut = accelerator.Allocate1D<float>(count * 6);
+                var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>, int, float>(BoidsSimKernelTest);
+                kernel((Index1D)count, bufIn.View, bufOut.View, count, 0.016f);
+                await accelerator.SynchronizeAsync();
+                var result = await bufOut.CopyToHostAsync<float>();
+                // pos.x should have moved: new_x = i + 1*0.016
+                for (int i = 0; i < count; i++)
+                {
+                    float expected = i + 0.016f;
+                    float got = result[i * 6];
+                    if (MathF.Abs(got - expected) > 0.001f)
+                        throw new Exception($"Boid {i}: expected px={expected:F4}, got {got:F4}");
+                }
+            }
+            finally { accelerator.Dispose(); context.Dispose(); }
+        }
+
+        /// <summary>Test 4: Loop that reads from a buffer (no if/else inside).</summary>
+        [TestMethod]
+        public async Task Boids_04_LoopReadTest()
+        {
+            var (context, accelerator) = await CreateAcceleratorAsync();
+            try
+            {
+                const int count = 8;
+                var data = Enumerable.Range(1, count).Select(v => (float)v).ToArray();
+                float expected = data.Sum();
+                using var bufIn = accelerator.Allocate1D(data);
+                using var bufOut = accelerator.Allocate1D<float>(1);
+                var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>, int>(BoidsLoopReadKernel);
+                kernel((Index1D)1, bufIn.View, bufOut.View, count);
+                await accelerator.SynchronizeAsync();
+                var result = await bufOut.CopyToHostAsync<float>();
+                if (MathF.Abs(result[0] - expected) > 0.01f)
+                    throw new Exception($"Loop read sum: expected {expected}, got {result[0]}");
+            }
+            finally { accelerator.Dispose(); context.Dispose(); }
+        }
+
+        /// <summary>Test 5: Loop with if/else inside — the construct that regressed.</summary>
+        [TestMethod]
+        public async Task Boids_05_LoopIfElseTest()
+        {
+            var (context, accelerator) = await CreateAcceleratorAsync();
+            try
+            {
+                const int count = 8;
+                var data = new float[] { 0.1f, 0.9f, 0.2f, 0.8f, 0.3f, 0.7f, 0.4f, 0.6f };
+                float expected = data.Sum(v => v > 0.5f ? v : -v);
+                using var bufIn = accelerator.Allocate1D(data);
+                using var bufOut = accelerator.Allocate1D<float>(1);
+                var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>, int>(BoidsLoopIfElseKernel);
+                kernel((Index1D)1, bufIn.View, bufOut.View, count);
+                await accelerator.SynchronizeAsync();
+                var result = await bufOut.CopyToHostAsync<float>();
+                if (MathF.Abs(result[0] - expected) > 0.01f)
+                    throw new Exception($"Loop+if/else: expected {expected:F4}, got {result[0]:F4}");
+            }
+            finally { accelerator.Dispose(); context.Dispose(); }
+        }
+
+        /// <summary>Test 6: Full Boids render kernel with zero boids (background only).</summary>
+        [TestMethod]
+        public async Task Boids_06_RenderNoBoidsTest()
+        {
+            var (context, accelerator) = await CreateAcceleratorAsync();
+            try
+            {
+                const int W = 32, H = 32;
+                using var buf = accelerator.Allocate2DDenseX<uint>(new Index2D(W, H));
+                var kernel = accelerator.LoadAutoGroupedStreamKernel<Index2D, ArrayView2D<uint, Stride2D.DenseX>, int, float, float, float>(BoidsRenderNoBoidsKernel);
+                int packedSize = W * 65536 + H;
+                kernel(buf.IntExtent, buf.View, packedSize, 0.8f, 0.5f, 20f);
+                await accelerator.SynchronizeAsync();
+                var result = await buf.CopyToHostAsync<uint>();
+                int nonZero = result.Cast<uint>().Count(v => v != 0);
+                if (nonZero < W * H / 2)
+                    throw new Exception($"Render (no boids): expected non-zero pixels, got {nonZero}/{W * H}");
+            }
+            finally { accelerator.Dispose(); context.Dispose(); }
+        }
+
+        // ─── Test 10/11: Compound && with loop-carried update ───────────────────────
+
+        /// <summary>Test 10: Compound && condition with loop-carried update — mirrors the exact inner-loop pattern of the boids render kernel.</summary>
+        static void CompoundAndLoopKernel(
+            Index2D index,
+            ArrayView2D<uint, Stride2D.DenseX> output,
+            ArrayView1D<float, Stride1D.Dense> buf,
+            int count, int width, int height)
+        {
+            if (index.X >= width || index.Y >= height) return;
+            float best = 999.0f;
+            float found = 0f;
+            float threshold = 50.0f;
+            for (int i = 0; i < count; i++)
+            {
+                float v = buf[i];
+                if (v < threshold && v < best)  // compound &&, mirrors pixelDist<dotSizeSq && viewZ<closestDepth
+                {
+                    best = v;
+                    found = 1f;
+                }
+            }
+            int r = found > 0.5f ? 200 : 0;
+            output[index] = (uint)(r | (0xFF << 24));
+        }
+
+        [TestMethod]
+        public async Task Boids_10_CompoundAndLoopTest()
+        {
+            // buf = [5, 2, 8, 1]  threshold=50  → all < 50, so only second condition matters → best goes 999→5→2→1 → found=1
+            var (context, accelerator) = await CreateAcceleratorAsync();
+            try
+            {
+                const int W = 4, H = 4;
+                var data = new float[] { 5f, 2f, 8f, 1f };
+                using var buf = accelerator.Allocate1D(data);
+                using var output = accelerator.Allocate2DDenseX<uint>(new Index2D(W, H));
+                var kernel = accelerator.LoadAutoGroupedStreamKernel<
+                    Index2D, ArrayView2D<uint, Stride2D.DenseX>, ArrayView1D<float, Stride1D.Dense>,
+                    int, int, int>(CompoundAndLoopKernel);
+                kernel(output.IntExtent, output.View, buf.View, data.Length, W, H);
+                await accelerator.SynchronizeAsync();
+                var result = await output.CopyToHostAsync<uint>();
+                bool anyRed = result.Cast<uint>().Any(px => (px & 0xFF) > 100);
+                if (!anyRed)
+                    throw new Exception($"Compound-&& loop: expected found=1 (red pixel). First pixel: 0x{result.Cast<uint>().First():X8}");
+            }
+            finally { accelerator.Dispose(); context.Dispose(); }
+        }
+
+        /// <summary>Test 11: Compound && with buffer read INSIDE the conditional (mirrors boids[bi+3..5] reads inside the if block).</summary>
+        static void CompoundAndBufferReadInsideKernel(
+            Index2D index,
+            ArrayView2D<uint, Stride2D.DenseX> output,
+            ArrayView1D<float, Stride1D.Dense> buf,
+            int count, int width, int height)
+        {
+            if (index.X >= width || index.Y >= height) return;
+            int stride = 2;        // [value, weight] pairs
+            float best = 999.0f;
+            float sumWeight = 0f;
+            for (int i = 0; i < count; i++)
+            {
+                int bi = i * stride;
+                float v = buf[bi + 0];
+                if (v < 50.0f && v < best)  // compound &&
+                {
+                    best = v;
+                    float w = buf[bi + 1];  // read from buffer INSIDE conditional — mirrors boids[bi+3]
+                    sumWeight += w;
+                }
+            }
+            // Items: (5,10),(2,20),(8,5),(1,30) — all v<50; best improves each time so all 4 qualify
+            // sumWeight = 10+20+5+30 = 65 > 30
+            int r = sumWeight > 30.0f ? 200 : 0;
+            output[index] = (uint)(r | (0xFF << 24));
+        }
+
+        [TestMethod]
+        public async Task Boids_11_CompoundAndBufferReadInsideTest()
+        {
+            // stride=2: buf = [5,10, 2,20, 8,5, 1,30]
+            // Expected: items (5,10),(2,20),(1,30) qualify → sumWeight=60 > 30
+            var (context, accelerator) = await CreateAcceleratorAsync();
+            try
+            {
+                const int W = 4, H = 4;
+                var data = new float[] { 5f, 10f, 2f, 20f, 8f, 5f, 1f, 30f };
+                using var buf = accelerator.Allocate1D(data);
+                using var output = accelerator.Allocate2DDenseX<uint>(new Index2D(W, H));
+                var kernel = accelerator.LoadAutoGroupedStreamKernel<
+                    Index2D, ArrayView2D<uint, Stride2D.DenseX>, ArrayView1D<float, Stride1D.Dense>,
+                    int, int, int>(CompoundAndBufferReadInsideKernel);
+                kernel(output.IntExtent, output.View, buf.View, data.Length / 2, W, H);
+                await accelerator.SynchronizeAsync();
+                var result = await output.CopyToHostAsync<uint>();
+                bool anyRed = result.Cast<uint>().Any(px => (px & 0xFF) > 100);
+                if (!anyRed)
+                {
+                    var glsl = SpawnDev.ILGPU.WebGL.WebGLAccelerator.LastGeneratedGLSL ?? "(null)";
+                    var glslSnippet = glsl.Length > 6000 ? glsl[..6000] : glsl;
+                    throw new Exception($"Compound-&& buffer-read-inside: expected sumWeight>30 (red). First pixel: 0x{result.Cast<uint>().First():X8}\nGLSL[0..6000]:\n{glslSnippet}");
+                }
+            }
+            finally { accelerator.Dispose(); context.Dispose(); }
+        }
+
+        // ─── Test 12: Simple (non-compound) if with buffer read inside ──────────────
+
+        /// <summary>Test 12: Simple single-condition if with a buffer read inside — isolates compound-&& vs basic if-inside-buffer-read.</summary>
+        static void SimpleIfBufReadInsideKernel(
+            Index2D index,
+            ArrayView2D<uint, Stride2D.DenseX> output,
+            ArrayView1D<float, Stride1D.Dense> buf,
+            int count, int width, int height)
+        {
+            if (index.X >= width || index.Y >= height) return;
+            float sumWeight = 0f;
+            for (int i = 0; i < count; i++)
+            {
+                int bi = i * 2;
+                float v = buf[bi];
+                if (v < 50.0f)          // SIMPLE single condition (no &&)
+                {
+                    float w = buf[bi + 1]; // buffer read inside simple if
+                    sumWeight += w;
+                }
+            }
+            // All v values (5,2,8,1) < 50 → all weights sum: 10+20+5+30=65 > 30
+            int r = sumWeight > 30.0f ? 200 : 0;
+            output[index] = (uint)(r | (0xFF << 24));
+        }
+
+        [TestMethod]
+        public async Task Boids_12_SimpleIfBufReadInsideTest()
+        {
+            // Simple if (v<50) with buf[bi+1] inside — no compound &&
+            // All 4 items have v<50, so all weights accumulate: 10+20+5+30=65 > 30
+            var (context, accelerator) = await CreateAcceleratorAsync();
+            try
+            {
+                const int W = 4, H = 4;
+                var data = new float[] { 5f, 10f, 2f, 20f, 8f, 5f, 1f, 30f };
+                using var buf = accelerator.Allocate1D(data);
+                using var output = accelerator.Allocate2DDenseX<uint>(new Index2D(W, H));
+                var kernel = accelerator.LoadAutoGroupedStreamKernel<
+                    Index2D, ArrayView2D<uint, Stride2D.DenseX>, ArrayView1D<float, Stride1D.Dense>,
+                    int, int, int>(SimpleIfBufReadInsideKernel);
+                kernel(output.IntExtent, output.View, buf.View, data.Length / 2, W, H);
+                await accelerator.SynchronizeAsync();
+                var result = await output.CopyToHostAsync<uint>();
+                bool anyRed = result.Cast<uint>().Any(px => (px & 0xFF) > 100);
+                if (!anyRed)
+                {
+                    var glsl = SpawnDev.ILGPU.WebGL.WebGLAccelerator.LastGeneratedGLSL ?? "(null)";
+                    var glslSnippet = glsl.Length > 6000 ? glsl[..6000] : glsl;
+                    throw new Exception($"Simple-if buf-read-inside: expected sumWeight>30 (red). First pixel: 0x{result.Cast<uint>().First():X8}\nGLSL[0..6000]:\n{glslSnippet}");
+                }
+            }
+            finally { accelerator.Dispose(); context.Dispose(); }
+        }
+
+        // ─── Test 9: Loop-carried minimum tracker ───────────────────────────────────
+
+        /// <summary>Test 9: Loop over float buffer with a loop-carried minimum tracker (mirrors closestDepth pattern).</summary>
+        static void LoopFloatMinTrackerKernel(
+            Index2D index,
+            ArrayView2D<uint, Stride2D.DenseX> output,
+            ArrayView1D<float, Stride1D.Dense> buf,
+            int count, int width, int height)
+        {
+            if (index.X >= width || index.Y >= height) return;
+            float minVal = 999.0f;   // loop-carried, like closestDepth
+            float found = 0f;        // set when minVal is updated
+            for (int i = 0; i < count; i++)
+            {
+                float v = buf[i];
+                if (v < 0f) continue; // skip negatives (never taken in test)
+                if (v < minVal)
+                {
+                    minVal = v;
+                    found = 1f;      // update loop-carried variable
+                }
+            }
+            // If minVal was updated from 999 → some buffer value, found=1
+            int r = found > 0.5f ? 200 : 0;
+            output[index] = (uint)(r | (0xFF << 24));
+        }
+
+        /// <summary>Test 9: Loop-carried variable (closestDepth analog) — isolates whether loop-carried float updates work in GLSL.</summary>
+        [TestMethod]
+        public async Task Boids_09_LoopCarriedMinTrackerTest()
+        {
+            var (context, accelerator) = await CreateAcceleratorAsync();
+            try
+            {
+                const int W = 4, H = 4;
+                // Values [5, 2, 8, 1] — minimum is 1, so minVal should update from 999→5→2→1, found=1
+                var bufData = new float[] { 5f, 2f, 8f, 1f };
+                using var buf = accelerator.Allocate1D(bufData);
+                using var output = accelerator.Allocate2DDenseX<uint>(new Index2D(W, H));
+                var kernel = accelerator.LoadAutoGroupedStreamKernel<
+                    Index2D, ArrayView2D<uint, Stride2D.DenseX>, ArrayView1D<float, Stride1D.Dense>,
+                    int, int, int>(LoopFloatMinTrackerKernel);
+                kernel(output.IntExtent, output.View, buf.View, bufData.Length, W, H);
+                await accelerator.SynchronizeAsync();
+                var result = await output.CopyToHostAsync<uint>();
+                uint first = result.Cast<uint>().First();
+                byte r = (byte)(first & 0xFF);
+                if (r < 150)
+                    throw new Exception($"Loop-carried min tracker: expected R≈200 (found=1), got R={r} (pixel=0x{first:X8}). Loop-carried variable update may be lost in GLSL PHI resolution.");
+            }
+            finally { accelerator.Dispose(); context.Dispose(); }
+        }
+
+        /// <summary>Test 7: 2D kernel reads known values from a 1D float buffer — confirms texelFetch works for float inputs in a 2D kernel.</summary>
+        [TestMethod]
+        public async Task Boids_07_FloatBufferRead2DTest()
+        {
+            var (context, accelerator) = await CreateAcceleratorAsync();
+            try
+            {
+                const int W = 8, H = 8;
+                // Known values: R=1.0, G=0.5, B=0.25
+                var floatData = new float[] { 1.0f, 0.5f, 0.25f };
+                using var floatBuf = accelerator.Allocate1D(floatData);
+                using var output = accelerator.Allocate2DDenseX<uint>(new Index2D(W, H));
+                var kernel = accelerator.LoadAutoGroupedStreamKernel<
+                    Index2D, ArrayView2D<uint, Stride2D.DenseX>, ArrayView1D<float, Stride1D.Dense>,
+                    int, int>(FloatBufferRead2DKernel);
+                kernel(output.IntExtent, output.View, floatBuf.View, W, H);
+                await accelerator.SynchronizeAsync();
+                var result = await output.CopyToHostAsync<uint>();
+                // Every pixel should encode R=255, G=127, B=63 (within ±2 rounding)
+                uint first = result.Cast<uint>().First();
+                byte r = (byte)(first & 0xFF);
+                byte g = (byte)((first >> 8) & 0xFF);
+                byte b = (byte)((first >> 16) & 0xFF);
+                if (r < 250)
+                    throw new Exception($"Float buffer read: expected R≈255 from floatBuf[0]=1.0, got R={r} (pixel=0x{first:X8}). Buffer reads are returning wrong/zero values.");
+                if (g < 120 || g > 135)
+                    throw new Exception($"Float buffer read: expected G≈127 from floatBuf[1]=0.5, got G={g} (pixel=0x{first:X8}).");
+            }
+            finally { accelerator.Dispose(); context.Dispose(); }
+        }
+
+        /// <summary>Test 8: Full BoidsRenderKernel with 1 boid at origin — detects blank canvas with real boids buffer.</summary>
+        [TestMethod]
+        public async Task Boids_08_RenderWithBoidsTest()
+        {
+            var (context, accelerator) = await CreateAcceleratorAsync();
+            try
+            {
+                const int W = 64, H = 64;
+                // Single boid at origin (0,0,0), zero velocity
+                var boidsData = new float[6]; // all zeros = boid at origin
+                using var boidsBuffer = accelerator.Allocate1D(boidsData);
+                using var outputBuffer = accelerator.Allocate2DDenseX<uint>(new Index2D(W, H));
+                var kernel = accelerator.LoadAutoGroupedStreamKernel<
+                    Index2D, ArrayView2D<uint, Stride2D.DenseX>, ArrayView1D<float, Stride1D.Dense>,
+                    int, int, int, float, float, float, float, float>(BoidsRenderKernelFull);
+                int packedSize = W * 65536 + H;
+                kernel(outputBuffer.IntExtent, outputBuffer.View, boidsBuffer.View,
+                    1, 1, packedSize, 0.8f, 0.5f, 20.0f, 0f, 0f);
+                await accelerator.SynchronizeAsync();
+                var result = await outputBuffer.CopyToHostAsync<uint>();
+                // Boid at origin projects to screen center; at least one pixel should be
+                // noticeably brighter than background (R or G or B > 100)
+                bool foundBoid = false;
+                foreach (var px in result.Cast<uint>())
+                {
+                    byte r = (byte)(px & 0xFF);
+                    byte g = (byte)((px >> 8) & 0xFF);
+                    byte b = (byte)((px >> 16) & 0xFF);
+                    if (r > 100 || g > 100 || b > 100) { foundBoid = true; break; }
+                }
+                if (!foundBoid)
+                {
+                    uint center = result.Cast<uint>().ElementAt(H / 2 * W + W / 2);
+                    throw new Exception($"Render with boids: expected at least one bright pixel from 1 boid at origin, none found. Center pixel: 0x{center:X8}");
+                }
+            }
+            finally { accelerator.Dispose(); context.Dispose(); }
+        }
+
+        #endregion
     }
 }

@@ -1278,10 +1278,25 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             PopIndent();
             AppendLine("}");
 
-            // Continue with merge block if it's in the loop and wasn't consumed
-            // by BOTH branches (it may have been consumed by just one)
-            if (mergeInLoop && !_visitedBlocks.Contains(merge))
+            // Always regenerate the merge block after the if/else by restoring
+            // _visitedBlocks to the pre-branch state. This handles two failure modes:
+            //
+            // 1. The false branch may have internally visited BB_phi_merge (e.g.,
+            //    via BB_if_body → BB_phi_merge), leaving it marked visited and
+            //    causing the old `!Contains(merge)` guard to skip generation.
+            //
+            // 2. Sub-blocks of the merge (e.g., BB_case0 in a color-select switch)
+            //    may have been visited during the true or false branch. If only
+            //    `Remove(merge)` were used, those sub-blocks would still be marked
+            //    visited when the merge re-runs its own nested Case-4 branches,
+            //    producing empty else-blocks and wrong phi values.
+            //
+            // By intersecting back to visitedBeforeTrueBranch we let the merge and
+            // its entire sub-tree regenerate cleanly. Any code emitted after an
+            // already-executed `continue` is dead but harmless.
+            if (mergeInLoop)
             {
+                _visitedBlocks.IntersectWith(visitedBeforeTrueBranch);
                 GenerateLoopBody(merge, loop, outerStop);
             }
         }
@@ -1838,9 +1853,9 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             }
             else
             {
-                // Fallback: emit 0 (should not happen for well-formed kernels)
+                // Fallback: emit typed zero (should not happen for well-formed kernels)
                 Declare(target);
-                AppendLine($"{target} = 0; // GetViewLength: could not resolve view to parameter");
+                AppendLine($"{target} = {GetDefaultValue(TypeGenerator[value.Type])}; // GetViewLength: could not resolve view to parameter");
             }
         }
 
@@ -1937,14 +1952,22 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                         }
                         else if (is1DView)
                         {
+                            string glslType1D = TypeGenerator[value.Type];
+                            bool needsI64_1D = glslType1D == "uvec2";
+                            string zeroExpr1D = needsI64_1D ? "uvec2(0u)" : "0";
+                            string lenExpr1D = needsI64_1D ? $"uvec2(uint({totalLen}), 0u)" : totalLen;
                             switch (value.FieldSpan.Index)
                             {
-                                case 1: AppendLine($"{prefix}{target} = 0;"); return; // Index
-                                case 2: AppendLine($"{prefix}{target} = {totalLen};"); return; // Length
+                                case 1: AppendLine($"{prefix}{target} = {zeroExpr1D};"); return; // Index (stride offset = 0)
+                                case 2: AppendLine($"{prefix}{target} = {lenExpr1D};"); return; // Length
                             }
                         }
 
-                        AppendLine($"{prefix}{target} = {totalLen};");
+                        {
+                            string glslTypeFb = TypeGenerator[value.Type];
+                            string lenExprFb = glslTypeFb == "uvec2" ? $"uvec2(uint({totalLen}), 0u)" : totalLen;
+                            AppendLine($"{prefix}{target} = {lenExprFb};");
+                        }
                         return;
                     }
                 }
