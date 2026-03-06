@@ -1,5 +1,6 @@
 @page "/mandelbrot_old"
 @implements IAsyncDisposable
+@using SpawnDev.ILGPU.Rendering
 @using SpawnDev.ILGPU.WebGPU
 @using SpawnDev.ILGPU.WebGPU.Backend
 @using SpawnDev.BlazorJS
@@ -153,10 +154,12 @@
     private Accelerator? _ilgpuAccelerator;
     private Action<Index2D, ArrayView2D<uint, Stride2D.DenseX>, int, int, int, double, double, double>? _ilgpuKernel;
     private MemoryBuffer2D<uint, Stride2D.DenseX>? _ilgpuBuffer;
+    private ICanvasRenderer? _ilgpuCanvasRenderer;
 
     // Cached ILGPU resources (perturbation mode)
     private Context? _pertContext;
     private Accelerator? _pertAccelerator;
+    private ICanvasRenderer? _pertCanvasRenderer;
     private Action<Index2D, ArrayView2D<uint, Stride2D.DenseX>, ArrayView<float>, ArrayView<float>,
         int, int, int, float>? _pertKernel;
     private MemoryBuffer2D<uint, Stride2D.DenseX>? _pertBuffer;
@@ -337,6 +340,8 @@
         _ilgpuAccelerator = await ilgpuDevice.CreateAcceleratorAsync(_ilgpuContext, options);
         _ilgpuKernel = _ilgpuAccelerator.LoadAutoGroupedStreamKernel<Index2D, ArrayView2D<uint, Stride2D.DenseX>, int, int, int, double, double, double>(MandelbrotKernel);
         _ilgpuBuffer = _ilgpuAccelerator.Allocate2DDenseX<uint>(new Index2D(_width, _height));
+        _ilgpuCanvasRenderer = CanvasRendererFactory.Create(_ilgpuAccelerator);
+        _ilgpuCanvasRenderer.AttachCanvas(new HTMLCanvasElement(mandelbrotCanvas));
     }
 
     private async Task ReloadKernel(bool enableF64 = false)
@@ -352,6 +357,8 @@
             }
             
             _ilgpuKernel = null;
+            _ilgpuCanvasRenderer?.Dispose();
+            _ilgpuCanvasRenderer = null;
             _ilgpuBuffer?.Dispose();
             _ilgpuBuffer = null;
             _ilgpuAccelerator?.Dispose();
@@ -371,6 +378,8 @@
             
             _ilgpuKernel = _ilgpuAccelerator.LoadAutoGroupedStreamKernel<Index2D, ArrayView2D<uint, Stride2D.DenseX>, int, int, int, double, double, double>(MandelbrotKernel);
             _ilgpuBuffer = _ilgpuAccelerator.Allocate2DDenseX<uint>(new Index2D(_width, _height));
+            _ilgpuCanvasRenderer = CanvasRendererFactory.Create(_ilgpuAccelerator);
+            _ilgpuCanvasRenderer.AttachCanvas(new HTMLCanvasElement(mandelbrotCanvas));
         }
         finally
         {
@@ -390,16 +399,10 @@
             
             await _ilgpuAccelerator!.SynchronizeAsync();
 
-            var webGpuMemBuffer = (WebGPUMemoryBuffer)((IArrayView)_ilgpuBuffer).Buffer;
-            var bytes = await webGpuMemBuffer.NativeBuffer.CopyToHostAsync();
-
-            var result = new uint[_width * _height];
-            Buffer.BlockCopy(bytes, 0, result, 0, bytes.Length);
-
             sw.Stop();
             _ilgpuRenderTime = $"{sw.ElapsedMilliseconds} ms";
 
-            await DrawToCanvas(result);
+            await _ilgpuCanvasRenderer!.PresentAsync(_ilgpuBuffer!);
         }
         finally
         {
@@ -466,6 +469,8 @@
             Index2D, ArrayView2D<uint, Stride2D.DenseX>, ArrayView<float>, ArrayView<float>,
             int, int, int, float>(PerturbationKernel);
         _pertBuffer = _pertAccelerator.Allocate2DDenseX<uint>(new Index2D(_width, _height));
+        _pertCanvasRenderer = CanvasRendererFactory.Create(_pertAccelerator);
+        _pertCanvasRenderer.AttachCanvas(new HTMLCanvasElement(mandelbrotCanvas));
     }
 
     /// <summary>
@@ -556,18 +561,11 @@
 
             await _pertAccelerator!.SynchronizeAsync();
 
-            // 4. Read back results
-            var webGpuMemBuffer = (WebGPUMemoryBuffer)((IArrayView)_pertBuffer).Buffer;
-            var bytes = await webGpuMemBuffer.NativeBuffer.CopyToHostAsync();
-
-            var result = new uint[_width * _height];
-            Buffer.BlockCopy(bytes, 0, result, 0, bytes.Length);
-
             sw.Stop();
             _ilgpuRenderTime = $"{sw.ElapsedMilliseconds} ms";
             _refOrbitInfo = _cachedRefOrbitInfo;
 
-            await DrawToCanvas(result);
+            await _pertCanvasRenderer!.PresentAsync(_pertBuffer!);
         }
         finally
         {
@@ -833,11 +831,13 @@ fn main(@builtin(global_invocation_id) global_id : vec3<u32>) {
         _disposed = true;
 
         // Dispose standard ILGPU
+        _ilgpuCanvasRenderer?.Dispose();
         _ilgpuBuffer?.Dispose();
         _ilgpuAccelerator?.Dispose();
         _ilgpuContext?.Dispose();
 
         // Dispose perturbation ILGPU
+        _pertCanvasRenderer?.Dispose();
         _pertRefRealBuf?.Dispose();
         _pertRefImagBuf?.Dispose();
         _pertBuffer?.Dispose();

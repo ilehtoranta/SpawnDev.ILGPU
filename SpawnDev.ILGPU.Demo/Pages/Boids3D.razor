@@ -5,14 +5,13 @@
 @using SpawnDev.ILGPU.WebGL
 @using SpawnDev.ILGPU.WebGL.Backend
 @using SpawnDev.ILGPU.Wasm
+@using SpawnDev.ILGPU.Rendering
 @using SpawnDev.BlazorJS
 @using SpawnDev.BlazorJS.JSObjects
 @using ILGPU
 @using System.Diagnostics
 @using global::ILGPU
 @using global::ILGPU.Runtime
-@using global::ILGPU.Runtime.CPU
-
 <PageTitle>GPU Boids</PageTitle>
 
 <h1>GPU Boids — Particle Flocking</h1>
@@ -198,14 +197,11 @@
         int, int, int,
         float, float, float, float, float>? _renderKernel;
 
-    // Cached rendering resources
-    private uint[]? _cachedResult;
-    private CanvasRenderingContext2D? _cachedMainCtx;
+    // Canvas renderer (backend-specific)
+    private ICanvasRenderer? _canvasRenderer;
+
+    // FPS graph canvas context
     private CanvasRenderingContext2D? _cachedFpsCtx;
-    private ImageData? _cachedImageData;
-    private Uint8ClampedArray? _cachedDestPixels;
-    private int _cachedResultWidth;
-    private int _cachedResultHeight;
 
     protected override async Task OnAfterRenderAsync(bool firstRender)
     {
@@ -232,7 +228,6 @@
         }
         catch { }
         backends.Add(new("Wasm", "⚡ Wasm (Multi-core Wasm)"));
-        backends.Add(new("CPU", "🐢 CPU (Single-thread)"));
         _availableBackends = backends;
         _selectedBackend = backends[0].Key;
         StateHasChanged();
@@ -290,18 +285,14 @@
         _boidsBuffer?.Dispose(); _boidsBuffer = null;
         _boidsBufferOut?.Dispose(); _boidsBufferOut = null;
         _outputBuffer?.Dispose(); _outputBuffer = null;
+        _canvasRenderer?.Dispose(); _canvasRenderer = null;
         _ilgpuAccelerator?.Dispose(); _ilgpuAccelerator = null;
         _ilgpuContext?.Dispose(); _ilgpuContext = null;
     }
 
     private void DisposeRenderingCaches()
     {
-        _cachedDestPixels?.Dispose(); _cachedDestPixels = null;
-        _cachedImageData?.Dispose(); _cachedImageData = null;
-        _cachedMainCtx?.Dispose(); _cachedMainCtx = null;
         _cachedFpsCtx?.Dispose(); _cachedFpsCtx = null;
-        _cachedResult = null;
-        _cachedResultWidth = 0; _cachedResultHeight = 0;
     }
 
     private async Task InitializeBackend(string backendName)
@@ -327,11 +318,6 @@
                 if (wasmDevices.Count == 0) throw new Exception("No Wasm device found");
                 _ilgpuAccelerator = await wasmDevices[0].CreateAcceleratorAsync(_ilgpuContext);
                 break;
-            case "CPU":
-                var cpuDevice = new CPUDevice(numThreadsPerWarp: 4, numWarpsPerMultiprocessor: 16, numMultiprocessors: 1);
-                _ilgpuContext = Context.Create().CPU(cpuDevice).ToContext();
-                _ilgpuAccelerator = _ilgpuContext.CreateCPUAccelerator(0);
-                break;
         }
 
         _simKernel = _ilgpuAccelerator!.LoadAutoGroupedStreamKernel<
@@ -343,6 +329,12 @@
             float, float, float, float, float>(BoidsRenderKernel);
 
         _outputBuffer = _ilgpuAccelerator.Allocate2DDenseX<uint>(new Index2D(_width, _height));
+
+        _canvasRenderer?.Dispose();
+        _canvasRenderer = CanvasRendererFactory.Create(_ilgpuAccelerator);
+        using var mainCanvas = new HTMLCanvasElement(_mainCanvas);
+        _canvasRenderer.AttachCanvas(mainCanvas);
+
         InitializeBoids();
     }
 
@@ -486,55 +478,7 @@
 
             // Canvas blit
             var swReadback = Stopwatch.StartNew();
-            var internalBuffer = ((IArrayView)_outputBuffer).Buffer;
-            int pixelCount = _width * _height;
-            int byteCount = pixelCount * 4;
-
-            if (_cachedMainCtx == null)
-            {
-                using var canvas = new HTMLCanvasElement(_mainCanvas);
-                _cachedMainCtx = canvas.GetContext<CanvasRenderingContext2D>("2d");
-            }
-
-            if (_cachedImageData == null || _cachedResultWidth != _width || _cachedResultHeight != _height)
-            {
-                _cachedDestPixels?.Dispose();
-                _cachedImageData?.Dispose();
-                _cachedImageData = _cachedMainCtx!.CreateImageData(_width, _height);
-                _cachedDestPixels = _cachedImageData.Data;
-                _cachedResultWidth = _width;
-                _cachedResultHeight = _height;
-                _cachedResult = new uint[pixelCount];
-            }
-
-            var destPixels = _cachedDestPixels!;
-            if (internalBuffer is IBrowserMemoryBuffer browserBuf)
-            {
-                using var srcView = await browserBuf.CopyToHostUint8ArrayAsync(0, byteCount);
-                destPixels.Set(srcView);
-            }
-            else if (internalBuffer is WasmMemoryBuffer wasmBuf)
-            {
-                using var srcView = await wasmBuf.CopyToHostUint8ArrayAsync(0, byteCount);
-                destPixels.Set(srcView);
-            }
-            else if (internalBuffer is WebGLMemoryBuffer webGlBuf)
-            {
-                using var srcView = await webGlBuf.CopyToHostUint8ArrayAsync(0, byteCount);
-                destPixels.Set(srcView);
-            }
-            else if (internalBuffer is WebGPUMemoryBuffer webGpuBuf)
-            {
-                using var srcView = await webGpuBuf.CopyToHostUint8ArrayAsync(0, byteCount);
-                destPixels.Set(srcView);
-            }
-            else
-            {
-                _outputBuffer.View.BaseView.CopyToCPU(_cachedResult!);
-                destPixels.Write(_cachedResult!);
-            }
-
-            _cachedMainCtx!.PutImageData(_cachedImageData, 0, 0);
+            await _canvasRenderer!.PresentAsync(_outputBuffer!);
 
             swReadback.Stop();
             _lastReadbackMs = swReadback.Elapsed.TotalMilliseconds;

@@ -3,10 +3,10 @@
 @implements IAsyncDisposable
 @using SpawnDev.ILGPU.WebGPU
 @using SpawnDev.ILGPU.WebGPU.Backend
-
 @using SpawnDev.ILGPU.WebGL
 @using SpawnDev.ILGPU.WebGL.Backend
 @using SpawnDev.ILGPU.Wasm
+@using SpawnDev.ILGPU.Rendering
 @using SpawnDev.BlazorJS
 @using SpawnDev.BlazorJS.JSObjects
 @using ILGPU
@@ -15,8 +15,6 @@
 @using SpawnDev.ILGPU.Demo.Shared.Kernels
 @using global::ILGPU
 @using global::ILGPU.Runtime
-@using global::ILGPU.Runtime.CPU
-
 <PageTitle>Fractal Explorer</PageTitle>
 
 <h1>Fractal Explorer</h1>
@@ -214,14 +212,11 @@
         double, double, double, double, double>? _kernel;
     private MemoryBuffer2D<uint, Stride2D.DenseX>? _outputBuffer;
 
-    // Cached rendering resources (avoid per-frame allocations)
-    private uint[]? _cachedResult;
-    private CanvasRenderingContext2D? _cachedMainCtx;
+    // Canvas renderer (backend-specific, replaces per-frame PutImageData readback)
+    private ICanvasRenderer? _canvasRenderer;
+
+    // FPS graph canvas context
     private CanvasRenderingContext2D? _cachedFpsCtx;
-    private ImageData? _cachedImageData;
-    private Uint8ClampedArray? _cachedDestPixels;
-    private int _cachedResultWidth;
-    private int _cachedResultHeight;
 
     protected override async Task OnAfterRenderAsync(bool firstRender)
     {
@@ -270,9 +265,6 @@
         backends.Add(new("Wasm", "⚡ Wasm (Multi-core Wasm)"));
 
 
-
-        // CPU — always available
-        backends.Add(new("CPU", "🐢 CPU (Single-thread)"));
 
         _availableBackends = backends;
         _selectedBackend = backends[0].Key; // Best available
@@ -333,6 +325,8 @@
         _kernel = null;
         _outputBuffer?.Dispose();
         _outputBuffer = null;
+        _canvasRenderer?.Dispose();
+        _canvasRenderer = null;
         _ilgpuAccelerator?.Dispose();
         _ilgpuAccelerator = null;
         _ilgpuContext?.Dispose();
@@ -341,17 +335,8 @@
 
     private void DisposeRenderingCaches()
     {
-        _cachedDestPixels?.Dispose();
-        _cachedDestPixels = null;
-        _cachedImageData?.Dispose();
-        _cachedImageData = null;
-        _cachedMainCtx?.Dispose();
-        _cachedMainCtx = null;
         _cachedFpsCtx?.Dispose();
         _cachedFpsCtx = null;
-        _cachedResult = null;
-        _cachedResultWidth = 0;
-        _cachedResultHeight = 0;
     }
 
     // ========== Initialization ==========
@@ -370,9 +355,6 @@
             case "Wasm":
                 await InitializeWasm();
                 break;
-            case "CPU":
-                await InitializeCPU();
-                break;
             default:
                 throw new ArgumentException($"Unknown backend: {backendName}");
         }
@@ -383,6 +365,11 @@
             int, int, int,
             double, double, double, double, double>(FractalKernels.Render);
         _outputBuffer = _ilgpuAccelerator.Allocate2DDenseX<uint>(new Index2D(_width, _height));
+
+        _canvasRenderer?.Dispose();
+        _canvasRenderer = CanvasRendererFactory.Create(_ilgpuAccelerator);
+        using var mainCanvas = new HTMLCanvasElement(_mainCanvas);
+        _canvasRenderer.AttachCanvas(mainCanvas);
     }
 
     private async Task InitializeWebGPU()
@@ -412,17 +399,6 @@
         var devices = _ilgpuContext.GetDevices<WasmILGPUDevice>();
         if (devices.Count == 0) throw new Exception("No Wasm device found");
         _ilgpuAccelerator = await devices[0].CreateAcceleratorAsync(_ilgpuContext);
-    }
-
-    private Task InitializeCPU()
-    {
-        var device = new CPUDevice(
-            numThreadsPerWarp: 4,
-            numWarpsPerMultiprocessor: 16,
-            numMultiprocessors: 1);
-        _ilgpuContext = Context.Create().CPU(device).ToContext();
-        _ilgpuAccelerator = _ilgpuContext.CreateCPUAccelerator(0);
-        return Task.CompletedTask;
     }
 
     // ========== Render Loop ==========
@@ -565,71 +541,8 @@
             var kernelTime = sw.Elapsed.TotalMilliseconds;
             _lastKernelMs = kernelTime;
 
-            // Canvas blit — uses ctx.CreateImageData for non-shared buffer backing.
-            // In multi-threaded Blazor WASM, the .NET heap is a SharedArrayBuffer,
-            // so ImageData(Uint8ClampedArray) rejects all views from .NET or shared memory.
-            // Solution: CreateImageData creates non-shared backing, then .Data.Set() copies into it.
             var swReadback = Stopwatch.StartNew();
-            var internalBuffer = ((IArrayView)_outputBuffer).Buffer;
-            int pixelCount = _width * _height;
-            int byteCount = pixelCount * 4;
-
-            // Cache the canvas 2D context — it never changes between frames
-            if (_cachedMainCtx == null)
-            {
-                using var canvas = new HTMLCanvasElement(_mainCanvas);
-                _cachedMainCtx = canvas.GetContext<CanvasRenderingContext2D>("2d");
-            }
-
-            // Cache the ImageData and its Data pixel buffer (non-shared) — rebuild only on dimension change
-            if (_cachedImageData == null || _cachedResultWidth != _width || _cachedResultHeight != _height)
-            {
-                _cachedDestPixels?.Dispose();
-                _cachedImageData?.Dispose();
-                _cachedImageData = _cachedMainCtx!.CreateImageData(_width, _height);
-                _cachedDestPixels = _cachedImageData.Data;
-                _cachedResultWidth = _width;
-                _cachedResultHeight = _height;
-                // Also resize the cached result array
-                _cachedResult = new uint[pixelCount];
-            }
-
-            var destPixels = _cachedDestPixels!;
-            if (internalBuffer is IBrowserMemoryBuffer browserMemoryBuffer)
-            {
-                // JS-side copy: source view from shared buffer → non-shared ImageData
-                using var srcView = await browserMemoryBuffer.CopyToHostUint8ArrayAsync(0, byteCount);
-                destPixels.Set(srcView);
-            }
-
-            else if (internalBuffer is WasmMemoryBuffer wasmBuf)
-            {
-                // JS-side copy: source view from shared buffer → non-shared ImageData
-                using var srcView = await wasmBuf.CopyToHostUint8ArrayAsync(0, byteCount);
-                //using var srcView = new Uint8Array(wasmBuf.SharedBuffer, 0, byteCount);
-                destPixels.Set(srcView);
-            }
-            else if (internalBuffer is WebGLMemoryBuffer webGlBuf)
-            {
-                // JS-side copy: source view from regular ArrayBuffer → non-shared ImageData
-                using var srcView = await webGlBuf.CopyToHostUint8ArrayAsync(0, byteCount);
-                destPixels.Set(srcView);
-            }
-            else if (internalBuffer is WebGPUMemoryBuffer webGpuBuf)
-            {
-                // WebGPU: cached staging readback → Write to ImageData (zero-alloc hot path)
-                using var srcView = await webGpuBuf.CopyToHostUint8ArrayAsync(0, byteCount);
-                destPixels.Set(srcView);
-            }
-            else
-            {
-                // CPU fallback: read to .NET, Write to ImageData
-                _outputBuffer.View.BaseView.CopyToCPU(_cachedResult!);
-                destPixels.Write(_cachedResult!);
-            }
-
-            _cachedMainCtx!.PutImageData(_cachedImageData, 0, 0);
-
+            await _canvasRenderer!.PresentAsync(_outputBuffer!);
             swReadback.Stop();
             _lastReadbackMs = swReadback.Elapsed.TotalMilliseconds;
 
