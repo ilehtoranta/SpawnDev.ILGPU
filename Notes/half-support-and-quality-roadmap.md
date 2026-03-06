@@ -151,7 +151,7 @@ Added `XMath.Min(Half, Half)`, `XMath.Max(Half, Half)`, and `XMath.Clamp(Half, H
 | **WasmTests** | ~20 | RadixSort infinite loops, struct decomposition unsupported, no subgroups |
 | **WebGPU** | 0 | All previously-skipped tests now pass |
 
-**Conclusion:** All skips are legitimate hardware/platform limitations, not bugs. 721 tests pass, 159 skipped, 0 failed.
+**Conclusion:** All skips are legitimate hardware/platform limitations, not bugs. 723 tests pass (after offset fix), 161 skipped, 0 failed.
 
 ---
 
@@ -181,7 +181,23 @@ Browser skip overrides added in `CPUTests.cs` and `WebGLTests.cs` for all 14 new
 
 ---
 
-## 10. Performance / Quality
+## 10. ~~Pending: WebGPU Packed-Struct Sub-View Offset~~ DONE
+
+**Problem:** When a `RadixSortPair<T>` (or other packed-struct) sub-view had a non-zero 256-byte-alignment padding (i.e. when the inner `TempViewManager` allocation didn't start at a 256-byte boundary), the `_scalar_params` element offset was computed as `padding / CPU_element_size` (logical elements). The WGSL formula `(offset + i) * packed_stride` then gave a wrong u32 index because `(padding/16) * 3 ≠ padding/4` when `padding > 0`.
+
+**Triggered by:** `n % 16 != 0` for `RadixSortPair<double/long, int>` (16-byte CPU element size). The existing `n=256` tests always had `padding=0`.
+
+**Solution implemented:**
+- **`WebGPUAccelerator.cs`** — Changed `elementOffset = (int)(padding / (ulong)elementSize)` to `(int)(padding / 4UL)` (u32 units). Safe for all view types: regular 4-byte views are unchanged; emu_f64/i64 formulas are mathematically equivalent; packed structs now correct.
+- **`WGSLKernelFunctionGenerator.cs`** — Changed `base_idx` formula from `(u32Offset + i) * stride` to `u32Offset + i * stride` at all 4 locations (body-struct emu, body-struct packed, top-level emu, top-level packed).
+- **`BackendTestBase.Tests6.cs`** — Added `AlgorithmRadixSortPairsDoubleOffsetTest` and `AlgorithmRadixSortPairsLongOffsetTest` using `n=129` (triggers `padding=16 bytes`).
+- **`WebGLTests.cs`** — Added skip overrides for the two new tests.
+
+**Unlocked:** All 723 supported tests pass (721 + 2 new offset tests).
+
+---
+
+## 11. Performance / Quality
 
 | Item | Status |
 |------|--------|

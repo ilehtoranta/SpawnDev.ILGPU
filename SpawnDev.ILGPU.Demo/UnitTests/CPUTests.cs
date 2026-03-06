@@ -186,6 +186,12 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
         public new async Task AlgorithmRadixSortPairsLongTest() =>
             throw new UnsupportedTestException("CPU: algorithm tests require barriers (single-threaded WASM)");
         [TestMethod]
+        public new async Task AlgorithmRadixSortPairsDoubleOffsetTest() =>
+            throw new UnsupportedTestException("CPU: algorithm tests require barriers (single-threaded WASM)");
+        [TestMethod]
+        public new async Task AlgorithmRadixSortPairsLongOffsetTest() =>
+            throw new UnsupportedTestException("CPU: algorithm tests require barriers (single-threaded WASM)");
+        [TestMethod]
         public new async Task AlgorithmRadixSortPairsUIntTest() =>
             throw new UnsupportedTestException("CPU: algorithm tests require barriers (single-threaded WASM)");
         [TestMethod]

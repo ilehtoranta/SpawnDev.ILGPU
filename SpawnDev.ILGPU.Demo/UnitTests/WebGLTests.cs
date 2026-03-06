@@ -529,6 +529,12 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
         public new async Task AlgorithmRadixSortPairsLongTest() =>
             throw new UnsupportedTestException("WebGL: algorithm tests require shared memory + barriers");
         [TestMethod]
+        public new async Task AlgorithmRadixSortPairsDoubleOffsetTest() =>
+            throw new UnsupportedTestException("WebGL: algorithm tests require shared memory + barriers");
+        [TestMethod]
+        public new async Task AlgorithmRadixSortPairsLongOffsetTest() =>
+            throw new UnsupportedTestException("WebGL: algorithm tests require shared memory + barriers");
+        [TestMethod]
         public new async Task AlgorithmRadixSortPairsUIntTest() =>
             throw new UnsupportedTestException("WebGL: algorithm tests require shared memory + barriers");
         [TestMethod]

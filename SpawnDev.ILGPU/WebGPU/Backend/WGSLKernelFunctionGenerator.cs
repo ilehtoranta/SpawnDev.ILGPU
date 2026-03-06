@@ -3551,15 +3551,16 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     {
                         _emulatedVarMappings[target.Name] = (bsParam.Index, isEmuF64Field);
 
-                        string adjustedOffEmu = offsetExpr;
+                        AppendIndent();
                         if (bsFields[fieldIdx].ViewOffsetSlot >= 0)
                         {
                             int voSlotEmu = bsFields[fieldIdx].ViewOffsetSlot;
-                            adjustedOffEmu = $"(i32(_scalar_params[{voSlotEmu}]) + {offsetExpr})";
+                            Builder.Append($"let {target.Name}_base_idx = i32(_scalar_params[{voSlotEmu}]) + i32({offsetExpr}) * 2;");
                         }
-
-                        AppendIndent();
-                        Builder.Append($"let {target.Name}_base_idx = i32({adjustedOffEmu}) * 2;");
+                        else
+                        {
+                            Builder.Append($"let {target.Name}_base_idx = i32({offsetExpr}) * 2;");
+                        }
                         Builder.AppendLine();
                         
                         AppendIndent();
@@ -3572,15 +3573,16 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     if (_packedStructBSFieldLayouts.TryGetValue((bsParam.Index, fieldIdx), out var bsPsLayout))
                     {
                         int psStrideU32s = bsPsLayout.Sum(f => f.U32Count);
-                        // View offset adjustment for body struct packed struct view fields
-                        string adjustedOffPsBS = offsetExpr;
+                        AppendIndent();
                         if (bsFields[fieldIdx].ViewOffsetSlot >= 0)
                         {
                             int voSlotBS = bsFields[fieldIdx].ViewOffsetSlot;
-                            adjustedOffPsBS = $"(i32(_scalar_params[{voSlotBS}]) + {offsetExpr})";
+                            Builder.Append($"let {target.Name}_base_idx = i32(_scalar_params[{voSlotBS}]) + i32({offsetExpr}) * {psStrideU32s};");
                         }
-                        AppendIndent();
-                        Builder.Append($"let {target.Name}_base_idx = i32({adjustedOffPsBS}) * {psStrideU32s};");
+                        else
+                        {
+                            Builder.Append($"let {target.Name}_base_idx = i32({offsetExpr}) * {psStrideU32s};");
+                        }
                         Builder.AppendLine();
                         AppendIndent();
                         Builder.Append($"let {target.Name} = &{bindingName};");
@@ -3619,13 +3621,14 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     // --- View offset adjustment ---
                     // With offset=0 binding, the buffer starts at byte 0 (not sub-view start).
                     // ILGPU IR assumes LoadElementAddress addresses relative to the sub-view.
-                    // Add the view element offset from _scalar_params so the WGSL accesses
-                    // the correct region: paramN[viewOffset + localIndex].
-                    string adjustedOffsetExpr = offsetExpr;
-                    if (_viewOffsetScalarSlots.TryGetValue(param.Index, out int voSlot))
-                    {
-                        adjustedOffsetExpr = $"(i32(_scalar_params[{voSlot}]) + {offsetExpr})";
-                    }
+                    // The u32 padding offset from _scalar_params is added OUTSIDE the stride
+                    // multiplication: base_idx = u32Offset + i * stride.
+                    // This is correct because u32Offset = padding/4 (raw u32 distance from
+                    // binding start to view start), independent of element or packed stride.
+                    bool hasViewOffset = _viewOffsetScalarSlots.TryGetValue(param.Index, out int voSlot);
+                    string adjustedOffsetExpr = hasViewOffset
+                        ? $"(i32(_scalar_params[{voSlot}]) + {offsetExpr})"
+                        : offsetExpr;
 
                     // Check if this is an emulated 64-bit buffer
                     if (_emulatedF64Params.Contains(param.Index) || _emulatedI64Params.Contains(param.Index))
@@ -3634,12 +3637,13 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                         // Register for Load/Store to know this needs conversion
                         _emulatedVarMappings[target.Name] = (param.Index, isF64);
 
-                        // For emulated buffers, we need to address 2 u32 per element
-                        // Store the base index (multiplied by 2) for later use in Load/Store
+                        // base_idx = u32Offset + i * 2  (u32Offset already in scalar params as padding/4)
                         AppendIndent();
-                        Builder.Append($"let {target.Name}_base_idx = i32({adjustedOffsetExpr}) * 2;");
+                        if (hasViewOffset)
+                            Builder.Append($"let {target.Name}_base_idx = i32(_scalar_params[{voSlot}]) + i32({offsetExpr}) * 2;");
+                        else
+                            Builder.Append($"let {target.Name}_base_idx = i32({offsetExpr}) * 2;");
                         Builder.AppendLine();
-                        // Also create an alias for compatibility
                         AppendIndent();
                         Builder.Append($"let {target.Name} = &param{param.Index};");
                         Builder.AppendLine();
@@ -3650,8 +3654,12 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     if (_packedStructLayouts.TryGetValue(param.Index, out var psLayout))
                     {
                         int psStrideU32s = psLayout.Sum(f => f.U32Count);
+                        // base_idx = u32Offset + i * stride  (u32Offset already in scalar params as padding/4)
                         AppendIndent();
-                        Builder.Append($"let {target.Name}_base_idx = i32({adjustedOffsetExpr}) * {psStrideU32s};");
+                        if (hasViewOffset)
+                            Builder.Append($"let {target.Name}_base_idx = i32(_scalar_params[{voSlot}]) + i32({offsetExpr}) * {psStrideU32s};");
+                        else
+                            Builder.Append($"let {target.Name}_base_idx = i32({offsetExpr}) * {psStrideU32s};");
                         Builder.AppendLine();
                         AppendIndent();
                         Builder.Append($"let {target.Name} = &param{param.Index};");

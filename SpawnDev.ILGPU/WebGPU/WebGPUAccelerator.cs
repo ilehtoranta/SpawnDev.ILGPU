@@ -881,11 +881,13 @@ namespace SpawnDev.ILGPU.WebGPU
                             Size = bindingSize
                         };
 
-                        // Record element offset for this binding so Phase 2 can pack it.
-                        // The element offset = padding bytes / element size (the residual
-                        // elements between the aligned binding start and the actual sub-view start).
-                        int elementSize = contiguous.ElementSize > 0 ? contiguous.ElementSize : 1;
-                        int elementOffset = (int)(padding / (ulong)elementSize);
+                        // Record the u32 offset for this binding so Phase 2 can pack it.
+                        // We store padding/4 (u32 units) rather than padding/elementSize (element units)
+                        // because the WGSL formula is: base_idx = u32Offset + i * packed_stride
+                        // This correctly handles packed structs where CPU element size != GPU packed size.
+                        // For regular 4-byte views: u32Offset == elementOffset (no change in behavior).
+                        // For emu_f64/i64 (8-byte CPU, 2 u32s): formulas are mathematically equivalent.
+                        int elementOffset = (int)(padding / 4UL);
                         viewElementOffsets[currentBindingIndex] = elementOffset;
                         // Record the logical element count for packed-struct views.
                         // contiguous.Length gives the exact count regardless of CPU vs GPU element size.

@@ -238,6 +238,72 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
         });
 
         /// <summary>
+        /// Test RadixSortPairs with double keys using n=129 (non-multiple of 16) to trigger
+        /// non-zero 256-byte-alignment padding in the inner temp view, exposing the packed-struct
+        /// view element offset bug on WebGPU.
+        /// </summary>
+        [TestMethod]
+        public async Task AlgorithmRadixSortPairsDoubleOffsetTest() => await RunEmulatedTest(async accelerator =>
+        {
+            int n = 129;
+            var keys = new double[n];
+            var values = new int[n];
+            for (int i = 0; i < n; i++) { keys[i] = (double)(n - i); values[i] = i; }
+
+            using var keysBuf = accelerator.Allocate1D(keys);
+            using var valuesBuf = accelerator.Allocate1D(values);
+            var tempSize = accelerator.ComputeRadixSortPairsTempStorageSize<double, int, AscendingDouble>(n);
+            using var tempBuf = accelerator.Allocate1D<int>(tempSize);
+
+            var radixSort = accelerator.CreateRadixSortPairs<double, Stride1D.Dense, int, Stride1D.Dense, AscendingDouble>();
+            radixSort(accelerator.DefaultStream, keysBuf.View, valuesBuf.View, tempBuf.View.AsContiguous());
+            await accelerator.SynchronizeAsync();
+
+            var sortedKeys = await keysBuf.CopyToHostAsync<double>();
+            var sortedValues = await valuesBuf.CopyToHostAsync<int>();
+            for (int i = 0; i < n; i++)
+            {
+                if (Math.Abs(sortedKeys[i] - (i + 1.0)) > 0.001)
+                    throw new Exception($"RadixSort double offset key mismatch at [{i}]: expected={i + 1.0}, got={sortedKeys[i]}");
+                if (sortedValues[i] != n - 1 - i)
+                    throw new Exception($"RadixSort double offset value mismatch at [{i}]: expected={n - 1 - i}, got={sortedValues[i]}");
+            }
+        });
+
+        /// <summary>
+        /// Test RadixSortPairs with long keys using n=129 (non-multiple of 16) to trigger
+        /// non-zero 256-byte-alignment padding in the inner temp view, exposing the packed-struct
+        /// view element offset bug on WebGPU.
+        /// </summary>
+        [TestMethod]
+        public async Task AlgorithmRadixSortPairsLongOffsetTest() => await RunEmulatedTest(async accelerator =>
+        {
+            int n = 129;
+            var keys = new long[n];
+            var values = new int[n];
+            for (int i = 0; i < n; i++) { keys[i] = (long)(n - i); values[i] = i; }
+
+            using var keysBuf = accelerator.Allocate1D(keys);
+            using var valuesBuf = accelerator.Allocate1D(values);
+            var tempSize = accelerator.ComputeRadixSortPairsTempStorageSize<long, int, AscendingInt64>(n);
+            using var tempBuf = accelerator.Allocate1D<int>(tempSize);
+
+            var radixSort = accelerator.CreateRadixSortPairs<long, Stride1D.Dense, int, Stride1D.Dense, AscendingInt64>();
+            radixSort(accelerator.DefaultStream, keysBuf.View, valuesBuf.View, tempBuf.View.AsContiguous());
+            await accelerator.SynchronizeAsync();
+
+            var sortedKeys = await keysBuf.CopyToHostAsync<long>();
+            var sortedValues = await valuesBuf.CopyToHostAsync<int>();
+            for (int i = 0; i < n; i++)
+            {
+                if (sortedKeys[i] != (long)(i + 1))
+                    throw new Exception($"RadixSort long offset key mismatch at [{i}]: expected={i + 1}, got={sortedKeys[i]}");
+                if (sortedValues[i] != n - 1 - i)
+                    throw new Exception($"RadixSort long offset value mismatch at [{i}]: expected={n - 1 - i}, got={sortedValues[i]}");
+            }
+        });
+
+        /// <summary>
         /// Test RadixSortPairs with uint keys — verifies AscendingUInt32 operation.
         /// </summary>
         [TestMethod]
