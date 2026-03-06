@@ -52,6 +52,84 @@ public interface IBrowserMemoryBuffer
 
 ---
 
+## SpawnDev.ILGPU.Rendering
+
+Canvas rendering API — presents an ILGPU pixel buffer to an HTML `<canvas>` using the most efficient path for each backend.
+
+```csharp
+using SpawnDev.ILGPU.Rendering;
+```
+
+> **Full guide:** [Canvas Rendering](canvas-rendering.md)
+
+### ICanvasRenderer
+
+```csharp
+public interface ICanvasRenderer : IDisposable
+{
+    void AttachCanvas(HTMLCanvasElement canvas);
+    Task PresentAsync(MemoryBuffer2D<uint, Stride2D.DenseX> buffer);
+    Task PresentAsync(MemoryBuffer2D<int,  Stride2D.DenseX> buffer);
+}
+```
+
+| Method | Description |
+|--------|-------------|
+| `AttachCanvas(canvas)` | Attaches (or re-attaches) the renderer to a canvas element. Disposes any previous context. |
+| `PresentAsync(buffer)` | Presents a 2D packed-uint or packed-int RGBA pixel buffer to the canvas. |
+
+### CanvasRendererFactory
+
+```csharp
+public static class CanvasRendererFactory
+{
+    public static ICanvasRenderer Create(Accelerator accelerator);
+}
+```
+
+`Create` returns the optimal renderer for the given accelerator:
+
+| Accelerator | Renderer | Technique |
+|-------------|----------|-----------|
+| `WebGPUAccelerator` | `WebGPUCanvasRenderer` | Fullscreen-triangle render pass — no CPU readback |
+| `WebGLAccelerator` | `WebGLCanvasRenderer` | `ImageBitmap` blit from GL worker, drawn synchronously |
+| Any other (Wasm, desktop CPU) | `CPUCanvasRenderer` | Cached `ImageData` with fast Uint8Array copy |
+
+### WebGPUCanvasRenderer
+
+`SpawnDev.ILGPU.WebGPU.Rendering`
+
+Zero-copy presenter. Reads the pixel buffer directly from GPU memory via a `read-only-storage` binding in a fullscreen render pass. No CPU readback occurs.
+
+| Member | Description |
+|--------|-------------|
+| `AttachCanvas(canvas)` | Builds the render pipeline and configures the internal WebGPU canvas. |
+| `PresentAsync(buffer)` | Flushes pending commands, runs the render pass, blits to display canvas. |
+
+### WebGLCanvasRenderer
+
+`SpawnDev.ILGPU.WebGL.Rendering`
+
+`ImageBitmap`-based presenter. Renders the WebGL texture to an offscreen FBO in the GL worker, transfers the bitmap to the main thread, then calls `ctx.drawImage` synchronously inside the worker callback — ensuring the draw completes in the same JS event-loop turn as the blit.
+
+| Member | Description |
+|--------|-------------|
+| `AttachCanvas(canvas)` | Acquires a `CanvasRenderingContext2D` on the display canvas. |
+| `PresentAsync(buffer)` | Posts blit to the GL worker, awaits the `ImageBitmap`, and draws synchronously. |
+
+### CPUCanvasRenderer
+
+`SpawnDev.ILGPU.Rendering`
+
+Fallback renderer for the Wasm browser backend and the desktop CPU accelerator. Reuses a pre-allocated `ImageData` object to minimise GC pressure.
+
+| Member | Description |
+|--------|-------------|
+| `AttachCanvas(canvas)` | Acquires a `CanvasRenderingContext2D` and invalidates cached `ImageData`. |
+| `PresentAsync(buffer)` | Copies to `Uint8Array` (fast path for `IBrowserMemoryBuffer`) or CPU array, then calls `putImageData`. |
+
+---
+
 ## SpawnDev.ILGPU.WebGPU
 
 ### WebGPUAccelerator
@@ -121,6 +199,7 @@ WGSL transpiler backend.
 | `VerboseLogging` | `static bool` | Enable/disable debug output |
 | `EnableReflectionCaching` | `static bool` | Enable reflection metadata caching |
 | `EnableBufferPooling` | `static bool` | Enable scalar buffer pooling |
+| `LastGeneratedWGSL` | `static string?` | WGSL source of the most recently compiled kernel (set on every `LoadKernel` call) |
 
 ### WebGPUBackendOptions
 
@@ -156,6 +235,8 @@ WebGL2 accelerator — all GL calls are offloaded to a dedicated Web Worker.
 |--------|------|-------------|
 | `Create(context, device, options?)` | `WebGLAccelerator` | Creates a WebGL accelerator |
 | `SynchronizeAsync()` | `Task` | Async wait for GPU work (via extension method) |
+| `LastGeneratedGLSL` | `static string?` | GLSL ES 3.0 source of the most recently compiled kernel (set on every `LoadKernel` call) |
+| `BlitAndDrawAsync(memBuf, w, h, draw)` | `Task` | Blits a WebGL buffer to an `ImageBitmap` and calls `draw` synchronously in the worker callback before resolving |
 
 ### WebGLDevice
 

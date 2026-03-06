@@ -248,83 +248,50 @@ wrapped.Dispose();
 
 ## Canvas Rendering Pipeline
 
-The most common advanced pattern: run an ILGPU compute kernel, then blit the output to an HTML `<canvas>`.
+The recommended way to blit an ILGPU pixel buffer to an HTML `<canvas>` is `ICanvasRenderer`. It picks the fastest rendering path for each backend automatically — no CPU readback on WebGPU or WebGL.
 
-### Complete Render Loop
+> **Full details:** See [Canvas Rendering](canvas-rendering.md).
+
+### Quick Pattern
 
 ```csharp
-@code {
-    // Cached resources (allocated once)
-    private MemoryBuffer2D<uint, Stride2D.DenseX>? _outputBuffer;
-    private Action<Index2D, ArrayView2D<uint, Stride2D.DenseX>, float>? _kernel;
-    private CanvasRenderingContext2D? _ctx;
-    private ImageData? _imageData;
-    private Uint8ClampedArray? _destPixels;
+using SpawnDev.ILGPU.Rendering;
 
-    private async Task RenderFrame()
-    {
-        if (_kernel == null || _outputBuffer == null) return;
+// Create once alongside the accelerator
+ICanvasRenderer _renderer = CanvasRendererFactory.Create(_accelerator);
 
-        // 1. Run the kernel
-        _kernel(_outputBuffer.IntExtent, _outputBuffer.View, time);
-        await accelerator.SynchronizeAsync();
+// Attach to the canvas (once, or when the element changes)
+using var canvas = new HTMLCanvasElement(_canvasRef);
+_renderer.AttachCanvas(canvas);
 
-        // 2. Get the internal buffer for fast readback
-        var internalBuffer = ((IArrayView)_outputBuffer).Buffer;
-        int byteCount = _width * _height * 4;
-
-        // 3. Ensure canvas resources exist
-        if (_ctx == null)
-        {
-            using var canvas = new HTMLCanvasElement(_canvasRef);
-            _ctx = canvas.GetContext<CanvasRenderingContext2D>("2d");
-        }
-        if (_imageData == null)
-        {
-            _imageData = _ctx.CreateImageData(_width, _height);
-            _destPixels = _imageData.Data;
-        }
-
-        // 4. Copy GPU → Uint8Array → Canvas
-        if (internalBuffer is IBrowserMemoryBuffer browserBuf)
-        {
-            using var srcBytes = await browserBuf.CopyToHostUint8ArrayAsync(0, byteCount);
-            _destPixels!.Set(srcBytes);
-        }
-        else
-        {
-            // CPU fallback
-            var result = new uint[_width * _height];
-            _outputBuffer.View.BaseView.CopyToCPU(result);
-            _destPixels!.Write(result);
-        }
-
-        // 5. Paint to canvas
-        _ctx.PutImageData(_imageData, 0, 0);
-    }
-}
+// Each frame: dispatch → sync → present
+_kernel(_outputBuffer.IntExtent, _outputBuffer.View /*, args */);
+await _accelerator.SynchronizeAsync();
+await _renderer.PresentAsync(_outputBuffer);
 ```
+
+`CanvasRendererFactory.Create` returns:
+- `WebGPUCanvasRenderer` — fullscreen-triangle render pass, zero CPU readback
+- `WebGLCanvasRenderer` — `ImageBitmap` transfer from the GL worker, drawn synchronously
+- `CPUCanvasRenderer` — reused `ImageData` with a fast Uint8Array copy (Wasm in browser; desktop CPU on server/desktop)
 
 ### Pixel Format
 
-ILGPU buffers use `uint` (RGBA packed as `0xAABBGGRR`). The Canvas `ImageData` expects RGBA byte order:
+Pack pixels as `uint32` little-endian RGBA (R in bits 0–7, A in bits 24–31):
 
 ```csharp
-static void PixelKernel(Index2D index, ArrayView2D<uint, Stride2D.DenseX> output,
-    int width, int height)
+static void PixelKernel(Index2D index, ArrayView2D<uint, Stride2D.DenseX> output)
 {
-    int x = index.X, y = index.Y;
-    if (x >= width || y >= height) return;
-
-    byte r = (byte)(255 * x / width);
-    byte g = (byte)(255 * y / height);
+    byte r = (byte)(255 * index.X / width);
+    byte g = (byte)(255 * index.Y / height);
     byte b = 128;
     byte a = 255;
 
-    // Pack as AABBGGRR (little-endian → Canvas reads as RGBA)
     output[index] = (uint)((a << 24) | (b << 16) | (g << 8) | r);
 }
 ```
+
+This packing is identical across all three renderer implementations.
 
 ## Real-Time Render Loop Pattern
 
@@ -416,15 +383,18 @@ This enables detailed console output including:
 
 ### Compiled Shader Source
 
-After loading a kernel on a GPU backend, inspect the generated shader:
+After loading a kernel the generated shader source is captured automatically:
 
 ```csharp
-// WebGPU: Generated WGSL source
-var wgslSource = JS.Get<string>("wgslDebug");
+using SpawnDev.ILGPU.WebGPU;
+using SpawnDev.ILGPU.WebGL;
 
-// WebGL: Generated GLSL source
-var glslSource = JS.Get<string>("glslDebug");
+// Available immediately after LoadAutoGroupedStreamKernel / LoadStreamKernel
+string? wgsl = WebGPUAccelerator.LastGeneratedWGSL;   // WebGPU backend
+string? glsl = WebGLAccelerator.LastGeneratedGLSL;    // WebGL backend
 ```
+
+Both properties are `static` and updated on every kernel load, so they always hold the most recently compiled shader.
 
 ### Device Information
 

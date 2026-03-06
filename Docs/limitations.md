@@ -145,28 +145,27 @@ Without `SharedArrayBuffer`, the Wasm backend still works but falls back to a si
 
 Not all ILGPU features work on all backends:
 
-| Feature | WebGPU | WebGL | Wasm | CPU (Browser) | Cuda | OpenCL | CPU (Desktop) |
-|---------|--------|-------|------|---------------|------|--------|---------------|
-| Basic kernels | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| 1D/2D/3D index | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Scalar params | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Struct params | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| SharedMemory | ✅ | ❌ | ✅ | ⚠️ | ✅ | ✅ | ✅ |
-| Group.Barrier() | ✅ | ❌ | ✅ | ❌ | ✅ | ✅ | ✅ |
-| Dynamic SharedMemory | ✅ | ❌ | ✅ | ❌ | ✅ | ✅ | ✅ |
-| Group.Broadcast | ✅ | ❌ | ✅ | ❌ | ✅ | ✅¹ | ✅ |
-| Atomics | ✅ | ❌ | ✅ | ⚠️ | ✅ | ✅ | ✅ |
-| Warp/Subgroup ops | ✅² | ❌ | ❌ | ❌ | ✅ | ✅¹ | ✅ |
-| f64 emulation | ✅ | ✅ | N/A (native) | N/A (native) | N/A (native) | N/A (native) | N/A (native) |
-| i64 emulation | ✅ | ✅ | N/A (native) | N/A (native) | N/A (native) | N/A (native) | N/A (native) |
-| ILGPU Algorithms | ✅⁴ | ❌³ | ⚠️⁵ | ⚠️ | ✅ | ✅ | ✅ |
+| Feature | WebGPU | WebGL | Wasm | Cuda | OpenCL | CPU (Desktop) |
+|---------|--------|-------|------|------|--------|---------------|
+| Basic kernels | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| 1D/2D/3D index | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Scalar params | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Struct params | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| SharedMemory | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ |
+| Group.Barrier() | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ |
+| Dynamic SharedMemory | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ |
+| Group.Broadcast | ✅ | ❌ | ✅ | ✅ | ✅¹ | ✅ |
+| Atomics | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ |
+| Warp/Subgroup ops | ✅² | ❌ | ❌ | ✅ | ✅¹ | ✅ |
+| f64 emulation | ✅ | ✅ | N/A (native) | N/A (native) | N/A (native) | N/A (native) |
+| i64 emulation | ✅ | ✅ | N/A (native) | N/A (native) | N/A (native) | N/A (native) |
+| ILGPU Algorithms | ✅⁴ | ❌³ | ⚠️⁵ | ✅ | ✅ | ✅ |
 
 ¹ Requires device subgroup support. OpenCL shuffle needs `cl_intel_subgroups` (Intel) or `cl_khr_subgroup_shuffle` + `cl_khr_subgroup_shuffle_relative` (NVIDIA/AMD). Dynamically detected.  
 ² Requires `subgroups` WebGPU extension  
 ³ Most algorithms require shared memory or atomics  
 ⁴ WebGPU: RadixSort, Scan, Reduce, Histogram fully supported and tested  
-⁵ Wasm: Scan and Reduce work; RadixSort excluded (infinite-loop bug in generated Wasm)  
-⚠️ CPU backend works in theory but may crash or have limitations in Blazor WASM single-threaded environment
+⁵ Wasm: Scan and Reduce work; RadixSort excluded (infinite-loop bug in generated Wasm)
 
 ## Browser Compatibility
 

@@ -4,7 +4,7 @@
 
 ## Executive Summary
 
-SpawnDev.ILGPU adds **three browser backends** (WebGPU, WebGL, Wasm) to ILGPU's original **three desktop backends** (CUDA, OpenCL, CPU). The same C# kernel code runs on all six without modification. Key findings:
+SpawnDev.ILGPU adds **three browser backends** (WebGPU, WebGL, Wasm) to ILGPU's original **three desktop backends** (CUDA, OpenCL, CPU). The same C# kernel code runs on all six without modification. Note: the browser CPU backend has been removed — the Wasm backend covers all browser devices and avoids the instability of running ILGPU's CPU accelerator in Blazor WASM's single-threaded environment. Key findings:
 
 | | WebGPU | WebGL | Wasm | CUDA | OpenCL | CPU |
 |---|:---:|:---:|:---:|:---:|:---:|:---:|
@@ -219,14 +219,13 @@ The SpawnDev fork has fixed **6 upstream ILGPU bugs** that benefit all backends:
 
 ## 9. Test Coverage
 
-**640 tests** across 8 suites:
+**~590 tests** across 7 suites (browser CPU backend removed — Wasm covers all devices):
 
 | Suite | Backend | Tests |
 |-------|---------|:-----:|
 | WebGPUTests | WebGPU | ~128 |
 | WebGLTests | WebGL | ~80 |
 | WasmTests | Wasm | ~128 |
-| CPUTests | CPU (browser) | ~48 |
 | DefaultTests | Auto-select | ~16 |
 | CudaTests | CUDA | ~128 |
 | OpenCLTests | OpenCL | ~128 |

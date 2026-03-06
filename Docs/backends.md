@@ -1,24 +1,24 @@
 # Backends
 
-SpawnDev.ILGPU supports multiple backends for running ILGPU kernels. In the browser, three backends (WebGPU, WebGL, Wasm) bring GPU compute to Blazor WebAssembly. On desktop and server, ILGPU's native Cuda and OpenCL backends are available. The CPU backend works everywhere. The same kernel code and async extensions work across all backends.
+SpawnDev.ILGPU supports multiple backends for running ILGPU kernels. In the browser, three backends (WebGPU, WebGL, Wasm) bring GPU compute to Blazor WebAssembly. On desktop and server, ILGPU's native Cuda, OpenCL, and CPU backends are available. The same kernel code and async extensions work across all backends.
 
 ## Overview
 
 ### Browser Backends
 
-| | 🎮 **WebGPU** | 🖼️ **WebGL** | 🧊 **Wasm** | 🐢 **CPU** |
-|---|---|---|---|---|
-| **Executes on** | GPU | GPU | Web Workers | Main thread |
-| **Transpiles to** | WGSL | GLSL ES 3.0 | WebAssembly binary | — (interpreted) |
-| **Technique** | Compute shader | Transform Feedback | Multi-worker | Single-threaded |
-| **Blocking** | Non-blocking | Non-blocking | Non-blocking | ⚠️ Blocks UI |
-| **Shared Memory** | ✅ | ❌ | ✅ | ⚠️ Single-threaded |
-| **Group.Barrier()** | ✅ | ❌ | ✅ | ❌ |
-| **Dynamic Shared Memory** | ✅ | ❌ | ✅ | ❌ |
-| **Atomics** | ✅ | ❌ | ✅ | ⚠️ Crashes in WASM |
-| **ILGPU Algorithms** | ✅ RadixSort, Scan, Reduce, Histogram | ❌ | ⚠️ Scan/Reduce only (RadixSort excluded) | ❌ |
-| **64-bit (f64/i64)** | ✅ Emulated | ✅ Emulated | ✅ Native | ✅ Native |
-| **Browser support** | Chrome/Edge 113+ | All modern browsers | All modern browsers | All modern browsers |
+| | 🎮 **WebGPU** | 🖼️ **WebGL** | 🧊 **Wasm** |
+|---|---|---|---|
+| **Executes on** | GPU | GPU | Web Workers |
+| **Transpiles to** | WGSL | GLSL ES 3.0 | WebAssembly binary |
+| **Technique** | Compute shader | Transform Feedback | Multi-worker |
+| **Blocking** | Non-blocking | Non-blocking | Non-blocking |
+| **Shared Memory** | ✅ | ❌ | ✅ |
+| **Group.Barrier()** | ✅ | ❌ | ✅ |
+| **Dynamic Shared Memory** | ✅ | ❌ | ✅ |
+| **Atomics** | ✅ | ❌ | ✅ |
+| **ILGPU Algorithms** | ✅ RadixSort, Scan, Reduce, Histogram | ❌ | ⚠️ Scan/Reduce only (RadixSort excluded) |
+| **64-bit (f64/i64)** | ✅ Emulated | ✅ Emulated | ✅ Native |
+| **Browser support** | Chrome/Edge 113+ | All modern browsers | All modern browsers |
 
 ### Desktop/Server Backends
 
@@ -56,7 +56,7 @@ var results = await bufC.CopyToHostAsync<float>();   // The only GPU→CPU data 
 ```
 
 `AllAcceleratorsAsync()` automatically detects the environment:
-- **Browser:** Registers WebGPU, WebGL, Wasm, and CPU
+- **Browser:** Registers WebGPU, WebGL, and Wasm
 - **Desktop:** Registers Cuda, OpenCL, and CPU (browser backends are skipped)
 
 `CreatePreferredAcceleratorAsync()` picks the best available backend on either platform.
@@ -239,32 +239,7 @@ For multi-worker mode, the page must be cross-origin isolated (COOP/COEP headers
 
 All modern browsers that support Blazor WebAssembly.
 
-## CPU Backend
-
-Standard ILGPU CPU accelerator. Runs kernels synchronously on the main thread. Best for debugging and as a reference implementation.
-
-### Setup
-
-```csharp
-using ILGPU;
-using ILGPU.Runtime;
-using ILGPU.Runtime.CPU;
-
-// CPU backend uses the synchronous API
-using var context = Context.Create().CPU().ToContext();
-using var accelerator = context.CreateCPUAccelerator(0);
-```
-
-### Limitations
-
-- **Blocks the UI thread** — runs synchronously on the main thread
-- **Barriers broken** in Blazor WASM single-threaded environment
-- **Atomics crash** in Blazor WASM
-- **Slowest backend** — single-threaded execution
-
-Best used for debugging kernel logic.
-
-## Desktop Backends (Cuda & OpenCL)
+## Desktop Backends (Cuda, OpenCL & CPU)
 
 When running outside the browser (console apps, WPF, ASP.NET, etc.), SpawnDev.ILGPU uses ILGPU's native Cuda and OpenCL backends automatically. These are registered by the standard `builder.AllAccelerators()` call.
 
@@ -295,7 +270,19 @@ foreach (var device in context)
 - NVIDIA GPUs with OpenCL 3.0 drivers are now compatible — the `GenericAddressSpace` requirement that previously blocked these devices has been relaxed
 - Subgroup-dependent tests (e.g., `Warp.Shuffle`) are dynamically skipped on devices that don't report subgroup support
 
-> **Note:** Cuda and OpenCL are not available in Blazor WebAssembly — they fail silently when the context builder tries to register them in the browser.
+### CPU (Desktop)
+
+Multi-threaded CPU accelerator using `Parallel.For`. Useful as a reference or for machines without GPU drivers. Full ILGPU feature support (shared memory, barriers, atomics). Not available in the browser — use the Wasm backend for off-main-thread compute in Blazor.
+
+```csharp
+using ILGPU;
+using ILGPU.Runtime.CPU;
+
+using var context = Context.Create(b => b.CPU());
+using var accelerator = context.CreateCPUAccelerator(0);
+```
+
+> **Note:** Cuda, OpenCL, and CPU are not available in Blazor WebAssembly — they are skipped silently when registering via `AllAcceleratorsAsync()` in the browser.
 
 ## 64-bit Emulation
 
@@ -368,10 +355,15 @@ This outputs compiled shader source, buffer binding details, and dispatch inform
 
 ## Compiled Shader Inspection
 
-After loading a kernel on a GPU backend, you can inspect the compiled shader source:
+After loading a kernel the generated shader source is captured automatically:
 
 ```csharp
-// After kernel loads, the generated shader is available as a global JS variable
-var wgslSource = JS.Get<string>("wgslDebug");  // WebGPU
-var glslSource = JS.Get<string>("glslDebug");  // WebGL
+using SpawnDev.ILGPU.WebGPU;
+using SpawnDev.ILGPU.WebGL;
+
+// Available immediately after LoadAutoGroupedStreamKernel / LoadStreamKernel
+string? wgsl = WebGPUAccelerator.LastGeneratedWGSL;   // WebGPU backend
+string? glsl = WebGLAccelerator.LastGeneratedGLSL;    // WebGL backend
 ```
+
+Both properties are `static` and updated on every kernel load (not just on dispatch), so they always reflect the most recently compiled shader regardless of whether the kernel has been launched yet.

@@ -63,27 +63,28 @@ Comprehensive documentation is available in the [Docs](Docs/) folder:
 - **[Backends](Docs/backends.md)** — WebGPU, WebGL, Wasm, Cuda, OpenCL, CPU setup & configuration
 - **[Writing Kernels](Docs/kernels.md)** — Kernel rules, index types, math functions, shared memory
 - **[Memory & Buffers](Docs/memory-and-buffers.md)** — Allocation, async readback, zero-allocation patterns
-- **[Advanced Patterns](Docs/advanced-patterns.md)** — Device sharing, external buffers, GPU intrinsics, rendering
+- **[Canvas Rendering](Docs/canvas-rendering.md)** — `ICanvasRenderer`, zero-copy GPU→canvas blitting, per-backend details
+- **[Advanced Patterns](Docs/advanced-patterns.md)** — Device sharing, external buffers, GPU intrinsics, render loops
 - **[Limitations](Docs/limitations.md)** — Blazor WASM constraints, browser compatibility
 - **[API Reference](Docs/api-reference.md)** — Public API surface by namespace
 
 ## Browser Backends (Blazor WebAssembly)
 
-| | 🎮 **WebGPU** | 🖼️ **WebGL** | 🧊 **Wasm** | 🐢 **CPU** (Debug) |
-|---|---|---|---|---|
-| **Executes on** | GPU | GPU | Web Workers | Main (UI) thread |
-| **Transpiles to** | WGSL | GLSL ES 3.0 | WebAssembly binary | — (interpreted) |
-| **Technique** | Compute shader | Transform Feedback | Multi-worker | Single-threaded |
-| **Blocking** | Non-blocking | Non-blocking | Non-blocking | ⚠️ Blocks UI thread |
-| **SharedArrayBuffer** | Not required | Not required | Required for multi-worker | Not required |
-| **Shared Memory** | ✅ | ❌ | ✅ | ⚠️ Single-threaded |
-| **Group.Barrier()** | ✅ | ❌ | ✅ | ❌ |
-| **Dynamic Shared Memory** | ✅ | ❌ | ✅ | ❌ |
-| **ILGPU Algorithms** | ✅ RadixSort, Scan, Reduce, etc. | ❌ | ⚠️ RadixSort excluded (Wasm bug) | ⚠️ Barriers unsupported |
-| **Atomics** | ✅ | ❌ | ✅ | ⚠️ Crashes in WASM |
-| **64-bit (f64/i64)** | ✅ Emulated | ✅ Emulated | ✅ Native | ✅ Native |
-| **Browser support** | Chrome/Edge 113+ | All modern browsers | All modern browsers | All modern browsers |
-| **Best for** | GPU compute (modern) | GPU compute (universal) | General compute | Debugging / comparison |
+| | 🎮 **WebGPU** | 🖼️ **WebGL** | 🧊 **Wasm** |
+|---|---|---|---|
+| **Executes on** | GPU | GPU | Web Workers |
+| **Transpiles to** | WGSL | GLSL ES 3.0 | WebAssembly binary |
+| **Technique** | Compute shader | Transform Feedback | Multi-worker |
+| **Blocking** | Non-blocking | Non-blocking | Non-blocking |
+| **SharedArrayBuffer** | Not required | Not required | Required for multi-worker |
+| **Shared Memory** | ✅ | ❌ | ✅ |
+| **Group.Barrier()** | ✅ | ❌ | ✅ |
+| **Dynamic Shared Memory** | ✅ | ❌ | ✅ |
+| **ILGPU Algorithms** | ✅ RadixSort, Scan, Reduce, etc. | ❌ | ⚠️ RadixSort excluded (Wasm bug) |
+| **Atomics** | ✅ | ❌ | ✅ |
+| **64-bit (f64/i64)** | ✅ Emulated | ✅ Emulated | ✅ Native |
+| **Browser support** | Chrome/Edge 113+ | All modern browsers | All modern browsers |
+| **Best for** | GPU compute (modern) | GPU compute (universal) | General compute |
 
 **Auto-selection priority:** WebGPU → WebGL → Wasm
 
@@ -117,6 +118,7 @@ SpawnDev.ILGPU bundles ILGPU's native backends, so the same NuGet package works 
 - **WebGPU extension auto-detection** — Probes adapter for `shader-f16`, `subgroups`, `timestamp-query`, and other features; conditionally enables them on the device
 - **Subgroup operations** — `Group.Broadcast` and `Warp.Shuffle` are supported on the WebGPU backend when the browser supports the `subgroups` extension
 - **Multi-worker dispatch** — Wasm backend distributes work across all available CPU cores via SharedArrayBuffer; falls back to a single off-thread worker when SAB is unavailable
+- **Zero-copy canvas rendering** — `ICanvasRenderer` presents pixel buffers to HTML canvases without CPU readback on GPU backends: WebGPU uses a fullscreen-triangle render pass reading directly from GPU storage; WebGL transfers an `ImageBitmap` from its worker and draws synchronously; Wasm reuses a cached `ImageData`. One API, all backends: `CanvasRendererFactory.Create(accelerator)`
 - **Blazor WebAssembly** — Seamless integration via [SpawnDev.BlazorJS](https://github.com/LostBeard/SpawnDev.BlazorJS)
 - **Shared memory & barriers** — Static and dynamic workgroup memory with `Group.Barrier()` synchronization (WebGPU, Wasm, Cuda, OpenCL)
 - **ILGPU Algorithms** — RadixSort, Scan, Reduce, Histogram, and other algorithm extensions are fully supported on WebGPU and tested in-browser; Wasm supports Scan/Reduce (RadixSort has a known bug)
@@ -216,7 +218,7 @@ using global::ILGPU.Runtime;
 using SpawnDev.ILGPU;
 
 // SAME code as Blazor WASM — AllAcceleratorsAsync auto-detects the environment
-// Browser: registers WebGPU, WebGL, Wasm, CPU
+// Browser: registers WebGPU, WebGL, Wasm
 // Desktop: registers Cuda, OpenCL, CPU (browser backends are skipped)
 using var context = await Context.CreateAsync(builder => builder.AllAcceleratorsAsync());
 using var accelerator = await context.CreatePreferredAcceleratorAsync();
@@ -264,7 +266,7 @@ _test.bat
 
 ## Test Coverage
 
-**640 tests** across eight test suites covering all core features on both browser and desktop.
+**~590 tests** across seven test suites covering all core features on both browser and desktop.
 
 ### Test Suites
 
@@ -275,7 +277,6 @@ _test.bat
 | **WebGPUTests** | WebGPU | Full ILGPU feature set on GPU via WGSL |
 | **WebGLTests** | WebGL | GPU compute via GLSL ES 3.0, f64/i64 emulation |
 | **WasmTests** | Wasm | Native WebAssembly binary dispatch to workers, shared memory, barriers |
-| **CPUTests** | CPU | ILGPU CPU accelerator as reference (barriers/atomics excluded) |
 | **DefaultTests** | Auto | Device enumeration, preferred backend, kernel execution |
 
 #### Desktop (Console Runner)
@@ -316,7 +317,6 @@ _test.bat
 | **WebGPU** | Chrome/Edge 113+, Firefox Nightly (`dom.webgpu.enabled`) |
 | **WebGL** | ✅ All modern browsers (Chrome, Edge, Firefox, Safari, mobile browsers) |
 | **Wasm** | All modern browsers (compatible with every browser that supports Blazor WASM) |
-| **CPU** | All modern browsers |
 
 > **GPU on every device:** WebGL support means GPU-accelerated compute works on virtually every browser and device — including mobile phones, tablets, and older desktops without WebGPU support.
 
@@ -326,7 +326,7 @@ _test.bat
 
 ### 64-bit Emulation
 
-GPU hardware typically only supports 32-bit operations. Both GPU backends (WebGPU and WebGL) provide software emulation for 64-bit types (`double`/f64 and `long`/i64), **enabled by default** for full precision parity with the Wasm and CPU backends.
+GPU hardware typically only supports 32-bit operations. Both GPU backends (WebGPU and WebGL) provide software emulation for 64-bit types (`double`/f64 and `long`/i64), **enabled by default** for full precision parity with the Wasm backend (and native desktop backends).
 
 #### `double` (f64) Emulation Schemes
 
