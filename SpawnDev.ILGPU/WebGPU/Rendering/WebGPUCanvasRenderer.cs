@@ -24,6 +24,7 @@ namespace SpawnDev.ILGPU.WebGPU.Rendering
         private GPUBindGroupLayout? _bindGroupLayout;
         private GPUBuffer? _uniformBuffer;
 
+        private static readonly GPUCommandBuffer[] _submitArray = new GPUCommandBuffer[1];
         private uint _lastWidth;
         private uint _lastHeight;
         private string _canvasFormat = "bgra8unorm";
@@ -233,7 +234,8 @@ fn fs_main(@builtin(position) pos : vec4<f32>) -> @location(0) vec4<f32> {
             pass.End();
 
             using var commandBuffer = encoder.Finish();
-            Queue.Submit(new[] { commandBuffer });
+            _submitArray[0] = commandBuffer;
+            Queue.Submit(_submitArray);
 
             // Blit internal WebGPU canvas to the display canvas via 2d context.
             _displayCtx.DrawImage(_internalCanvas);

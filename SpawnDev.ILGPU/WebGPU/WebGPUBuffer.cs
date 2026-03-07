@@ -18,6 +18,7 @@ namespace SpawnDev.ILGPU.WebGPU
     {
         #region Instance
 
+        private static readonly GPUCommandBuffer[] _submitArray = new GPUCommandBuffer[1];
         private GPUBuffer? _buffer;
         private bool _disposed;
         private readonly bool _ownsBuffer;
@@ -189,7 +190,8 @@ namespace SpawnDev.ILGPU.WebGPU
             using var encoder = device.CreateCommandEncoder();
             encoder.CopyBufferToBuffer(_buffer, (ulong)sourceByteOffset, _cachedStagingBuffer, 0, (ulong)paddedBytes);
             using var commandBuffer = encoder.Finish();
-            Accelerator.Queue?.Submit(new[] { commandBuffer });
+            _submitArray[0] = commandBuffer;
+            Accelerator.Queue?.Submit(_submitArray);
 
             // Map, read into caller's destination array, unmap
             await _cachedStagingBuffer.MapAsync(GPUMapMode.Read);
@@ -253,7 +255,8 @@ namespace SpawnDev.ILGPU.WebGPU
             using var encoder = device.CreateCommandEncoder();
             encoder.CopyBufferToBuffer(_buffer, (ulong)sourceByteOffset, _cachedStagingBuffer, 0, (ulong)paddedBytes);
             using var commandBuffer = encoder.Finish();
-            Accelerator.Queue?.Submit(new[] { commandBuffer });
+            _submitArray[0] = commandBuffer;
+            Accelerator.Queue?.Submit(_submitArray);
 
             // Map, read into caller's destination array, unmap
             await _cachedStagingBuffer.MapAsync(GPUMapMode.Read);
@@ -330,7 +333,8 @@ namespace SpawnDev.ILGPU.WebGPU
             using var encoder = device.CreateCommandEncoder();
             encoder.CopyBufferToBuffer(_buffer, (ulong)sourceByteOffset, _cachedStagingBuffer, 0, (ulong)paddedBytes);
             using var commandBuffer = encoder.Finish();
-            Accelerator.Queue?.Submit(new[] { commandBuffer });
+            _submitArray[0] = commandBuffer;
+            Accelerator.Queue?.Submit(_submitArray);
 
             // Map, read as TDest into destination array, unmap
             await _cachedStagingBuffer.MapAsync(GPUMapMode.Read);

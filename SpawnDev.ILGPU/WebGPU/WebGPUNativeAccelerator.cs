@@ -47,6 +47,7 @@ namespace SpawnDev.ILGPU.WebGPU
 
         #region Instance
 
+        private static readonly GPUCommandBuffer[] _submitArray = new GPUCommandBuffer[1];
         private GPUDevice? _gpuDevice;
         private GPUQueue? _queue;
         private bool _isInitialized;
@@ -403,7 +404,8 @@ namespace SpawnDev.ILGPU.WebGPU
             passEncoder.End();
 
             var commandBuffer = encoder.Finish();
-            _queue!.Submit(new[] { commandBuffer });
+            _submitArray[0] = commandBuffer;
+            _queue!.Submit(_submitArray);
 
             // Clean up
             commandBuffer.Dispose();

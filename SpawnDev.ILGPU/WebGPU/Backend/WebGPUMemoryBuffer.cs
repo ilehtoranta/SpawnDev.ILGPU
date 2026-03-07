@@ -7,6 +7,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 {
     public class WebGPUMemoryBuffer : MemoryBuffer, IBrowserMemoryBuffer
     {
+        private static readonly GPUCommandBuffer[] _submitArray = new GPUCommandBuffer[1];
         private readonly WebGPUBuffer<byte>? _buffer;
 
         public WebGPUMemoryBuffer(WebGPUAccelerator accelerator, long length, int elementSize)
@@ -85,7 +86,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     _buffer!.NativeBuffer!, (ulong)destContiguous.Index,
                     (ulong)paddedBytes);
                 using var commandBuffer = encoder.Finish();
-                accelerator.NativeAccelerator.Queue?.Submit(new[] { commandBuffer });
+                _submitArray[0] = commandBuffer;
+                accelerator.NativeAccelerator.Queue?.Submit(_submitArray);
             }
         }
 
