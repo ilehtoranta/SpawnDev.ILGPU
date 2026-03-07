@@ -1214,10 +1214,24 @@ namespace SpawnDev.ILGPU.WebGPU
                     workY = (uint)config.GridDim.Y;
                     workZ = (uint)config.GridDim.Z;
                 }
-                else if (dimension is Index1D i1) workX = (uint)Math.Ceiling(i1.X / 64.0);
+                else if (dimension is Index1D i1)
+                {
+                    // WebGPU limits each dispatch dimension to 65535 workgroups.
+                    // For large 1D ranges (e.g. 14.7M elements → 229,954 workgroups),
+                    // spill into workY. The kernel's index formula accounts for this via
+                    // group_id.y * num_workgroups.x in WGSLKernelFunctionGenerator.
+                    uint totalWG = (uint)Math.Ceiling(i1.X / 64.0);
+                    if (totalWG > 65535u) { workX = 65535u; workY = (totalWG + 65534u) / 65535u; }
+                    else workX = totalWG;
+                }
                 else if (dimension is Index2D i2) { workX = (uint)Math.Ceiling(i2.X / 8.0); workY = (uint)Math.Ceiling(i2.Y / 8.0); }
                 else if (dimension is Index3D i3) { workX = (uint)Math.Ceiling(i3.X / 4.0); workY = (uint)Math.Ceiling(i3.Y / 4.0); workZ = (uint)Math.Ceiling(i3.Z / 4.0); }
-                else if (dimension is LongIndex1D l1) workX = (uint)Math.Ceiling(l1.X / 64.0);
+                else if (dimension is LongIndex1D l1)
+                {
+                    uint totalWG = (uint)Math.Ceiling(l1.X / 64.0);
+                    if (totalWG > 65535u) { workX = 65535u; workY = (totalWG + 65534u) / 65535u; }
+                    else workX = totalWG;
+                }
                 else if (dimension is LongIndex2D l2) { workX = (uint)Math.Ceiling(l2.X / 8.0); workY = (uint)Math.Ceiling(l2.Y / 8.0); }
                 else if (dimension is LongIndex3D l3) { workX = (uint)Math.Ceiling(l3.X / 4.0); workY = (uint)Math.Ceiling(l3.Y / 4.0); workZ = (uint)Math.Ceiling(l3.Z / 4.0); }
 

@@ -50,6 +50,8 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         private readonly Dictionary<int, int> _outputStoreCount = new();
         // Multi-store TF: runtime counter for assigning store slots during code generation
         private readonly Dictionary<int, int> _currentStoreSlot = new();
+        // Params targeted by GenericAtomic (Atomic.Add etc.) — get atomic vote TF varyings
+        private readonly HashSet<int> _atomicParamIndices = new();
 
         // Input buffer detection: params with Load sources get sampler uniforms
         private readonly HashSet<int> _inputParamIndices = new();
@@ -186,6 +188,18 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                             }
                         }
                     }
+                    else if (value.Value is GenericAtomic atomic)
+                    {
+                        // Atomic operations (Atomic.Add etc.) write to a buffer element.
+                        // Mark the target param as an output so it gets an atomic vote TF varying.
+                        var atomicTarget = atomic.Target.Resolve();
+                        var param = ResolveToParameterStatic(atomicTarget);
+                        if (param != null && param.Index >= paramOffset)
+                        {
+                            _atomicParamIndices.Add(param.Index);
+                            _outputParamIndices.Add(param.Index);
+                        }
+                    }
                 }
             }
             // Populate store counts from unique source expression counts
@@ -302,6 +316,10 @@ namespace SpawnDev.ILGPU.WebGL.Backend
 
             // 10. Load parameters into local variables
             SetupParameterBindings();
+
+            // 10.5. Initialize atomic vote varyings to 0 before the kernel body may return early.
+            // This ensures threads that take an early-return path emit 0 (no contribution).
+            InitializeAtomicVoteVaryings();
 
             // 11. Emit hoisted variable declarations
             EmitHoistedDeclarations();
@@ -645,6 +663,22 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                     // TF slots and causes interleaving bugs in multi-buffer readback.
                     if (!_outputParamIndices.Contains(param.Index))
                         continue;
+
+                    // Atomic-only params get a special "vote" TF varying instead of a direct-write varying.
+                    // Each thread emits its increment amount; JS sums all votes and adds to buffer[element].
+                    if (_atomicParamIndices.Contains(param.Index) && !_outputStoreCount.ContainsKey(param.Index))
+                    {
+                        string glslType = _bufferGlslTypes.TryGetValue(param.Index, out var cachedType) ? cachedType : "int";
+                        bool needsFlat = glslType != "float";
+                        string flatPrefix = needsFlat ? "flat " : "";
+                        string varyingName = $"tf_atomic_vote_{param.Index}";
+                        Builder.AppendLine($"{flatPrefix}out highp {glslType} {varyingName}; // atomic vote for param[{param.Index}]");
+                        var varyingInfo = new OutputVaryingInfo(param.Index, outIndex++, varyingName, glslType, isAtomicVote: true);
+                        _outputVaryings.Add(varyingInfo);
+                        _generatorArgs.OutputVaryings.Add(varyingInfo);
+                        continue;
+                    }
+
                     var elementType = UnwrapType(type);
                     bool isEmulatedF64 = _emulatedF64Params.Contains(param.Index);
                     bool isEmulatedI64 = _emulatedI64Params.Contains(param.Index);
@@ -1488,6 +1522,57 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         {
             // Kernel: just return from main()
             AppendLine("return;");
+        }
+
+        /// <summary>
+        /// Emits 0 to every atomic vote TF varying at the start of main() so that
+        /// threads taking an early-return path contribute nothing to the accumulated sum.
+        /// Must be called after EmitOutputVaryings() populates _outputVaryings.
+        /// </summary>
+        private void InitializeAtomicVoteVaryings()
+        {
+            foreach (var varying in _outputVaryings)
+            {
+                if (varying.IsAtomicVote)
+                    AppendLine($"{varying.VaryingName} = {varying.GlslType}(0); // atomic vote default: no contribution");
+            }
+        }
+
+        /// <summary>
+        /// Emulates Atomic.Add in WebGL2 vertex shaders using the "vote" TF pattern:
+        /// each thread emits its increment to a TF varying; JS sums all per-vertex
+        /// contributions and adds the total to buffer[element] after the draw.
+        ///
+        /// Limitations:
+        /// - The return value (old value before add) is approximated as 0. Kernels
+        ///   that use Atomic.Add as a compaction slot allocator (e.g. DepthToGaussianKernel)
+        ///   cannot be correctly emulated in WebGL2 — use the ILGPU 2D-dispatch fix instead.
+        /// - Only Add is handled; other atomic kinds fall back to the base no-op.
+        /// </summary>
+        public override void GenerateCode(GenericAtomic value)
+        {
+            var target = Load(value);
+            var address = Load(value.Target);
+            var atomicVal = Load(value.Value);
+
+            // Return value: approximate as 0 (already declared if hoisted)
+            if (!_hoistedPrimitives.Contains(value))
+                Declare(target);
+            AppendLine($"{target} = {target.Type}(0); // atomic return (WebGL2 emulation)");
+
+            if (value.Kind == AtomicKind.Add)
+            {
+                // Emit the increment to the atomic vote TF varying so JS can accumulate it
+                if (_leaParamMap.TryGetValue(address.ToString(), out var paramIdx))
+                {
+                    var atomicVarying = _outputVaryings.FirstOrDefault(o => o.ParamIndex == paramIdx && o.IsAtomicVote);
+                    if (atomicVarying != null)
+                    {
+                        string castVal = CastIfNeeded(atomicVal, atomicVarying.GlslType ?? "int");
+                        AppendLine($"{atomicVarying.VaryingName} = {castVal}; // atomic vote emit");
+                    }
+                }
+            }
         }
 
         public override void GenerateCode(LoadElementAddress value)
@@ -2416,10 +2501,16 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         public int StoreSlot { get; }
         /// <summary>For multi-store buffers: total number of stores per vertex. 1 for single-store.</summary>
         public int StoreCount { get; }
+        /// <summary>
+        /// True when this varying emits an atomic vote (increment amount per thread).
+        /// The JS worker sums all per-vertex values and adds the total to the buffer element,
+        /// instead of writing each vertex's value to its own sequential slot.
+        /// </summary>
+        public bool IsAtomicVote { get; }
 
         public OutputVaryingInfo(int paramIndex, int outputIndex, string varyingName, string glslType,
             bool isEmulated = false, string? emulatedSuffix = null, int fieldIndex = -1,
-            int storeSlot = -1, int storeCount = 1)
+            int storeSlot = -1, int storeCount = 1, bool isAtomicVote = false)
         {
             ParamIndex = paramIndex;
             OutputIndex = outputIndex;
@@ -2430,6 +2521,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             FieldIndex = fieldIndex;
             StoreSlot = storeSlot;
             StoreCount = storeCount;
+            IsAtomicVote = isAtomicVote;
         }
     }
 

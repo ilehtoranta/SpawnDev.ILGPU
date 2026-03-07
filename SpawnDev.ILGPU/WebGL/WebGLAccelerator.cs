@@ -811,6 +811,7 @@ namespace SpawnDev.ILGPU.WebGL
                                 fieldIndex = outputInfo.FieldIndex,
                                 storeSlot = outputInfo.StoreSlot,
                                 storeCount = outputInfo.StoreCount,
+                                isAtomicVote = outputInfo.IsAtomicVote,
                                 writeByteOffset = (int)contiguous.Index,
                                 writeLengthBytes = (int)contiguous.LengthInBytes
                             });

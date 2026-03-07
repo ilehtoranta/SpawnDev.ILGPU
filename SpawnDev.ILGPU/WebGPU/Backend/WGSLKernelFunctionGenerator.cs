@@ -2961,8 +2961,12 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             // 1D Kernel
             if (EntryPoint.IndexType == IndexType.Index1D)
             {
-                // Map to global linear index: local_index + group_id.x * workgroup_size.x
-                AppendLine($"var {indexVar.Name} : i32 = i32(local_index + group_id.x * workgroup_size.x);");
+                // Map to global linear index, accounting for 2D dispatch fallback.
+                // When the element count exceeds 65535×64, WebGPUAccelerator spills into
+                // workY (workX=65535, workY=ceil(total/65535)). The full linear index is:
+                //   (group_id.x + group_id.y * num_workgroups.x) * workgroup_size.x + local_index
+                // When workY=1, group_id.y=0 → identical to the original 1D formula.
+                AppendLine($"var {indexVar.Name} : i32 = i32(local_index + (group_id.x + group_id.y * num_workgroups.x) * workgroup_size.x);");
             }
             // 2D Kernel
             else if (EntryPoint.IndexType == IndexType.Index2D)
@@ -3008,8 +3012,9 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             // LongIndex1D is an emulated i64 (vec2<u32>) representing the 64-bit thread index.
             else if (EntryPoint.IndexType == IndexType.LongIndex1D)
             {
-                // Map to emulated i64: pack the 32-bit global linear index into the low word
-                AppendLine($"var {indexVar.Name} : vec2<u32> = vec2<u32>(u32(local_index) + u32(group_id.x) * u32(workgroup_size.x), 0u); // LongIndex1D (emu_i64)");
+                // Map to emulated i64: pack the 32-bit global linear index into the low word.
+                // Accounts for 2D dispatch fallback (same reasoning as Index1D above).
+                AppendLine($"var {indexVar.Name} : vec2<u32> = vec2<u32>(u32(local_index) + (u32(group_id.x) + u32(group_id.y) * u32(num_workgroups.x)) * u32(workgroup_size.x), 0u); // LongIndex1D (emu_i64)");
             }
             // LongIndex2D Kernel
             else if (EntryPoint.IndexType == IndexType.LongIndex2D)
