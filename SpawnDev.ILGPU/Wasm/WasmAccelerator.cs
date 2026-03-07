@@ -14,8 +14,10 @@ using global::ILGPU.Runtime;
 using SpawnDev.BlazorJS;
 using SpawnDev.BlazorJS.JSObjects;
 using SpawnDev.ILGPU.Wasm.Backend;
+using System.Collections.Concurrent;
 using System.Reflection;
 using System.Reflection.Emit;
+using System.Runtime.CompilerServices;
 
 namespace SpawnDev.ILGPU.Wasm
 {
@@ -64,6 +66,35 @@ namespace SpawnDev.ILGPU.Wasm
         /// during the synchronous phase of each task.
         /// </summary>
         internal int _activeDispatchCount;
+
+        // --- Reflection caches for hot-path stride extraction and struct marshaling ---
+        private static readonly ConcurrentDictionary<Type, StrideReflectionCache> _strideCache = new();
+        private static readonly ConcurrentDictionary<Type, MethodInfo> _unsafeWriteCache = new();
+
+        private sealed class StrideReflectionCache
+        {
+            public PropertyInfo? StrideProp;
+            public PropertyInfo? YStrideProp;
+            public PropertyInfo? XStrideProp;
+            public PropertyInfo? ZStrideProp;
+        }
+
+        private static StrideReflectionCache GetOrCreateStrideCache(Type argType, Type strideType)
+        {
+            // Two-level cache: argType → StrideProp, strideType → YStride/XStride/ZStride
+            var argCache = _strideCache.GetOrAdd(argType, t => new StrideReflectionCache
+            {
+                StrideProp = t.GetProperty("Stride"),
+            });
+            if (argCache.StrideProp != null && argCache.YStrideProp == null && argCache.XStrideProp == null)
+            {
+                // Populate stride sub-properties from the stride object's type (done once per stride type)
+                argCache.YStrideProp = strideType.GetProperty("YStride");
+                argCache.XStrideProp = strideType.GetProperty("XStride");
+                argCache.ZStrideProp = strideType.GetProperty("ZStride");
+            }
+            return argCache;
+        }
 
         // Backend instance
         public WasmBackend Backend { get; private set; } = null!;
@@ -181,7 +212,7 @@ namespace SpawnDev.ILGPU.Wasm
             var wasmKernel = (WasmKernel)kernel;
             var compiledKernel = (WasmCompiledKernel)wasmKernel.CompiledKernel;
 
-            WasmBackend.Log($"[Wasm-Debug] RunKernel called with {args.Length} args");
+            if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm-Debug] RunKernel called with {args.Length} args");
 
             // Increment active dispatch count BEFORE starting the async task,
             // so the count is visible during the task's synchronous execution phase.
@@ -212,7 +243,7 @@ namespace SpawnDev.ILGPU.Wasm
                 if (dimension is KernelConfig kConfig)
                     dynamicSharedElements = kConfig.SharedMemoryConfig.NumElements;
 
-                WasmBackend.Log($"[Wasm] Dispatching kernel: {totalItems} items ({gridDimX}x{gridDimY}x{gridDimZ}), groupSize={groupSize}, numGroups={numGroups}, hasBarriers={compiledKernel.HasBarriers}, dynamicSharedElements={dynamicSharedElements}");
+                if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm] Dispatching kernel: {totalItems} items ({gridDimX}x{gridDimY}x{gridDimZ}), groupSize={groupSize}, numGroups={numGroups}, hasBarriers={compiledKernel.HasBarriers}, dynamicSharedElements={dynamicSharedElements}");
 
                 // Determine isView flags from compiled kernel metadata
                 var paramInfos = compiledKernel.ParamInfos;
@@ -243,39 +274,38 @@ namespace SpawnDev.ILGPU.Wasm
                         {
                             bufferInfos.Add((wasmBuf, wasmBuf.ByteOffset));
 
-                            // Extract stride via reflection for multi-dimensional views
+                            // Extract stride via cached reflection for multi-dimensional views
                             int stride = 1;
                             int stride2 = 0;
                             var argType = args[i].GetType();
-                            var strideProp = argType.GetProperty("Stride");
-                            if (strideProp != null)
+                            var argCache = _strideCache.GetOrAdd(argType, t => new StrideReflectionCache
                             {
-                                var strideObj = strideProp.GetValue(args[i]);
+                                StrideProp = t.GetProperty("Stride"),
+                            });
+                            if (argCache.StrideProp != null)
+                            {
+                                var strideObj = argCache.StrideProp.GetValue(args[i]);
                                 if (strideObj != null)
                                 {
-                                    // Try YStride (for Stride2D.DenseX, Stride3D.DenseXY)
-                                    var yStrideProp = strideObj.GetType().GetProperty("YStride");
-                                    if (yStrideProp != null)
+                                    var strideType = strideObj.GetType();
+                                    // Lazily populate stride sub-properties (once per type)
+                                    if (argCache.YStrideProp == null && argCache.XStrideProp == null)
                                     {
-                                        stride = (int)yStrideProp.GetValue(strideObj)!;
-                                    }
-                                    else
-                                    {
-                                        // Try XStride (for Stride2D.DenseY)
-                                        var xStrideProp = strideObj.GetType().GetProperty("XStride");
-                                        if (xStrideProp != null)
-                                            stride = (int)xStrideProp.GetValue(strideObj)!;
+                                        argCache.YStrideProp = strideType.GetProperty("YStride");
+                                        argCache.XStrideProp = strideType.GetProperty("XStride");
+                                        argCache.ZStrideProp = strideType.GetProperty("ZStride");
                                     }
 
-                                    // Try ZStride (for Stride3D.DenseXY)
-                                    var zStrideProp = strideObj.GetType().GetProperty("ZStride");
-                                    if (zStrideProp != null)
-                                    {
-                                        stride2 = (int)zStrideProp.GetValue(strideObj)!;
-                                    }
+                                    if (argCache.YStrideProp != null)
+                                        stride = (int)argCache.YStrideProp.GetValue(strideObj)!;
+                                    else if (argCache.XStrideProp != null)
+                                        stride = (int)argCache.XStrideProp.GetValue(strideObj)!;
+
+                                    if (argCache.ZStrideProp != null)
+                                        stride2 = (int)argCache.ZStrideProp.GetValue(strideObj)!;
                                 }
                             }
-                            WasmBackend.Log($"[Wasm] View arg[{i}]: length={iav.Length}, stride={stride}, stride2={stride2}");
+                            if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm] View arg[{i}]: length={iav.Length}, stride={stride}, stride2={stride2}");
                             wasmArgs.Add((true, wasmBuf, (int)iav.Length, stride, stride2, null));
                         }
                         else
@@ -312,7 +342,7 @@ namespace SpawnDev.ILGPU.Wasm
                 if (dynamicSharedElements > 0)
                 {
                     sharedMemSize += dynamicSharedBytes;
-                    WasmBackend.Log($"[Wasm] Dynamic shared memory: {dynamicSharedElements} elements x {compiledKernel.DynamicSharedElementSize} bytes = {dynamicSharedBytes} bytes, total shared={sharedMemSize}");
+                    if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm] Dynamic shared memory: {dynamicSharedElements} elements x {compiledKernel.DynamicSharedElementSize} bytes = {dynamicSharedBytes} bytes, total shared={sharedMemSize}");
                 }
                 int afterShared = sharedMemBase + sharedMemSize;
 
@@ -321,7 +351,7 @@ namespace SpawnDev.ILGPU.Wasm
                 int barrierSize = compiledKernel.BarrierCount * 8;
                 int totalWithBarriers = barrierBase + barrierSize;
 
-                WasmBackend.Log($"[Wasm] Memory layout: buffers={totalMemoryBytes}, scratch={scratchBase}, sharedMem={sharedMemBase}({sharedMemSize}), barrier={barrierBase}({barrierSize}), hasBarriers={compiledKernel.HasBarriers}, groupSize={groupSize}");
+                if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm] Memory layout: buffers={totalMemoryBytes}, scratch={scratchBase}, sharedMem={sharedMemBase}({sharedMemSize}), barrier={barrierBase}({barrierSize}), hasBarriers={compiledKernel.HasBarriers}, groupSize={groupSize}");
 
                 // Round up to Wasm page size (64KB)
                 int wasmPages = Math.Max(1, (totalWithBarriers + 65535) / 65536);
@@ -367,10 +397,14 @@ namespace SpawnDev.ILGPU.Wasm
                     memoryBuffer = disposeBuffer;
                 }
 
-                // Zero out the used portion of linear memory to prevent stale data
-                // from prior dispatches when the memory is cached/reused.
+                // Zero out shared memory and barrier regions to prevent stale data.
+                // Buffer regions are not zeroed — they are overwritten by the copy-in below
+                // or by kernel output. This saves significant time for large output buffers.
+                int zeroStart = sharedMemBase;
+                int zeroEnd = totalWithBarriers;
+                if (zeroEnd > zeroStart)
                 {
-                    using var zeroView = new Uint8Array(memoryBuffer, 0, totalWithBarriers);
+                    using var zeroView = new Uint8Array(memoryBuffer, zeroStart, zeroEnd - zeroStart);
                     zeroView.JSRef!.CallVoid("fill", 0);
                 }
 
@@ -421,10 +455,11 @@ namespace SpawnDev.ILGPU.Wasm
                                     unsafe
                                     {
                                         byte* ptr = (byte*)handle.AddrOfPinnedObject();
-                                        // Use reflection to call Unsafe.Write<T> with the correct closed generic type
-                                        var unsafeWriteMethod = typeof(System.Runtime.CompilerServices.Unsafe)
-                                            .GetMethod("Write", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)!
-                                            .MakeGenericMethod(value.GetType());
+                                        // Use cached reflection to call Unsafe.Write<T> with the correct closed generic type
+                                        var unsafeWriteMethod = _unsafeWriteCache.GetOrAdd(value.GetType(), t =>
+                                            typeof(Unsafe)
+                                                .GetMethod("Write", BindingFlags.Public | BindingFlags.Static)!
+                                                .MakeGenericMethod(t));
                                         unsafeWriteMethod.Invoke(null, new object[] { (IntPtr)ptr, value });
                                     }
                                 }
@@ -441,7 +476,7 @@ namespace SpawnDev.ILGPU.Wasm
                             structScratchWrites.Add((absoluteOffset, bytes));
                             flatArgs.Add(absoluteOffset.ToString());
                             scratchCursor += structSize;
-                            WasmBackend.Log($"[Wasm] Struct scalar arg: type={value.GetType().Name}, size={structSize}, scratchOffset={absoluteOffset}");
+                            if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm] Struct scalar arg: type={value.GetType().Name}, size={structSize}, scratchOffset={absoluteOffset}");
                         }
                         else flatArgs.Add(value?.ToString() ?? "0");
                     }
@@ -521,7 +556,7 @@ namespace SpawnDev.ILGPU.Wasm
                 if (workerCount > totalItems) workerCount = Math.Max(1, totalItems);
             }
 
-            WasmBackend.Log($"[Wasm] Dispatching to {workerCount} worker(s), {totalItems} items, hasBarriers={hasBarriers}, groupSize={groupSize}, numGroups={numGroups}");
+            if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm] Dispatching to {workerCount} worker(s), {totalItems} items, hasBarriers={hasBarriers}, groupSize={groupSize}, numGroups={numGroups}");
 
             // Build the worker script
             string argStr = string.Join(", ", flatArgs);

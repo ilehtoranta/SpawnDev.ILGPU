@@ -130,10 +130,21 @@ namespace SpawnDev.ILGPU.WebGPU
             if (buffer?.NativeBuffer == null)
                 throw new ArgumentNullException(nameof(buffer));
 
-            // Remove any existing binding at this index
-            _bindings.RemoveAll(b => b.Index == bindingIndex);
+            // Remove any existing binding at this index and insert sorted
+            for (int i = _bindings.Count - 1; i >= 0; i--)
+            {
+                if (_bindings[i].Index == bindingIndex)
+                {
+                    _bindings.RemoveAt(i);
+                    break; // indices are unique
+                }
+            }
 
-            _bindings.Add(new WebGPUBufferBinding(bindingIndex, buffer.NativeBuffer));
+            // Insert in sorted order by index
+            var newBinding = new WebGPUBufferBinding(bindingIndex, buffer.NativeBuffer);
+            int insertAt = _bindings.BinarySearch(newBinding);
+            if (insertAt < 0) insertAt = ~insertAt;
+            _bindings.Insert(insertAt, newBinding);
 
             // Rebuild bind group
             RebuildBindGroup();
@@ -178,15 +189,16 @@ namespace SpawnDev.ILGPU.WebGPU
             // Dispose old bind group
             _bindGroup?.Dispose();
 
-            // Create new bind group
-            var entries = _bindings
-                .OrderBy(b => b.Index)
-                .Select(b => new GPUBindGroupEntry
+            // Create new bind group (bindings are already sorted by index)
+            var entries = new GPUBindGroupEntry[_bindings.Count];
+            for (int i = 0; i < _bindings.Count; i++)
+            {
+                entries[i] = new GPUBindGroupEntry
                 {
-                    Binding = (uint)b.Index,
-                    Resource = new GPUBufferBinding { Buffer = b.Buffer }
-                })
-                .ToArray();
+                    Binding = (uint)_bindings[i].Index,
+                    Resource = new GPUBufferBinding { Buffer = _bindings[i].Buffer }
+                };
+            }
 
             var descriptor = new GPUBindGroupDescriptor
             {
@@ -213,7 +225,7 @@ namespace SpawnDev.ILGPU.WebGPU
 
         #region Nested Types
 
-        private readonly struct WebGPUBufferBinding
+        private readonly struct WebGPUBufferBinding : IComparable<WebGPUBufferBinding>
         {
             public WebGPUBufferBinding(int index, GPUBuffer buffer)
             {
@@ -223,6 +235,8 @@ namespace SpawnDev.ILGPU.WebGPU
 
             public int Index { get; }
             public GPUBuffer Buffer { get; }
+
+            public int CompareTo(WebGPUBufferBinding other) => Index.CompareTo(other.Index);
         }
 
         #endregion

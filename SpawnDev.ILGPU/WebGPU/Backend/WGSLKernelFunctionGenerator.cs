@@ -67,6 +67,9 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         // where the element offset for that buffer binding is stored.
         // Used by GetField to read ArrayView Field 1 (Index) from _scalar_params instead of hardcoding 0.
         private Dictionary<int, int> _viewOffsetScalarSlots = new Dictionary<int, int>();
+        // Tracked during body generation: set true when any _scalar_params[ reference is emitted.
+        // Avoids expensive Builder.ToString().Contains() call in GenerateHeader().
+        private bool _bodyReferencesScalarParams = false;
         private CFG<ReversePostOrder, Forwards> _cfg;
         private Dominators<Backwards> _postDominators;
         private Loops<ReversePostOrder, Forwards> _loops;
@@ -1230,8 +1233,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             // for it. Skip the declaration entirely to keep layout and bind group in sync.
             if (scalarManifest.Count > 0)
             {
-                bool bodyUsesScalarParams = Builder.ToString().Contains("_scalar_params[");
-                if (bodyUsesScalarParams)
+                if (_bodyReferencesScalarParams)
                 {
                     builder.AppendLine($"@group(0) @binding({bindingIdx}) var<storage, read> _scalar_params : array<u32>;");
                     bindingIdx++;
@@ -3341,6 +3343,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                         else
                         {
                             // User scalar field: read from _scalar_params
+                            _bodyReferencesScalarParams = true;
                             int slot = fieldInfo.ScalarSlot;
                             var scalarElemType = GetBufferElementType(fieldInfo.FieldType);
                             var scalarWgslType = TypeGenerator[scalarElemType];
@@ -3373,6 +3376,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 if (packedScalarSlots.TryGetValue(param.Index, out var packInfo))
                 {
                     // --- PACKED SCALAR: read from _scalar_params buffer ---
+                    _bodyReferencesScalarParams = true;
                     int slot = packInfo.slot;
 
                     if (packInfo.isEmuF64)
@@ -3559,6 +3563,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                         AppendIndent();
                         if (bsFields[fieldIdx].ViewOffsetSlot >= 0)
                         {
+                            _bodyReferencesScalarParams = true;
                             int voSlotEmu = bsFields[fieldIdx].ViewOffsetSlot;
                             Builder.Append($"let {target.Name}_base_idx = i32(_scalar_params[{voSlotEmu}]) + i32({offsetExpr}) * 2;");
                         }
@@ -3581,6 +3586,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                         AppendIndent();
                         if (bsFields[fieldIdx].ViewOffsetSlot >= 0)
                         {
+                            _bodyReferencesScalarParams = true;
                             int voSlotBS = bsFields[fieldIdx].ViewOffsetSlot;
                             Builder.Append($"let {target.Name}_base_idx = i32(_scalar_params[{voSlotBS}]) + i32({offsetExpr}) * {psStrideU32s};");
                         }
@@ -3602,6 +3608,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     string adjustedOffsetExprBS = offsetExpr;
                     if (bsFields[fieldIdx].ViewOffsetSlot >= 0)
                     {
+                        _bodyReferencesScalarParams = true;
                         int voSlot = bsFields[fieldIdx].ViewOffsetSlot;
                         adjustedOffsetExprBS = $"(i32(_scalar_params[{voSlot}]) + {offsetExpr})";
                     }
@@ -3631,6 +3638,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     // This is correct because u32Offset = padding/4 (raw u32 distance from
                     // binding start to view start), independent of element or packed stride.
                     bool hasViewOffset = _viewOffsetScalarSlots.TryGetValue(param.Index, out int voSlot);
+                    if (hasViewOffset) _bodyReferencesScalarParams = true;
                     string adjustedOffsetExpr = hasViewOffset
                         ? $"(i32(_scalar_params[{voSlot}]) + {offsetExpr})"
                         : offsetExpr;
@@ -4913,7 +4921,10 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                                             // The runtime packs the element offset (contiguous.Index) at this slot
                                             // so sub-views correctly offset array accesses.
                                             if (_viewOffsetScalarSlots.TryGetValue(param.Index, out int viewOffSlot))
+                                            {
+                                                _bodyReferencesScalarParams = true;
                                                 AppendLine($"{prefix}{target} = i32(_scalar_params[{viewOffSlot}]);");
+                                            }
                                             else
                                                 AppendLine($"{prefix}{target} = {WrapI32("0")};");
                                             return;

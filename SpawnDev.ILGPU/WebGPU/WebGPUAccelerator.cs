@@ -1373,7 +1373,7 @@ namespace SpawnDev.ILGPU.WebGPU
             {
                 if (_encoder == null) return;
 
-                WebGPUBackend.Log($"[WebGPU] Flushing batch: {_pendingPassCount} compute passes");
+                if (WebGPUBackend.VerboseLogging) WebGPUBackend.Log($"[WebGPU] Flushing batch: {_pendingPassCount} compute passes");
 
                 using var cmd = _encoder.Finish();
                 _webGpuAccelerator.NativeAccelerator.Queue!.Submit(new[] { cmd });

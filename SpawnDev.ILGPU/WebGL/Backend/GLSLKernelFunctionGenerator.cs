@@ -73,6 +73,12 @@ namespace SpawnDev.ILGPU.WebGL.Backend
 
         // Output buffer info
         private readonly List<OutputVaryingInfo> _outputVaryings = new();
+        // Pre-indexed lookups for O(1) output varying access (built after all varyings are added)
+        private Dictionary<int, OutputVaryingInfo>? _atomicVoteIndex;           // paramIdx → atomic vote varying
+        private Dictionary<(int, string), OutputVaryingInfo>? _emulatedIndex;   // (paramIdx, suffix) → emulated varying
+        private Dictionary<(int, int), OutputVaryingInfo>? _storeSlotIndex;     // (paramIdx, slot) → multi-store varying
+        private Dictionary<int, OutputVaryingInfo>? _singleStoreIndex;          // paramIdx → single-store varying (slot < 0)
+        private Dictionary<int, OutputVaryingInfo>? _paramFallbackIndex;        // paramIdx → first varying for param
 
         // Struct buffer field counts: paramIndex → number of flattened scalar fields
         private readonly Dictionary<int, int> _structFieldCounts = new();
@@ -306,6 +312,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
 
             // 7. Emit output varyings for Transform Feedback
             EmitOutputVaryings();
+            BuildOutputVaryingIndex();
 
             // 8. Emit main() vertex shader entry point
             Builder.AppendLine("void main() {");
@@ -753,6 +760,32 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             }
 
             Builder.AppendLine();
+        }
+
+        /// <summary>
+        /// Builds lookup dictionaries from _outputVaryings for O(1) access during code generation.
+        /// Must be called after EmitOutputVaryings() populates the list.
+        /// </summary>
+        private void BuildOutputVaryingIndex()
+        {
+            _atomicVoteIndex = new Dictionary<int, OutputVaryingInfo>();
+            _emulatedIndex = new Dictionary<(int, string), OutputVaryingInfo>();
+            _storeSlotIndex = new Dictionary<(int, int), OutputVaryingInfo>();
+            _singleStoreIndex = new Dictionary<int, OutputVaryingInfo>();
+            _paramFallbackIndex = new Dictionary<int, OutputVaryingInfo>();
+
+            foreach (var ov in _outputVaryings)
+            {
+                if (ov.IsAtomicVote)
+                    _atomicVoteIndex.TryAdd(ov.ParamIndex, ov);
+                if (ov.IsEmulated && ov.EmulatedSuffix != null)
+                    _emulatedIndex.TryAdd((ov.ParamIndex, ov.EmulatedSuffix), ov);
+                if (ov.StoreSlot >= 0)
+                    _storeSlotIndex.TryAdd((ov.ParamIndex, ov.StoreSlot), ov);
+                if (ov.StoreSlot < 0 && !ov.IsAtomicVote && !ov.IsEmulated && ov.FieldIndex < 0)
+                    _singleStoreIndex.TryAdd(ov.ParamIndex, ov);
+                _paramFallbackIndex.TryAdd(ov.ParamIndex, ov);
+            }
         }
 
         #endregion
@@ -1565,7 +1598,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 // Emit the increment to the atomic vote TF varying so JS can accumulate it
                 if (_leaParamMap.TryGetValue(address.ToString(), out var paramIdx))
                 {
-                    var atomicVarying = _outputVaryings.FirstOrDefault(o => o.ParamIndex == paramIdx && o.IsAtomicVote);
+                    _atomicVoteIndex!.TryGetValue(paramIdx, out var atomicVarying);
                     if (atomicVarying != null)
                     {
                         string castVal = CastIfNeeded(atomicVal, atomicVarying.GlslType ?? "int");
@@ -1798,8 +1831,8 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             if (_emulatedVarMappings.TryGetValue(address.ToString(), out var emulInfo))
             {
                 // Find the lo and hi TF varyings for this param
-                var loOutput = _outputVaryings.FirstOrDefault(o => o.ParamIndex == emulInfo.ParamIndex && o.EmulatedSuffix == "lo");
-                var hiOutput = _outputVaryings.FirstOrDefault(o => o.ParamIndex == emulInfo.ParamIndex && o.EmulatedSuffix == "hi");
+                _emulatedIndex!.TryGetValue((emulInfo.ParamIndex, "lo"), out var loOutput);
+                _emulatedIndex!.TryGetValue((emulInfo.ParamIndex, "hi"), out var hiOutput);
                 if (loOutput != null && hiOutput != null)
                 {
                     if (emulInfo.IsF64)
@@ -1850,7 +1883,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 {
                     // Multi-store TF: route this store to the next sequential slot
                     int slot = _currentStoreSlot.GetValueOrDefault(leaParamIdx, 0);
-                    var slotOutput = _outputVaryings.FirstOrDefault(o => o.ParamIndex == leaParamIdx && o.StoreSlot == slot);
+                    _storeSlotIndex!.TryGetValue((leaParamIdx, slot), out var slotOutput);
                     if (slotOutput != null)
                     {
                         string tfValExpr = CastIfNeeded(val, slotOutput.GlslType ?? "float");
@@ -1860,7 +1893,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                     }
                 }
 
-                var output = _outputVaryings.FirstOrDefault(o => o.ParamIndex == leaParamIdx && o.StoreSlot < 0);
+                _singleStoreIndex!.TryGetValue(leaParamIdx, out var output);
                 if (output != null)
                 {
                     // Single-element TF output (one value per vertex invocation)
@@ -1878,7 +1911,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 // (propagated through PushPhiValues). Try one more time.
                 if (_leaParamMap.TryGetValue(address.ToString(), out var cbParamIdx))
                 {
-                    var cbOutput = _outputVaryings.FirstOrDefault(o => o.ParamIndex == cbParamIdx);
+                    _paramFallbackIndex!.TryGetValue(cbParamIdx, out var cbOutput);
                     if (cbOutput != null)
                     {
                         string cbValExpr = CastIfNeeded(val, cbOutput.GlslType ?? "float");

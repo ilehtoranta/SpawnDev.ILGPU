@@ -367,3 +367,4 @@ FodyWeavers.xsd
 /State
 /.agents/workflows
 /.cursorrules
+/.claude/settings.local.json

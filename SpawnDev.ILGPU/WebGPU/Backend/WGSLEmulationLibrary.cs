@@ -47,9 +47,19 @@ fn f64_from_ieee754_bits(lo: u32, hi: u32) -> emu_f64 {
     if (exponent == 0u && mantissa_hi20 == 0u && mantissa_lo32 == 0u) {
         return emu_f64(0.0, 0.0);
     }
-    // Inf/NaN
+    // Inf/NaN: preserve in f32 high word so IsNaN/IsInf propagation works.
+    // Map +Inf/-Inf to f32 Inf, NaN to f32 NaN (sign preserved via sign_bit).
     if (exponent == 0x7FFu) {
-        return emu_f64(0.0, 0.0);
+        let is_nan = (mantissa_hi20 != 0u) || (mantissa_lo32 != 0u);
+        if (is_nan) {
+            // Produce f32 NaN with sign preserved
+            let nan_bits = (sign_bit << 31u) | 0x7FC00000u; // quiet NaN
+            return emu_f64(bitcast<f32>(nan_bits), 0.0);
+        } else {
+            // Produce f32 Inf with sign preserved
+            let inf_bits = (sign_bit << 31u) | 0x7F800000u;
+            return emu_f64(bitcast<f32>(inf_bits), 0.0);
+        }
     }
 
     let exp_bias: i32 = 1023;
@@ -115,6 +125,16 @@ fn f64_to_ieee754_bits(v: emu_f64) -> vec2<u32> {
     let sign = (f32_bits_h >> 31u) & 1u;
     let f32_exp = (f32_bits_h >> 23u) & 0xFFu;
     let f32_mantissa = f32_bits_h & 0x7FFFFFu;
+
+    // Handle Inf/NaN: f32 exponent 0xFF maps to f64 exponent 0x7FF
+    if (f32_exp == 0xFFu) {
+        let is_nan = (f32_mantissa != 0u);
+        if (is_nan) {
+            return vec2<u32>(0u, (sign << 31u) | 0x7FF80000u); // quiet NaN
+        } else {
+            return vec2<u32>(0u, (sign << 31u) | 0x7FF00000u); // Inf
+        }
+    }
 
     let f32_bias: i32 = 127;
     let f64_bias: i32 = 1023;
@@ -638,8 +658,16 @@ fn f64_from_ieee754_bits(lo: u32, hi: u32) -> emu_f64 {
     if (exponent == 0u && mantissa_hi20 == 0u && mantissa_lo32 == 0u) {
         return emu_f64(0.0, 0.0, 0.0, 0.0);
     }
+    // Inf/NaN: preserve in f32 high word so IsNaN/IsInf propagation works.
     if (exponent == 0x7FFu) {
-        return emu_f64(0.0, 0.0, 0.0, 0.0);
+        let is_nan = (mantissa_hi20 != 0u) || (mantissa_lo32 != 0u);
+        if (is_nan) {
+            let nan_bits = (sign_bit << 31u) | 0x7FC00000u;
+            return emu_f64(bitcast<f32>(nan_bits), 0.0, 0.0, 0.0);
+        } else {
+            let inf_bits = (sign_bit << 31u) | 0x7F800000u;
+            return emu_f64(bitcast<f32>(inf_bits), 0.0, 0.0, 0.0);
+        }
     }
 
     let exp_bias: i32 = 1023;
@@ -696,6 +724,16 @@ fn f64_to_ieee754_bits(v: emu_f64) -> vec2<u32> {
     let sign = (f32_bits_h >> 31u) & 1u;
     let f32_exp = (f32_bits_h >> 23u) & 0xFFu;
     let f32_mantissa = f32_bits_h & 0x7FFFFFu;
+
+    // Handle Inf/NaN: f32 exponent 0xFF maps to f64 exponent 0x7FF
+    if (f32_exp == 0xFFu) {
+        let is_nan = (f32_mantissa != 0u);
+        if (is_nan) {
+            return vec2<u32>(0u, (sign << 31u) | 0x7FF80000u); // quiet NaN
+        } else {
+            return vec2<u32>(0u, (sign << 31u) | 0x7FF00000u); // Inf
+        }
+    }
 
     let f32_bias: i32 = 127;
     let f64_bias: i32 = 1023;
