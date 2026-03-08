@@ -32,13 +32,20 @@ namespace SpawnDev.ILGPU.WebGPU.Algorithms
             AllReduce<T, TReduction>(value);
 
         /// <summary cref="GroupExtensions.AllReduce{T, TReduction}(T)"/>
+        /// <remarks>
+        /// Allocation size (512) chosen to be distinct from InclusiveScanImplementation
+        /// (2048) and from common histogram buffers (1024) to prevent shared memory
+        /// aliasing in the WGSL code generator's type+size matcher.
+        /// Only Group.DimX elements are used (max 256 on WebGPU).
+        /// </remarks>
         public static T AllReduce<T, TReduction>(T value)
             where T : unmanaged
             where TReduction : struct, IScanReduceOperation<T>
         {
             // Use shared memory approach — no warp shuffle needed.
             // Every thread writes its value, then first thread reduces.
-            var sharedMemory = SharedMemory.Allocate<T>(1024);
+            // Size 512 — distinct from scan workspace (2048) and histogram (1024).
+            var sharedMemory = SharedMemory.Allocate<T>(512);
             sharedMemory[Group.LinearIndex] = value;
             Group.Barrier();
 
@@ -112,6 +119,15 @@ namespace SpawnDev.ILGPU.WebGPU.Algorithms
         /// <summary>
         /// Performs a group-wide inclusive scan using shared memory.
         /// </summary>
+        /// <remarks>
+        /// IMPORTANT: The allocation size (2048) must differ from other shared memory
+        /// allocations used in the same kernel (e.g. RadixSortKernel1's histogram buffer
+        /// of groupSize*unrollFactor = 1024 ints). The WGSL code generator resolves
+        /// shared memory allocations by (elementType, arraySize). If two allocations
+        /// share the same type+size, they can be aliased to the same var&lt;workgroup&gt;
+        /// variable, corrupting data. Using 2048 here ensures the scan workspace is
+        /// distinguishable from any 1024-element histogram buffer.
+        /// </remarks>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private static ArrayView<T> InclusiveScanImplementation<T, TScanOperation>(
             T value)
@@ -119,7 +135,9 @@ namespace SpawnDev.ILGPU.WebGPU.Algorithms
             where TScanOperation : struct, IScanReduceOperation<T>
         {
             // Load values into shared memory
-            var sharedMemory = SharedMemory.Allocate<T>(1024);
+            // Size 2048 (not 1024) to avoid aliasing with same-typed, same-sized
+            // shared allocations in the calling kernel (see remarks above).
+            var sharedMemory = SharedMemory.Allocate<T>(2048);
             sharedMemory[Group.LinearIndex] = value;
             Group.Barrier();
 

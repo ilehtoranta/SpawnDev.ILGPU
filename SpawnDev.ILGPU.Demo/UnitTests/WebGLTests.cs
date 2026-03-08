@@ -600,6 +600,20 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
         public new async Task AlgorithmGroupReduceHalfTest() =>
             throw new UnsupportedTestException("WebGL: algorithm tests require shared memory + barriers");
 
+        // --- Tests8: Shared memory aliasing regression tests ---
+        [TestMethod]
+        public new async Task SharedMemoryDualSameSizeTest() =>
+            throw new UnsupportedTestException("WebGL: no shared memory in vertex shaders");
+        [TestMethod]
+        public new async Task ExclusiveScanWithSharedMemoryTest() =>
+            throw new UnsupportedTestException("WebGL: no shared memory in vertex shaders");
+        [TestMethod]
+        public new async Task RadixSortPairsIndexIntegrityTest() =>
+            throw new UnsupportedTestException("WebGL: RadixSort requires shared memory + peer-to-peer buffer copies");
+        [TestMethod]
+        public new async Task RadixSortPairsDescendingIndexIntegrityTest() =>
+            throw new UnsupportedTestException("WebGL: RadixSort requires shared memory + peer-to-peer buffer copies");
+
         // ====================================================================
         // Boids Pipeline Diagnostic Tests
         // These run sub-components of the Boids3D demo in isolation to pinpoint

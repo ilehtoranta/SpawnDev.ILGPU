@@ -779,21 +779,14 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             if (Backend.HasSubgroups || Backend.HasShaderF16)
                 builder.AppendLine();
 
-            // Pre-scan parameters to detect if any actually use f64/i64 types.
-            // IMPORTANT: We check IR types directly (BasicValueType) instead of going through
-            // TypeGenerator[...] which would populate the mapping dictionary and cause
-            // GenerateTypeDefinitions to emit struct definitions prematurely.
-            bool needsF64Emulation = Backend.Options.EnableF64Emulation && ContainsBasicValueType(BasicValueType.Float64);
-            bool containsI64 = ContainsBasicValueType(BasicValueType.Int64);
-            bool needsI64Emulation = Backend.Options.EnableI64Emulation && containsI64;
+            // Use the emulation flags already set by SetEmulationFlags() in GenerateCode().
+            // GenerateCode() runs BEFORE GenerateHeader() (CodeGeneratorBackend.Compile order),
+            // and it scans both the kernel's IR AND helper methods' IR for Int64/Float64.
+            // This ensures the emulation library inclusion matches the body's emulation usage.
+            bool needsI64Emulation = TypeGenerator.KernelUsesI64 == true;
+            bool needsF64Emulation = TypeGenerator.KernelUsesF64 == true;
 
-            // Set per-kernel overrides on the TypeGenerator so that intermediate IR values
-            // (e.g., Grid.GlobalIndex.X → Int64) map to i32 instead of emu_i64 when the
-            // kernel parameters don't actually use 64-bit data types.
-            TypeGenerator.KernelUsesI64 = needsI64Emulation;
-            TypeGenerator.KernelUsesF64 = needsF64Emulation;
-
-            // Only emit emulation library if it's both enabled AND actually needed by this kernel
+            // Emit emulation library if needed by this kernel (including inlined helpers)
             if (needsF64Emulation || needsI64Emulation)
             {
                 builder.AppendLine("// ============ 64-bit Emulation Library ============");
@@ -1973,6 +1966,16 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
         public override void GenerateCode()
         {
+            // CRITICAL: Set i64/f64 emulation flags BEFORE body generation.
+            // GenerateCode() runs before GenerateHeader() (see CodeGeneratorBackend.Compile).
+            // Without this, KernelUsesI64 is null during body generation, causing the
+            // TypeGenerator to fall back to Backend.Options.EnableI64Emulation (true),
+            // emitting emu_i64 types and i64_from_i32 calls. But GenerateHeader() later
+            // sets KernelUsesI64=false (if the kernel's own IR has no Int64) and omits the
+            // emulation library — producing unresolved call targets in the WGSL.
+            // Fix: scan kernel AND helper methods' IR here so body and header are consistent.
+            SetEmulationFlags();
+
             string workgroupSize = GetWorkgroupSize();
 
             // --- BODY-FIRST GENERATION ---
@@ -2866,6 +2869,47 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         }
 
         /// <summary>
+        /// Sets TypeGenerator.KernelUsesI64 and KernelUsesF64 by scanning the kernel's
+        /// IR AND all helper methods' IR for Int64/Float64 types.
+        /// Must be called at the start of GenerateCode() (before body generation) so that
+        /// the TypeGenerator maps 64-bit types consistently during both body and header.
+        /// </summary>
+        private void SetEmulationFlags()
+        {
+            bool containsI64 = ContainsBasicValueType(BasicValueType.Int64);
+            bool containsF64 = ContainsBasicValueType(BasicValueType.Float64);
+
+            // Also scan helper methods' IR — inlined helpers (e.g., ExclusiveScan) may
+            // introduce Int64/Float64 operations (like Index3D.Size overflow checks) that
+            // are invisible to the kernel's own IR scan.
+            if (!containsI64 || !containsF64)
+            {
+                foreach (var (helperMethod, _) in _generatorArgs.HelperMethods)
+                {
+                    foreach (var block in helperMethod.Blocks)
+                    {
+                        foreach (var valueEntry in block)
+                        {
+                            if (valueEntry.Value.Type is PrimitiveType pt)
+                            {
+                                if (!containsI64 && pt.BasicValueType == BasicValueType.Int64)
+                                    containsI64 = true;
+                                if (!containsF64 && pt.BasicValueType == BasicValueType.Float64)
+                                    containsF64 = true;
+                            }
+                            if (containsI64 && containsF64) break;
+                        }
+                        if (containsI64 && containsF64) break;
+                    }
+                    if (containsI64 && containsF64) break;
+                }
+            }
+
+            TypeGenerator.KernelUsesI64 = Backend.Options.EnableI64Emulation && containsI64;
+            TypeGenerator.KernelUsesF64 = Backend.Options.EnableF64Emulation && containsF64;
+        }
+
+        /// <summary>
         /// Checks whether ANY value in the kernel IR (parameters AND internal values)
         /// contains the specified BasicValueType.
         /// This scans the full IR because intermediate values (e.g. Grid.GlobalIndex.X → Int64,
@@ -3042,6 +3086,85 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             }
         }
 
+
+        // ─────────────────────────────────────────────────────────────
+        //  Grid.IdxX / Grid.DimX linearization for 2D dispatch fallback
+        // ─────────────────────────────────────────────────────────────
+
+        /// <summary>
+        /// Returns true if the kernel is logically 1D (auto-grouped Index1D, LongIndex1D,
+        /// or explicitly grouped). For these kernels, when the workgroup count exceeds 65535
+        /// and the accelerator falls back to 2D dispatch, Grid.IdxX and Grid.DimX must
+        /// return linearized values so algorithms see a flat 1D workgroup namespace.
+        /// True 2D/3D kernels (Index2D, Index3D, etc.) use actual multi-dimensional grids
+        /// and should NOT be linearized.
+        /// </summary>
+        private bool ShouldLinearizeGridX()
+        {
+            return EntryPoint.IndexType switch
+            {
+                IndexType.Index2D => false,
+                IndexType.Index3D => false,
+                // LongIndex2D/3D could be added here if they exist
+                _ => true, // Index1D, LongIndex1D, explicitly grouped (IndexType.None)
+            };
+        }
+
+        /// <summary>
+        /// Override: Grid.IdxX returns the linearized workgroup index for 1D kernels.
+        /// When 2D dispatch fallback is used (workY > 1), group_id.x alone is wrong;
+        /// the full linear index is group_id.x + group_id.y * num_workgroups.x.
+        /// For 1D dispatch (workY=1), group_id.y=0 so this is a no-op.
+        /// </summary>
+        public override void GenerateCode(GridIndexValue value)
+        {
+            var target = Load(value);
+            Declare(target);
+
+            if (value.Dimension == DeviceConstantDimension3D.X && ShouldLinearizeGridX())
+            {
+                AppendLine($"{target} = i32(group_id.x + group_id.y * num_workgroups.x);");
+            }
+            else
+            {
+                string dim = value.Dimension switch
+                {
+                    DeviceConstantDimension3D.X => "x",
+                    DeviceConstantDimension3D.Y => "y",
+                    DeviceConstantDimension3D.Z => "z",
+                    _ => "x"
+                };
+                AppendLine($"{target} = i32(group_id.{dim});");
+            }
+        }
+
+        /// <summary>
+        /// Override: Grid.DimX returns the total workgroup count for 1D kernels.
+        /// When 2D dispatch fallback splits workgroups into (workX, workY),
+        /// the total is num_workgroups.x * num_workgroups.y (not just num_workgroups.x).
+        /// For 1D dispatch (workY=1), this is num_workgroups.x * 1 = same result.
+        /// </summary>
+        public override void GenerateCode(GridDimensionValue value)
+        {
+            var target = Load(value);
+            Declare(target);
+
+            if (value.Dimension == DeviceConstantDimension3D.X && ShouldLinearizeGridX())
+            {
+                AppendLine($"{target} = i32(num_workgroups.x * num_workgroups.y);");
+            }
+            else
+            {
+                string dim = value.Dimension switch
+                {
+                    DeviceConstantDimension3D.X => "x",
+                    DeviceConstantDimension3D.Y => "y",
+                    DeviceConstantDimension3D.Z => "z",
+                    _ => "x"
+                };
+                AppendLine($"{target} = i32(num_workgroups.{dim});");
+            }
+        }
 
         /// <summary>
         /// Pre-scans parameters to identify which buffers use emulated 64-bit types.
@@ -5772,10 +5895,19 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                         {
                             needsSyntheticGroupCounter = true;
                             syntheticGroupCounterVar = "_uf_group_iter";
-                            AppendLine($"var {syntheticGroupCounterVar} : i32 = i32(group_id.x);");
-                            
+                            // Use linearized group index for 1D kernels with 2D dispatch fallback.
+                            // For true 2D/3D kernels, use group_id.x directly.
+                            if (ShouldLinearizeGridX())
+                            {
+                                AppendLine($"var {syntheticGroupCounterVar} : i32 = i32(group_id.x + group_id.y * num_workgroups.x);");
+                            }
+                            else
+                            {
+                                AppendLine($"var {syntheticGroupCounterVar} : i32 = i32(group_id.x);");
+                            }
+
                             if (WebGPU.Backend.WebGPUBackend.VerboseLogging)
-                                Console.WriteLine($"[UniformityDirect] SYNTHETIC counter: var {syntheticGroupCounterVar} = i32(group_id.x)");
+                                Console.WriteLine($"[UniformityDirect] SYNTHETIC counter: var {syntheticGroupCounterVar} (linearized={ShouldLinearizeGridX()})");
                         }
                     }
                 }
@@ -5933,7 +6065,11 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             // at the end of the loop body (before PopIndent/closing brace).
             if (needsSyntheticGroupCounter && syntheticGroupCounterVar != null)
             {
-                AppendLine($"{syntheticGroupCounterVar} = {syntheticGroupCounterVar} + i32(num_workgroups.x);");
+                // Use linearized workgroup count for 1D kernels with 2D dispatch fallback.
+                if (ShouldLinearizeGridX())
+                    AppendLine($"{syntheticGroupCounterVar} = {syntheticGroupCounterVar} + i32(num_workgroups.x * num_workgroups.y);");
+                else
+                    AppendLine($"{syntheticGroupCounterVar} = {syntheticGroupCounterVar} + i32(num_workgroups.x);");
             }
 
             PopIndent();

@@ -122,6 +122,14 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
         public new async Task AlgorithmRadixSortPairsHalfTest() =>
             throw new UnsupportedTestException("Wasm: RadixSort generates infinite loop in Wasm bytecode (browser lockup)");
 
+        // --- Tests8 RadixSort: same infinite loop issue ---
+        [TestMethod]
+        public new async Task RadixSortPairsIndexIntegrityTest() =>
+            throw new UnsupportedTestException("Wasm: RadixSort generates infinite loop in Wasm bytecode (browser lockup)");
+        [TestMethod]
+        public new async Task RadixSortPairsDescendingIndexIntegrityTest() =>
+            throw new UnsupportedTestException("Wasm: RadixSort generates infinite loop in Wasm bytecode (browser lockup)");
+
         // --- ScanWithBoundaries: NESTED STATE MACHINE BUG ---
         // Returns 0 instead of expected values at index 1 ("Expected 2, got 0").
         // ROOT CAUSE: When the kernel has its own state machine (3 blocks from

@@ -125,6 +125,7 @@ namespace SpawnDev.ILGPU.WebGPU
             int maxWorkgroupSizeZ = 64;
             int maxWorkgroupStorageSize = 16384;
             long maxBufferSize = 268435456;
+            long maxStorageBufferBindingSize = 134217728; // WebGPU spec default: 128 MiB
             try
             {
                 using var adapterLimits = adapter.Limits;
@@ -135,12 +136,13 @@ namespace SpawnDev.ILGPU.WebGPU
                 maxWorkgroupSizeZ = (int)(adapterLimits.MaxComputeWorkgroupSizeZ ?? 64);
                 maxWorkgroupStorageSize = (int)(adapterLimits.MaxComputeWorkgroupStorageSize ?? 16384);
                 maxBufferSize = (long)(adapterLimits.MaxBufferSize ?? 268435456);
+                maxStorageBufferBindingSize = adapterLimits.MaxStorageBufferBindingSize ?? 134217728;
             }
             catch
             {
                 // Limits query failed — use fallback
             }
-            WebGPUBackend.Log($"[WebGPU] Adapter limits: maxStorageBuffers={maxStorageBuffers}, maxComputeInvocations={maxComputeInvocations}, maxWorkgroupSizeX={maxWorkgroupSizeX}, maxWorkgroupStorageSize={maxWorkgroupStorageSize}");
+            WebGPUBackend.Log($"[WebGPU] Adapter limits: maxStorageBuffers={maxStorageBuffers}, maxComputeInvocations={maxComputeInvocations}, maxWorkgroupSizeX={maxWorkgroupSizeX}, maxWorkgroupStorageSize={maxWorkgroupStorageSize}, maxStorageBufferBindingSize={maxStorageBufferBindingSize}");
 
             // Use Dictionary for RequiredLimits to ensure reliable JS interop serialization.
             // Anonymous objects may not serialize correctly through BlazorJS's interop layer.
@@ -153,6 +155,7 @@ namespace SpawnDev.ILGPU.WebGPU
                 ["maxComputeWorkgroupSizeZ"] = maxWorkgroupSizeZ,
                 ["maxComputeWorkgroupStorageSize"] = maxWorkgroupStorageSize,
                 ["maxBufferSize"] = maxBufferSize,
+                ["maxStorageBufferBindingSize"] = maxStorageBufferBindingSize,
             };
 
             // Request device with detected features and the adapter's max storage buffer limit.

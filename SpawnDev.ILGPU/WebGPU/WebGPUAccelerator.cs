@@ -1213,6 +1213,16 @@ namespace SpawnDev.ILGPU.WebGPU
                     workX = (uint)config.GridDim.X;
                     workY = (uint)config.GridDim.Y;
                     workZ = (uint)config.GridDim.Z;
+                    // 2D fallback for 1D explicitly grouped kernels exceeding 65535 workgroups.
+                    // Splits workX into (workX, workY) — Grid.IdxX/DimX linearization in the
+                    // WGSL code generator handles reconstructing the flat workgroup index.
+                    // Only applies when the grid is logically 1D (Y=1, Z=1).
+                    if (workX > 65535u && workY == 1u && workZ == 1u)
+                    {
+                        uint totalWG = workX;
+                        workX = 65535u;
+                        workY = (totalWG + 65534u) / 65535u;
+                    }
                 }
                 else if (dimension is Index1D i1)
                 {
