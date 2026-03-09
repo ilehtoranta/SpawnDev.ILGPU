@@ -101,16 +101,36 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
         protected override void MemSet(AcceleratorStream stream, byte value, in ArrayView<byte> view)
         {
-            // Use GPU queue WriteBuffer with filled array
             var length = (int)view.Length;
             var paddedLength = (int)WebGPUAlignment.AlignTo4(length);
-            var data = new byte[paddedLength];
-            if (value != 0) global::System.Array.Fill(data, value);
             var accelerator = (WebGPUAccelerator)Accelerator;
-            accelerator.FlushPendingCommands();
             var viewContiguous = (IContiguousArrayView)view;
-            using var typedArray = new Uint8Array(data);
-            accelerator.NativeAccelerator.Queue!.WriteBuffer(_buffer.NativeBuffer!, (long)viewContiguous.Index, typedArray);
+
+            if (value == 0)
+            {
+                // Use encoder.ClearBuffer — records the zero-fill into the command
+                // encoder pipeline alongside compute passes, with proper implicit
+                // barriers.  This avoids Queue.WriteBuffer which is a separate
+                // queue-timeline operation and may have subtle ordering issues
+                // with subsequent dispatches in some browser implementations.
+                accelerator.RecordClearBuffer(
+                    stream,
+                    _buffer!.NativeBuffer!,
+                    (ulong)viewContiguous.Index,
+                    (ulong)paddedLength);
+            }
+            else
+            {
+                // Non-zero fill: must use WriteBuffer (no encoder-level fill API)
+                accelerator.FlushPendingCommands();
+                var data = new byte[paddedLength];
+                global::System.Array.Fill(data, value);
+                using var typedArray = new Uint8Array(data);
+                accelerator.NativeAccelerator.Queue!.WriteBuffer(
+                    _buffer!.NativeBuffer!,
+                    (long)viewContiguous.Index,
+                    typedArray);
+            }
         }
 
         // DisposeAcceleratorObject is protected (not protected internal) in base AcceleratorObject

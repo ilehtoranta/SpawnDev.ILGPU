@@ -100,6 +100,9 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         // declarations here and insert them at function scope after code gen.
         private readonly List<string> _deferredVarDeclarations = new List<string>();
         private bool _useDeferredDeclarations = false;
+        // Set to true during GenerateCode() for scan/sort kernels to enable
+        // block-level WGSL comments and structured code gen tracing.
+        private bool _isScanKernel = false;
 
         /// <summary>
         /// Describes one field of a decomposed body struct parameter.
@@ -850,7 +853,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     {
                         var fieldType = earlyBodyStructType.Fields[fi];
                         bool fieldIsView = IsViewFieldType(fieldType);
-                        WebGPUBackend.Log($"[WGSL-Field] param.Index={param.Index} fi={fi} type={fieldType} IsView={fieldIsView} phase={viewMetadataPhase} lastViewName='{lastViewBindingName}'");
+                        if (WebGPUBackend.VerboseLogging) WebGPUBackend.Log($"[WGSL-Field] param.Index={param.Index} fi={fi} type={fieldType} IsView={fieldIsView} phase={viewMetadataPhase} lastViewName='{lastViewBindingName}'");
                         // Capture lastViewBindingName BEFORE any potential reset in the state machine below,
                         // so AssociatedViewBindingName is correctly set for metadata fields.
                         string capturedViewBindingName = lastViewBindingName;
@@ -1017,7 +1020,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                             // param.Index == 0 still produce a synthetic >= 1000, which is how the
                             // runtime decoder distinguishes body-struct scalars from real params.
                             int syntheticParamIdx = (param.Index + 1) * 1000 + fi;
-                            WebGPUBackend.Log($"[WGSL-BodyStruct] param.Index={param.Index}, fi={fi}, syntheticParamIdx={syntheticParamIdx}, paramOffset={paramOffset}, wgslType={scalarWgslType}");
+                            if (WebGPUBackend.VerboseLogging) WebGPUBackend.Log($"[WGSL-BodyStruct] param.Index={param.Index}, fi={fi}, syntheticParamIdx={syntheticParamIdx}, paramOffset={paramOffset}, wgslType={scalarWgslType}");
                             var entry = new ScalarPackingEntry
                             {
                                 ParamIndex = syntheticParamIdx,
@@ -1236,7 +1239,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                         _generatorArgs.ScalarPackingManifest.Add(entry);
 
                     foreach (var entry in scalarManifest)
-                        WebGPUBackend.Log($"[WGSL-Manifest] ParamIndex={entry.ParamIndex}, ByteOffset={entry.ByteOffset}, ByteSize={entry.ByteSize}, WgslType={entry.WgslType}");
+                        if (WebGPUBackend.VerboseLogging) WebGPUBackend.Log($"[WGSL-Manifest] ParamIndex={entry.ParamIndex}, ByteOffset={entry.ByteOffset}, ByteSize={entry.ByteSize}, WgslType={entry.WgslType}");
                 }
                 else
                 {
@@ -1442,7 +1445,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             // Check if this is a helper function we should inline
             if (_generatorArgs.HelperMethods.TryGetValue(targetMethod, out var helperAllocas))
             {
-                WebGPUBackend.Log($"[WGSL-Inline] Inlining helper: {targetMethod.Name} (id={targetMethod.Id}, {targetMethod.Parameters.Count} params, {methodCall.Nodes.Length} args)");
+                if (WebGPUBackend.VerboseLogging) WebGPUBackend.Log($"[WGSL-Inline] Inlining helper: {targetMethod.Name} (id={targetMethod.Id}, {targetMethod.Parameters.Count} params, {methodCall.Nodes.Length} args)");
 
                 // Step 1: Map call arguments to helper's parameters in valueVariables.
                 // This ensures that when the inlined code calls Load(param), it resolves
@@ -1456,7 +1459,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     // to point to the same Variable
                     var argVar = Load(arg);
                     valueVariables[param] = argVar;
-                    WebGPUBackend.Log($"[WGSL-Inline]   param[{i}] '{param}' -> {argVar.Name}");
+                    if (WebGPUBackend.VerboseLogging) WebGPUBackend.Log($"[WGSL-Inline]   param[{i}] '{param}' -> {argVar.Name}");
                 }
 
                 // Step 2: Allocate result variable if the call has a non-void return
@@ -1465,7 +1468,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 {
                     resultVar = Load(methodCall);
                     Declare(resultVar);
-                    WebGPUBackend.Log($"[WGSL-Inline]   result -> {resultVar.Name}");
+                    if (WebGPUBackend.VerboseLogging) WebGPUBackend.Log($"[WGSL-Inline]   result -> {resultVar.Name}");
                 }
 
                 // Step 2.5: Set up the helper's local allocations (accumulators, loop counters, etc.)
@@ -1473,7 +1476,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 // causing the inlined code to create fresh variables instead of using the correct ones.
                 if (helperAllocas.LocalAllocations.Length > 0)
                 {
-                    WebGPUBackend.Log($"[WGSL-Inline]   Setting up {helperAllocas.LocalAllocations.Length} local allocations");
+                    if (WebGPUBackend.VerboseLogging) WebGPUBackend.Log($"[WGSL-Inline]   Setting up {helperAllocas.LocalAllocations.Length} local allocations");
                     SetupAllocations(helperAllocas.LocalAllocations, MemoryAddressSpace.Local);
                 }
 
@@ -1487,11 +1490,11 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     {
                         var wgslType = TypeGenerator[sharedAlloca.Alloca.Type];
                         valueVariables[sharedAlloca.Alloca] = new Variable(preAssigned.Name, wgslType);
-                        WebGPUBackend.Log($"[WGSL-Inline]   Registered shared alloca -> {preAssigned.Name}");
+                        if (WebGPUBackend.VerboseLogging) WebGPUBackend.Log($"[WGSL-Inline]   Registered shared alloca -> {preAssigned.Name}");
                     }
                     else
                     {
-                        WebGPUBackend.Log($"[WGSL-Inline]   WARNING: shared alloca not found in SharedMemoryVarNames (hash={sharedAlloca.Alloca.GetHashCode()})");
+                        if (WebGPUBackend.VerboseLogging) WebGPUBackend.Log($"[WGSL-Inline]   WARNING: shared alloca not found in SharedMemoryVarNames (hash={sharedAlloca.Alloca.GetHashCode()})");
                     }
                 }
 
@@ -1553,7 +1556,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                             if (resultVar != null && !ret.IsVoidReturn)
                             {
                                 var retVal = Load(ret.ReturnValue.Resolve());
-                                AppendLine($"{resultVar} = {retVal}; // inlined return");
+                                AppendLine($"{resultVar} = {retVal};");
                             }
                             // Don't emit the actual return — we're inlining, not returning
                         }
@@ -1563,7 +1566,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 {
                     // Multi-block helper: use post-dominator-based structured code generation.
                     // This maintains uniform control flow for barriers.
-                    WebGPUBackend.Log($"[WGSL-Inline] Multi-block helper with {blockList.Count} blocks");
+                    if (WebGPUBackend.VerboseLogging) WebGPUBackend.Log($"[WGSL-Inline] Multi-block helper with {blockList.Count} blocks");
 
                     // Save the current Method context — GenerateStructuredCode uses Method
                     // internally, but we need to process the helper's blocks, not the kernel's.
@@ -1587,8 +1590,6 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 // Restore varCounter so the kernel's own code gen continues from
                 // where it left off, without gaps from the inlined variable names.
                 varCounter = savedVarCounter;
-
-                WebGPUBackend.Log($"[WGSL-Inline] Done inlining {targetMethod.Name}");
                 return;
             }
 
@@ -1694,7 +1695,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 if (resultVar != null && !ret.IsVoidReturn)
                 {
                     var retVal = Load(ret.ReturnValue.Resolve());
-                    AppendLine($"{resultVar} = {retVal}; // inlined return");
+                    AppendLine($"{resultVar} = {retVal};");
                 }
                 // No code needed after return — structured flow naturally ends
                 if (isLoopHeader)
@@ -1975,6 +1976,90 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             // emulation library — producing unresolved call targets in the WGSL.
             // Fix: scan kernel AND helper methods' IR here so body and header are consistent.
             SetEmulationFlags();
+
+            // DIAGNOSTIC: Dump kernel structure for scan kernels
+            var _kernelMethodName = Method.Handle.Name ?? "unknown";
+            _isScanKernel = _kernelMethodName.Contains("MultiPassScan") || _kernelMethodName.Contains("SingleGroupScan")
+                         || _kernelMethodName.Contains("RadixSort");
+            if (_isScanKernel)
+            {
+                Console.WriteLine($"[DIAG-KERNEL] === Compiling kernel: {_kernelMethodName} ===");
+                Console.WriteLine($"[DIAG-KERNEL] Method blocks: {Method.Blocks.Count}");
+                Console.WriteLine($"[DIAG-KERNEL] Helper methods in scope: {_generatorArgs.HelperMethods.Count}");
+                foreach (var (helperMethod, helperAllocas) in _generatorArgs.HelperMethods)
+                {
+                    Console.WriteLine($"[DIAG-KERNEL]   Helper: {helperMethod.Handle.Name ?? helperMethod.Name} (id={helperMethod.Id}, blocks={helperMethod.Blocks.Count}, shared={helperAllocas.SharedAllocations.Length}, local={helperAllocas.LocalAllocations.Length})");
+                }
+                Console.WriteLine($"[DIAG-KERNEL] Kernel shared allocs: {Allocas.SharedAllocations.Length}");
+                Console.WriteLine($"[DIAG-KERNEL] Kernel local allocs: {Allocas.LocalAllocations.Length}");
+                // Dump IR structure: list all blocks and their MethodCall nodes
+                foreach (var block in Method.Blocks)
+                {
+                    var methodCalls = new List<string>();
+                    foreach (var val in block)
+                    {
+                        if (val.Value is MethodCall mc)
+                            methodCalls.Add($"MethodCall({mc.Target.Handle.Name ?? mc.Target.Name}, ret={mc.Type})");
+                    }
+                    if (methodCalls.Count > 0)
+                        Console.WriteLine($"[DIAG-KERNEL]   Block {block.Id}: {string.Join(", ", methodCalls)}");
+                }
+                // Dump full IR block structure: blocks, phis, terminators, barriers
+                Console.WriteLine($"[DIAG-IR] --- IR Block Structure ---");
+                foreach (var block in Method.Blocks)
+                {
+                    var termStr = block.Terminator switch
+                    {
+                        global::ILGPU.IR.Values.IfBranch ib => $"IfBranch(cond={ib.Condition.GetType().Name}, true=B{ib.TrueTarget.Id}, false=B{ib.FalseTarget.Id})",
+                        global::ILGPU.IR.Values.UnconditionalBranch ub => $"UnconditionalBranch(target=B{ub.Target.Id})",
+                        global::ILGPU.IR.Values.ReturnTerminator _ => "Return",
+                        _ => block.Terminator?.GetType().Name ?? "null"
+                    };
+                    Console.WriteLine($"[DIAG-IR] Block {block.Id} ({block.Count} values, term={termStr}):");
+                    foreach (var val in block)
+                    {
+                        if (val.Value is PhiValue phi)
+                        {
+                            var sources = new List<string>();
+                            for (int pi = 0; pi < phi.Count; pi++)
+                                sources.Add($"B{phi.Sources[pi].Id}:{phi[pi].Resolve().GetType().Name}");
+                            Console.WriteLine($"[DIAG-IR]   PHI {val.Value.Id} : {val.Value.Type} = phi({string.Join(", ", sources)})");
+                        }
+                        else if (val.Value is global::ILGPU.IR.Values.Barrier)
+                            Console.WriteLine($"[DIAG-IR]   BARRIER {val.Value.Id}");
+                        else if (val.Value is global::ILGPU.IR.Values.MemoryBarrier)
+                            Console.WriteLine($"[DIAG-IR]   MEM_BARRIER {val.Value.Id}");
+                        else if (val.Value is global::ILGPU.IR.Values.Broadcast bc)
+                            Console.WriteLine($"[DIAG-IR]   BROADCAST {val.Value.Id} : {val.Value.Type} (kind={bc.Kind})");
+                        else if (val.Value is global::ILGPU.IR.Values.NewView)
+                            Console.WriteLine($"[DIAG-IR]   NEWVIEW {val.Value.Id} : {val.Value.Type}");
+                        else if (val.Value is Alloca alloca)
+                            Console.WriteLine($"[DIAG-IR]   ALLOCA {val.Value.Id} : {val.Value.Type} (isShared={alloca.AddressSpace == MemoryAddressSpace.Shared})");
+                        else if (val.Value is global::ILGPU.IR.Values.TerminatorValue)
+                        { /* skip, shown in termStr */ }
+                    }
+                }
+                Console.WriteLine($"[DIAG-IR] --- End IR Block Structure ---");
+
+                // Dump loop analysis
+                Console.WriteLine($"[DIAG-LOOPS] Loop analysis: {_loops.Count} loops detected");
+                foreach (var loop in _loops)
+                {
+                    var headerIds = string.Join(",", loop.Headers.ToArray().Select(h => $"B{h.Id}"));
+                    var exitIds = string.Join(",", loop.Exits.Select(e => $"B{e.Id}"));
+                    var bodyIds = string.Join(",", loop.AllMembers.Select(m => $"B{m.Id}"));
+                    Console.WriteLine($"[DIAG-LOOPS]   Loop level={loop.Level} headers=[{headerIds}] exits=[{exitIds}] members=[{bodyIds}]");
+                }
+
+                // Dump post-dominator tree for all blocks
+                Console.WriteLine($"[DIAG-PD] --- Post-Dominator Tree ---");
+                foreach (var block in Method.Blocks)
+                {
+                    var ipd = _postDominators.GetImmediateDominator(block);
+                    Console.WriteLine($"[DIAG-PD] B{block.Id} → ipd=B{ipd?.Id.ToString() ?? "null"}");
+                }
+                Console.WriteLine($"[DIAG-PD] --- End Post-Dominator Tree ---");
+            }
 
             string workgroupSize = GetWorkgroupSize();
 
@@ -2838,16 +2923,23 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             {
                 // Find the largest shared allocation
                 long maxSharedElements = _generatorArgs.SharedAllocations.Allocas.Max(a => a.ArraySize);
-                if (WebGPU.Backend.WebGPUBackend.VerboseLogging) Console.WriteLine($"[WorkgroupSize] ExplicitlyGrouped with shared memory. Max shared elements={maxSharedElements}");
-                
-                // Common ILGPU patterns: shared memory = groupSize * N where N is a small factor (1, 2, 4, 8, 16)
-                // Try to find the largest power-of-2 factor that gives a reasonable groupSize (32..1024)
-                for (int factor = 1; factor <= 16; factor *= 2)
+                // Cap at the device's actual MaxNumThreadsPerGroup to avoid emitting a
+                // @workgroup_size larger than what the device supports.  Without this cap
+                // the heuristic could pick 512 or 1024 from shared-memory sizes while the
+                // device (and the algorithm's dispatch) only supports 256, causing
+                // Group.DimX to return the wrong value and corrupting all index math
+                // (TileInfo, grid-stride loops, etc.).
+                int maxAllowedWorkgroupSize = _generatorArgs.Backend.DefaultMaxWorkgroupSize ?? 1024;
+                if (WebGPU.Backend.WebGPUBackend.VerboseLogging) Console.WriteLine($"[WorkgroupSize] ExplicitlyGrouped with shared memory. Max shared elements={maxSharedElements}, deviceMax={maxAllowedWorkgroupSize}");
+
+                // Common ILGPU patterns: shared memory = groupSize * N where N is a small factor (1, 2, 4, ..., 64)
+                // Try to find the largest power-of-2 factor that gives a reasonable groupSize (32..deviceMax)
+                for (int factor = 1; factor <= 64; factor *= 2)
                 {
                     long candidateGroupSize = maxSharedElements / factor;
-                    if (candidateGroupSize >= 32 && candidateGroupSize <= 1024 && (candidateGroupSize & (candidateGroupSize - 1)) == 0)
+                    if (candidateGroupSize >= 32 && candidateGroupSize <= maxAllowedWorkgroupSize && (candidateGroupSize & (candidateGroupSize - 1)) == 0)
                     {
-                        if (WebGPU.Backend.WebGPUBackend.VerboseLogging) Console.WriteLine($"[WorkgroupSize] Inferred groupSize={candidateGroupSize} from shared[{maxSharedElements}]/factor={factor}");
+                        if (WebGPU.Backend.WebGPUBackend.VerboseLogging) Console.WriteLine($"[WorkgroupSize] Inferred groupSize={candidateGroupSize} from shared[{maxSharedElements}]/factor={factor}, deviceMax={maxAllowedWorkgroupSize}");
                         return EntryPoint.IndexType switch
                         {
                             IndexType.Index1D => $"{candidateGroupSize}",
@@ -3827,6 +3919,12 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             }
 
             var sourceVal = Load(value.Source);
+            // DIAGNOSTIC: Log fallback LEA path for scan kernels
+            var _leaKernelName = Method.Handle.Name ?? "";
+            if (_leaKernelName.Contains("MultiPassScan") || _leaKernelName.Contains("SingleGroupScan"))
+            {
+                Console.WriteLine($"[DIAG-LEA] Fallback LEA: target={target.Name}, source={sourceVal.Name} (type={sourceVal.Type}), IR source type={value.Source.Type}, IR source kind={value.Source.Resolve().GetType().Name}, isNewView={value.Source.Resolve() is NewView}, isPointerType={value.Source.Type.IsPointerType}");
+            }
             AppendIndent();
             Builder.Append($"let {target.Name} = ");
 
@@ -4170,7 +4268,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             // DIAGNOSTIC: Log all Max/Min operations to trace 64-bit detection
             if (value.Kind == BinaryArithmeticKind.Max || value.Kind == BinaryArithmeticKind.Min)
             {
-                WebGPUBackend.Log($"[DIAG-BinaryArith] Kind={value.Kind} BVT={value.BasicValueType} leftType={leftType} rightType={rightType} isEmuI64={isEmulatedI64} isEmuF64={isEmulatedF64} I64Emu={Backend.Options.EnableI64Emulation} LeftIRType={value.Left.Type} IsUnsigned={value.IsUnsigned}");
+                if (WebGPUBackend.VerboseLogging) WebGPUBackend.Log($"[DIAG-BinaryArith] Kind={value.Kind} BVT={value.BasicValueType} leftType={leftType} rightType={rightType} isEmuI64={isEmulatedI64} isEmuF64={isEmulatedF64} I64Emu={Backend.Options.EnableI64Emulation} LeftIRType={value.Left.Type} IsUnsigned={value.IsUnsigned}");
             }
 
             if (isEmulatedF64)
@@ -4299,12 +4397,15 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
         private void PushPhiValues(BasicBlock targetBlock, BasicBlock sourceBlock)
         {
+            var _phiKernelName = Method.Handle.Name ?? "";
+            bool _logPhis = _phiKernelName.Contains("MultiPassScan") || _phiKernelName.Contains("SingleGroupScan");
             foreach (var value in targetBlock)
             {
                 if (value.Value is PhiValue phi)
                 {
                     var targetVar = Load(phi);
                     Declare(targetVar); // Ensure phi var is declared (Allocate doesn't call Declare)
+                    bool matched = false;
                     // PhiValue in ILGPU implements a collection of (SourceBlock, Value) pairs
                     for (int i = 0; i < phi.Count; i++)
                     {
@@ -4312,7 +4413,15 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                         {
                             var sourceVal = Load(phi[i]);
                             AppendLine($"{targetVar} = {sourceVal};");
+                            matched = true;
                         }
+                    }
+                    if (_logPhis && !matched)
+                    {
+                        var allSources = new List<string>();
+                        for (int i = 0; i < phi.Count; i++)
+                            allSources.Add($"B{phi.Sources[i].Id}");
+                        Console.WriteLine($"[DIAG-PHI] WARNING: No match for phi {targetVar} in B{targetBlock.Id} from source B{sourceBlock.Id}. Phi sources: [{string.Join(", ", allSources)}]");
                     }
                 }
             }
@@ -5362,14 +5471,19 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     if (loopNode.Exits.Length > 0)
                     {
                         block = loopNode.Exits[0];
-                        // Skip pass-through blocks in the exit chain
+                        if (_isScanKernel)
+                            Console.WriteLine($"[CODEGEN] Post-loop exit: start=B{block.Id} stopBlock=B{stopBlock?.Id}");
+                        // Skip pass-through blocks in the exit chain, but never
+                        // skip past the stopBlock — the caller owns that boundary.
                         int skipLimit = 10;
-                        while (block != null && skipLimit-- > 0)
+                        while (block != null && block != stopBlock && skipLimit-- > 0)
                         {
                             if (block.Terminator is global::ILGPU.IR.Values.UnconditionalBranch exitUBranch
                                 && !HasNonPhiInstructions(block))
                             {
                                 // Pure pass-through block — mark visited and skip
+                                if (_isScanKernel)
+                                    Console.WriteLine($"[CODEGEN]   Skip pass-through B{block.Id} → B{exitUBranch.Target.Id}");
                                 visited.Add(block);
                                 block = exitUBranch.Target;
                             }
@@ -5403,7 +5517,21 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     break;
                 }
 
-                // Emit Block Body
+                // Emit Block Body — with diagnostic annotations for scan kernels
+                if (_isScanKernel)
+                {
+                    var termDesc = block.Terminator switch
+                    {
+                        global::ILGPU.IR.Values.IfBranch ib => $"IfBranch(T=B{ib.TrueTarget.Id},F=B{ib.FalseTarget.Id})",
+                        global::ILGPU.IR.Values.UnconditionalBranch ub => $"UBranch(B{ub.Target.Id})",
+                        global::ILGPU.IR.Values.ReturnTerminator _ => "Return",
+                        _ => block.Terminator?.GetType().Name ?? "?"
+                    };
+                    string loopInfo = currentLoop != null ? $" inLoop" : "";
+                    string stopInfo = stopBlock != null ? $" stop=B{stopBlock.Id}" : "";
+                    AppendLine($"// BB_{block.Id} ({termDesc}{loopInfo}{stopInfo})");
+                    Console.WriteLine($"[CODEGEN] Process BB_{block.Id} {termDesc}{loopInfo}{stopInfo}");
+                }
                 GenerateBasicBlockCode(block);
 
                 var terminator = block.Terminator;
@@ -5485,6 +5613,25 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     BasicBlock? mergeNode = pd.GetImmediateDominator(block);
                     if (mergeNode == block) mergeNode = null;
 
+                    // If the post-dominator-computed merge node is outside the current
+                    // loop, clamp it to stopBlock. The post-dominator tree is computed
+                    // over the full CFG and can cross loop boundaries. If unclamped,
+                    // the recursive if/else calls would process blocks beyond the loop,
+                    // then set block=mergeNode (outside), causing the outer while loop's
+                    // currentLoop.Contains check to break — skipping remaining loop body.
+                    if (currentLoop != null && mergeNode != null && !currentLoop.Contains(mergeNode))
+                    {
+                        if (_isScanKernel)
+                            Console.WriteLine($"[CODEGEN] CLAMP mergeNode B{mergeNode.Id} (outside loop) → stopBlock B{stopBlock?.Id}");
+                        mergeNode = stopBlock;
+                    }
+
+                    if (_isScanKernel)
+                    {
+                        AppendLine($"// IF from BB_{block.Id}: merge=BB_{mergeNode?.Id.ToString() ?? "null"} true=BB_{trueTarget.Id} false=BB_{falseTarget.Id}");
+                        Console.WriteLine($"[CODEGEN] IF BB_{block.Id}: merge=B{mergeNode?.Id.ToString() ?? "null"} true=B{trueTarget.Id} false=B{falseTarget.Id}");
+                    }
+
                     if (falseTarget == mergeNode)
                     {
                         AppendLine($"if ({Load(branch.Condition)}) {{");
@@ -5549,6 +5696,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                         AppendLine("}");
                     }
 
+                    if (_isScanKernel && mergeNode != null)
+                        AppendLine($"// MERGE → BB_{mergeNode.Id}");
                     block = mergeNode;
                 }
                 else if (terminator is global::ILGPU.IR.Values.UnconditionalBranch uBranch)
@@ -5913,6 +6062,12 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 }
             }
             
+            if (_isScanKernel)
+            {
+                var exitIds = string.Join(",", loopNode.Exits.Select(e => $"B{e.Id}"));
+                AppendLine($"// LOOP header=BB_{headerBlock.Id} exits=[{exitIds}]");
+                Console.WriteLine($"[CODEGEN] LOOP header=B{headerBlock.Id} exits=[{exitIds}] outerStop=B{outerStopBlock?.Id}");
+            }
             AppendLine("loop {");
             PushIndent();
 

@@ -11,12 +11,20 @@
 <UnitTestsView TypeInstanceResolver="TestTypeResolver" TestAssemblies="Assemblies" TestTypes="Types"></UnitTestsView>
 
 <hr />
-<h4>Last Generated WGSL Source</h4>
+<h4>Generated WGSL Sources</h4>
 <button @onclick="RefreshWGSL">Refresh WGSL</button>
-@if (!string.IsNullOrEmpty(_lastWGSL))
+<button @onclick="ClearWGSL">Clear WGSL List</button>
+@if (_allWGSL != null && _allWGSL.Count > 0)
 {
-    <p>Length: @_lastWGSL.Length chars, @_lastWGSL.Split('\n').Length lines</p>
-    <pre style="max-height:600px;overflow:auto;background:#1e1e1e;color:#d4d4d4;padding:8px;font-size:12px;white-space:pre;border:1px solid #444;">@_lastWGSL</pre>
+    <p>Total shaders: @_allWGSL.Count</p>
+    @for (int idx = 0; idx < _allWGSL.Count; idx++)
+    {
+        var shader = _allWGSL[idx];
+        <details>
+            <summary>Shader @(idx + 1) (@shader.Split('\n').Length lines, @shader.Length chars)</summary>
+            <pre style="max-height:600px;overflow:auto;background:#1e1e1e;color:#d4d4d4;padding:8px;font-size:12px;white-space:pre;border:1px solid #444;">@shader</pre>
+        </details>
+    }
 }
 else
 {
@@ -46,10 +54,16 @@ else
         if (testType == this.GetType()) return this;
         return null;
     }
-    string? _lastWGSL;
+    List<string>? _allWGSL;
     void RefreshWGSL()
     {
-        _lastWGSL = WebGPUBackend.LastGeneratedWGSL;
+        _allWGSL = new List<string>(WebGPUBackend.AllGeneratedWGSL);
+        StateHasChanged();
+    }
+    void ClearWGSL()
+    {
+        WebGPUBackend.AllGeneratedWGSL.Clear();
+        _allWGSL = null;
         StateHasChanged();
     }
     string? _lastGLSL;

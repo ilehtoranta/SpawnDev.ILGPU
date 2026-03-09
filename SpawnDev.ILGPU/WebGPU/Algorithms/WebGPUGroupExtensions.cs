@@ -33,10 +33,10 @@ namespace SpawnDev.ILGPU.WebGPU.Algorithms
 
         /// <summary cref="GroupExtensions.AllReduce{T, TReduction}(T)"/>
         /// <remarks>
-        /// Allocation size (512) chosen to be distinct from InclusiveScanImplementation
-        /// (2048) and from common histogram buffers (1024) to prevent shared memory
-        /// aliasing in the WGSL code generator's type+size matcher.
-        /// Only Group.DimX elements are used (max 256 on WebGPU).
+        /// Allocation size (2048) must be at least as large as the maximum workgroup
+        /// size (1024 on WebGPU) so every thread can write its value. Using 2048 also
+        /// keeps it distinct from common histogram buffers (1024) to prevent shared
+        /// memory aliasing in the WGSL code generator's type+size matcher.
         /// </remarks>
         public static T AllReduce<T, TReduction>(T value)
             where T : unmanaged
@@ -44,8 +44,9 @@ namespace SpawnDev.ILGPU.WebGPU.Algorithms
         {
             // Use shared memory approach — no warp shuffle needed.
             // Every thread writes its value, then first thread reduces.
-            // Size 512 — distinct from scan workspace (2048) and histogram (1024).
-            var sharedMemory = SharedMemory.Allocate<T>(512);
+            // Size 2048 — must cover max workgroup size (1024) and stay distinct
+            // from histogram buffers (1024) to avoid WGSL shared memory aliasing.
+            var sharedMemory = SharedMemory.Allocate<T>(2048);
             sharedMemory[Group.LinearIndex] = value;
             Group.Barrier();
 

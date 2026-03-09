@@ -614,6 +614,76 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
         public new async Task RadixSortPairsDescendingIndexIntegrityTest() =>
             throw new UnsupportedTestException("WebGL: RadixSort requires shared memory + peer-to-peer buffer copies");
 
+        // --- Tests9: Diagnostic scan + boundary tests ---
+        [TestMethod]
+        public new async Task GlobalInclusiveScan256Test() =>
+            throw new UnsupportedTestException("WebGL: algorithm tests require shared memory + barriers");
+        [TestMethod]
+        public new async Task GlobalInclusiveScan320Test() =>
+            throw new UnsupportedTestException("WebGL: algorithm tests require shared memory + barriers");
+        [TestMethod]
+        public new async Task GlobalInclusiveScan8000Test() =>
+            throw new UnsupportedTestException("WebGL: algorithm tests require shared memory + barriers");
+        [TestMethod]
+        public new async Task GlobalInclusiveScan4160Test() =>
+            throw new UnsupportedTestException("WebGL: algorithm tests require shared memory + barriers");
+        [TestMethod]
+        public new async Task RadixSortBoundary16KTest() =>
+            throw new UnsupportedTestException("WebGL: RadixSort requires shared memory + peer-to-peer buffer copies");
+        [TestMethod]
+        public new async Task RadixSortBoundary20KTest() =>
+            throw new UnsupportedTestException("WebGL: RadixSort requires shared memory + peer-to-peer buffer copies");
+
+        [TestMethod]
+        public new async Task RadixSortThresholdProbeTest() =>
+            throw new UnsupportedTestException("WebGL: RadixSort requires shared memory + peer-to-peer buffer copies");
+
+        // --- Tests9: Large-scale RadixSort stress tests ---
+        [TestMethod]
+        public new async Task RadixSortDescending1_4MTest() =>
+            throw new UnsupportedTestException("WebGL: RadixSort requires shared memory + peer-to-peer buffer copies");
+        [TestMethod]
+        public new async Task RadixSortDescendingWithSentinelsTest() =>
+            throw new UnsupportedTestException("WebGL: RadixSort requires shared memory + peer-to-peer buffer copies");
+        [TestMethod]
+        public new async Task RadixSortRepeatedResortTest() =>
+            throw new UnsupportedTestException("WebGL: RadixSort requires shared memory + peer-to-peer buffer copies");
+        [TestMethod]
+        public new async Task RadixSortDescending2MTest() =>
+            throw new UnsupportedTestException("WebGL: RadixSort requires shared memory + peer-to-peer buffer copies");
+        [TestMethod]
+        public new async Task RadixSortDescending4MTest() =>
+            throw new UnsupportedTestException("WebGL: RadixSort requires shared memory + peer-to-peer buffer copies");
+        [TestMethod]
+        public new async Task RadixSortHeavyDuplicateKeysTest() =>
+            throw new UnsupportedTestException("WebGL: RadixSort requires shared memory + peer-to-peer buffer copies");
+        [TestMethod]
+        public new async Task RadixSortDescendingOddCountTest() =>
+            throw new UnsupportedTestException("WebGL: RadixSort requires shared memory + peer-to-peer buffer copies");
+        [TestMethod]
+        public new async Task RadixSortAscending1_4MTest() =>
+            throw new UnsupportedTestException("WebGL: RadixSort requires shared memory + peer-to-peer buffer copies");
+        [TestMethod]
+        public new async Task RadixSortSpawnSceneSimulationTest() =>
+            throw new UnsupportedTestException("WebGL: RadixSort requires shared memory + peer-to-peer buffer copies");
+
+        // --- Tests9: Diagnostic isolation tests ---
+        [TestMethod]
+        public new async Task ScanBroadcastIsolationTest() =>
+            throw new UnsupportedTestException("WebGL: requires shared memory + barriers");
+        [TestMethod]
+        public new async Task AllReducePerGroupDiagTest() =>
+            throw new UnsupportedTestException("WebGL: requires shared memory + barriers");
+        [TestMethod]
+        public new async Task GroupBroadcastDiagTest() =>
+            throw new UnsupportedTestException("WebGL: requires shared memory + barriers");
+        [TestMethod]
+        public new async Task DualScanKernelTest() =>
+            throw new UnsupportedTestException("WebGL: requires shared memory + barriers");
+        [TestMethod]
+        public new async Task TwoPassScanSimulationTest() =>
+            throw new UnsupportedTestException("WebGL: requires shared memory + barriers");
+
         // ====================================================================
         // Boids Pipeline Diagnostic Tests
         // These run sub-components of the Boids3D demo in isolation to pinpoint

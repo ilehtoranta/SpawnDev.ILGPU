@@ -1,0 +1,1322 @@
+using ILGPU;
+using ILGPU.Algorithms;
+using ILGPU.Algorithms.RadixSortOperations;
+using ILGPU.Algorithms.ScanReduceOperations;
+using ILGPU.Runtime;
+using SpawnDev.UnitTesting;
+
+namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
+{
+    // Part 9: Large-scale RadixSort stress tests + diagnostic scan tests.
+    //
+    // These tests reproduce the exact usage patterns from SpawnScene's Gaussian
+    // splat renderer, which sorts 1.4M+ splat indices by quantized camera depth
+    // using DescendingInt32 RadixSortPairs every frame. The renderer exhibits
+    // holes and random splat movement at >4M elements, pointing to data
+    // corruption in the radix sort at scale.
+    //
+    // DIAGNOSTIC: The global inclusive scan (accelerator.CreateScan with
+    // ScanKind.Inclusive) switches from single-group to multi-pass when the
+    // input exceeds MaxNumThreadsPerGroup elements. RadixSort's counter array
+    // scan crosses this threshold when data > ~16K elements. Tests below
+    // isolate the scan to determine if it's the root cause.
+    //
+    // Test categories:
+    //   0. Diagnostic: Global inclusive scan at various sizes
+    //   1. Diagnostic: RadixSort at boundary sizes (16K vs 20K)
+    //   2. Real-world scale (1.4M elements, SpawnScene's exact count)
+    //   3. Sentinel value handling (int.MinValue for culled splats)
+    //   4. Repeated re-sorts (simulating camera movement)
+    //   5. Large scale stress (2M, 4M elements)
+    //   6. Narrow key range / heavy duplicates (quantized depth bunching)
+    public abstract partial class BackendTestBase
+    {
+        // ═══════════════════════════════════════════════════════════
+        //  Diagnostic: Global Inclusive Scan tests
+        //  These isolate the multi-pass scan used internally by RadixSort
+        //  on the counter array. Single-group scan (≤256 elements) should
+        //  pass; multi-pass scan (>256 elements) may fail.
+        // ═══════════════════════════════════════════════════════════
+
+        /// <summary>
+        /// Global inclusive scan on 256 elements (all 1s). This fits in a single
+        /// workgroup, so no multi-pass scan is needed. Expected: [1, 2, 3, ..., 256].
+        /// </summary>
+        [TestMethod]
+        public async Task GlobalInclusiveScan256Test() => await RunTest(async accelerator =>
+        {
+            int n = 256;
+            var input = new int[n];
+            for (int i = 0; i < n; i++) input[i] = 1;
+
+            using var inputBuf = accelerator.Allocate1D(input);
+            using var outputBuf = accelerator.Allocate1D<int>(n);
+            var tempSize = accelerator.ComputeScanTempStorageSize<int>(n);
+            using var tempBuf = accelerator.Allocate1D<int>(tempSize);
+
+            var scan = accelerator.CreateScan<int, Stride1D.Dense, Stride1D.Dense, AddInt32>(
+                ScanKind.Inclusive);
+            scan(accelerator.DefaultStream, inputBuf.View, outputBuf.View, tempBuf.View.AsContiguous());
+            await accelerator.SynchronizeAsync();
+
+            var result = await outputBuf.CopyToHostAsync<int>();
+            int errors = 0;
+            for (int i = 0; i < n; i++)
+            {
+                if (result[i] != i + 1)
+                {
+                    if (errors < 5)
+                        Console.WriteLine($"  Scan[{i}] = {result[i]}, expected {i + 1}");
+                    errors++;
+                }
+            }
+            if (errors > 0)
+                throw new Exception($"GlobalInclusiveScan256: {errors}/{n} wrong values");
+        });
+
+        /// <summary>
+        /// Global inclusive scan on 320 elements (exceeds single workgroup of 256).
+        /// This triggers the multi-pass scan path. If the multi-pass scan has a bug,
+        /// this will fail while the 256-element test passes.
+        /// </summary>
+        [TestMethod]
+        public async Task GlobalInclusiveScan320Test() => await RunTest(async accelerator =>
+        {
+            int n = 320;
+            var input = new int[n];
+            for (int i = 0; i < n; i++) input[i] = 1;
+
+            using var inputBuf = accelerator.Allocate1D(input);
+            using var outputBuf = accelerator.Allocate1D<int>(n);
+            var tempSize = accelerator.ComputeScanTempStorageSize<int>(n);
+            using var tempBuf = accelerator.Allocate1D<int>(tempSize);
+
+            var scan = accelerator.CreateScan<int, Stride1D.Dense, Stride1D.Dense, AddInt32>(
+                ScanKind.Inclusive);
+            scan(accelerator.DefaultStream, inputBuf.View, outputBuf.View, tempBuf.View.AsContiguous());
+            await accelerator.SynchronizeAsync();
+
+            var result = await outputBuf.CopyToHostAsync<int>();
+            int errors = 0;
+            for (int i = 0; i < n; i++)
+            {
+                if (result[i] != i + 1)
+                {
+                    if (errors < 10)
+                        Console.WriteLine($"  Scan[{i}] = {result[i]}, expected {i + 1}");
+                    errors++;
+                }
+            }
+            if (errors > 0)
+                throw new Exception($"GlobalInclusiveScan320: {errors}/{n} wrong values. " +
+                    $"Multi-pass scan threshold exceeded (>256 elements).");
+        });
+
+        /// <summary>
+        /// Global inclusive scan on 8000 elements — the approximate counter array
+        /// size for a 500K-element radix sort. If this fails, the multi-pass scan
+        /// is the root cause of radix sort failures at scale.
+        /// </summary>
+        [TestMethod]
+        public async Task GlobalInclusiveScan8000Test() => await RunTest(async accelerator =>
+        {
+            int n = 8000;
+            var input = new int[n];
+            for (int i = 0; i < n; i++) input[i] = 1;
+
+            using var inputBuf = accelerator.Allocate1D(input);
+            using var outputBuf = accelerator.Allocate1D<int>(n);
+            var tempSize = accelerator.ComputeScanTempStorageSize<int>(n);
+            using var tempBuf = accelerator.Allocate1D<int>(tempSize);
+
+            var scan = accelerator.CreateScan<int, Stride1D.Dense, Stride1D.Dense, AddInt32>(
+                ScanKind.Inclusive);
+            scan(accelerator.DefaultStream, inputBuf.View, outputBuf.View, tempBuf.View.AsContiguous());
+            await accelerator.SynchronizeAsync();
+
+            var result = await outputBuf.CopyToHostAsync<int>();
+            int errors = 0;
+            int firstErrorIdx = -1;
+            for (int i = 0; i < n; i++)
+            {
+                if (result[i] != i + 1)
+                {
+                    if (errors == 0) firstErrorIdx = i;
+                    if (errors < 10)
+                        Console.WriteLine($"  Scan[{i}] = {result[i]}, expected {i + 1}");
+                    errors++;
+                }
+            }
+            if (errors > 0)
+                throw new Exception($"GlobalInclusiveScan8000: {errors}/{n} wrong values. " +
+                    $"First error at [{firstErrorIdx}]: got {result[firstErrorIdx]}, expected {firstErrorIdx + 1}. " +
+                    $"This confirms the multi-pass scan is broken.");
+        });
+
+        /// <summary>
+        /// Inclusive scan at the EXACT counter array threshold: 4096 (single-tile) vs 4160 (multi-tile).
+        /// Counter array = numVirtualGroups * 4. With gridDim=16, groupDim=256:
+        ///   n=262144 → numVG=1024 → counter=4096 → scan numIterPerGroup=1 (PASS)
+        ///   n=262145 → numVG=1040 → counter=4160 → scan numIterPerGroup=2 (FAIL?)
+        /// Uses histogram-like data (small ints, many zeros) to mimic real counter arrays.
+        /// </summary>
+        [TestMethod]
+        public async Task GlobalInclusiveScan4160Test() => await RunTest(async accelerator =>
+        {
+            // Use distinguishable per-group values: group g gets all (g+1)s.
+            // Group 0: all 1s (sum=256), Group 1: all 2s (sum=512), etc.
+            // Expected at group boundary g*256: sum of groups 0..g-1 + first element
+            int n = 4096;
+            var input = new int[n];
+            for (int i = 0; i < n; i++)
+                input[i] = (i / 256) + 1; // group 0=1, group 1=2, ...
+
+            using var inputBuf = accelerator.Allocate1D(input);
+            using var outputBuf = accelerator.Allocate1D<int>(n);
+            var tempSize = accelerator.ComputeScanTempStorageSize<int>(n);
+            using var tempBuf = accelerator.Allocate1D<int>(tempSize);
+
+            var scan = accelerator.CreateScan<int, Stride1D.Dense, Stride1D.Dense, AddInt32>(
+                ScanKind.Inclusive);
+            scan(accelerator.DefaultStream, inputBuf.View, outputBuf.View, tempBuf.View.AsContiguous());
+            await accelerator.SynchronizeAsync();
+
+            var result = await outputBuf.CopyToHostAsync<int>();
+
+            // Print values at each group boundary (every 256 elements)
+            string details = "";
+            int runningSum = 0;
+            int errors = 0;
+            int firstErrorIdx = -1;
+            for (int i = 0; i < n; i++)
+            {
+                runningSum += input[i];
+                bool isGroupStart = (i % 256) == 0;
+                if (isGroupStart)
+                {
+                    int grp = i / 256;
+                    details += $"  Group {grp} start [{i}]: got={result[i]}, expected={runningSum}, diff={result[i] - runningSum}\n";
+                }
+                if (result[i] != runningSum)
+                {
+                    if (errors == 0) firstErrorIdx = i;
+                    errors++;
+                }
+            }
+
+            Console.WriteLine("Scan group boundary values:\n" + details);
+
+            if (errors > 0)
+                throw new Exception($"GlobalInclusiveScan n={n}: {errors}/{n} wrong values. " +
+                    $"First error at [{firstErrorIdx}].\n" +
+                    $"Group boundary values:\n{details}");
+        });
+
+        // ═══════════════════════════════════════════════════════════
+        //  Diagnostic: RadixSort boundary tests
+        //  16384 elements should use single-group counter scan (pass).
+        //  20000 elements should use multi-pass counter scan (fail if scan is broken).
+        // ═══════════════════════════════════════════════════════════
+
+        /// <summary>
+        /// RadixSort with exactly 16384 elements. The counter array has 256 entries,
+        /// which fits in a single workgroup. This should pass.
+        /// </summary>
+        [TestMethod]
+        public async Task RadixSortBoundary16KTest() => await RunTest(async accelerator =>
+        {
+            int n = 16384;
+            var keys = new int[n];
+            var values = new int[n];
+            var rng = new Random(42);
+            for (int i = 0; i < n; i++) { keys[i] = rng.Next(0, 100000); values[i] = i; }
+
+            using var keysBuf = accelerator.Allocate1D(keys);
+            using var valuesBuf = accelerator.Allocate1D(values);
+            var tempSize = accelerator.ComputeRadixSortPairsTempStorageSize<int, int, DescendingInt32>(n);
+            using var tempBuf = accelerator.Allocate1D<int>(tempSize);
+
+            var radixSort = accelerator.CreateRadixSortPairs<
+                int, Stride1D.Dense, int, Stride1D.Dense, DescendingInt32>();
+            radixSort(accelerator.DefaultStream, keysBuf.View, valuesBuf.View, tempBuf.View.AsContiguous());
+            await accelerator.SynchronizeAsync();
+
+            var sortedKeys = await keysBuf.CopyToHostAsync<int>();
+            var sortedValues = await valuesBuf.CopyToHostAsync<int>();
+            VerifyDescendingSortIntegrity(sortedKeys, sortedValues, n, "RadixSortBoundary16K");
+        });
+
+        /// <summary>
+        /// RadixSort with 20000 elements. The counter array has ~320 entries,
+        /// exceeding the single-workgroup threshold. This triggers the multi-pass
+        /// counter scan. If it fails while the 16K test passes, the multi-pass
+        /// scan is confirmed as the root cause.
+        /// </summary>
+        [TestMethod]
+        public async Task RadixSortBoundary20KTest() => await RunTest(async accelerator =>
+        {
+            int n = 20000;
+            var keys = new int[n];
+            var values = new int[n];
+            var rng = new Random(42);
+            for (int i = 0; i < n; i++) { keys[i] = rng.Next(0, 100000); values[i] = i; }
+
+            using var keysBuf = accelerator.Allocate1D(keys);
+            using var valuesBuf = accelerator.Allocate1D(values);
+            var tempSize = accelerator.ComputeRadixSortPairsTempStorageSize<int, int, DescendingInt32>(n);
+            using var tempBuf = accelerator.Allocate1D<int>(tempSize);
+
+            var radixSort = accelerator.CreateRadixSortPairs<
+                int, Stride1D.Dense, int, Stride1D.Dense, DescendingInt32>();
+            radixSort(accelerator.DefaultStream, keysBuf.View, valuesBuf.View, tempBuf.View.AsContiguous());
+            await accelerator.SynchronizeAsync();
+
+            var sortedKeys = await keysBuf.CopyToHostAsync<int>();
+            var sortedValues = await valuesBuf.CopyToHostAsync<int>();
+            VerifyDescendingSortIntegrity(sortedKeys, sortedValues, n, "RadixSortBoundary20K");
+        });
+
+        // ═══════════════════════════════════════════════════════════
+        //  Diagnostic: Find exact radix sort failure threshold
+        //  Tests sizes from 32K to 500K to pinpoint where it breaks.
+        // ═══════════════════════════════════════════════════════════
+
+        /// <summary>
+        /// Probes multiple radix sort sizes to find the exact threshold where
+        /// the sort starts failing. Reports pass/fail for each size.
+        /// Sizes: 32K, 50K, 65K, 100K, 128K, 200K, 256K, 500K.
+        /// </summary>
+        [TestMethod]
+        public async Task RadixSortThresholdProbeTest() => await RunTest(async accelerator =>
+        {
+            // Alignment diagnostic: gridStride = 16 * 256 = 4096.
+            // Sizes that are exact multiples of 4096 have paddedLength == numVirtualGroups * groupDim.
+            // Non-multiples have paddedLength < numVirtualGroups * groupDim (some virtual groups idle).
+            int[] sizes = { 262144, 262145, 266240, 266241, 270000 };
+            var radixSort = accelerator.CreateRadixSortPairs<
+                int, Stride1D.Dense, int, Stride1D.Dense, DescendingInt32>();
+
+            string results = "";
+            string firstFailure = null;
+
+            foreach (int n in sizes)
+            {
+                var keys = new int[n];
+                var values = new int[n];
+                var rng = new Random(42);
+                for (int i = 0; i < n; i++)
+                {
+                    keys[i] = rng.Next(0, 10_000_000);
+                    values[i] = i;
+                }
+
+                using var keysBuf = accelerator.Allocate1D(keys);
+                using var valuesBuf = accelerator.Allocate1D(values);
+                var tempSize = accelerator.ComputeRadixSortPairsTempStorageSize<int, int, DescendingInt32>(n);
+                using var tempBuf = accelerator.Allocate1D<int>(tempSize);
+
+                radixSort(accelerator.DefaultStream, keysBuf.View, valuesBuf.View, tempBuf.View.AsContiguous());
+                await accelerator.SynchronizeAsync();
+
+                var sortedKeys = await keysBuf.CopyToHostAsync<int>();
+
+                int violations = 0;
+                for (int i = 1; i < n; i++)
+                {
+                    if (sortedKeys[i] > sortedKeys[i - 1])
+                        violations++;
+                }
+
+                string status = violations == 0 ? "PASS" : $"FAIL({violations} violations)";
+                results += $"  n={n}: {status}\n";
+
+                if (violations > 0 && firstFailure == null)
+                    firstFailure = $"First failure at n={n}: {violations} order violations out of {n} elements";
+            }
+
+            Console.WriteLine("RadixSort Threshold Probe Results:\n" + results);
+
+            if (firstFailure != null)
+                throw new Exception($"RadixSortThresholdProbe: {firstFailure}\n\nFull results:\n{results}");
+        });
+
+        // ═══════════════════════════════════════════════════════════
+        //  Helper: Verify RadixSortPairs result integrity
+        // ═══════════════════════════════════════════════════════════
+
+        private static void VerifyDescendingSortIntegrity(
+            int[] sortedKeys, int[] sortedValues, int n, string testName)
+        {
+            // Check 1: keys are in descending order
+            int orderViolations = 0;
+            int firstViolationIdx = -1;
+            for (int i = 1; i < n; i++)
+            {
+                if (sortedKeys[i] > sortedKeys[i - 1])
+                {
+                    if (orderViolations == 0) firstViolationIdx = i;
+                    orderViolations++;
+                }
+            }
+            if (orderViolations > 0)
+                throw new Exception(
+                    $"{testName}: Descending order violated {orderViolations} times out of {n} elements. " +
+                    $"First violation at [{firstViolationIdx}]: {sortedKeys[firstViolationIdx - 1]} < {sortedKeys[firstViolationIdx]}");
+
+            // Check 2: every original index appears exactly once
+            var seen = new HashSet<int>(n);
+            int dupes = 0, outOfRange = 0;
+            foreach (var v in sortedValues)
+            {
+                if (v < 0 || v >= n) outOfRange++;
+                else if (!seen.Add(v)) dupes++;
+            }
+            int missing = n - seen.Count;
+
+            if (dupes > 0 || missing > 0 || outOfRange > 0)
+                throw new Exception(
+                    $"{testName}: Index integrity failure — {dupes} duplicates, {missing} missing, " +
+                    $"{outOfRange} out-of-range out of {n} elements.");
+        }
+
+        // ═══════════════════════════════════════════════════════════
+        //  Test 1: 1.4M elements — SpawnScene's exact splat count
+        //  Descending sort with realistic quantized depth keys.
+        // ═══════════════════════════════════════════════════════════
+
+        /// <summary>
+        /// Sorts 1,393,167 elements (SpawnScene's Gaussian splat count from a 5K
+        /// source image) using DescendingInt32 RadixSortPairs. Keys simulate
+        /// quantized camera-to-splat depth values in [0..10000000].
+        /// Verifies descending order and full index integrity.
+        /// </summary>
+        [TestMethod]
+        public async Task RadixSortDescending1_4MTest() => await RunTest(async accelerator =>
+        {
+            int n = 1_393_167; // SpawnScene exact count
+            var keys = new int[n];
+            var values = new int[n];
+            var rng = new Random(42);
+
+            // Simulate quantized depth: dist * 10000, range [0..10M]
+            for (int i = 0; i < n; i++)
+            {
+                keys[i] = rng.Next(0, 10_000_000);
+                values[i] = i;
+            }
+
+            using var keysBuf = accelerator.Allocate1D(keys);
+            using var valuesBuf = accelerator.Allocate1D(values);
+            var tempSize = accelerator.ComputeRadixSortPairsTempStorageSize<int, int, DescendingInt32>(n);
+            using var tempBuf = accelerator.Allocate1D<int>(tempSize);
+
+            var radixSort = accelerator.CreateRadixSortPairs<
+                int, Stride1D.Dense, int, Stride1D.Dense, DescendingInt32>();
+            radixSort(
+                accelerator.DefaultStream,
+                keysBuf.View,
+                valuesBuf.View,
+                tempBuf.View.AsContiguous());
+            await accelerator.SynchronizeAsync();
+
+            var sortedKeys = await keysBuf.CopyToHostAsync<int>();
+            var sortedValues = await valuesBuf.CopyToHostAsync<int>();
+
+            VerifyDescendingSortIntegrity(sortedKeys, sortedValues, n, "RadixSortDescending1.4M");
+
+            // Check 3: value tracking — each sorted key matches the original key at that index
+            int trackingErrors = 0;
+            for (int i = 0; i < n && trackingErrors < 10; i++)
+            {
+                int origIdx = sortedValues[i];
+                if (sortedKeys[i] != keys[origIdx])
+                    trackingErrors++;
+            }
+            if (trackingErrors > 0)
+                throw new Exception(
+                    $"RadixSortDescending1.4M: {trackingErrors} key-value tracking errors " +
+                    $"(sorted key doesn't match original key at tracked index).");
+        });
+
+        // ═══════════════════════════════════════════════════════════
+        //  Test 2: SpawnScene sentinel pattern — visible + culled splats
+        //  Visible splats get depth >= 0, culled get int.MinValue.
+        //  After descending sort: all visible (highest depth first),
+        //  then all culled (int.MinValue) at the end.
+        // ═══════════════════════════════════════════════════════════
+
+        /// <summary>
+        /// Mimics SpawnScene's CullAndDistanceKernel output: ~70% of splats are
+        /// visible with quantized depth in [0..65534], ~30% are culled with
+        /// int.MinValue sentinel. After DescendingInt32 sort, all visible splats
+        /// should appear first (highest depth to lowest), followed by all culled
+        /// splats (int.MinValue). Verifies the boundary and index integrity.
+        /// </summary>
+        [TestMethod]
+        public async Task RadixSortDescendingWithSentinelsTest() => await RunTest(async accelerator =>
+        {
+            int n = 1_393_167;
+            var keys = new int[n];
+            var values = new int[n];
+            var rng = new Random(99);
+            int cullCount = 0;
+
+            // ~30% culled (int.MinValue), ~70% visible with depth in [0..65534]
+            for (int i = 0; i < n; i++)
+            {
+                bool culled = rng.NextDouble() < 0.3;
+                if (culled)
+                {
+                    keys[i] = int.MinValue;
+                    cullCount++;
+                }
+                else
+                {
+                    // Quantized depth: scale=500, max=65534 (SpawnScene 16-bit mode)
+                    keys[i] = rng.Next(0, 65535);
+                }
+                values[i] = i;
+            }
+
+            int visibleCount = n - cullCount;
+
+            using var keysBuf = accelerator.Allocate1D(keys);
+            using var valuesBuf = accelerator.Allocate1D(values);
+            var tempSize = accelerator.ComputeRadixSortPairsTempStorageSize<int, int, DescendingInt32>(n);
+            using var tempBuf = accelerator.Allocate1D<int>(tempSize);
+
+            var radixSort = accelerator.CreateRadixSortPairs<
+                int, Stride1D.Dense, int, Stride1D.Dense, DescendingInt32>();
+            radixSort(
+                accelerator.DefaultStream,
+                keysBuf.View,
+                valuesBuf.View,
+                tempBuf.View.AsContiguous());
+            await accelerator.SynchronizeAsync();
+
+            var sortedKeys = await keysBuf.CopyToHostAsync<int>();
+            var sortedValues = await valuesBuf.CopyToHostAsync<int>();
+
+            // Check descending order and index integrity
+            VerifyDescendingSortIntegrity(sortedKeys, sortedValues, n, "RadixSortSentinels");
+
+            // Check sentinel boundary: first visibleCount keys should be >= 0,
+            // remaining cullCount keys should be int.MinValue
+            int actualVisible = 0;
+            for (int i = 0; i < n; i++)
+            {
+                if (sortedKeys[i] != int.MinValue)
+                    actualVisible++;
+                else
+                    break; // First int.MinValue found
+            }
+
+            if (actualVisible != visibleCount)
+                throw new Exception(
+                    $"RadixSortSentinels: Visible/culled boundary wrong. " +
+                    $"Expected {visibleCount} visible then {cullCount} culled, " +
+                    $"but found {actualVisible} visible before first sentinel.");
+
+            // Verify all elements after the boundary are int.MinValue
+            for (int i = actualVisible; i < n; i++)
+            {
+                if (sortedKeys[i] != int.MinValue)
+                    throw new Exception(
+                        $"RadixSortSentinels: Non-sentinel key {sortedKeys[i]} found at [{i}] " +
+                        $"(after visible/culled boundary at {actualVisible}).");
+            }
+        });
+
+        // ═══════════════════════════════════════════════════════════
+        //  Test 3: Repeated re-sorts (camera movement simulation)
+        //  SpawnScene re-sorts every frame as camera moves. Each frame
+        //  generates new depth keys but reuses the same buffers.
+        // ═══════════════════════════════════════════════════════════
+
+        /// <summary>
+        /// Simulates 5 consecutive frames of camera movement: each frame writes
+        /// new random depth keys into the key buffer and re-initializes the value
+        /// buffer to identity, then re-sorts. Catches bugs where residual data
+        /// from a previous sort corrupts the next (e.g., temp buffer state leak).
+        /// Uses 500K elements for reasonable test time across 5 iterations.
+        /// </summary>
+        [TestMethod]
+        public async Task RadixSortRepeatedResortTest() => await RunTest(async accelerator =>
+        {
+            int n = 500_000;
+            var keys = new int[n];
+            var values = new int[n];
+
+            using var keysBuf = accelerator.Allocate1D<int>(n);
+            using var valuesBuf = accelerator.Allocate1D<int>(n);
+            var tempSize = accelerator.ComputeRadixSortPairsTempStorageSize<int, int, DescendingInt32>(n);
+            using var tempBuf = accelerator.Allocate1D<int>(tempSize);
+
+            var radixSort = accelerator.CreateRadixSortPairs<
+                int, Stride1D.Dense, int, Stride1D.Dense, DescendingInt32>();
+
+            // Simulate 5 "frames" with different camera positions
+            for (int frame = 0; frame < 5; frame++)
+            {
+                var rng = new Random(frame * 1000 + 7);
+
+                // Each frame: new depth keys, reset identity values
+                for (int i = 0; i < n; i++)
+                {
+                    keys[i] = rng.Next(0, 10_000_000);
+                    values[i] = i;
+                }
+
+                keysBuf.CopyFromCPU(keys);
+                valuesBuf.CopyFromCPU(values);
+
+                radixSort(
+                    accelerator.DefaultStream,
+                    keysBuf.View,
+                    valuesBuf.View,
+                    tempBuf.View.AsContiguous());
+                await accelerator.SynchronizeAsync();
+
+                var sortedKeys = await keysBuf.CopyToHostAsync<int>();
+                var sortedValues = await valuesBuf.CopyToHostAsync<int>();
+
+                VerifyDescendingSortIntegrity(
+                    sortedKeys, sortedValues, n, $"RadixSortResort_Frame{frame}");
+            }
+        });
+
+        // ═══════════════════════════════════════════════════════════
+        //  Test 4: 2M elements — medium stress test
+        // ═══════════════════════════════════════════════════════════
+
+        /// <summary>
+        /// Sorts 2,097,152 (2M) elements descending. Tests the radix sort at a
+        /// scale larger than SpawnScene's typical count but below the 4M failure
+        /// threshold. Catches buffer sizing and workgroup dispatch issues.
+        /// </summary>
+        [TestMethod]
+        public async Task RadixSortDescending2MTest() => await RunTest(async accelerator =>
+        {
+            int n = 2_097_152; // 2^21
+            var keys = new int[n];
+            var values = new int[n];
+            var rng = new Random(314);
+
+            for (int i = 0; i < n; i++)
+            {
+                keys[i] = rng.Next(0, 10_000_000);
+                values[i] = i;
+            }
+
+            using var keysBuf = accelerator.Allocate1D(keys);
+            using var valuesBuf = accelerator.Allocate1D(values);
+            var tempSize = accelerator.ComputeRadixSortPairsTempStorageSize<int, int, DescendingInt32>(n);
+            using var tempBuf = accelerator.Allocate1D<int>(tempSize);
+
+            var radixSort = accelerator.CreateRadixSortPairs<
+                int, Stride1D.Dense, int, Stride1D.Dense, DescendingInt32>();
+            radixSort(
+                accelerator.DefaultStream,
+                keysBuf.View,
+                valuesBuf.View,
+                tempBuf.View.AsContiguous());
+            await accelerator.SynchronizeAsync();
+
+            var sortedKeys = await keysBuf.CopyToHostAsync<int>();
+            var sortedValues = await valuesBuf.CopyToHostAsync<int>();
+
+            VerifyDescendingSortIntegrity(sortedKeys, sortedValues, n, "RadixSortDescending2M");
+        });
+
+        // ═══════════════════════════════════════════════════════════
+        //  Test 5: 4M elements — the failure boundary
+        //  SpawnScene reports holes and random movement at this scale.
+        // ═══════════════════════════════════════════════════════════
+
+        /// <summary>
+        /// Sorts 4,194,304 (4M) elements descending. This is the approximate scale
+        /// where SpawnScene's Gaussian splat renderer shows holes and random splat
+        /// movement when the camera moves. If this test fails, the radix sort has
+        /// a data corruption bug at this buffer size (likely workgroup dispatch
+        /// overflow, temp buffer underallocation, or histogram aliasing).
+        /// </summary>
+        [TestMethod]
+        public async Task RadixSortDescending4MTest() => await RunTest(async accelerator =>
+        {
+            int n = 4_194_304; // 2^22
+            var keys = new int[n];
+            var values = new int[n];
+            var rng = new Random(271);
+
+            for (int i = 0; i < n; i++)
+            {
+                keys[i] = rng.Next(0, 10_000_000);
+                values[i] = i;
+            }
+
+            using var keysBuf = accelerator.Allocate1D(keys);
+            using var valuesBuf = accelerator.Allocate1D(values);
+            var tempSize = accelerator.ComputeRadixSortPairsTempStorageSize<int, int, DescendingInt32>(n);
+            using var tempBuf = accelerator.Allocate1D<int>(tempSize);
+
+            var radixSort = accelerator.CreateRadixSortPairs<
+                int, Stride1D.Dense, int, Stride1D.Dense, DescendingInt32>();
+            radixSort(
+                accelerator.DefaultStream,
+                keysBuf.View,
+                valuesBuf.View,
+                tempBuf.View.AsContiguous());
+            await accelerator.SynchronizeAsync();
+
+            var sortedKeys = await keysBuf.CopyToHostAsync<int>();
+            var sortedValues = await valuesBuf.CopyToHostAsync<int>();
+
+            VerifyDescendingSortIntegrity(sortedKeys, sortedValues, n, "RadixSortDescending4M");
+        });
+
+        // ═══════════════════════════════════════════════════════════
+        //  Test 6: Heavy duplicate keys (quantized depth bunching)
+        //  SpawnScene's depth quantization produces many ties when
+        //  splats are at similar distances from the camera.
+        // ═══════════════════════════════════════════════════════════
+
+        /// <summary>
+        /// Sorts 1M elements where keys are drawn from a narrow range [0..1000],
+        /// creating ~1000 duplicates per key on average. This mimics the worst case
+        /// in SpawnScene where many splats share the same quantized depth (e.g.,
+        /// a flat wall viewed head-on). Sort must not lose or duplicate any index.
+        /// </summary>
+        [TestMethod]
+        public async Task RadixSortHeavyDuplicateKeysTest() => await RunTest(async accelerator =>
+        {
+            int n = 1_000_000;
+            var keys = new int[n];
+            var values = new int[n];
+            var rng = new Random(137);
+
+            // Only 1000 distinct key values — extreme duplication
+            for (int i = 0; i < n; i++)
+            {
+                keys[i] = rng.Next(0, 1000);
+                values[i] = i;
+            }
+
+            using var keysBuf = accelerator.Allocate1D(keys);
+            using var valuesBuf = accelerator.Allocate1D(values);
+            var tempSize = accelerator.ComputeRadixSortPairsTempStorageSize<int, int, DescendingInt32>(n);
+            using var tempBuf = accelerator.Allocate1D<int>(tempSize);
+
+            var radixSort = accelerator.CreateRadixSortPairs<
+                int, Stride1D.Dense, int, Stride1D.Dense, DescendingInt32>();
+            radixSort(
+                accelerator.DefaultStream,
+                keysBuf.View,
+                valuesBuf.View,
+                tempBuf.View.AsContiguous());
+            await accelerator.SynchronizeAsync();
+
+            var sortedKeys = await keysBuf.CopyToHostAsync<int>();
+            var sortedValues = await valuesBuf.CopyToHostAsync<int>();
+
+            VerifyDescendingSortIntegrity(sortedKeys, sortedValues, n, "RadixSortHeavyDuplicates");
+        });
+
+        // ═══════════════════════════════════════════════════════════
+        //  Test 7: Non-power-of-2 large count (odd element count)
+        //  Catches off-by-one bugs in workgroup tail handling.
+        // ═══════════════════════════════════════════════════════════
+
+        /// <summary>
+        /// Sorts 1,500,001 elements (odd, non-power-of-2) descending. Radix sort
+        /// kernels process data in workgroup-sized chunks; the last workgroup often
+        /// has fewer elements than the group size. This test catches off-by-one
+        /// errors in tail handling that could corrupt the last few elements.
+        /// </summary>
+        [TestMethod]
+        public async Task RadixSortDescendingOddCountTest() => await RunTest(async accelerator =>
+        {
+            int n = 1_500_001; // Prime-ish, non-power-of-2
+            var keys = new int[n];
+            var values = new int[n];
+            var rng = new Random(577);
+
+            for (int i = 0; i < n; i++)
+            {
+                keys[i] = rng.Next(0, 10_000_000);
+                values[i] = i;
+            }
+
+            using var keysBuf = accelerator.Allocate1D(keys);
+            using var valuesBuf = accelerator.Allocate1D(values);
+            var tempSize = accelerator.ComputeRadixSortPairsTempStorageSize<int, int, DescendingInt32>(n);
+            using var tempBuf = accelerator.Allocate1D<int>(tempSize);
+
+            var radixSort = accelerator.CreateRadixSortPairs<
+                int, Stride1D.Dense, int, Stride1D.Dense, DescendingInt32>();
+            radixSort(
+                accelerator.DefaultStream,
+                keysBuf.View,
+                valuesBuf.View,
+                tempBuf.View.AsContiguous());
+            await accelerator.SynchronizeAsync();
+
+            var sortedKeys = await keysBuf.CopyToHostAsync<int>();
+            var sortedValues = await valuesBuf.CopyToHostAsync<int>();
+
+            VerifyDescendingSortIntegrity(sortedKeys, sortedValues, n, "RadixSortDescendingOddCount");
+        });
+
+        // ═══════════════════════════════════════════════════════════
+        //  Test 8: Ascending 1.4M (control test)
+        //  Same scale as Test 1 but ascending, to isolate descending-
+        //  specific bugs from general large-scale issues.
+        // ═══════════════════════════════════════════════════════════
+
+        /// <summary>
+        /// Sorts 1,393,167 elements ascending. If this passes but the descending
+        /// test fails, the bug is in the DescendingInt32 bit-flip logic rather
+        /// than in the general radix sort infrastructure.
+        /// </summary>
+        [TestMethod]
+        public async Task RadixSortAscending1_4MTest() => await RunTest(async accelerator =>
+        {
+            int n = 1_393_167;
+            var keys = new int[n];
+            var values = new int[n];
+            var rng = new Random(42);
+
+            for (int i = 0; i < n; i++)
+            {
+                keys[i] = rng.Next(0, 10_000_000);
+                values[i] = i;
+            }
+
+            using var keysBuf = accelerator.Allocate1D(keys);
+            using var valuesBuf = accelerator.Allocate1D(values);
+            var tempSize = accelerator.ComputeRadixSortPairsTempStorageSize<int, int, AscendingInt32>(n);
+            using var tempBuf = accelerator.Allocate1D<int>(tempSize);
+
+            var radixSort = accelerator.CreateRadixSortPairs<
+                int, Stride1D.Dense, int, Stride1D.Dense, AscendingInt32>();
+            radixSort(
+                accelerator.DefaultStream,
+                keysBuf.View,
+                valuesBuf.View,
+                tempBuf.View.AsContiguous());
+            await accelerator.SynchronizeAsync();
+
+            var sortedKeys = await keysBuf.CopyToHostAsync<int>();
+            var sortedValues = await valuesBuf.CopyToHostAsync<int>();
+
+            // Ascending order check
+            int orderViolations = 0;
+            for (int i = 1; i < n; i++)
+            {
+                if (sortedKeys[i] < sortedKeys[i - 1])
+                    orderViolations++;
+            }
+            if (orderViolations > 0)
+                throw new Exception(
+                    $"RadixSortAscending1.4M: Ascending order violated {orderViolations} times out of {n}");
+
+            // Index integrity
+            var seen = new HashSet<int>(n);
+            int dupes = 0, outOfRange = 0;
+            foreach (var v in sortedValues)
+            {
+                if (v < 0 || v >= n) outOfRange++;
+                else if (!seen.Add(v)) dupes++;
+            }
+            int missing = n - seen.Count;
+            if (dupes > 0 || missing > 0 || outOfRange > 0)
+                throw new Exception(
+                    $"RadixSortAscending1.4M: {dupes} duplicates, {missing} missing, {outOfRange} out-of-range");
+        });
+
+        // ═══════════════════════════════════════════════════════════
+        //  Test 9: Full SpawnScene simulation — cull + sort + verify
+        //  Combines sentinel pattern with repeated re-sorts and
+        //  varying cull ratios (camera panning changes visibility).
+        // ═══════════════════════════════════════════════════════════
+
+        /// <summary>
+        /// Full SpawnScene frame simulation: 1.4M splats, 3 frames where each
+        /// frame has a different cull ratio (simulating camera pan from looking
+        /// at a wall to looking at open sky). Each frame re-writes keys with
+        /// new depth values and sentinel patterns, then re-sorts. Verifies order,
+        /// index integrity, and correct sentinel boundary after each frame.
+        /// </summary>
+        [TestMethod]
+        public async Task RadixSortSpawnSceneSimulationTest() => await RunTest(async accelerator =>
+        {
+            int n = 1_393_167;
+            var keys = new int[n];
+            var values = new int[n];
+
+            using var keysBuf = accelerator.Allocate1D<int>(n);
+            using var valuesBuf = accelerator.Allocate1D<int>(n);
+            var tempSize = accelerator.ComputeRadixSortPairsTempStorageSize<int, int, DescendingInt32>(n);
+            using var tempBuf = accelerator.Allocate1D<int>(tempSize);
+
+            var radixSort = accelerator.CreateRadixSortPairs<
+                int, Stride1D.Dense, int, Stride1D.Dense, DescendingInt32>();
+
+            // Frame 0: 10% culled (most splats visible — looking at dense scene)
+            // Frame 1: 50% culled (half visible — camera turned sideways)
+            // Frame 2: 90% culled (camera looking at sky, few splats in view)
+            double[] cullRatios = { 0.10, 0.50, 0.90 };
+
+            for (int frame = 0; frame < cullRatios.Length; frame++)
+            {
+                var rng = new Random(frame * 7919 + 13);
+                double cullRatio = cullRatios[frame];
+                int expectedCulled = 0;
+
+                for (int i = 0; i < n; i++)
+                {
+                    if (rng.NextDouble() < cullRatio)
+                    {
+                        keys[i] = int.MinValue;
+                        expectedCulled++;
+                    }
+                    else
+                    {
+                        keys[i] = rng.Next(0, 10_000_000);
+                    }
+                    values[i] = i;
+                }
+
+                int expectedVisible = n - expectedCulled;
+
+                keysBuf.CopyFromCPU(keys);
+                valuesBuf.CopyFromCPU(values);
+
+                radixSort(
+                    accelerator.DefaultStream,
+                    keysBuf.View,
+                    valuesBuf.View,
+                    tempBuf.View.AsContiguous());
+                await accelerator.SynchronizeAsync();
+
+                var sortedKeys = await keysBuf.CopyToHostAsync<int>();
+                var sortedValues = await valuesBuf.CopyToHostAsync<int>();
+
+                // Order + index integrity
+                VerifyDescendingSortIntegrity(
+                    sortedKeys, sortedValues, n,
+                    $"SpawnSceneSim_Frame{frame}(cull={cullRatio:P0})");
+
+                // Sentinel boundary check
+                int actualVisible = 0;
+                while (actualVisible < n && sortedKeys[actualVisible] != int.MinValue)
+                    actualVisible++;
+
+                if (actualVisible != expectedVisible)
+                    throw new Exception(
+                        $"SpawnSceneSim_Frame{frame}: Sentinel boundary mismatch. " +
+                        $"Expected {expectedVisible} visible, got {actualVisible}.");
+            }
+        });
+        // ═══════════════════════════════════════════════════════════
+        //  Diagnostic: Isolate pass 2 of multi-pass scan
+        //  Tests inclusive scan + Group.Broadcast with known boundary
+        //  values to determine if the bug is in pass 1 or pass 2.
+        // ═══════════════════════════════════════════════════════════
+
+        /// <summary>
+        /// Directly tests the logic of MultiPassScanKernel2's boundary scan:
+        /// loads known right boundary values, does group inclusive scan, then
+        /// Group.Broadcast from Grid.IdxX. If this test fails, the bug is in
+        /// the group scan or broadcast. If it passes, the bug is in pass 1.
+        /// Uses 16 workgroups of 256 threads with 17 boundary values.
+        /// </summary>
+        [TestMethod]
+        public async Task ScanBroadcastIsolationTest() => await RunTest(async accelerator =>
+        {
+            // Right boundary values: same as what pass 1 would produce for
+            // input[i] = (i/256)+1 with 16 groups of 256 elements.
+            // tempView[0] = 0 (identity), tempView[g+1] = 256*(g+1)
+            int numGroups = 16;
+            int numBoundaries = numGroups + 1; // 17
+            var boundaries = new int[numBoundaries];
+            for (int g = 0; g < numGroups; g++)
+                boundaries[g + 1] = 256 * (g + 1);
+            // boundaries = [0, 256, 512, 768, 1024, ..., 4096]
+
+            using var boundaryBuf = accelerator.Allocate1D(boundaries);
+            using var outputBuf = accelerator.Allocate1D<int>(numGroups);
+
+            var kernel = accelerator.LoadStreamKernel<ArrayView<int>, ArrayView<int>>(
+                ScanBroadcastIsolationKernel);
+            kernel(new KernelConfig(numGroups, 256), boundaryBuf.View, outputBuf.View);
+            await accelerator.SynchronizeAsync();
+
+            var result = await outputBuf.CopyToHostAsync<int>();
+
+            // Expected left boundaries: inclusive scan of boundaries, picked at Grid.IdxX
+            // scan[0]=0, scan[1]=256, scan[2]=768, scan[3]=1536, scan[4]=2560, ...
+            int[] expectedScan = new int[numBoundaries];
+            for (int i = 1; i < numBoundaries; i++)
+                expectedScan[i] = expectedScan[i - 1] + boundaries[i];
+
+            string details = "";
+            int errors = 0;
+            for (int g = 0; g < numGroups; g++)
+            {
+                int expected = expectedScan[g];
+                int actual = result[g];
+                if (actual != expected)
+                {
+                    details += $"  Group {g}: got={actual}, expected={expected}, diff={actual - expected}\n";
+                    errors++;
+                }
+            }
+
+            if (errors > 0)
+                throw new Exception(
+                    $"ScanBroadcastIsolation: {errors}/{numGroups} wrong left boundaries.\n" +
+                    $"Bug is in pass 2 (group scan + broadcast).\n{details}");
+
+            Console.WriteLine("ScanBroadcastIsolation: All 16 left boundaries correct — bug is in pass 1.");
+        });
+
+        /// <summary>
+        /// Tests AllReduce per group: 16 groups each reduce 256 elements.
+        /// Input[i] = (i/256)+1 (group g has all g+1 values).
+        /// Expected AllReduce result for group g = 256*(g+1).
+        /// If this fails, the bug is in AllReduce (pass 1's right boundary computation).
+        /// </summary>
+        [TestMethod]
+        public async Task AllReducePerGroupDiagTest() => await RunTest(async accelerator =>
+        {
+            int n = 4096;
+            var input = new int[n];
+            for (int i = 0; i < n; i++)
+                input[i] = (i / 256) + 1;
+
+            using var inputBuf = accelerator.Allocate1D(input);
+            using var outputBuf = accelerator.Allocate1D<int>(16);
+
+            var kernel = accelerator.LoadStreamKernel<ArrayView<int>, ArrayView<int>, int>(
+                AllReducePerGroupDiagKernel);
+            kernel(new KernelConfig(16, 256), inputBuf.View, outputBuf.View, n);
+            await accelerator.SynchronizeAsync();
+
+            var result = await outputBuf.CopyToHostAsync<int>();
+
+            string details = "";
+            int errors = 0;
+            for (int g = 0; g < 16; g++)
+            {
+                int expected = 256 * (g + 1);
+                int actual = result[g];
+                if (actual != expected)
+                {
+                    details += $"  Group {g}: AllReduce={actual}, expected={expected}, diff={actual - expected}\n";
+                    errors++;
+                }
+            }
+
+            Console.WriteLine("AllReduce per group results:");
+            for (int g = 0; g < 16; g++)
+                Console.WriteLine($"  Group {g}: {result[g]} (expected {256 * (g + 1)})");
+
+            if (errors > 0)
+                throw new Exception(
+                    $"AllReducePerGroupDiag: {errors}/16 wrong reductions.\n" +
+                    $"Bug is in AllReduce (pass 1).\n{details}");
+        });
+
+        /// <summary>
+        /// Tests bare Group.Broadcast: each of 16 workgroups broadcasts from
+        /// thread Grid.IdxX. Verifies correct value selection.
+        /// </summary>
+        [TestMethod]
+        public async Task GroupBroadcastDiagTest() => await RunTest(async accelerator =>
+        {
+            int numGroups = 16;
+            using var outputBuf = accelerator.Allocate1D<int>(numGroups);
+
+            var kernel = accelerator.LoadStreamKernel<ArrayView<int>>(
+                GroupBroadcastDiagKernel);
+            kernel(new KernelConfig(numGroups, 256), outputBuf.View);
+            await accelerator.SynchronizeAsync();
+
+            var result = await outputBuf.CopyToHostAsync<int>();
+
+            string details = "";
+            int errors = 0;
+            for (int g = 0; g < numGroups; g++)
+            {
+                // Each thread has value Group.IdxX * 100 + 7.
+                // Broadcast from thread Grid.IdxX = g.
+                // Expected: g * 100 + 7.
+                int expected = g * 100 + 7;
+                int actual = result[g];
+                if (actual != expected)
+                {
+                    details += $"  Group {g}: got={actual}, expected={expected}\n";
+                    errors++;
+                }
+            }
+
+            if (errors > 0)
+                throw new Exception(
+                    $"GroupBroadcastDiag: {errors}/{numGroups} wrong broadcasts.\n{details}");
+        });
+
+        /// <summary>
+        /// Full pass 2 simulation: boundary scan + broadcast + tile scan.
+        /// This kernel calls InclusiveScan TWICE (like MultiPassScanKernel2 does):
+        /// once for the boundary scan, once for the tile scan. If this fails while
+        /// ScanBroadcastIsolationTest passes, the bug is in having two InclusiveScan
+        /// calls in the same kernel (shared memory aliasing or phi value conflict).
+        /// </summary>
+        [TestMethod]
+        public async Task DualScanKernelTest() => await RunTest(async accelerator =>
+        {
+            int numGroups = 16;
+            int groupSize = 256;
+            int n = numGroups * groupSize; // 4096
+
+            // Right boundary values: same as GlobalInclusiveScan4160Test
+            int numBoundaries = numGroups + 1; // 17
+            var boundaries = new int[numBoundaries];
+            for (int g = 0; g < numGroups; g++)
+                boundaries[g + 1] = 256 * (g + 1);
+
+            // Input data: same as GlobalInclusiveScan4160Test
+            var input = new int[n];
+            for (int i = 0; i < n; i++)
+                input[i] = (i / 256) + 1;
+
+            using var boundaryBuf = accelerator.Allocate1D(boundaries);
+            using var inputBuf = accelerator.Allocate1D(input);
+            using var outputBuf = accelerator.Allocate1D<int>(n);
+
+            var kernel = accelerator.LoadStreamKernel<ArrayView<int>, ArrayView<int>, ArrayView<int>>(
+                DualScanKernel);
+            kernel(new KernelConfig(numGroups, groupSize), boundaryBuf.View, inputBuf.View, outputBuf.View);
+            await accelerator.SynchronizeAsync();
+
+            var result = await outputBuf.CopyToHostAsync<int>();
+
+            // Verify output: should be the inclusive scan of input with boundary offsets
+            string details = "";
+            int errors = 0;
+            int runningSum = 0;
+            for (int i = 0; i < n; i++)
+            {
+                runningSum += input[i];
+                if (result[i] != runningSum)
+                {
+                    if (errors < 20)
+                    {
+                        int grp = i / 256;
+                        details += $"  [{i}] (group {grp}): got={result[i]}, expected={runningSum}, diff={result[i] - runningSum}\n";
+                    }
+                    errors++;
+                }
+            }
+
+            // Print group boundary summary
+            string boundaryDetails = "";
+            int rSum = 0;
+            for (int i = 0; i < n; i++)
+            {
+                rSum += input[i];
+                if (i % 256 == 0)
+                {
+                    int grp = i / 256;
+                    boundaryDetails += $"  Group {grp} [{i}]: got={result[i]}, expected={rSum}, diff={result[i] - rSum}\n";
+                }
+            }
+            Console.WriteLine("DualScan group boundaries:\n" + boundaryDetails);
+
+            if (errors > 0)
+                throw new Exception(
+                    $"DualScanKernel: {errors}/{n} wrong values.\n" +
+                    $"Two InclusiveScan calls in same kernel produce wrong results.\n" +
+                    $"Group boundaries:\n{boundaryDetails}\n" +
+                    $"First errors:\n{details}");
+        });
+
+        /// <summary>
+        /// Same as DualScanKernelTest but tests the fence pathway:
+        /// uses two SEPARATE kernel dispatches (like the actual multi-pass scan)
+        /// instead of a single kernel. If this passes while DualScanKernelTest fails,
+        /// the bug is confirmed as being in the single kernel with two InclusiveScan calls.
+        /// If this also fails, the bug is in the fence or buffer handling.
+        /// </summary>
+        [TestMethod]
+        public async Task TwoPassScanSimulationTest() => await RunTest(async accelerator =>
+        {
+            int numGroups = 16;
+            int groupSize = 256;
+            int n = numGroups * groupSize; // 4096
+
+            // Input data
+            var input = new int[n];
+            for (int i = 0; i < n; i++)
+                input[i] = (i / 256) + 1;
+
+            using var inputBuf = accelerator.Allocate1D(input);
+            using var outputBuf = accelerator.Allocate1D<int>(n);
+
+            // Manually do what CreateMultiPassScan does:
+            // 1. Allocate temp buffer for boundaries
+            int numBoundaries = numGroups + 1; // 17
+            using var tempBuf = accelerator.Allocate1D<int>(numBoundaries);
+
+            // Initialize tempBuf to 0
+            var zeros = new int[numBoundaries];
+            tempBuf.CopyFromCPU(zeros);
+
+            // Pass 1: compute right boundaries
+            var pass1Kernel = accelerator.LoadStreamKernel<ArrayView<int>, ArrayView<int>, int>(
+                AllReducePerGroupDiagKernel);
+            // Write to tempBuf[1..16] (offset by 1 for inclusive scan)
+            pass1Kernel(new KernelConfig(numGroups, groupSize),
+                inputBuf.View, tempBuf.View.SubView(1, numGroups), n);
+            await accelerator.SynchronizeAsync();
+
+            // Fence: copy + sync (same as actual multi-pass scan)
+            using var fenceBuf = accelerator.Allocate1D<int>(numBoundaries);
+            fenceBuf.View.CopyFrom(accelerator.DefaultStream, tempBuf.View);
+            accelerator.Synchronize();
+
+            // Pass 2: scan boundaries + apply to tile scan
+            var pass2Kernel = accelerator.LoadStreamKernel<ArrayView<int>, ArrayView<int>, ArrayView<int>>(
+                DualScanKernel);
+            pass2Kernel(new KernelConfig(numGroups, groupSize),
+                tempBuf.View, inputBuf.View, outputBuf.View);
+            await accelerator.SynchronizeAsync();
+
+            var result = await outputBuf.CopyToHostAsync<int>();
+
+            // Verify
+            string details = "";
+            int errors = 0;
+            int runningSum = 0;
+            for (int i = 0; i < n; i++)
+            {
+                runningSum += input[i];
+                if (result[i] != runningSum)
+                {
+                    if (errors < 20)
+                    {
+                        int grp = i / 256;
+                        details += $"  [{i}] (group {grp}): got={result[i]}, expected={runningSum}, diff={result[i] - runningSum}\n";
+                    }
+                    errors++;
+                }
+            }
+
+            string boundaryDetails = "";
+            int rSum = 0;
+            for (int i = 0; i < n; i++)
+            {
+                rSum += input[i];
+                if (i % 256 == 0)
+                {
+                    int grp = i / 256;
+                    boundaryDetails += $"  Group {grp} [{i}]: got={result[i]}, expected={rSum}, diff={result[i] - rSum}\n";
+                }
+            }
+            Console.WriteLine("TwoPassScan group boundaries:\n" + boundaryDetails);
+
+            if (errors > 0)
+                throw new Exception(
+                    $"TwoPassScanSimulation: {errors}/{n} wrong values.\n" +
+                    $"Group boundaries:\n{boundaryDetails}\n" +
+                    $"First errors:\n{details}");
+        });
+
+        #region Tests9 Diagnostic Kernel Methods
+
+        /// <summary>
+        /// Kernel that mimics MultiPassScanKernel2's boundary scan + broadcast.
+        /// Loads rightBoundaries[Group.IdxX], does inclusive scan, broadcasts from Grid.IdxX.
+        /// </summary>
+        static void ScanBroadcastIsolationKernel(
+            ArrayView<int> rightBoundaries,
+            ArrayView<int> output)
+        {
+            int localRB = Group.IdxX < rightBoundaries.Length
+                ? rightBoundaries[Group.IdxX]
+                : 0;
+
+            int scanned = GroupExtensions.InclusiveScan<int, AddInt32>(localRB);
+            int leftBoundary = Group.Broadcast(scanned, Grid.IdxX);
+
+            if (Group.IsFirstThread)
+                output[Grid.IdxX] = leftBoundary;
+        }
+
+        /// <summary>
+        /// Kernel that computes AllReduce per group, mimicking pass 1 of multi-pass scan.
+        /// </summary>
+        static void AllReducePerGroupDiagKernel(
+            ArrayView<int> input,
+            ArrayView<int> output,
+            int n)
+        {
+            int tid = Grid.IdxX * Group.DimX + Group.IdxX;
+            int value = tid < n ? input[tid] : 0;
+            int reduced = GroupExtensions.AllReduce<int, AddInt32>(value);
+
+            if (Group.IsFirstThread)
+                output[Grid.IdxX] = reduced;
+        }
+
+        /// <summary>
+        /// Kernel that tests Group.Broadcast in isolation.
+        /// Each thread has value (Group.IdxX * 100 + 7).
+        /// Each workgroup broadcasts from thread Grid.IdxX.
+        /// </summary>
+        static void GroupBroadcastDiagKernel(
+            ArrayView<int> output)
+        {
+            int myValue = Group.IdxX * 100 + 7;
+            int broadcastValue = Group.Broadcast(myValue, Grid.IdxX);
+
+            if (Group.IsFirstThread)
+                output[Grid.IdxX] = broadcastValue;
+        }
+
+        /// <summary>
+        /// Kernel that calls InclusiveScan TWICE in the same kernel — mimicking
+        /// MultiPassScanKernel2's behavior:
+        /// 1. Scan boundary values, broadcast to get leftBoundary
+        /// 2. Scan tile data from input, add leftBoundary to output
+        /// If two InclusiveScan calls in the same kernel cause shared memory or
+        /// phi value conflicts, this will produce wrong results.
+        /// </summary>
+        static void DualScanKernel(
+            ArrayView<int> rightBoundaries,
+            ArrayView<int> input,
+            ArrayView<int> output)
+        {
+            // Step 1: Boundary scan (same as ScanBroadcastIsolationKernel)
+            int localRB = Group.IdxX < rightBoundaries.Length
+                ? rightBoundaries[Group.IdxX]
+                : 0;
+
+            int scanned = GroupExtensions.InclusiveScan<int, AddInt32>(localRB);
+            int leftBoundary = Group.Broadcast(scanned, Grid.IdxX);
+
+            // Step 2: Tile scan (InclusiveScan called SECOND time in same kernel)
+            int tileStart = Grid.IdxX * Group.DimX;
+            int tid = tileStart + Group.IdxX;
+            int inputValue = tid < input.Length ? input[tid] : 0;
+
+            int tileScan = GroupExtensions.InclusiveScan<int, AddInt32>(inputValue);
+
+            // Output = leftBoundary + tileScan
+            if (tid < output.Length)
+                output[tid] = leftBoundary + tileScan;
+        }
+
+        #endregion
+    }
+}

@@ -842,6 +842,13 @@ namespace ILGPU.Algorithms
         {
             var initializer = accelerator.CreateInitializer<T, Stride1D.Dense>();
 
+            // Pass the workgroup size as a kernel specialization so that backends
+            // with compile-time workgroup sizes (WebGPU/WGSL) can bake the correct
+            // @workgroup_size into the shader.  ComputeGridStrideLoopExtent always
+            // returns MaxNumThreadsPerGroup as groupDim, so this is safe.
+            var scanSpec = new KernelSpecialization(
+                accelerator.MaxNumThreadsPerGroup, null);
+
             Action<AcceleratorStream, KernelConfig, ArrayView1D<T, TStrideIn>,
                 ArrayView<T>, Index1D> pass1Kernel;
             Action<AcceleratorStream, KernelConfig, ArrayView1D<T, TStrideIn>,
@@ -851,22 +858,26 @@ namespace ILGPU.Algorithms
                 pass1Kernel = accelerator.LoadKernel<
                     ArrayView1D<T, TStrideIn>, ArrayView<T>, Index1D>(
                     MultiPassScanKernel1<T, TStrideIn, TScanOperation,
-                        InclusiveScanImplementation<T, TScanOperation>>);
+                        InclusiveScanImplementation<T, TScanOperation>>,
+                    scanSpec);
                 pass2Kernel = accelerator.LoadKernel<ArrayView1D<T, TStrideIn>,
                     ArrayView<T>, ArrayView1D<T, TStrideOut>, Index1D>(
                     MultiPassScanKernel2<T, TStrideIn, TStrideOut, TScanOperation,
-                        InclusiveScanImplementation<T, TScanOperation>>);
+                        InclusiveScanImplementation<T, TScanOperation>>,
+                    scanSpec);
             }
             else
             {
                 pass1Kernel = accelerator.LoadKernel<
                     ArrayView1D<T, TStrideIn>, ArrayView<T>, Index1D>(
                     MultiPassScanKernel1<T, TStrideIn, TScanOperation,
-                        ExclusiveScanImplementation<T, TScanOperation>>);
+                        ExclusiveScanImplementation<T, TScanOperation>>,
+                    scanSpec);
                 pass2Kernel = accelerator.LoadKernel<ArrayView1D<T, TStrideIn>,
                     ArrayView<T>, ArrayView1D<T, TStrideOut>, Index1D>(
                     MultiPassScanKernel2<T, TStrideIn, TStrideOut, TScanOperation,
-                        ExclusiveScanImplementation<T, TScanOperation>>);
+                        ExclusiveScanImplementation<T, TScanOperation>>,
+                    scanSpec);
             }
 
             return (stream, input, output, temp) =>
@@ -923,6 +934,286 @@ namespace ILGPU.Algorithms
                     tempView,
                     output,
                     numIterationsPerGroup);
+
+                // Flush the command encoder so the scan output lives in its own
+                // command buffer.  Without this, the scan's pass2 dispatch and
+                // the caller's next dispatch (e.g. RadixSortKernel2) share one
+                // command buffer.  WebGPU's implicit storage-buffer barrier
+                // between compute passes *should* suffice, but browser WebGPU
+                // implementations can have subtle barrier bugs that cause rare,
+                // non-deterministic data races.  An explicit Synchronize (which
+                // maps to Flush on WebGPU) forces a command-buffer boundary,
+                // giving the queue explicit ordering guarantees.
+                stream.Synchronize();
+            };
+        }
+
+        #endregion
+
+        #region WebGPU Multi-Pass Scan
+
+        // WebGPU-specific multi-pass scan implementation.
+        // Uses simple flat kernels that avoid the TileInfo/ComputeTileScan
+        // infrastructure. The standard MultiPassScanKernel1/2 generate WGSL
+        // code with complex control flow (grid-stride loops, TileInfo struct,
+        // generic scan implementations) that triggers a code generation bug
+        // in the WGSL backend — producing incorrect results for non-uniform
+        // data while working for uniform data. These simplified kernels
+        // produce identical results with straightforward control flow.
+
+        /// <summary>
+        /// WebGPU pass 1: each workgroup computes AllReduce of its tile.
+        /// Handles multiple iterations per group when the input exceeds
+        /// gridDim * groupDim elements.
+        /// </summary>
+        internal static void WebGPUScanPass1<
+            T,
+            TStrideIn,
+            TScanOperation>(
+            ArrayView1D<T, TStrideIn> input,
+            ArrayView<T> rightBoundaries,
+            Index1D numIterationsPerGroup)
+            where T : unmanaged
+            where TStrideIn : struct, IStride1D
+            where TScanOperation : struct, IScanReduceOperation<T>
+        {
+            TScanOperation op = default;
+            int tileSize = Group.DimX * numIterationsPerGroup;
+            int baseIdx = Grid.IdxX * tileSize + Group.IdxX;
+
+            // First chunk
+            T value = baseIdx < input.IntLength
+                ? input[baseIdx]
+                : op.Identity;
+            T boundary = AllReduce<T, TScanOperation>(value);
+
+            // Additional chunks (grid-stride within tile)
+            for (int i = baseIdx + Group.DimX; i < (Grid.IdxX + 1) * tileSize; i += Group.DimX)
+            {
+                T v = i < input.IntLength ? input[i] : op.Identity;
+                T r = AllReduce<T, TScanOperation>(v);
+                boundary = op.Apply(boundary, r);
+            }
+
+            if (Group.IsFirstThread)
+                rightBoundaries[Grid.IdxX] = boundary;
+        }
+
+        /// <summary>
+        /// WebGPU pass 2: scan boundaries, broadcast left boundary per
+        /// workgroup, then scan each tile and add the left boundary offset.
+        /// </summary>
+        internal static void WebGPUInclusiveScanPass2<
+            T,
+            TStrideIn,
+            TStrideOut,
+            TScanOperation>(
+            ArrayView1D<T, TStrideIn> input,
+            ArrayView<T> rightBoundaries,
+            ArrayView1D<T, TStrideOut> output,
+            Index1D numIterationsPerGroup)
+            where T : unmanaged
+            where TStrideIn : struct, IStride1D
+            where TStrideOut : struct, IStride1D
+            where TScanOperation : struct, IScanReduceOperation<T>
+        {
+            TScanOperation op = default;
+            int tileSize = Group.DimX * numIterationsPerGroup;
+
+            // Step 1: Scan the right boundaries to get left boundary per group
+            T localRB = Group.IdxX < rightBoundaries.Length
+                ? rightBoundaries[Group.IdxX]
+                : op.Identity;
+            T scanned = InclusiveScan<T, TScanOperation>(localRB);
+            T leftBoundary = Group.Broadcast(scanned, Grid.IdxX);
+
+            // Step 2: Scan each chunk of the tile
+            int baseIdx = Grid.IdxX * tileSize + Group.IdxX;
+
+            // First chunk
+            T inputVal = baseIdx < input.IntLength
+                ? input[baseIdx]
+                : op.Identity;
+            T current = InclusiveScanWithBoundaries<T, TScanOperation>(
+                inputVal, out var bounds);
+
+            if (baseIdx < input.IntLength)
+                output[baseIdx] = op.Apply(leftBoundary, current);
+
+            // Additional chunks
+            for (int i = baseIdx + Group.DimX; i < (Grid.IdxX + 1) * tileSize; i += Group.DimX)
+            {
+                leftBoundary = op.Apply(leftBoundary, bounds.RightBoundary);
+
+                inputVal = i < input.IntLength ? input[i] : op.Identity;
+                current = InclusiveScanWithBoundaries<T, TScanOperation>(
+                    inputVal, out bounds);
+
+                if (i < input.IntLength)
+                    output[i] = op.Apply(leftBoundary, current);
+            }
+        }
+
+        /// <summary>
+        /// WebGPU pass 2 for exclusive scan.
+        /// </summary>
+        internal static void WebGPUExclusiveScanPass2<
+            T,
+            TStrideIn,
+            TStrideOut,
+            TScanOperation>(
+            ArrayView1D<T, TStrideIn> input,
+            ArrayView<T> rightBoundaries,
+            ArrayView1D<T, TStrideOut> output,
+            Index1D numIterationsPerGroup)
+            where T : unmanaged
+            where TStrideIn : struct, IStride1D
+            where TStrideOut : struct, IStride1D
+            where TScanOperation : struct, IScanReduceOperation<T>
+        {
+            TScanOperation op = default;
+            int tileSize = Group.DimX * numIterationsPerGroup;
+
+            // Step 1: Scan boundaries
+            T localRB = Group.IdxX < rightBoundaries.Length
+                ? rightBoundaries[Group.IdxX]
+                : op.Identity;
+            T scanned = InclusiveScan<T, TScanOperation>(localRB);
+            T leftBoundary = Group.Broadcast(scanned, Grid.IdxX);
+
+            // Step 2: Exclusive scan of each chunk
+            int baseIdx = Grid.IdxX * tileSize + Group.IdxX;
+
+            T inputVal = baseIdx < input.IntLength
+                ? input[baseIdx]
+                : op.Identity;
+            T current = ExclusiveScanWithBoundaries<T, TScanOperation>(
+                inputVal, out var bounds);
+
+            if (baseIdx < input.IntLength)
+                output[baseIdx] = op.Apply(leftBoundary, current);
+
+            for (int i = baseIdx + Group.DimX; i < (Grid.IdxX + 1) * tileSize; i += Group.DimX)
+            {
+                T nextBoundary = op.Apply(leftBoundary, bounds.RightBoundary);
+                leftBoundary = op.Apply(
+                    nextBoundary,
+                    Group.Broadcast(inputVal, Group.DimX - 1));
+
+                inputVal = i < input.IntLength ? input[i] : op.Identity;
+                current = ExclusiveScanWithBoundaries<T, TScanOperation>(
+                    inputVal, out bounds);
+
+                if (i < input.IntLength)
+                    output[i] = op.Apply(leftBoundary, current);
+            }
+        }
+
+        /// <summary>
+        /// Creates a WebGPU-specific multi-pass scan using simplified kernels
+        /// that avoid the TileInfo/ComputeTileScan infrastructure.
+        /// </summary>
+        private static Scan<T, TStrideIn, TStrideOut> CreateWebGPUMultiPassScan<
+            T,
+            TStrideIn,
+            TStrideOut,
+            TScanOperation>(
+            Accelerator accelerator,
+            ScanKind kind)
+            where T : unmanaged
+            where TStrideIn : struct, IStride1D
+            where TStrideOut : struct, IStride1D
+            where TScanOperation : struct, IScanReduceOperation<T>
+        {
+            var initializer = accelerator.CreateInitializer<T, Stride1D.Dense>();
+            var scanSpec = new KernelSpecialization(
+                accelerator.MaxNumThreadsPerGroup, null);
+
+            var pass1Kernel = accelerator.LoadKernel<
+                ArrayView1D<T, TStrideIn>, ArrayView<T>, Index1D>(
+                WebGPUScanPass1<T, TStrideIn, TScanOperation>,
+                scanSpec);
+
+            Action<AcceleratorStream, KernelConfig, ArrayView1D<T, TStrideIn>,
+                ArrayView<T>, ArrayView1D<T, TStrideOut>, Index1D> pass2Kernel;
+            if (kind == ScanKind.Inclusive)
+            {
+                pass2Kernel = accelerator.LoadKernel<ArrayView1D<T, TStrideIn>,
+                    ArrayView<T>, ArrayView1D<T, TStrideOut>, Index1D>(
+                    WebGPUInclusiveScanPass2<T, TStrideIn, TStrideOut, TScanOperation>,
+                    scanSpec);
+            }
+            else
+            {
+                pass2Kernel = accelerator.LoadKernel<ArrayView1D<T, TStrideIn>,
+                    ArrayView<T>, ArrayView1D<T, TStrideOut>, Index1D>(
+                    WebGPUExclusiveScanPass2<T, TStrideIn, TStrideOut, TScanOperation>,
+                    scanSpec);
+            }
+
+            return (stream, input, output, temp) =>
+            {
+                if (!input.IsValid)
+                    throw new ArgumentNullException(nameof(input));
+                if (!output.IsValid)
+                    throw new ArgumentNullException(nameof(output));
+                if (output.Length < input.Length)
+                    throw new ArgumentOutOfRangeException(nameof(output));
+                if (input.Length > int.MaxValue)
+                {
+                    throw new NotSupportedException(
+                        ErrorMessages.NotSupportedArrayView64);
+                }
+
+                var (gridDim, groupDim) = accelerator.ComputeGridStrideLoopExtent(
+                    input.IntLength,
+                    out int numIterationsPerGroup);
+
+                var viewManager = new TempViewManager(temp, nameof(temp));
+                var tempView = viewManager.Allocate<T>(gridDim + 1);
+
+                TScanOperation scanOperation = default;
+                initializer(stream, tempView, scanOperation.Identity);
+                if (tempView.Length > 1)
+                {
+                    // Always prepend identity at tempView[0] so that
+                    // InclusiveScan in pass2 produces the correct left
+                    // boundary for both inclusive and exclusive scan.
+                    var offsetView =
+                        tempView.SubView(1, tempView.Length - 1);
+                    pass1Kernel(
+                        stream,
+                        (gridDim, groupDim),
+                        input,
+                        offsetView,
+                        numIterationsPerGroup);
+
+                    // Fence between scan passes
+                    {
+                        using var resultBuffer = accelerator.Allocate1D<T>(tempView.Length);
+                        resultBuffer.View.CopyFrom(stream, tempView);
+                        stream.Synchronize();
+                    }
+                }
+
+                pass2Kernel(
+                    stream,
+                    (gridDim, groupDim),
+                    input,
+                    tempView,
+                    output,
+                    numIterationsPerGroup);
+
+                // Flush the command encoder so the scan output lives in its own
+                // command buffer.  Without this, the scan's pass2 dispatch and
+                // the caller's next dispatch (e.g. RadixSortKernel2) share one
+                // command buffer.  WebGPU's implicit storage-buffer barrier
+                // between compute passes *should* suffice, but browser WebGPU
+                // implementations can have subtle barrier bugs that cause rare,
+                // non-deterministic data races.  An explicit Synchronize (which
+                // maps to Flush on WebGPU) forces a command-buffer boundary,
+                // giving the queue explicit ordering guarantees.
+                stream.Synchronize();
             };
         }
 
@@ -967,7 +1258,11 @@ namespace ILGPU.Algorithms
                     CreateSinglePassScan<T, TStrideIn, TStrideOut, TScanOperation>(
                         accelerator,
                         kind),
-                // WebGPU/WebGL: use multi-pass scan (safe without device-wide atomics)
+                AcceleratorType.WebGPU =>
+                    CreateWebGPUMultiPassScan<T, TStrideIn, TStrideOut, TScanOperation>(
+                        accelerator,
+                        kind),
+                // WebGL and others: use standard multi-pass scan
                 _ =>
                     CreateMultiPassScan<T, TStrideIn, TStrideOut, TScanOperation>(
                         accelerator,

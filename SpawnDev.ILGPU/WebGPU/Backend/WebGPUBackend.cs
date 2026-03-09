@@ -205,7 +205,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
                     if (webGpuIndex >= containers.Length)
                     {
-                        WebGPUBackend.Log($"WebGPU: Resizing IntrinsicManager containers from {containers.Length} to {webGpuIndex + 1}");
+                        if (VerboseLogging) Log($"WebGPU: Resizing IntrinsicManager containers from {containers.Length} to {webGpuIndex + 1}");
                         var newContainers = Array.CreateInstance(containerType, webGpuIndex + 1);
                         Array.Copy(containers, newContainers, containers.Length);
                         containers = newContainers;
@@ -241,7 +241,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             }
             catch (Exception ex)
             {
-                WebGPUBackend.Log($"WebGPU: Error fixing IntrinsicManager: {ex}");
+                if (VerboseLogging) Log($"WebGPU: Error fixing IntrinsicManager: {ex}");
             }
         }
 
@@ -252,7 +252,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 WebGPUBackend.Log("WebGPU: Skipping invalid intrinsic method (null)");
                 return;
             }
-            WebGPUBackend.Log($"WebGPU: Registering Intrinsic: {method.DeclaringType.Name}.{method.Name}");
+            if (VerboseLogging) Log($"WebGPU: Registering Intrinsic: {method.DeclaringType.Name}.{method.Name}");
             GetIntrinsicManager(Context).RegisterMethod(
                 method,
                 new WebGPUIntrinsic(
@@ -273,14 +273,14 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             }
             if (!found)
             {
-                WebGPUBackend.Log($"WebGPU: Intrinsic not found: {type.Name}.{methodName}");
+                if (VerboseLogging) Log($"WebGPU: Intrinsic not found: {type.Name}.{methodName}");
             }
         }
 
         private void RegisterRedirect(MethodInfo original, MethodInfo target)
         {
             if (original == null || target == null) return;
-            WebGPUBackend.Log($"WebGPU: Redirecting {original.DeclaringType.Name}.{original.Name} -> {target.DeclaringType.Name}.{target.Name}");
+            if (VerboseLogging) Log($"WebGPU: Redirecting {original.DeclaringType.Name}.{original.Name} -> {target.DeclaringType.Name}.{target.Name}");
             GetIntrinsicManager(Context).RegisterMethod(
                 original,
                 new WebGPUIntrinsic(
@@ -334,14 +334,14 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
                     if (wrapper != null)
                     {
-                        WebGPUBackend.Log($"WebGPU: Mapping {type.Name}.{name}({string.Join(",", pTypes.Select(pt => pt.Name))}) to {t.Name}.{name}");
+                        if (VerboseLogging) Log($"WebGPU: Mapping {type.Name}.{name}({string.Join(",", pTypes.Select(pt => pt.Name))}) to {t.Name}.{name}");
                         Reg(target, wrapper, handler);
                     }
                     else
                     {
                         // Debug log for missing wrapper
                         var pTypeNames = string.Join(", ", pTypes.Select(pt => pt.Name));
-                        WebGPUBackend.Log($"WebGPU: Missing wrapper for {type.Name}.{name}({pTypeNames})");
+                        if (VerboseLogging) Log($"WebGPU: Missing wrapper for {type.Name}.{name}({pTypeNames})");
                     }
                 }
             }
@@ -413,7 +413,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             }
             catch (Exception ex)
             {
-                WebGPUBackend.Log($"WebGPU: Error registering XMath intrinsics: {ex.Message}");
+                if (VerboseLogging) Log($"WebGPU: Error registering XMath intrinsics: {ex.Message}");
             }
 
             // Register ILGPU.Algorithms group/warp reduction intrinsics.
@@ -530,7 +530,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             }
             catch (Exception ex)
             {
-                WebGPUBackend.Log($"WebGPU: Error registering group/warp reduction intrinsics: {ex.Message}");
+                if (VerboseLogging) Log($"WebGPU: Error registering group/warp reduction intrinsics: {ex.Message}");
             }
 
             // Register Half ↔ float conversion intrinsics.
@@ -689,11 +689,26 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             // the already-transformed WGSL without markers, causing the fallback regex path
             // to corrupt the output.
 
+            // Prepend kernel method name as a comment for identification
+            var methodName = entryPoint.MethodInfo?.Name ?? "unknown";
+            wgslSource = $"// Kernel: {methodName}\n" + wgslSource;
+
             LastGeneratedWGSL = wgslSource;
             AllGeneratedWGSL.Add(wgslSource);
-            WebGPUBackend.Log("--- GENERATED WGSL ---");
-            WebGPUBackend.Log(wgslSource);
-            WebGPUBackend.Log("-----------------------");
+            // Always log scan and radix sort kernels for debugging
+            if (methodName.Contains("MultiPassScan") || methodName.Contains("SingleGroupScan")
+                || methodName.Contains("RadixSort") || methodName.Contains("WebGPUScan"))
+            {
+                Console.WriteLine($"=== WGSL for {methodName} ({wgslSource.Length} chars, {wgslSource.Split('\n').Length} lines) ===");
+                Console.WriteLine(wgslSource);
+                Console.WriteLine($"=== END {methodName} ===");
+            }
+            if (VerboseLogging)
+            {
+                Log("--- GENERATED WGSL ---");
+                Log(wgslSource);
+                Log("-----------------------");
+            }
 
 
             return new WebGPUCompiledKernel(

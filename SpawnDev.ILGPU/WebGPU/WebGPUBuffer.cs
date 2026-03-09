@@ -160,7 +160,7 @@ namespace SpawnDev.ILGPU.WebGPU
             var paddedBytes = WebGPUAlignment.AlignTo4(copyBytes);
             var sourceByteOffset = sourceOffset * ElementSize;
 
-            WebGPUBackend.Log($"[WebGPU] CopyToHostAsync: SourceOffset={sourceOffset}, Length={copyLength} elements");
+            if (WebGPUBackend.VerboseLogging) WebGPUBackend.Log($"[WebGPU] CopyToHostAsync: SourceOffset={sourceOffset}, Length={copyLength} elements");
 
             var device = Accelerator.NativeDevice;
             if (device == null)
@@ -203,7 +203,7 @@ namespace SpawnDev.ILGPU.WebGPU
             }
             _cachedStagingBuffer.Unmap();
 
-            WebGPUBackend.Log($"[WebGPU] CopyToHostAsync: Finished");
+            if (WebGPUBackend.VerboseLogging) WebGPUBackend.Log($"[WebGPU] CopyToHostAsync: Finished");
 
             return copyLength;
         }
@@ -226,7 +226,7 @@ namespace SpawnDev.ILGPU.WebGPU
 
             var paddedBytes = WebGPUAlignment.AlignTo4(copyBytes.Value);
 
-            WebGPUBackend.Log($"[WebGPU] CopyToHostUint8ArrayAsync: SourceByteOffset={sourceByteOffset}, CopyBytes={copyBytes} elements");
+            if (WebGPUBackend.VerboseLogging) WebGPUBackend.Log($"[WebGPU] CopyToHostUint8ArrayAsync: SourceByteOffset={sourceByteOffset}, CopyBytes={copyBytes} elements");
 
             var device = Accelerator.NativeDevice;
             if (device == null)
@@ -276,7 +276,7 @@ namespace SpawnDev.ILGPU.WebGPU
                 _cachedStagingBuffer.Unmap();
             }
 
-            WebGPUBackend.Log($"[WebGPU] CopyToHostAsync: Finished");
+            if (WebGPUBackend.VerboseLogging) WebGPUBackend.Log($"[WebGPU] CopyToHostAsync: Finished");
 
             return result ?? new Uint8Array();
         }
@@ -304,7 +304,7 @@ namespace SpawnDev.ILGPU.WebGPU
             var paddedBytes = WebGPUAlignment.AlignTo4(copyBytes);
             var sourceByteOffset = sourceOffset * destElementSize;
 
-            WebGPUBackend.Log($"[WebGPU] CopyToHostAsync<{typeof(TDest).Name}>: SourceOffset={sourceOffset}, Length={count} elements, ByteSize={copyBytes}");
+            if (WebGPUBackend.VerboseLogging) WebGPUBackend.Log($"[WebGPU] CopyToHostAsync<{typeof(TDest).Name}>: SourceOffset={sourceOffset}, Length={count} elements, ByteSize={copyBytes}");
 
             var device = Accelerator.NativeDevice;
             if (device == null)
@@ -346,7 +346,7 @@ namespace SpawnDev.ILGPU.WebGPU
             }
             _cachedStagingBuffer.Unmap();
 
-            WebGPUBackend.Log($"[WebGPU] CopyToHostAsync<{typeof(TDest).Name}>: Finished");
+            if (WebGPUBackend.VerboseLogging) WebGPUBackend.Log($"[WebGPU] CopyToHostAsync<{typeof(TDest).Name}>: Finished");
 
             return count;
         }

@@ -196,7 +196,7 @@ namespace SpawnDev.ILGPU.WebGPU
             MaxComputeWorkgroupsPerDimension = ReadLimit(adapter, l => (int)(l.MaxComputeWorkgroupsPerDimension ?? 65535), 65535);
             MaxComputeWorkgroupStorageSize = ReadLimit(adapter, l => (int)(l.MaxComputeWorkgroupStorageSize ?? 16384), 16384);
             MaxBufferSize = ReadLimit(adapter, l => l.MaxBufferSize ?? 268435456L, 268435456L);
-            Backend.WebGPUBackend.Log($"[WebGPUDevice] Limits: Invocations={MaxComputeInvocationsPerWorkgroup}, WorkgroupSizeX={MaxComputeWorkgroupSizeX}, SharedMem={MaxComputeWorkgroupStorageSize}, MaxBuf={MaxBufferSize}, MaxBufType={typeof(GPUSupportedLimits).GetProperty("MaxBufferSize")?.PropertyType.Name ?? "?"}");
+            if (Backend.WebGPUBackend.VerboseLogging) Backend.WebGPUBackend.Log($"[WebGPUDevice] Limits: Invocations={MaxComputeInvocationsPerWorkgroup}, WorkgroupSizeX={MaxComputeWorkgroupSizeX}, SharedMem={MaxComputeWorkgroupStorageSize}, MaxBuf={MaxBufferSize}, MaxBufType={typeof(GPUSupportedLimits).GetProperty("MaxBufferSize")?.PropertyType.Name ?? "?"}");
         }
 
         #endregion

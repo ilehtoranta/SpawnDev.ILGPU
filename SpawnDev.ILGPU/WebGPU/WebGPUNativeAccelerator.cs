@@ -99,7 +99,7 @@ namespace SpawnDev.ILGPU.WebGPU
             // Listen for uncaptured GPU errors
             _gpuDevice.OnUncapturedError += OnGPUUncapturedError;
 
-            WebGPUBackend.Log("[WebGPU] Accelerator created from external GPUDevice (shared with ORT)");
+            if (WebGPUBackend.VerboseLogging) WebGPUBackend.Log("[WebGPU] Accelerator created from external GPUDevice (shared with ORT)");
         }
 
         /// <summary>
@@ -142,7 +142,7 @@ namespace SpawnDev.ILGPU.WebGPU
             {
                 // Limits query failed — use fallback
             }
-            WebGPUBackend.Log($"[WebGPU] Adapter limits: maxStorageBuffers={maxStorageBuffers}, maxComputeInvocations={maxComputeInvocations}, maxWorkgroupSizeX={maxWorkgroupSizeX}, maxWorkgroupStorageSize={maxWorkgroupStorageSize}, maxStorageBufferBindingSize={maxStorageBufferBindingSize}");
+            if (WebGPUBackend.VerboseLogging) WebGPUBackend.Log($"[WebGPU] Adapter limits: maxStorageBuffers={maxStorageBuffers}, maxComputeInvocations={maxComputeInvocations}, maxWorkgroupSizeX={maxWorkgroupSizeX}, maxWorkgroupStorageSize={maxWorkgroupStorageSize}, maxStorageBufferBindingSize={maxStorageBufferBindingSize}");
 
             // Use Dictionary for RequiredLimits to ensure reliable JS interop serialization.
             // Anonymous objects may not serialize correctly through BlazorJS's interop layer.
@@ -167,11 +167,11 @@ namespace SpawnDev.ILGPU.WebGPU
                     RequiredLimits = requiredLimits
                 };
                 _gpuDevice = await adapter.RequestDevice(descriptor);
-                WebGPUBackend.Log($"[WebGPU] Device created with features + limits (maxStorage={maxStorageBuffers})");
+                if (WebGPUBackend.VerboseLogging) WebGPUBackend.Log($"[WebGPU] Device created with features + limits (maxStorage={maxStorageBuffers})");
             }
             catch (Exception ex)
             {
-                WebGPUBackend.Log($"[WebGPU] Device creation with features failed: {ex.Message}");
+                if (WebGPUBackend.VerboseLogging) WebGPUBackend.Log($"[WebGPU] Device creation with features failed: {ex.Message}");
                 // Fall back: try without features but with limits
                 try
                 {
@@ -180,16 +180,16 @@ namespace SpawnDev.ILGPU.WebGPU
                         RequiredLimits = requiredLimits
                     };
                     _gpuDevice = await adapter.RequestDevice(descriptor);
-                    WebGPUBackend.Log($"[WebGPU] Device created with limits only (maxStorage={maxStorageBuffers})");
+                    if (WebGPUBackend.VerboseLogging) WebGPUBackend.Log($"[WebGPU] Device created with limits only (maxStorage={maxStorageBuffers})");
                     // Clear features since we couldn't request them
                     requestedFeatures.Clear();
                 }
                 catch (Exception ex2)
                 {
-                    WebGPUBackend.Log($"[WebGPU] Device creation with limits failed: {ex2.Message}");
+                    if (WebGPUBackend.VerboseLogging) WebGPUBackend.Log($"[WebGPU] Device creation with limits failed: {ex2.Message}");
                     // Fall back to fully default device
                     _gpuDevice = await adapter.RequestDevice();
-                    WebGPUBackend.Log("[WebGPU] Device created with defaults (no limits override)");
+                    if (WebGPUBackend.VerboseLogging) WebGPUBackend.Log("[WebGPU] Device created with defaults (no limits override)");
                     requestedFeatures.Clear();
                 }
             }
@@ -376,11 +376,11 @@ namespace SpawnDev.ILGPU.WebGPU
 
             if (_shaderCache.TryGetValue(cacheKey, out var cached))
             {
-                WebGPUBackend.Log("[WebGPU] Using cached shader");
+                if (WebGPUBackend.VerboseLogging) WebGPUBackend.Log("[WebGPU] Using cached shader");
                 return cached;
             }
 
-            WebGPUBackend.Log("[WebGPU] Creating and caching new shader");
+            if (WebGPUBackend.VerboseLogging) WebGPUBackend.Log("[WebGPU] Creating and caching new shader");
             var shader = CreateComputeShader(wgslSource, entryPoint, overrideConstants);
             _shaderCache[cacheKey] = shader;
             return shader;

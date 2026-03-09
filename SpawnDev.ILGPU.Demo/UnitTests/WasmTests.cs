@@ -130,6 +130,59 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
         public new async Task RadixSortPairsDescendingIndexIntegrityTest() =>
             throw new UnsupportedTestException("Wasm: RadixSort generates infinite loop in Wasm bytecode (browser lockup)");
 
+        // --- Tests9: Diagnostic scan + boundary tests ---
+        [TestMethod]
+        public new async Task GlobalInclusiveScan256Test() =>
+            throw new UnsupportedTestException("Wasm: algorithm tests require shared memory + barriers");
+        [TestMethod]
+        public new async Task GlobalInclusiveScan320Test() =>
+            throw new UnsupportedTestException("Wasm: algorithm tests require shared memory + barriers");
+        [TestMethod]
+        public new async Task GlobalInclusiveScan8000Test() =>
+            throw new UnsupportedTestException("Wasm: algorithm tests require shared memory + barriers");
+        [TestMethod]
+        public new async Task GlobalInclusiveScan4160Test() =>
+            throw new UnsupportedTestException("Wasm: algorithm tests require shared memory + barriers");
+        [TestMethod]
+        public new async Task RadixSortBoundary16KTest() =>
+            throw new UnsupportedTestException("Wasm: RadixSort generates infinite loop in Wasm bytecode (browser lockup)");
+        [TestMethod]
+        public new async Task RadixSortBoundary20KTest() =>
+            throw new UnsupportedTestException("Wasm: RadixSort generates infinite loop in Wasm bytecode (browser lockup)");
+
+        [TestMethod]
+        public new async Task RadixSortThresholdProbeTest() =>
+            throw new UnsupportedTestException("Wasm: RadixSort generates infinite loop in Wasm bytecode (browser lockup)");
+
+        // --- Tests9: Large-scale RadixSort stress tests (same infinite loop issue) ---
+        [TestMethod]
+        public new async Task RadixSortDescending1_4MTest() =>
+            throw new UnsupportedTestException("Wasm: RadixSort generates infinite loop in Wasm bytecode (browser lockup)");
+        [TestMethod]
+        public new async Task RadixSortDescendingWithSentinelsTest() =>
+            throw new UnsupportedTestException("Wasm: RadixSort generates infinite loop in Wasm bytecode (browser lockup)");
+        [TestMethod]
+        public new async Task RadixSortRepeatedResortTest() =>
+            throw new UnsupportedTestException("Wasm: RadixSort generates infinite loop in Wasm bytecode (browser lockup)");
+        [TestMethod]
+        public new async Task RadixSortDescending2MTest() =>
+            throw new UnsupportedTestException("Wasm: RadixSort generates infinite loop in Wasm bytecode (browser lockup)");
+        [TestMethod]
+        public new async Task RadixSortDescending4MTest() =>
+            throw new UnsupportedTestException("Wasm: RadixSort generates infinite loop in Wasm bytecode (browser lockup)");
+        [TestMethod]
+        public new async Task RadixSortHeavyDuplicateKeysTest() =>
+            throw new UnsupportedTestException("Wasm: RadixSort generates infinite loop in Wasm bytecode (browser lockup)");
+        [TestMethod]
+        public new async Task RadixSortDescendingOddCountTest() =>
+            throw new UnsupportedTestException("Wasm: RadixSort generates infinite loop in Wasm bytecode (browser lockup)");
+        [TestMethod]
+        public new async Task RadixSortAscending1_4MTest() =>
+            throw new UnsupportedTestException("Wasm: RadixSort generates infinite loop in Wasm bytecode (browser lockup)");
+        [TestMethod]
+        public new async Task RadixSortSpawnSceneSimulationTest() =>
+            throw new UnsupportedTestException("Wasm: RadixSort generates infinite loop in Wasm bytecode (browser lockup)");
+
         // --- ScanWithBoundaries: NESTED STATE MACHINE BUG ---
         // Returns 0 instead of expected values at index 1 ("Expected 2, got 0").
         // ROOT CAUSE: When the kernel has its own state machine (3 blocks from
@@ -144,6 +197,23 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
         [TestMethod]
         public new async Task AlgorithmScanWithBoundariesTest() =>
             throw new UnsupportedTestException("Wasm: ScanWithBoundaries has nested state machine conflict (caller+callee both multi-block)");
+
+        // --- Tests9: Diagnostic isolation tests ---
+        [TestMethod]
+        public new async Task ScanBroadcastIsolationTest() =>
+            throw new UnsupportedTestException("Wasm: algorithm tests require shared memory + barriers");
+        [TestMethod]
+        public new async Task AllReducePerGroupDiagTest() =>
+            throw new UnsupportedTestException("Wasm: algorithm tests require shared memory + barriers");
+        [TestMethod]
+        public new async Task GroupBroadcastDiagTest() =>
+            throw new UnsupportedTestException("Wasm: algorithm tests require shared memory + barriers");
+        [TestMethod]
+        public new async Task DualScanKernelTest() =>
+            throw new UnsupportedTestException("Wasm: algorithm tests require shared memory + barriers");
+        [TestMethod]
+        public new async Task TwoPassScanSimulationTest() =>
+            throw new UnsupportedTestException("Wasm: algorithm tests require shared memory + barriers");
 
     }
 }
