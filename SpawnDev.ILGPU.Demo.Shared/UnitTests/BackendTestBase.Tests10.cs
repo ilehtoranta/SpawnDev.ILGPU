@@ -160,9 +160,9 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             var kernel = accelerator.LoadStreamKernel<
                 ArrayView<int>, ArrayView<int>, int>(SingleSharedMemKernel);
             kernel(new KernelConfig(1, 256), inputBuf.View, outputBuf.View, n);
-            accelerator.Synchronize();
+            await accelerator.SynchronizeAsync();
 
-            var result = outputBuf.GetAsArray1D();
+            var result = await outputBuf.CopyToHostAsync<int>();
             if (result[0] != n)
                 throw new Exception($"SharedMemSingleAlloc: expected {n}, got {result[0]}");
         });
@@ -194,10 +194,10 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             kernel(new KernelConfig(1, 256),
                 intInputBuf.View, floatInputBuf.View,
                 intOutputBuf.View, floatOutputBuf.View, n);
-            accelerator.Synchronize();
+            await accelerator.SynchronizeAsync();
 
-            var intResult = intOutputBuf.GetAsArray1D();
-            var floatResult = floatOutputBuf.GetAsArray1D();
+            var intResult = await intOutputBuf.CopyToHostAsync<int>();
+            var floatResult = await floatOutputBuf.CopyToHostAsync<float>();
 
             // Expected: intOutput[0] = intInput[0] + intInput[255] = 0 + 255 = 255
             int expectedInt = 0 + 255;
@@ -230,9 +230,9 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             var kernel = accelerator.LoadStreamKernel<
                 ArrayView<int>, ArrayView<int>, int>(SameTypeDualSharedMemKernel);
             kernel(new KernelConfig(1, 256), inputBuf.View, outputBuf.View, n);
-            accelerator.Synchronize();
+            await accelerator.SynchronizeAsync();
 
-            var result = outputBuf.GetAsArray1D();
+            var result = await outputBuf.CopyToHostAsync<int>();
             // For threads 0..63: result[i] = input[i] + i = (100 + i) + i = 100 + 2*i
             int errors = 0;
             for (int i = 0; i < 64; i++)
@@ -265,9 +265,9 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             var kernel = accelerator.LoadStreamKernel<
                 ArrayView<int>, ArrayView<int>, int>(SharedMemTileScanKernel);
             kernel(new KernelConfig(1, 256), inputBuf.View, outputBuf.View, n);
-            accelerator.Synchronize();
+            await accelerator.SynchronizeAsync();
 
-            var result = outputBuf.GetAsArray1D();
+            var result = await outputBuf.CopyToHostAsync<int>();
             // Inclusive scan of all 1s: result[i] = i + 1
             int errors = 0;
             for (int i = 0; i < n; i++)
@@ -303,9 +303,9 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             var kernel = accelerator.LoadStreamKernel<
                 ArrayView<int>, ArrayView<int>, int>(SingleSharedMemKernel);
             kernel(new KernelConfig(numGroups, groupSize), inputBuf.View, outputBuf.View, n);
-            accelerator.Synchronize();
+            await accelerator.SynchronizeAsync();
 
-            var result = outputBuf.GetAsArray1D();
+            var result = await outputBuf.CopyToHostAsync<int>();
             // Each group sums 256 ones → 256
             int errors = 0;
             for (int g = 0; g < numGroups; g++)
