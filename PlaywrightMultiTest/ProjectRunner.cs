@@ -39,7 +39,13 @@ namespace PlaywrightMultiTest
             };
             using var p = Process.Start(startInfo);
             if (p == null) return -1;
+            // Must read stdout/stderr to prevent deadlock when the pipe buffer fills.
+            // dotnet publish can produce hundreds of warning lines that exceed the 4KB
+            // pipe buffer, causing the child process to block on write indefinitely.
+            var stdoutTask = p.StandardOutput.ReadToEndAsync();
+            var stderrTask = p.StandardError.ReadToEndAsync();
             await p.WaitForExitAsync();
+            await Task.WhenAll(stdoutTask, stderrTask);
             return p.ExitCode;
         }
         /// <summary>
@@ -51,7 +57,19 @@ namespace PlaywrightMultiTest
             Debug.WriteLine("Init()");
 
             string[] args = Environment.GetCommandLineArgs();
+            // Support both --filter=VALUE and --filter VALUE formats
             var filter = args.LastOrDefault(o => o.StartsWith("--filter="))?.Substring(9);
+            if (filter == null)
+            {
+                for (int i = 0; i < args.Length - 1; i++)
+                {
+                    if (args[i] == "--filter")
+                    {
+                        filter = args[i + 1];
+                        break;
+                    }
+                }
+            }
 
 
             var projects = ProjectDiscovery.GetWorkspaceRoot();
@@ -168,7 +186,7 @@ namespace PlaywrightMultiTest
                     }
                     catch (Exception ex)
                     {
-                        var nmtt = true;
+                        Console.Error.WriteLine($"[PlaywrightMultiTest] Error initializing {project.Name}: {ex.Message}");
                     }
                 }
                 else if (project.AppProjectType == ProjectType.Exe)
@@ -304,15 +322,15 @@ namespace PlaywrightMultiTest
             {
                 if (testableProject is TestableBlazorWasm blazorProj)
                 {
-                    if (blazorProj.Page != null) await blazorProj.Page.CloseAsync();
-                    if (blazorProj.BrowserContext != null) await blazorProj.BrowserContext.CloseAsync();
-                    if (blazorProj.Browser != null) await blazorProj.Browser.CloseAsync();
-                    if (blazorProj.Server != null) await blazorProj.Server.Stop();
+                    try { if (blazorProj.Page != null) await blazorProj.Page.CloseAsync(); } catch { }
+                    try { if (blazorProj.BrowserContext != null) await blazorProj.BrowserContext.CloseAsync(); } catch { }
+                    try { if (blazorProj.Browser != null) await blazorProj.Browser.CloseAsync(); } catch { }
+                    try { blazorProj.Playwright?.Dispose(); } catch { }
+                    try { if (blazorProj.Server != null) await blazorProj.Server.Stop(); } catch { }
                 }
                 else if (testableProject is TestableConsole consoleProj)
                 {
                     // do any cleanup needed for console projects
-
                 }
             }
         }
