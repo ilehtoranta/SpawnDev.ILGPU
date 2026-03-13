@@ -1247,25 +1247,32 @@ namespace ILGPU.Algorithms
             }
             else
             {
+                // WebGPU needs explicit KernelSpecialization to bake the correct
+                // @workgroup_size into compiled WGSL, avoiding runtime regex patching.
+                var radixSpec = accelerator.AcceleratorType == AcceleratorType.WebGPU
+                    ? new KernelSpecialization(
+                        accelerator.MaxNumThreadsPerGroup, null)
+                    : KernelSpecialization.Empty;
+
                 // Load specialized versions for dense and strided views
                 var pass1Kernel = accelerator.LoadKernel<Pass1KernelDelegate<T,
                     TStride>>(RadixSortKernel1Method.MakeGenericMethod(
                     typeof(T), typeof(TStride), typeof(TRadixSortOperation),
-                    specializationType));
+                    specializationType), radixSpec);
                 var pass1DenseKernel = accelerator.LoadKernel<Pass1KernelDelegate<T,
                     Stride1D.Dense>>(RadixSortKernel1Method.MakeGenericMethod(
                     typeof(T), typeof(Stride1D.Dense), typeof(TRadixSortOperation),
-                    specializationType));
+                    specializationType), radixSpec);
 
                 // Load specialized versions for dense and strided views
                 var pass2Kernel = accelerator.LoadKernel<Pass2KernelDelegate<T,
                     TStride, Stride1D.Dense>>(RadixSortKernel2Method.MakeGenericMethod(
                     typeof(T), typeof(Stride1D.Dense), typeof(TStride),
-                    typeof(TRadixSortOperation), specializationType));
+                    typeof(TRadixSortOperation), specializationType), radixSpec);
                 var pass2DenseKernel = accelerator.LoadKernel<Pass2KernelDelegate<T,
                     Stride1D.Dense, TStride>>(RadixSortKernel2Method.MakeGenericMethod(
                     typeof(T), typeof(TStride), typeof(Stride1D.Dense),
-                    typeof(TRadixSortOperation), specializationType));
+                    typeof(TRadixSortOperation), specializationType), radixSpec);
 
                 return (stream, input, tempView) =>
                 {

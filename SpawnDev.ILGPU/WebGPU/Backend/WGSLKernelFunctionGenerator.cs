@@ -21,6 +21,20 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 {
     internal sealed class WGSLKernelFunctionGenerator : WGSLCodeGenerator
     {
+        #region Pre-compiled Regex Patterns
+
+        // Let-to-var hoisting for inlined helper functions (matches v_N and v_N_suffix names)
+        private static readonly System.Text.RegularExpressions.Regex s_inlineLetPattern =
+            new(@"^(\s*)let\s+(v_\d+(?:_\w+)?)\s*=\s*(.+);",
+                System.Text.RegularExpressions.RegexOptions.Multiline | System.Text.RegularExpressions.RegexOptions.Compiled);
+
+        // Var declaration hoisting to function scope
+        private static readonly System.Text.RegularExpressions.Regex s_varHoistPattern =
+            new(@"^(\s*)var\s+(v_\d+\w*)\s*:\s*([^;=]+?)\s*(?:=\s*(.+?))?\s*;\s*$",
+                System.Text.RegularExpressions.RegexOptions.Multiline | System.Text.RegularExpressions.RegexOptions.Compiled);
+
+        #endregion
+
         #region Instance
 
         private HashSet<int> _atomicParameters = new HashSet<int>();
@@ -765,6 +779,23 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
         public override void GenerateHeader(StringBuilder builder)
         {
+            // ── Shader header comment ──
+            // Emitted at the top of every generated shader for debugging.
+            builder.AppendLine($"// Kernel: {Method.Name}");
+            builder.AppendLine($"// WorkgroupSize: {GetWorkgroupSize()}");
+            if (_generatorArgs.SharedMemoryResolver.Count > 0)
+            {
+                builder.AppendLine($"// SharedMemory: {string.Join(", ", _generatorArgs.SharedMemoryResolver.GetVariableNames())}");
+            }
+            if (TypeGenerator.KernelUsesI64 == true || TypeGenerator.KernelUsesF64 == true)
+            {
+                var emuParts = new List<string>();
+                if (TypeGenerator.KernelUsesI64 == true) emuParts.Add("i64");
+                if (TypeGenerator.KernelUsesF64 == true) emuParts.Add("f64");
+                builder.AppendLine($"// Emulation: {string.Join(", ", emuParts)}");
+            }
+            builder.AppendLine();
+
             // Pre-scan for Broadcast and subgroup usage
             ScanForSubgroupAndBroadcastUsage();
 
@@ -789,14 +820,25 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             bool needsI64Emulation = TypeGenerator.KernelUsesI64 == true;
             bool needsF64Emulation = TypeGenerator.KernelUsesF64 == true;
 
-            // Emit emulation library if needed by this kernel (including inlined helpers)
+            // Emit minimal emulation library: only functions actually used by the kernel body
             if (needsF64Emulation || needsI64Emulation)
             {
                 builder.AppendLine("// ============ 64-bit Emulation Library ============");
-                builder.AppendLine(WGSLEmulationLibrary.GetEmulationLibrary(
+                builder.AppendLine(WGSLEmulationLibrary.GetMinimalEmulationLibrary(
                     needsF64Emulation,
                     Backend.Options.UseOzakiF64Emulation,
-                    needsI64Emulation));
+                    needsI64Emulation,
+                    Builder.ToString()));
+            }
+
+            // Emit hoisted i64 constants (deduplicated across kernel + helper bodies)
+            if (_baseArgs.I64Constants.Count > 0)
+            {
+                builder.AppendLine("// ============ Hoisted i64 Constants ============");
+                foreach (var (pair, name) in _baseArgs.I64Constants)
+                    builder.AppendLine(
+                        $"const {name} : vec2<u32> = vec2<u32>({pair.Lo}u, {pair.Hi}u);");
+                builder.AppendLine();
             }
 
             // Emit struct definitions (may reference emu_i64/emu_f64 from the library above)
@@ -1255,127 +1297,53 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
             builder.AppendLine();
 
-            // Emit shared memory allocations (static)
-            // Use SharedMemoryVarNames (from backendContext.SharedAllocations) instead of
+            // Emit shared memory allocations (static) via SharedMemoryResolver.
+            // Uses SharedMemoryResolver (from backendContext.SharedAllocations) instead of
             // Allocas.SharedAllocations because the kernel's own Allocas may be EMPTY
             // when shared memory is allocated inside helper functions (e.g., reduction).
-            foreach (var kvp in _generatorArgs.SharedMemoryVarNames)
+            var resolver = _generatorArgs.SharedMemoryResolver;
+            resolver.EmitStaticDeclarations(builder, TypeGenerator, (allocaNode, varName, wgslType) =>
             {
-                var allocaNode = kvp.Key;
-                var (varName, declaration) = kvp.Value;
-
-                // Register the variable in valueVariables so Load(alloca) returns it
-                var wgslType = TypeGenerator[allocaNode.Type];
-                var sharedVar = new Variable(varName, wgslType);
-                valueVariables[allocaNode] = sharedVar;
+                valueVariables[allocaNode] = new Variable(varName, wgslType);
                 declaredVariables.Add(varName);
+            });
 
-                if (WebGPU.Backend.WebGPUBackend.VerboseLogging) Console.WriteLine($"[DIAG-KERNEL-SHARED] Emitting shared_mem: name={varName}, alloca hash={allocaNode.GetHashCode()}");
-
-                builder.AppendLine(declaration);
-            }
-
-            // Also iterate kernel's own Allocas.SharedAllocations to register those instances
-            // (they may be different object references from the ones in SharedMemoryVarNames).
-            // When TryGetValue fails (reference inequality), match by element type + array size
-            // to find the correct SharedMemoryVarNames entry. Without this, Load()'s fallback
-            // grabs the first unassigned entry which may be the WRONG allocation — e.g. mapping
-            // RadixSort's groupSize*4 histogram to ExclusiveScan's groupSize workspace.
-            foreach (var alloca in Allocas.SharedAllocations)
-            {
-                if (_generatorArgs.SharedMemoryVarNames.TryGetValue(alloca.Alloca, out var preAssigned))
+            // Register kernel's own shared allocas (may be different object instances).
+            resolver.RegisterKernelAllocas(
+                Allocas.SharedAllocations,
+                TypeGenerator,
+                (allocaNode, varName, wgslType) =>
                 {
-                    var wgslType = TypeGenerator[alloca.Alloca.Type];
-                    valueVariables[alloca.Alloca] = new Variable(preAssigned.Name, wgslType);
-                }
-                else
-                {
-                    // Reference mismatch: find a SharedMemoryVarNames entry with matching
-                    // element type and array size that isn't already mapped to a different Alloca.
-                    long allocaArraySize = alloca.ArraySize;
-                    string allocaElemStr = alloca.ElementType.ToString();
-                    foreach (var kvp in _generatorArgs.SharedMemoryVarNames)
-                    {
-                        if (!(kvp.Key is Alloca candidateAlloca)) continue;
-                        // Compare element type by string (safe across object instances)
-                        if (candidateAlloca.AllocaType.ToString() != allocaElemStr) continue;
-                        // Compare array size by resolving the constant ArrayLength
-                        if (!(candidateAlloca.ArrayLength.Resolve() is global::ILGPU.IR.Values.PrimitiveValue pv)
-                            || pv.Int64Value != allocaArraySize)
-                            continue;
-                        // Skip if this entry is already registered for a DIFFERENT kernel alloca
-                        if (valueVariables.Any(kv => kv.Value.Name == kvp.Value.Name && kv.Key != alloca.Alloca))
-                            continue;
-                        var wgslType = TypeGenerator[alloca.Alloca.Type];
-                        valueVariables[alloca.Alloca] = new Variable(kvp.Value.Name, wgslType);
-                        if (WebGPU.Backend.WebGPUBackend.VerboseLogging)
-                            Console.WriteLine($"[DIAG-KERNEL-SHARED] Matched kernel alloca (hash={alloca.Alloca.GetHashCode()}, size={allocaArraySize}) to '{kvp.Value.Name}' by type+size");
-                        break;
-                    }
-                }
-            }
+                    valueVariables[allocaNode] = new Variable(varName, wgslType);
+                },
+                (name, allocaValue) => valueVariables.Any(kv => kv.Value.Name == name && kv.Key != allocaValue));
 
             // Emit dynamic shared memory allocations using pipeline-overridable constants
-            if (DynamicSharedAllocations.Length > 0)
+            resolver.EmitDynamicDeclarations(
+                DynamicSharedAllocations,
+                builder,
+                TypeGenerator,
+                loadVariable: (alloca) => Load(alloca).Name,
+                markDeclared: (name) => declaredVariables.Add(name));
+
+            // Copy dynamic overrides to the local list and generator args
+            foreach (var overrideInfo in resolver.DynamicOverrides)
             {
-                builder.AppendLine();
-                builder.AppendLine("// Dynamic shared memory (sized via pipeline override constants)");
-                foreach (var alloca in DynamicSharedAllocations)
+                _dynamicSharedOverrides.Add(overrideInfo);
+                _generatorArgs.DynamicSharedOverrides.Add(overrideInfo);
+            }
+
+            // Emit synthetic workgroup variables (broadcast, shuffle, group reduce)
+            SharedMemoryResolver.EmitSyntheticWorkgroupVariables(
+                new SyntheticWorkgroupConfig
                 {
-                    var variable = Load(alloca.Alloca);
-                    declaredVariables.Add(variable.Name);
-
-                    var elementType = alloca.ElementType;
-                    var wgslType = TypeGenerator[elementType];
-                    int elementSize = alloca.ElementSize;
-
-                    // Override constant name — the accelerator will set this at pipeline creation
-                    string overrideConstName = $"DYNAMIC_SHARED_SIZE_{alloca.Index}";
-
-                    // Default to 1 element (will be overridden at pipeline creation)
-                    builder.AppendLine($"override {overrideConstName} : u32 = 1u;");
-                    builder.AppendLine($"var<workgroup> {variable.Name} : array<{wgslType}, {overrideConstName}>;");
-
-                    // Track the override constant info for the compiled kernel
-                    var overrideInfo = new DynamicSharedOverrideInfo(
-                        overrideConstName,
-                        variable.Name,
-                        alloca.Index,
-                        elementSize);
-                    _dynamicSharedOverrides.Add(overrideInfo);
-                    _generatorArgs.DynamicSharedOverrides.Add(overrideInfo);
-                }
-            }
-
-            // Emit workgroup-level broadcast temp variable if needed
-            if (_usesBroadcast)
-            {
-                builder.AppendLine();
-                builder.AppendLine("// Workgroup broadcast shared memory");
-                builder.AppendLine($"var<workgroup> _broadcast_temp : {_broadcastType};");
-            }
-
-            // Emit warp shuffle shared memory buffer when:
-            // 1. Subgroups are NOT available but shuffle ops are used (shared-memory emulation path), OR
-            // 2. UsesWarpShuffleEmulation is explicitly set (e.g., 64-bit reduce via shared memory)
-            if ((_usesSubgroups && !Backend.HasSubgroups) || UsesWarpShuffleEmulation)
-            {
-                builder.AppendLine();
-                builder.AppendLine("// Warp shuffle emulation shared memory (256 u32 slots = 4 per thread for Ozaki vec4<f32> emulated types)");
-                builder.AppendLine("var<workgroup> _warp_shuffle_buf : array<u32, 256>;");
-            }
-
-            // Emit workgroup-level group-reduce atomic variable when GenerateGroupAllReduce is used.
-            // Declared as atomic<i32> for integer max/min/add, plus an auxiliary slot array
-            // holding per-subgroup partial results (max 32 subgroups for workgroup_size 2048).
-            if (_usesGroupReduce)
-            {
-                builder.AppendLine();
-                builder.AppendLine("// Group-level reduction shared memory (for GenerateGroupAllReduce)");
-                builder.AppendLine("var<workgroup> _grp_reduce_i32 : atomic<i32>;");
-                builder.AppendLine("var<workgroup> _grp_reduce_u32 : atomic<u32>;");
-                builder.AppendLine("var<workgroup> _grp_sg_results : array<u32, 64>; // per-subgroup partial results (2 slots per sg for 64-bit types)");
-            }
+                    UsesBroadcast = _usesBroadcast,
+                    BroadcastType = _broadcastType,
+                    UsesWarpShuffleEmulation = UsesWarpShuffleEmulation,
+                    UsesSubgroupsWithoutHardwareSupport = _usesSubgroups && !Backend.HasSubgroups,
+                    UsesGroupReduce = _usesGroupReduce
+                },
+                builder);
 
             // NOTE: ALL builtins use 'let' bindings inside main() instead of var<private>.
             // var<private> is treated as "possibly non-uniform" by WGSL's uniformity analysis,
@@ -1480,23 +1448,17 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     SetupAllocations(helperAllocas.LocalAllocations, MemoryAddressSpace.Local);
                 }
 
-                // Step 2.6: Register helper's shared memory alloca references.
+                // Step 2.6: Register helper's shared memory alloca references via SharedMemoryResolver.
                 // The helper's IR may reference shared Alloca nodes that are different object
-                // instances from those in SharedMemoryVarNames. Pre-register them here so that
+                // instances from those in the resolver. Pre-register them here so that
                 // Load() finds the correct module-scope variable without relying on the fallback.
-                foreach (var sharedAlloca in helperAllocas.SharedAllocations)
-                {
-                    if (_generatorArgs.SharedMemoryVarNames.TryGetValue(sharedAlloca.Alloca, out var preAssigned))
+                _generatorArgs.SharedMemoryResolver.RegisterHelperAllocas(
+                    helperAllocas.SharedAllocations,
+                    TypeGenerator,
+                    (allocaNode, varName, wgslType) =>
                     {
-                        var wgslType = TypeGenerator[sharedAlloca.Alloca.Type];
-                        valueVariables[sharedAlloca.Alloca] = new Variable(preAssigned.Name, wgslType);
-                        if (WebGPUBackend.VerboseLogging) WebGPUBackend.Log($"[WGSL-Inline]   Registered shared alloca -> {preAssigned.Name}");
-                    }
-                    else
-                    {
-                        if (WebGPUBackend.VerboseLogging) WebGPUBackend.Log($"[WGSL-Inline]   WARNING: shared alloca not found in SharedMemoryVarNames (hash={sharedAlloca.Alloca.GetHashCode()})");
-                    }
-                }
+                        valueVariables[allocaNode] = new Variable(varName, wgslType);
+                    });
 
                 // Step 3: Walk the helper's IR blocks and emit their code inline.
                 // We handle single-block helpers directly, and multi-block helpers
@@ -2151,13 +2113,10 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             if (Method.Blocks.Count > 1)
             {
                 string generatedCode = Builder.ToString(codeGenStartPosition, Builder.Length - codeGenStartPosition);
-                var letPattern = new System.Text.RegularExpressions.Regex(
-                    @"^(\s*)let\s+(v_\d+(?:_\w+)?)\s*=\s*(.+);",
-                    System.Text.RegularExpressions.RegexOptions.Multiline);
                 var missingDeclarations = new List<string>(); // var declarations to add
                 var hoistedLetDeclarations = new List<string>(); // pointer-alias lets to hoist
                 bool anyReplacements = false;
-                string processed = letPattern.Replace(generatedCode, match =>
+                string processed = s_inlineLetPattern.Replace(generatedCode, match =>
                 {
                     string indent = match.Groups[1].Value;
                     string varName = match.Groups[2].Value;
@@ -2183,7 +2142,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                         }
                         // Simple pointer alias: &identifier (no brackets, no dots, no operators)
                         // e.g. &v_67, &param0 — these reference module-scope or function-scope vars
-                        bool isSimpleRef = System.Text.RegularExpressions.Regex.IsMatch(trimmed, @"^\&\w+$");
+                        bool isSimpleRef = IsAmpersandWordChars(trimmed);
                         if (isSimpleRef)
                         {
                             hoistedLetDeclarations.Add($"    let {varName} = {trimmed};");
@@ -2275,13 +2234,9 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             {
                 string code = Builder.ToString(codeGenStartPosition, Builder.Length - codeGenStartPosition);
 
-                var varHoistPattern = new System.Text.RegularExpressions.Regex(
-                    @"^(\s*)var\s+(v_\d+\w*)\s*:\s*([^;=]+?)\s*(?:=\s*(.+?))?\s*;\s*$",
-                    System.Text.RegularExpressions.RegexOptions.Multiline);
-
                 var hoistedVars = new Dictionary<string, string>();
 
-                string hoisted = varHoistPattern.Replace(code, match =>
+                string hoisted = s_varHoistPattern.Replace(code, match =>
                 {
                     string indent = match.Groups[1].Value;
                     string varName = match.Groups[2].Value;
@@ -2304,6 +2259,73 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     foreach (var kvp in hoistedVars)
                         Builder.AppendLine($"    var {kvp.Key} : {kvp.Value};");
                     Builder.Append(hoisted);
+                }
+            }
+
+            // PHASE 4: Dead variable elimination.
+            // Remove hoisted "var v_N : type;" pre-declarations that are never
+            // referenced elsewhere in the function body. Hoisting pre-declares
+            // variables for all cross-block values, but structured code generation
+            // may eliminate the code paths that use some of them.
+            // IMPORTANT: Only target "var v_" (hoisted pre-declarations). Never
+            // remove "let v_" lines — those are active computations whose removal
+            // can break binding layout detection and eliminate needed values.
+            {
+                string fullBody = Builder.ToString(signatureInsertPosition,
+                    Builder.Length - signatureInsertPosition);
+                var lines = fullBody.Split('\n');
+                int removedCount = 0;
+
+                for (int li = 0; li < lines.Length; li++)
+                {
+                    if (lines[li] == null) continue;
+                    var trimmed = lines[li].TrimStart();
+                    string varName = null;
+
+                    // Match: "var v_N :" or "var v_N_suffix :"
+                    if (trimmed.StartsWith("var v_"))
+                    {
+                        int nameEnd = trimmed.IndexOfAny(new[] { ' ', ':' }, 4);
+                        if (nameEnd > 4)
+                            varName = trimmed.Substring(4, nameEnd - 4);
+                    }
+
+                    if (varName == null) continue;
+                    string fullVarName = varName;
+
+                    // Check if this variable appears on any other line (word-boundary match)
+                    bool referenced = false;
+                    for (int lj = 0; lj < lines.Length; lj++)
+                    {
+                        if (lj == li || lines[lj] == null) continue;
+                        if (ContainsWordBoundary(lines[lj], fullVarName))
+                        {
+                            referenced = true;
+                            break;
+                        }
+                    }
+
+                    if (!referenced)
+                    {
+                        lines[li] = null; // Mark for removal
+                        removedCount++;
+                    }
+                }
+
+                if (removedCount > 0)
+                {
+                    Builder.Remove(signatureInsertPosition, Builder.Length - signatureInsertPosition);
+                    for (int li = 0; li < lines.Length; li++)
+                    {
+                        if (lines[li] != null)
+                        {
+                            if (li > 0 && Builder.Length > signatureInsertPosition)
+                                Builder.Append('\n');
+                            Builder.Append(lines[li]);
+                        }
+                    }
+                    WebGPUBackend.Diag(WGSLDiagnostics.Compilation,
+                        $"[DeadVarElim] Removed {removedCount} unused declarations");
                 }
             }
 
@@ -2350,12 +2372,6 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             string fullOutput = Builder.ToString(signatureInsertPosition, Builder.Length - signatureInsertPosition);
             fullOutput = fullOutput.Replace(signatureSentinel, signature + builtinCopies);
 
-            // Post-process: Fix grid-stride loop uniformity.
-            // NOTE: FixGridStrideLoopUniformity is no longer needed — uniform breaks
-            // are now emitted DIRECTLY during code generation in GenerateLoopConstruct.
-            // The old post-processor is retained in the codebase as reference but disabled.
-            // fullOutput = FixGridStrideLoopUniformity(fullOutput);
-
             Builder.Remove(signatureInsertPosition, Builder.Length - signatureInsertPosition);
             Builder.Append(fullOutput);
             // NOTE: The enable subgroups placeholder is resolved in WebGPUBackend.CreateKernel()
@@ -2370,459 +2386,35 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         }
 
         /// <summary>
-        /// Post-processing pass: fixes grid-stride loop uniformity violations.
-        /// WGSL requires workgroupBarrier() to be called from uniform control flow.
-        /// Grid-stride loops use a per-thread index (non-uniform: local_id + group_id * workgroup_size)
-        /// as the break condition, but also maintain a parallel group counter (uniform: group_id, += num_workgroups).
-        /// This method detects such loops and transforms the break condition to use the group counter,
-        /// which is uniform within a workgroup.
+        /// Checks if <paramref name="text"/> contains <paramref name="word"/> as a
+        /// whole word (surrounded by non-word characters or string boundaries).
+        /// Used by dead variable elimination to avoid false positives like v_1 matching v_10.
         /// </summary>
-        public static string FixGridStrideLoopUniformity(string wgsl)
+        private static bool ContainsWordBoundary(string text, string word)
         {
-            // Only process if there are barriers inside loops to worry about
-            if (!wgsl.Contains("workgroupBarrier()"))
-                return wgsl;
-
-            var lines = wgsl.Split('\n');
-            var result = new System.Text.StringBuilder(wgsl.Length);
-            if (WebGPU.Backend.WebGPUBackend.VerboseLogging)
-                Console.WriteLine($"[GridStrideFix] Processing WGSL ({lines.Length} lines, has barriers: {wgsl.Contains("workgroupBarrier()")})");
-
-            // Strategy: 
-            // 1. PRIMARY: Look for "// __UNIFORMITY_HINT__" markers emitted by the code generator.
-            //    These contain exact variable names from IR analysis (group counter, thread counter).
-            // 2. FALLBACK: For loops without markers (e.g., from inlined helpers), use regex detection.
-
-            // First, find all loop blocks with barriers
-            for (int i = 0; i < lines.Length; i++)
+            int pos = 0;
+            while (pos <= text.Length - word.Length)
             {
-                string trimmed = lines[i].TrimEnd('\r').Trim();
+                int idx = text.IndexOf(word, pos, StringComparison.Ordinal);
+                if (idx < 0) return false;
 
-                // ─── PRIMARY: Check for IR-emitted uniformity markers ───
-                // Pattern: "// __UNIFORMITY_HINT__ has_barriers group=v_XX thread=v_YY"
-                // followed by "loop {"
-                if (trimmed.StartsWith("// __UNIFORMITY_HINT__"))
-                {
-                    // Parse the marker fields
-                    string markerGroupCounter = null;
-                    string markerThreadCounter = null;
-                    bool markerHasBarriers = trimmed.Contains("has_barriers");
-                    
-                    var groupMatch = System.Text.RegularExpressions.Regex.Match(trimmed, @"group=(\w+)");
-                    if (groupMatch.Success) markerGroupCounter = groupMatch.Groups[1].Value;
-                    
-                    var threadMatch = System.Text.RegularExpressions.Regex.Match(trimmed, @"thread=(\w+)");
-                    if (threadMatch.Success) markerThreadCounter = threadMatch.Groups[1].Value;
+                bool startOk = idx == 0 || !IsWordChar(text[idx - 1]);
+                bool endOk = idx + word.Length >= text.Length || !IsWordChar(text[idx + word.Length]);
+                if (startOk && endOk) return true;
 
-                    if (WebGPU.Backend.WebGPUBackend.VerboseLogging)
-                        Console.WriteLine($"[GridStrideFix] Found __UNIFORMITY_HINT__ at line {i}: barriers={markerHasBarriers} group={markerGroupCounter} thread={markerThreadCounter}");
-
-                    // Don't emit the marker comment into the output — it was only needed for analysis
-                    // Skip to the next line which should be "loop {"
-                    if (i + 1 < lines.Length && lines[i + 1].TrimEnd('\r').Trim() == "loop {")
-                    {
-                        if (markerGroupCounter != null)
-                        {
-                            // We have a code-gen-identified group counter — use it!
-                            // Barrier detection is done by text-based scan below (not IR-level).
-                            i++; // advance to the "loop {" line
-                            
-                            // Find loop bounds
-                            int loopStart = i;
-                            int braceCount = 1;
-                            int loopEnd = -1;
-                            for (int j = i + 1; j < lines.Length && braceCount > 0; j++)
-                            {
-                                string lt = lines[j].TrimEnd('\r');
-                                foreach (char c in lt) { if (c == '{') braceCount++; else if (c == '}') braceCount--; }
-                                if (braceCount == 0) loopEnd = j;
-                            }
-                            if (loopEnd < 0) { result.AppendLine(lines[i].TrimEnd('\r')); continue; }
-
-                            // Find the break condition pattern (v_X = v_Y < v_Z; followed by if (!v_X) { break; })
-                            string breakCondVar = null, threadCounterVar = null, limitVar = null, compOp = null;
-                            int breakCondLine = -1;
-                            bool breakIsNegated = false; // true = "if (!v_X) { break; }", false = "if (v_X) { break; }"
-                            for (int j = loopStart + 1; j < Math.Min(loopStart + 100, loopEnd); j++)
-                            {
-                                string lt = lines[j].TrimEnd('\r').Trim();
-                                // Match any comparison: v_X = v_Y <op> v_Z;
-                                var compareMatch = System.Text.RegularExpressions.Regex.Match(lt, @"^(?:let\s+)?(\w+)\s*=\s*(\w+)\s*(<|<=|>|>=)\s*(\w+)\s*;$");
-                                if (compareMatch.Success)
-                                {
-                                    for (int k = j + 1; k < Math.Min(j + 5, loopEnd); k++)
-                                    {
-                                        string kt = lines[k].TrimEnd('\r').Trim();
-                                        if (kt.Contains("break;"))
-                                        {
-                                            breakCondVar = compareMatch.Groups[1].Value;
-                                            threadCounterVar = compareMatch.Groups[2].Value;
-                                            compOp = compareMatch.Groups[3].Value;
-                                            limitVar = compareMatch.Groups[4].Value;
-                                            breakCondLine = j;
-                                            // Detect negation by scanning ALL lines from compare to break
-                                            // The if statement might be on a different line than break;
-                                            for (int n = j + 1; n <= k; n++)
-                                            {
-                                                string nt = lines[n].TrimEnd('\r').Trim();
-                                                if (nt.Contains($"!{breakCondVar}") || nt.Contains($"! {breakCondVar}"))
-                                                {
-                                                    breakIsNegated = true;
-                                                    break;
-                                                }
-                                            }
-                                            break;
-                                        }
-                                    }
-                                    if (breakCondLine >= 0) break;
-                                }
-                            }
-
-                            if (breakCondLine >= 0)
-                            {
-                                string uniformExpr = $"({markerGroupCounter} * i32(workgroup_size.x)) {compOp} {limitVar}";
-                                string ufBreakVar = $"_uf_break_{breakCondVar}";
-                                
-                                if (WebGPU.Backend.WebGPUBackend.VerboseLogging)
-                                    Console.WriteLine($"[GridStrideFix] MARKER-BASED TRANSFORM: {breakCondVar} -> let {ufBreakVar} = {uniformExpr} (negated={breakIsNegated})");
-
-                                // Emit the transformed loop
-                                for (int j = loopStart; j <= loopEnd; j++)
-                                {
-                                    string lineContent = lines[j].TrimEnd('\r');
-                                    if (j == breakCondLine)
-                                    {
-                                        int contentStart = lineContent.Length - lineContent.TrimStart().Length;
-                                        string indentStr = lineContent.Substring(0, contentStart);
-                                        result.AppendLine($"{indentStr}let {ufBreakVar} = {uniformExpr};");
-                                    }
-                                    else if (breakIsNegated && (lineContent.Contains($"!{breakCondVar}") || lineContent.Contains($"! {breakCondVar}")))
-                                    {
-                                        // Negated pattern: if (!v_X) { break; } -> if (!_uf_break_v_X) { break; }
-                                        string replaced = lineContent.Replace($"!{breakCondVar}", $"!{ufBreakVar}");
-                                        replaced = replaced.Replace($"! {breakCondVar}", $"! {ufBreakVar}");
-                                        result.AppendLine(replaced);
-                                    }
-                                    else if (!breakIsNegated && lineContent.Contains($"if ({breakCondVar})")
-                                             && !lineContent.Contains($"if (!{breakCondVar})"))
-                                    {
-                                        // Non-negated pattern: if (v_X) { break; } -> if (_uf_break_v_X) { break; }
-                                        string replaced = lineContent.Replace($"if ({breakCondVar})", $"if ({ufBreakVar})");
-                                        result.AppendLine(replaced);
-                                    }
-                                    else
-                                    {
-                                        result.AppendLine(lineContent);
-                                    }
-                                }
-                                i = loopEnd;
-                                continue;
-                            }
-                            else
-                            {
-                                if (WebGPU.Backend.WebGPUBackend.VerboseLogging)
-                                    Console.WriteLine($"[GridStrideFix] MARKER found but no break condition pattern in loop {loopStart}-{loopEnd}");
-                                // Fall through to emit the loop as-is
-                                result.AppendLine(lines[i].TrimEnd('\r'));
-                                continue;
-                            }
-                        }
-                    }
-                    // If marker didn't match expected pattern, skip the comment line
-                    // (don't emit it to output)
-                    continue;
-                }
-
-                // ─── FALLBACK: Original regex-based detection for unmarked loops ───
-                // Detect "loop {"
-                if (trimmed == "loop {")
-                {
-                    // Find the matching closing brace by counting braces
-                    int loopStart = i;
-                    int braceCount = 1;
-                    int loopEnd = -1;
-                    for (int j = i + 1; j < lines.Length && braceCount > 0; j++)
-                    {
-                        string lt = lines[j].TrimEnd('\r');
-                        foreach (char c in lt)
-                        {
-                            if (c == '{') braceCount++;
-                            else if (c == '}') braceCount--;
-                        }
-                        if (braceCount == 0) loopEnd = j;
-                    }
-
-                    if (loopEnd < 0)
-                    {
-                        result.AppendLine(lines[i].TrimEnd('\r'));
-                        continue;
-                    }
-
-                    // Check if this loop contains workgroupBarrier()
-                    bool hasBarrier = false;
-                    for (int j = loopStart + 1; j < loopEnd; j++)
-                    {
-                        if (lines[j].Contains("workgroupBarrier()"))
-                        {
-                            hasBarrier = true;
-                            break;
-                        }
-                    }
-
-                    if (!hasBarrier)
-                    {
-                        // No barrier in this loop, output as-is
-                        result.AppendLine(lines[i].TrimEnd('\r'));
-                        continue;
-                    }
-                    if (WebGPU.Backend.WebGPUBackend.VerboseLogging)
-                        Console.WriteLine($"[GridStrideFix] Found barrier loop at lines {loopStart}-{loopEnd}");
-
-                    // This loop has barriers. Find the break condition pattern and group counter.
-                    // Pattern: "v_X = v_Y < v_Z;" (the compare, within first ~5 lines of loop body)
-                    // Followed by: "if (!v_X) {" ... "break;" ... "}" 
-                    string breakCondVar = null;
-                    string threadCounterVar = null;
-                    string limitVar = null;
-                    string compOp = null;
-                    int breakCondLine = -1;
-                    bool breakIsNegated = false;
-
-                    // Look for the compare + break pattern in the first ~100 lines of the loop
-                    // (can be far from loop { due to inlined code blocks)
-                    for (int j = loopStart + 1; j < Math.Min(loopStart + 100, loopEnd); j++)
-                    {
-                        string lt = lines[j].TrimEnd('\r').Trim();
-                        // Match any comparison: v_X = v_Y <op> v_Z;
-                        var compareMatch = System.Text.RegularExpressions.Regex.Match(lt,
-                            @"^(?:let\s+)?(\w+)\s*=\s*(\w+)\s*(<|<=|>|>=)\s*(\w+)\s*;$");
-                        if (compareMatch.Success)
-                        {
-                            // Check if the next few lines have "if (!<var>) { break; }" or "if (<var>) { break; }"
-                            for (int k = j + 1; k < Math.Min(j + 5, loopEnd); k++)
-                            {
-                                string kt = lines[k].TrimEnd('\r').Trim();
-                                if (kt.Contains("break;") || kt.Contains("break ;"))
-                                {
-                                    breakCondVar = compareMatch.Groups[1].Value;
-                                    threadCounterVar = compareMatch.Groups[2].Value;
-                                    compOp = compareMatch.Groups[3].Value;
-                                    limitVar = compareMatch.Groups[4].Value;
-                                    breakCondLine = j;
-                                    // Detect negation by scanning ALL lines from compare to break
-                                    for (int n = j + 1; n <= k; n++)
-                                    {
-                                        string nt = lines[n].TrimEnd('\r').Trim();
-                                        if (nt.Contains($"!{breakCondVar}") || nt.Contains($"! {breakCondVar}"))
-                                        {
-                                            breakIsNegated = true;
-                                            break;
-                                        }
-                                    }
-                                    break;
-                                }
-                            }
-                            if (breakCondLine >= 0) break;
-                        }
-                    }
-
-                    if (breakCondLine < 0)
-                    {
-                        // No break condition found, output as-is
-                        if (WebGPU.Backend.WebGPUBackend.VerboseLogging)
-                        {
-                            Console.WriteLine($"[GridStrideFix] NO break condition found in first 10 lines of barrier loop {loopStart}-{loopEnd}");
-                            for (int dbg = loopStart + 1; dbg < Math.Min(loopStart + 10, loopEnd); dbg++)
-                                Console.WriteLine($"  line {dbg}: {lines[dbg].TrimEnd('\r').Trim()}");
-                        }
-                        result.AppendLine(lines[i].TrimEnd('\r'));
-                        continue;
-                    }
-                    if (WebGPU.Backend.WebGPUBackend.VerboseLogging)
-                        Console.WriteLine($"[GridStrideFix] Found break: {breakCondVar} = {threadCounterVar} < {limitVar} at line {breakCondLine}");
-
-                    // Now find the group counter near the end of the loop.
-                    // Two patterns to detect:
-                    // 1. Direct: "v_G = v_G + v_N;" (self-increment)
-                    // 2. Indirect: "v_T = v_G + v_N;" then "v_G = v_T;" (via temp var)
-                    string groupCounterVar = null;
-
-                    // Scan BACKWARDS from loopEnd using brace-depth tracking.
-                    // Only consider variables at brace depth 0 (direct loop scope).
-                    // This prevents picking up variables from inlined helper blocks
-                    // (e.g., ExclusiveScan) that are scoped inside nested { } blocks.
-                    var simpleAssignments = new Dictionary<string, string>(); // target -> source
-                    var additionSources = new Dictionary<string, string>(); // tempResult -> leftOperand
-                    int scanDepth = 0; // tracks nesting depth (going backwards: } increments, { decrements)
-                    for (int j = loopEnd - 1; j >= Math.Max(loopStart + 1, loopEnd - 100); j--)
-                    {
-                        string lt = lines[j].TrimEnd('\r').Trim();
-                        
-                        // Update brace depth (scanning backwards)
-                        foreach (char c in lt)
-                        {
-                            if (c == '}') scanDepth++;
-                            else if (c == '{') scanDepth--;
-                        }
-                        // Skip lines inside nested scopes
-                        if (scanDepth > 0) continue;
-
-                        // Direct self-increment: "v_G = v_G + v_N;"
-                        var directMatch = System.Text.RegularExpressions.Regex.Match(lt,
-                            @"^(\w+)\s*=\s*\1\s*\+\s*(\w+)\s*;$");
-                        if (directMatch.Success)
-                        {
-                            string candidate = directMatch.Groups[1].Value;
-                            if (candidate == threadCounterVar) continue;
-                            groupCounterVar = candidate;
-                            break;
-                        }
-                        // Addition: "v_T = v_X + v_N;"
-                        var addMatch = System.Text.RegularExpressions.Regex.Match(lt,
-                            @"^(?:let\s+)?(\w+)\s*=\s*(\w+)\s*\+\s*(\w+)\s*;$");
-                        if (addMatch.Success)
-                        {
-                            additionSources[addMatch.Groups[1].Value] = addMatch.Groups[2].Value;
-                            continue;
-                        }
-                        // Simple assignment: "v_G = v_T;"
-                        var assignMatch = System.Text.RegularExpressions.Regex.Match(lt,
-                            @"^(\w+)\s*=\s*(\w+)\s*;$");
-                        if (assignMatch.Success)
-                        {
-                            simpleAssignments[assignMatch.Groups[1].Value] = assignMatch.Groups[2].Value;
-                        }
-                    }
-
-                    // If no direct self-increment found, check for indirect pattern:
-                    // v_T = v_G + v_N; then v_G = v_T; → means v_G is the counter
-                    if (groupCounterVar == null)
-                    {
-                        foreach (var assign in simpleAssignments)
-                        {
-                            string target = assign.Key;    // v_G
-                            string source = assign.Value;  // v_T
-                            // Skip the thread counter
-                            if (target == threadCounterVar)
-                                continue;
-                            // Check if v_T = v_G + v_N was seen (i.e., source was computed from target)
-                            if (additionSources.TryGetValue(source, out string addLeft) && addLeft == target)
-                            {
-                                groupCounterVar = target;
-                                break;
-                            }
-                        }
-                    }
-                    if (WebGPU.Backend.WebGPUBackend.VerboseLogging)
-                    {
-                        if (groupCounterVar != null)
-                        {
-                            Console.WriteLine($"[GridStrideFix] Found group counter: {groupCounterVar} (thread={threadCounterVar})");
-                        }
-                        else
-                        {
-                            Console.WriteLine($"[GridStrideFix] NO group counter found. assigns={simpleAssignments.Count}, additions={additionSources.Count}, thread={threadCounterVar}");
-                            foreach (var a in simpleAssignments)
-                                Console.WriteLine($"[GridStrideFix]   assign: {a.Key} = {a.Value}");
-                            foreach (var a in additionSources)
-                                Console.WriteLine($"[GridStrideFix]   add: {a.Key} = {a.Value} + ...");
-                        }
-                    }
-
-                    // Determine the uniform expression for the break condition
-                    string uniformExpr;
-                    if (groupCounterVar != null)
-                    {
-                        // Grid-stride loop: use group counter * workgroup_size for uniform check
-                        uniformExpr = $"({groupCounterVar} * i32(workgroup_size.x)) {compOp} {limitVar}";
-                        if (WebGPU.Backend.WebGPUBackend.VerboseLogging)
-                            Console.WriteLine($"[GridStrideFix] TRANSFORMING (grid-stride): {breakCondVar} -> ({groupCounterVar} * workgroup_size.x) {compOp} {limitVar}");
-                    }
-                    else
-                    {
-                        // No SEPARATE group counter found.
-                        // Check if the thread counter itself self-increments by a uniform stride.
-                        // If so, we can derive a uniform break by subtracting local_id.x:
-                        //   thread_counter = local_id.x + iteration * (num_workgroups * workgroup_size)
-                        //   uniform_base = thread_counter - local_id.x  (same for all threads)
-                        //   uniform_break = uniform_base < limit
-                        bool threadSelfIncrements = false;
-                        if (threadCounterVar != null)
-                        {
-                            // Check the additionSources: is there v_T = v_33 + ... ?
-                            foreach (var add in additionSources)
-                            {
-                                if (add.Value == threadCounterVar)
-                                {
-                                    // v_T = threadCounter + stride
-                                    // Check if threadCounter = v_T (assignment)
-                                    if (simpleAssignments.TryGetValue(threadCounterVar, out string assignSource) && 
-                                        assignSource == add.Key)
-                                    {
-                                        threadSelfIncrements = true;
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-
-                        if (threadSelfIncrements)
-                        {
-                            // Thread counter self-increments by uniform stride.
-                            // Derive uniform break: (thread_counter - i32(local_id.x)) < limit
-                            uniformExpr = $"({threadCounterVar} - i32(local_id.x)) {compOp} {limitVar}";
-                            if (WebGPU.Backend.WebGPUBackend.VerboseLogging)
-                                Console.WriteLine($"[GridStrideFix] TRANSFORMING (local_id-subtract): {breakCondVar} -> ({threadCounterVar} - local_id.x) {compOp} {limitVar}");
-                        }
-                        else
-                        {
-                            // Can't determine uniform expression — skip transform.
-                            if (WebGPU.Backend.WebGPUBackend.VerboseLogging)
-                                Console.WriteLine($"[GridStrideFix] SKIPPING (no group counter, no self-increment for thread={threadCounterVar})");
-                            result.AppendLine(lines[i].TrimEnd('\r'));
-                            continue;
-                        }
-                    }
-
-                    // Transform: replace the break condition with a fresh `let` binding.
-                    string ufBreakVar = $"_uf_break_{breakCondVar}";
-                    for (int j = loopStart; j <= loopEnd; j++)
-                    {
-                        string lineContent = lines[j].TrimEnd('\r');
-                        if (j == breakCondLine)
-                        {
-                            int contentStart = lineContent.Length - lineContent.TrimStart().Length;
-                            string indentStr = lineContent.Substring(0, contentStart);
-                            result.AppendLine($"{indentStr}let {ufBreakVar} = {uniformExpr};");
-                        }
-                        else if (breakIsNegated && (lineContent.Contains($"!{breakCondVar}") || lineContent.Contains($"! {breakCondVar}")))
-                        {
-                            string replaced = lineContent.Replace($"!{breakCondVar}", $"!{ufBreakVar}");
-                            replaced = replaced.Replace($"! {breakCondVar}", $"! {ufBreakVar}");
-                            result.AppendLine(replaced);
-                        }
-                        else if (!breakIsNegated && lineContent.Contains($"if ({breakCondVar})")
-                                 && !lineContent.Contains($"if (!{breakCondVar})"))
-                        {
-                            string replaced = lineContent.Replace($"if ({breakCondVar})", $"if ({ufBreakVar})");
-                            result.AppendLine(replaced);
-                        }
-                        else
-                        {
-                            result.AppendLine(lineContent);
-                        }
-                    }
-
-                    // Skip the lines we already output
-                    i = loopEnd;
-                    continue;
-                }
-
-                result.AppendLine(lines[i].TrimEnd('\r'));
+                pos = idx + 1;
             }
-
-            return result.ToString();
+            return false;
         }
+
+        private static bool IsWordChar(char c) => char.IsLetterOrDigit(c) || c == '_';
+
+        // FixGridStrideLoopUniformity — DELETED (Phase 0.4)
+        // The regex-based post-processing pass has been replaced by direct
+        // uniform break emission in GenerateLoopConstruct() with proper
+        // tile loop vs grid-stride loop classification.
+        // See: ClassifyLoopType(), TryRemoveGroupIndex(), FindPhiInitValue()
+
 
         /// <summary>
         /// Infers the WGSL type from an expression string for post-processing var declarations.
@@ -5949,7 +5541,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             // exactly which variable to use for the uniform break condition.
             // ═══════════════════════════════════════════════════════════════════
 
-            bool loopHasIRBarriers = LoopContainsBarrier(loopNode);
+            bool loopHasIRBarriers = UniformityAnalyzer.LoopContainsBarrier(loopNode);
 
             // ═══════════════════════════════════════════════════════════════════
             // IR-Level Uniformity Analysis — Direct Emission
@@ -5960,7 +5552,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             // ═══════════════════════════════════════════════════════════════════
             
             // Maps phi Value → classification result
-            var phiClassifications = new Dictionary<Value, BuiltinTraceResult>();
+            var phiClassifications = new Dictionary<Value, Backend.BuiltinTraceResult>();
             // Maps phi Value → emitted WGSL variable name
             var phiVarNames = new Dictionary<Value, string>();
             // Track identified group/thread counters
@@ -5982,17 +5574,17 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                         Console.WriteLine($"[UniformityDirect]   Found phi: {varName} with {phi.Nodes.Length} nodes");
                     
                     // Combine ALL phi node results before classifying.
-                    BuiltinTraceResult phiResult = BuiltinTraceResult.Unknown;
+                    var phiResult = BuiltinTraceResult.Unknown;
                     for (int phiIdx = 0; phiIdx < phi.Nodes.Length; phiIdx++)
                     {
                         var resolved = phi.Nodes[phiIdx].Resolve();
                         if (resolved == phi) continue;
-                        var traceResult = TraceToBuiltinSource(resolved, 8);
+                        var traceResult = UniformityAnalyzer.TraceToBuiltinSource(resolved, 8);
                         
                         if (WebGPU.Backend.WebGPUBackend.VerboseLogging)
                             Console.WriteLine($"[UniformityDirect]     Node[{phiIdx}] type={resolved.GetType().Name} -> {traceResult}");
                         
-                        phiResult = CombineTraceResults(phiResult, traceResult);
+                        phiResult = UniformityAnalyzer.CombineTraceResults(phiResult, traceResult);
                     }
                     
                     if (WebGPU.Backend.WebGPUBackend.VerboseLogging)
@@ -6019,14 +5611,35 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             if (WebGPU.Backend.WebGPUBackend.VerboseLogging)
                 Console.WriteLine($"[UniformityDirect] Result: group={groupCounterName ?? "null"}, thread={threadCounterName ?? "null"}");
 
-            // ─── Pre-loop analysis: determine if synthetic group counter is needed ───
+            // ─── Classify loop type by analyzing the counter increment ───
+            // Tile loops (step = GroupDimension / workgroup_size) have uniform
+            // iteration counts — all threads break at the same iteration. No
+            // synthetic counter needed.
+            // Grid-stride loops (step involves GridDimension) DO need the
+            // synthetic counter when the loop contains barriers.
+            LoopType loopType = LoopType.Unknown;
+            if (threadCounterPhi is PhiValue tcPhi)
+            {
+                loopType = UniformityAnalyzer.ClassifyLoopType(tcPhi, loopNode);
+                if (WebGPU.Backend.WebGPUBackend.VerboseLogging)
+                    Console.WriteLine($"[UniformityDirect] Loop classified as: {loopType}");
+            }
+
+            // ─── Pre-loop analysis: determine if synthetic uniform counter is needed ───
             // We must analyze the break condition BEFORE emitting `loop {` so we can
             // emit the synthetic counter initialization before the loop opens.
+            //
+            // For TILE LOOPS: use a uniform counter derived from the phi's init with
+            // GroupIndex (local_invocation_id) stripped. The counter tracks the same
+            // iteration pattern as thread 0, and all threads break at the same iteration.
+            //
+            // For GRID-STRIDE LOOPS: use the existing group_id-based counter.
             bool needsSyntheticGroupCounter = false;
+            bool isTileLoopCounter = false;
             string syntheticGroupCounterVar = null;
-            
+
             var terminator = headerBlock.Terminator;
-            if (terminator is global::ILGPU.IR.Values.IfBranch preCheckBranch && 
+            if (terminator is global::ILGPU.IR.Values.IfBranch preCheckBranch &&
                 threadCounterName != null && groupCounterName == null)
             {
                 var condValue = preCheckBranch.Condition.Resolve();
@@ -6036,27 +5649,59 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     string preRightVar = Load(preCompare.Right).ToString();
                     bool leftIsThread = (preLeftVar == threadCounterName);
                     bool rightIsThread = (preRightVar == threadCounterName);
-                    
+
                     if (leftIsThread || rightIsThread)
                     {
                         string threadType = threadCounterPhi != null ? TypeGenerator[threadCounterPhi.Type] : null;
                         if (threadType == "i32" || threadType == "u32")
                         {
-                            needsSyntheticGroupCounter = true;
-                            syntheticGroupCounterVar = "_uf_group_iter";
-                            // Use linearized group index for 1D kernels with 2D dispatch fallback.
-                            // For true 2D/3D kernels, use group_id.x directly.
-                            if (ShouldLinearizeGridX())
+                            bool usedTileCounter = false;
+
+                            if (loopType == LoopType.TileLoop && threadCounterPhi is PhiValue tilePhi)
                             {
-                                AppendLine($"var {syntheticGroupCounterVar} : i32 = i32(group_id.x + group_id.y * num_workgroups.x);");
-                            }
-                            else
-                            {
-                                AppendLine($"var {syntheticGroupCounterVar} : i32 = i32(group_id.x);");
+                                // ── Tile loop: build uniform counter from phi init ──
+                                // The phi init is e.g. base + Group.IdxX + Group.DimX.
+                                // Strip GroupIndex to get: base + Group.DimX (uniform).
+                                // This tracks thread 0's counter value at each iteration.
+                                var initValue = UniformityAnalyzer.FindPhiInitValue(tilePhi, loopNode);
+                                string uniformInit = initValue != null
+                                    ? UniformityAnalyzer.TryRemoveGroupIndex(initValue, v => Load(v).ToString())
+                                    : null;
+
+                                if (uniformInit != null && uniformInit != "")
+                                {
+                                    needsSyntheticGroupCounter = true;
+                                    isTileLoopCounter = true;
+                                    syntheticGroupCounterVar = "_uf_tile_iter";
+                                    AppendLine($"var {syntheticGroupCounterVar} : i32 = {uniformInit};");
+                                    usedTileCounter = true;
+
+                                    if (WebGPU.Backend.WebGPUBackend.VerboseLogging)
+                                        Console.WriteLine($"[UniformityDirect] TILE LOOP counter: var {syntheticGroupCounterVar} = {uniformInit}");
+                                }
+                                else if (WebGPU.Backend.WebGPUBackend.VerboseLogging)
+                                {
+                                    Console.WriteLine($"[UniformityDirect] TILE LOOP: failed to decompose init, falling back to grid-stride counter");
+                                }
                             }
 
-                            if (WebGPU.Backend.WebGPUBackend.VerboseLogging)
-                                Console.WriteLine($"[UniformityDirect] SYNTHETIC counter: var {syntheticGroupCounterVar} (linearized={ShouldLinearizeGridX()})");
+                            if (!usedTileCounter)
+                            {
+                                // ── Grid-stride / Unknown / tile fallback: existing behavior ──
+                                needsSyntheticGroupCounter = true;
+                                syntheticGroupCounterVar = "_uf_group_iter";
+                                if (ShouldLinearizeGridX())
+                                {
+                                    AppendLine($"var {syntheticGroupCounterVar} : i32 = i32(group_id.x + group_id.y * num_workgroups.x);");
+                                }
+                                else
+                                {
+                                    AppendLine($"var {syntheticGroupCounterVar} : i32 = i32(group_id.x);");
+                                }
+
+                                if (WebGPU.Backend.WebGPUBackend.VerboseLogging)
+                                    Console.WriteLine($"[UniformityDirect] SYNTHETIC counter: var {syntheticGroupCounterVar} (linearized={ShouldLinearizeGridX()})");
+                            }
                         }
                     }
                 }
@@ -6086,11 +5731,11 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 // ─── Uniform break emission ─────────────────────────────────
                 // If the break condition uses a non-uniform counter, emit a
                 // uniform replacement directly. This avoids the need for
-                // post-processing regex. The uniform break is always safe to
-                // emit — if the loop doesn't actually contain barriers, the
-                // uniform break is still correct (just unnecessary).
-                // We ONLY emit for loops where we identified a thread counter
-                // AND the condition actually compares against it.
+                // post-processing regex.
+                // For tile loops: use the tile counter with DIRECT comparison
+                // (no * workgroup_size.x scaling — the tile counter already
+                // tracks thread 0's absolute position).
+                // For grid-stride loops: use the group counter * workgroup_size.
                 string breakConditionExpr = null;
                 if ((trueIsExit || falseIsExit) && threadCounterName != null)
                 {
@@ -6112,8 +5757,18 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                         {
                             string limitVar = leftIsThread ? rightVar : leftVar;
                             string uniformExpr = null;
-                            
-                            if (groupCounterName != null)
+
+                            if (isTileLoopCounter && syntheticGroupCounterVar != null)
+                            {
+                                // ── Tile loop: direct comparison ──
+                                // The tile counter tracks thread 0's absolute position,
+                                // so compare directly against the limit (no scaling).
+                                if (leftIsThread)
+                                    uniformExpr = $"{syntheticGroupCounterVar} {compOp} {limitVar}";
+                                else
+                                    uniformExpr = $"{limitVar} {compOp} {syntheticGroupCounterVar}";
+                            }
+                            else if (groupCounterName != null)
                             {
                                 // Has a separate uniform group counter
                                 // Use: (groupCounter * workgroup_size) op limit
@@ -6131,7 +5786,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                                 // GUARD: Only valid for scalar i32 counters (not vec2/vec3)
                                 string threadType = threadCounterPhi != null ? TypeGenerator[threadCounterPhi.Type] : null;
                                 bool isScalarInt = threadType == "i32" || threadType == "u32";
-                                
+
                                 if (isScalarInt)
                                 {
                                     // We need the synthetic counter — mark for init and increment
@@ -6216,15 +5871,23 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 GenerateStructuredCodeRecursive(uBranch.Target, headerBlock, pd, visited, loopNode);
             }
 
-            // If we used a synthetic group counter, emit its increment
+            // If we used a synthetic counter, emit its increment
             // at the end of the loop body (before PopIndent/closing brace).
             if (needsSyntheticGroupCounter && syntheticGroupCounterVar != null)
             {
-                // Use linearized workgroup count for 1D kernels with 2D dispatch fallback.
-                if (ShouldLinearizeGridX())
-                    AppendLine($"{syntheticGroupCounterVar} = {syntheticGroupCounterVar} + i32(num_workgroups.x * num_workgroups.y);");
+                if (isTileLoopCounter)
+                {
+                    // Tile loop: step by workgroup_size (same as the actual loop step)
+                    AppendLine($"{syntheticGroupCounterVar} = {syntheticGroupCounterVar} + i32(workgroup_size.x);");
+                }
                 else
-                    AppendLine($"{syntheticGroupCounterVar} = {syntheticGroupCounterVar} + i32(num_workgroups.x);");
+                {
+                    // Grid-stride: step by num_workgroups
+                    if (ShouldLinearizeGridX())
+                        AppendLine($"{syntheticGroupCounterVar} = {syntheticGroupCounterVar} + i32(num_workgroups.x * num_workgroups.y);");
+                    else
+                        AppendLine($"{syntheticGroupCounterVar} = {syntheticGroupCounterVar} + i32(num_workgroups.x);");
+                }
             }
 
             PopIndent();
@@ -6232,189 +5895,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         }
 
 
-        // ═══════════════════════════════════════════════════════════════════
-        // IR-Level Uniformity Analysis Helpers
-        // ═══════════════════════════════════════════════════════════════════
-
-        /// <summary>
-        /// Result of tracing an IR value to its builtin source.
-        /// Used to classify loop counter variables for uniformity analysis.
-        /// </summary>
-        private enum BuiltinTraceResult
-        {
-            /// <summary>No builtin source found (e.g., parameter, constant, or trace depth exceeded).</summary>
-            Unknown,
-            /// <summary>Traces to GridIndexValue (group_id) — UNIFORM within a workgroup.</summary>
-            GridIndex,
-            /// <summary>Traces to GroupIndexValue (local_id) — NON-UNIFORM (per-thread).</summary>
-            GroupIndex,
-            /// <summary>Traces to GridDimensionValue (num_workgroups) — UNIFORM.</summary>
-            GridDimension,
-            /// <summary>Traces to GroupDimensionValue (workgroup_size) — UNIFORM.</summary>
-            GroupDimension,
-            /// <summary>Traces to mixed sources including at least one non-uniform source.</summary>
-            MixedNonUniform
-        }
-
-        /// <summary>
-        /// Recursively traces an IR value to find if it originates from a device builtin.
-        /// This is used to determine whether a loop counter phi variable derives from
-        /// group_id (uniform) or local_id (non-uniform).
-        /// </summary>
-        /// <param name="value">The IR value to trace.</param>
-        /// <param name="maxDepth">Maximum recursion depth to prevent infinite loops.</param>
-        /// <returns>The builtin classification of the value's origin.</returns>
-        private BuiltinTraceResult TraceToBuiltinSource(global::ILGPU.IR.Value value, int maxDepth)
-        {
-            if (maxDepth <= 0) return BuiltinTraceResult.Unknown;
-
-            // Direct builtin matches
-            if (value is global::ILGPU.IR.Values.GridIndexValue)
-                return BuiltinTraceResult.GridIndex;
-            if (value is global::ILGPU.IR.Values.GroupIndexValue)
-                return BuiltinTraceResult.GroupIndex;
-            if (value is global::ILGPU.IR.Values.GridDimensionValue)
-                return BuiltinTraceResult.GridDimension;
-            if (value is global::ILGPU.IR.Values.GroupDimensionValue)
-                return BuiltinTraceResult.GroupDimension;
-
-            // Unary operations preserve the source classification
-            if (value is global::ILGPU.IR.Values.UnaryArithmeticValue unary)
-                return TraceToBuiltinSource(unary.Value.Resolve(), maxDepth - 1);
-
-            // Convert operations preserve the source
-            if (value is global::ILGPU.IR.Values.ConvertValue convert)
-                return TraceToBuiltinSource(convert.Value.Resolve(), maxDepth - 1);
-
-            // Binary operations: combine both operands' classifications
-            if (value is global::ILGPU.IR.Values.BinaryArithmeticValue binary)
-            {
-                var left = TraceToBuiltinSource(binary.Left.Resolve(), maxDepth - 1);
-                var right = TraceToBuiltinSource(binary.Right.Resolve(), maxDepth - 1);
-                return CombineTraceResults(left, right);
-            }
-
-            // CompareValue: check both sides
-            if (value is global::ILGPU.IR.Values.CompareValue compare)
-            {
-                var left = TraceToBuiltinSource(compare.Left.Resolve(), maxDepth - 1);
-                var right = TraceToBuiltinSource(compare.Right.Resolve(), maxDepth - 1);
-                return CombineTraceResults(left, right);
-            }
-
-            // PhiValue: check all node values (not Sources, which are predecessor blocks)
-            if (value is PhiValue phi)
-            {
-                BuiltinTraceResult combined = BuiltinTraceResult.Unknown;
-                for (int idx = 0; idx < phi.Nodes.Length; idx++)
-                {
-                    var nodeVal = phi.Nodes[idx].Resolve();
-                    // Skip self-references to avoid infinite recursion in loops
-                    if (nodeVal == phi) continue;
-                    var result = TraceToBuiltinSource(nodeVal, maxDepth - 1);
-                    combined = CombineTraceResults(combined, result);
-                }
-                return combined;
-            }
-
-            // MethodCall: trace through all arguments (result is uniform if all args are uniform)
-            // This handles grid stride computations like num_workgroups * workgroup_size
-            if (value is global::ILGPU.IR.Values.MethodCall methodCall)
-            {
-                BuiltinTraceResult combined = BuiltinTraceResult.Unknown;
-                for (int idx = 0; idx < methodCall.Nodes.Length; idx++)
-                {
-                    var argVal = methodCall.Nodes[idx].Resolve();
-                    var result = TraceToBuiltinSource(argVal, maxDepth - 1);
-                    combined = CombineTraceResults(combined, result);
-                }
-                return combined;
-            }
-
-            // Broadcast: output is UNIFORM by definition (broadcasts a single value to all threads)
-            // Trace through the source value to determine the classification
-            if (value is global::ILGPU.IR.Values.Broadcast broadcast)
-                return TraceToBuiltinSource(broadcast.Variable.Resolve(), maxDepth - 1);
-
-            // GetField: trace through the source object
-            if (value is GetField getField)
-                return TraceToBuiltinSource(getField.ObjectValue.Resolve(), maxDepth - 1);
-
-            // PrimitiveValue (constants): always uniform
-            if (value is global::ILGPU.IR.Values.PrimitiveValue)
-                return BuiltinTraceResult.Unknown; // Unknown = no builtin source, but not non-uniform
-
-            // Constants and parameters are Unknown (not builtin-sourced)
-            return BuiltinTraceResult.Unknown;
-        }
-
-        /// <summary>
-        /// Combines two trace results. If either contains GroupIndex (non-uniform),
-        /// the result is MixedNonUniform. Otherwise, returns the more specific result.
-        /// </summary>
-        private static BuiltinTraceResult CombineTraceResults(BuiltinTraceResult a, BuiltinTraceResult b)
-        {
-            // If either is explicitly non-uniform, the combination is non-uniform
-            if (a == BuiltinTraceResult.GroupIndex || a == BuiltinTraceResult.MixedNonUniform ||
-                b == BuiltinTraceResult.GroupIndex || b == BuiltinTraceResult.MixedNonUniform)
-                return BuiltinTraceResult.MixedNonUniform;
-
-            // If one is unknown, return the other
-            if (a == BuiltinTraceResult.Unknown) return b;
-            if (b == BuiltinTraceResult.Unknown) return a;
-
-            // Both are uniform builtins — if they're the same type, keep it; 
-            // otherwise return the first (both are uniform, doesn't matter which)
-            return a;
-        }
-
-        /// <summary>
-        /// Checks if any block within a loop node contains a memory barrier instruction.
-        /// This is used to determine if a loop needs uniformity analysis for its break condition.
-        /// </summary>
-        /// <param name="loopNode">The loop analysis node containing all blocks in the loop.</param>
-        /// <returns>True if any block in the loop contains a MemoryBarrier.</returns>
-        private bool LoopContainsBarrier(Loops<ReversePostOrder, Forwards>.Node loopNode)
-        {
-            foreach (var block in loopNode.AllMembers)
-            {
-                foreach (var valueEntry in block)
-                {
-                    if (valueEntry.Value is global::ILGPU.IR.Values.MemoryBarrier)
-                        return true;
-                }
-            }
-            // Note: Barriers in inlined helpers won't appear as IR MemoryBarrier here,
-            // since inlining happens during WGSL code emission (not at the IR level).
-            // The post-processor's text-based "workgroupBarrier()" detection handles those.
-            return false;
-        }
+        // Uniformity analysis methods extracted to UniformityAnalyzer.cs (Phase 1.3)
 
     }
 
-    /// <summary>
-    /// Describes a pipeline-overridable constant for dynamic shared memory sizing.
-    /// </summary>
-    public readonly struct DynamicSharedOverrideInfo
-    {
-        /// <summary>The WGSL override constant name (e.g. "DYNAMIC_SHARED_SIZE_0").</summary>
-        public string ConstantName { get; }
-
-        /// <summary>The WGSL variable name for the shared memory array.</summary>
-        public string VariableName { get; }
-
-        /// <summary>The allocation index within ILGPU's dynamic shared allocation list.</summary>
-        public int AllocaIndex { get; }
-
-        /// <summary>The size of one element in bytes.</summary>
-        public int ElementSize { get; }
-
-        public DynamicSharedOverrideInfo(string constantName, string variableName, int allocaIndex, int elementSize)
-        {
-            ConstantName = constantName;
-            VariableName = variableName;
-            AllocaIndex = allocaIndex;
-            ElementSize = elementSize;
-        }
-    }
 }

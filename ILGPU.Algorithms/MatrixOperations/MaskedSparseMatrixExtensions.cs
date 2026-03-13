@@ -307,12 +307,15 @@ namespace ILGPU.Algorithms.MatrixOperations
             where TProcessor : struct, IMaskedSparseMatrixProcessor<T>
         {
             // Load basic sparse matrix convert kernel
+            var spec = accelerator.AcceleratorType == AcceleratorType.WebGPU
+                ? new KernelSpecialization(accelerator.MaxNumThreadsPerGroup, null)
+                : KernelSpecialization.Empty;
             var kernel = accelerator.LoadKernel<
                 TPredicate,
                 ArrayView2D<T, TStride>,
                 SparseMatrixView<T, TStride>,
                 ArrayView2D<T, TStride>,
-                TProcessor>(MaskedSparseTransposedMatrixMultiplierKernel);
+                TProcessor>(MaskedSparseTransposedMatrixMultiplierKernel, spec);
 
             // Get the optimal group size
             int groupSize = accelerator.EstimateGroupSize(kernel.GetKernel());

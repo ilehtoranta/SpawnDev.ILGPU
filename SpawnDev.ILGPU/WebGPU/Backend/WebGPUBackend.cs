@@ -21,6 +21,44 @@ using System.Text;
 namespace SpawnDev.ILGPU.WebGPU.Backend
 {
     /// <summary>
+    /// Diagnostic categories for WebGPU backend logging.
+    /// Use with <see cref="WebGPUBackend.DiagnosticFlags"/> to enable per-category output.
+    /// </summary>
+    [Flags]
+    public enum WGSLDiagnostics
+    {
+        None = 0,
+        SharedMemory = 1 << 0,
+        Uniformity = 1 << 1,
+        Inlining = 1 << 2,
+        Bindings = 1 << 3,
+        Dispatch = 1 << 4,
+        Compilation = 1 << 5,
+        All = SharedMemory | Uniformity | Inlining | Bindings | Dispatch | Compilation,
+    }
+
+    /// <summary>
+    /// A compiled WGSL shader entry in the registry, keyed by kernel name.
+    /// Provides structural metadata derived from the generated WGSL source.
+    /// </summary>
+    public record WGSLEntry(
+        string KernelName,
+        string Source,
+        int WorkgroupSize,
+        int SharedMemoryBytes,
+        int BindingCount,
+        int LineCount,
+        int EmulationFunctionCount,
+        string[] SharedMemoryVars,
+        bool UsesBarriers,
+        bool UsesAtomics,
+        bool UsesSubgroups,
+        bool UniformityTransformApplied,
+        bool UsesI64Emulation,
+        bool UsesF64Emulation,
+        DateTime Timestamp);
+
+    /// <summary>
     /// WebGPU/WGSL backend for ILGPU.
     /// Compiles ILGPU IR to WGSL shader code using the CodeGeneratorBackend pattern.
     /// </summary>
@@ -36,20 +74,61 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         /// </summary>
         public const BackendType BackendTypeWebGPU = BackendType.WebGPU; // Ensure this matches ILGPU's BackendType enum for WebGPU (if defined)
 
-        /// <summary>
-        /// Controls whether verbose logging is enabled. Set to true to enable console output.
-        /// </summary>
-        public static bool VerboseLogging { get; set; } = false;
+        #region Pre-compiled Regex Patterns
+
+        // @workgroup_size(x[,y[,z]]) extraction
+        private static readonly System.Text.RegularExpressions.Regex s_workgroupSizePattern =
+            new(@"@workgroup_size\((\d+)(?:\s*,\s*(\d+))?(?:\s*,\s*(\d+))?\)",
+                System.Text.RegularExpressions.RegexOptions.Compiled);
+
+        // @workgroup_size(x) — first dimension only
+        private static readonly System.Text.RegularExpressions.Regex s_workgroupSizeSimplePattern =
+            new(@"@workgroup_size\((\d+)",
+                System.Text.RegularExpressions.RegexOptions.Compiled);
+
+        // var<workgroup> shared memory declarations
+        private static readonly System.Text.RegularExpressions.Regex s_sharedMemoryPattern =
+            new(@"var<workgroup>\s+\w+\s*:\s*array<\w+,\s*(\d+)>",
+                System.Text.RegularExpressions.RegexOptions.Compiled);
+
+        #endregion
 
         /// <summary>
-        /// Stores the last generated WGSL source for debugging. Temporary.
+        /// Controls whether verbose logging is enabled. Set to true to enable console output.
+        /// Setting this to true also sets <see cref="DiagnosticFlags"/> to <see cref="WGSLDiagnostics.All"/>.
+        /// </summary>
+        public static bool VerboseLogging
+        {
+            get => DiagnosticFlags != WGSLDiagnostics.None;
+            set => DiagnosticFlags = value ? WGSLDiagnostics.All : WGSLDiagnostics.None;
+        }
+
+        /// <summary>
+        /// Per-category diagnostic flags. Set individual flags to enable focused logging.
+        /// </summary>
+        public static WGSLDiagnostics DiagnosticFlags { get; set; } = WGSLDiagnostics.None;
+
+        /// <summary>
+        /// Stores the last generated WGSL source for debugging.
         /// </summary>
         public static string? LastGeneratedWGSL { get; set; }
 
         /// <summary>
-        /// Stores ALL generated WGSL sources for multi-kernel debugging. Temporary.
+        /// Named registry of all compiled WGSL shaders, keyed by kernel name.
+        /// Replaces the old flat list for instant lookup.
+        /// </summary>
+        public static Dictionary<string, WGSLEntry> WGSLRegistry { get; } = new();
+
+        /// <summary>
+        /// Flat list of all generated WGSL sources (backward-compatible with demo UI).
         /// </summary>
         public static List<string> AllGeneratedWGSL { get; set; } = new List<string>();
+
+        /// <summary>
+        /// When true, emits IR StringValue nodes as WGSL comments (e.g. "// String: index out of range").
+        /// Default false — these comments appear ~42 times per kernel and add noise.
+        /// </summary>
+        public static bool EmitDebugStrings { get; set; } = false;
 
         /// <summary>
         /// Enables shader pipeline caching. Disable for debugging shader compilation issues.
@@ -72,12 +151,122 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         public static bool EnableBufferPooling { get; set; } = false;
 
         /// <summary>
-        /// Logs a message to the console if VerboseLogging is enabled.
+        /// When set, every compiled shader is auto-written to {WGSLDumpPath}/{KernelName}.wgsl.
+        /// Desktop only — ignored in Blazor WASM (use console.log instead).
+        /// </summary>
+        public static string? WGSLDumpPath { get; set; }
+
+        /// <summary>
+        /// When true, runs structural validation on generated WGSL before caching.
+        /// Catches codegen bugs early (missing entry point, undeclared shared memory,
+        /// undefined emulation functions, workgroup_size inconsistencies).
+        /// Default true — validation is cheap relative to GPU shader compilation.
+        /// </summary>
+        public static bool EnableWGSLValidation { get; set; } = true;
+
+        /// <summary>
+        /// Logs a diagnostic message if the specified category is enabled.
+        /// </summary>
+        public static void Diag(WGSLDiagnostics category, string message)
+        {
+            if ((DiagnosticFlags & category) != 0)
+                Console.WriteLine(message);
+        }
+
+        /// <summary>
+        /// Logs a message to the console if any diagnostic flag is set.
         /// </summary>
         public static void Log(string message)
         {
-            if (VerboseLogging)
+            if (DiagnosticFlags != WGSLDiagnostics.None)
                 Console.WriteLine(message);
+        }
+
+        // Pre-compiled patterns for WGSL validation
+        private static readonly System.Text.RegularExpressions.Regex s_fnNamePattern =
+            new(@"fn\s+(\w+)\s*\(",
+                System.Text.RegularExpressions.RegexOptions.Compiled);
+        private static readonly System.Text.RegularExpressions.Regex s_sharedVarDeclPattern =
+            new(@"var<workgroup>\s+(\w+)\s*:",
+                System.Text.RegularExpressions.RegexOptions.Compiled);
+        private static readonly System.Text.RegularExpressions.Regex s_sharedVarRefPattern =
+            new(@"(?<!var<workgroup>\s+)(shared_\d+)\s*\[",
+                System.Text.RegularExpressions.RegexOptions.Compiled);
+
+        /// <summary>
+        /// Validates generated WGSL for structural correctness. Catches codegen bugs
+        /// that would otherwise surface as cryptic GPU errors or silent failures.
+        /// </summary>
+        internal static void ValidateWGSL(string wgslSource, string kernelName)
+        {
+            if (!EnableWGSLValidation) return;
+
+            var errors = new List<string>();
+
+            // 1. Entry point must exist
+            if (!wgslSource.Contains("fn main("))
+                errors.Add("Missing entry point: 'fn main(' not found");
+
+            // 2. @workgroup_size must exist
+            if (!wgslSource.Contains("@workgroup_size("))
+                errors.Add("Missing @workgroup_size attribute");
+
+            // 3. Shared memory vars referenced but not declared
+            var declaredShared = new HashSet<string>();
+            foreach (System.Text.RegularExpressions.Match m in s_sharedVarDeclPattern.Matches(wgslSource))
+                declaredShared.Add(m.Groups[1].Value);
+            foreach (System.Text.RegularExpressions.Match m in s_sharedVarRefPattern.Matches(wgslSource))
+            {
+                var refName = m.Groups[1].Value;
+                if (!declaredShared.Contains(refName))
+                    errors.Add($"Shared memory '{refName}' referenced but not declared");
+            }
+
+            // 4. Emulation functions called but not defined
+            // Only check if emulation types are used
+            if (wgslSource.Contains("emu_i64") || wgslSource.Contains("emu_u64"))
+            {
+                var definedFns = new HashSet<string>();
+                foreach (System.Text.RegularExpressions.Match m in s_fnNamePattern.Matches(wgslSource))
+                    definedFns.Add(m.Groups[1].Value);
+
+                // Check common emulation functions that are called
+                string[] emuFunctions = { "i64_from_i32", "i64_to_i32", "u64_from_u32", "u64_to_u32",
+                    "i64_add", "i64_sub", "i64_mul", "i64_lt", "i64_gt", "i64_le", "i64_ge", "i64_eq",
+                    "i64_ne", "i64_shl", "i64_shr", "i64_and", "i64_or", "i64_xor", "i64_neg",
+                    "i64_min", "i64_max" };
+                foreach (var fn in emuFunctions)
+                {
+                    if (wgslSource.Contains(fn + "(") && !definedFns.Contains(fn))
+                        errors.Add($"Emulation function '{fn}' called but not defined");
+                }
+            }
+            if (wgslSource.Contains("emu_f64") || wgslSource.Contains("f64_"))
+            {
+                var definedFns = new HashSet<string>();
+                foreach (System.Text.RegularExpressions.Match m in s_fnNamePattern.Matches(wgslSource))
+                    definedFns.Add(m.Groups[1].Value);
+
+                string[] emuFunctions = { "f64_from_f32", "f64_to_f32", "f64_add", "f64_sub",
+                    "f64_mul", "f64_div", "f64_neg", "f64_abs", "f64_lt", "f64_gt", "f64_le",
+                    "f64_ge", "f64_eq", "f64_ne", "f64_from_ieee754_bits", "f64_to_ieee754_bits" };
+                foreach (var fn in emuFunctions)
+                {
+                    if (wgslSource.Contains(fn + "(") && !definedFns.Contains(fn))
+                        errors.Add($"Emulation function '{fn}' called but not defined");
+                }
+            }
+
+            if (errors.Count > 0)
+            {
+                var sb = new StringBuilder();
+                sb.Append($"WGSL validation failed for kernel '{kernelName}':");
+                foreach (var e in errors)
+                    sb.Append($"\n  - {e}");
+                var message = sb.ToString();
+                Diag(WGSLDiagnostics.Compilation, $"[WGSLValidation] {message}");
+                throw new InvalidOperationException(message);
+            }
         }
 
         #region Instance
@@ -671,8 +860,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             if (wgslSource.Contains("/*__WGSL_CONST_WORKGROUP_SIZE_PLACEHOLDER__*/"))
             {
                 string wgConst = "const workgroup_size : vec3<u32> = vec3<u32>(64u, 1u, 1u);";
-                var wgMatch = System.Text.RegularExpressions.Regex.Match(
-                    wgslSource, @"@workgroup_size\((\d+)(?:\s*,\s*(\d+))?(?:\s*,\s*(\d+))?\)");
+                var wgMatch = s_workgroupSizePattern.Match(wgslSource);
                 if (wgMatch.Success)
                 {
                     string x = wgMatch.Groups[1].Value;
@@ -683,33 +871,80 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 wgslSource = wgslSource.Replace("/*__WGSL_CONST_WORKGROUP_SIZE_PLACEHOLDER__*/", wgConst);
             }
 
-            // NOTE: FixGridStrideLoopUniformity is now called inside WGSLKernelFunctionGenerator
-            // during code generation, where it has access to __UNIFORMITY_HINT__ markers from
-            // the IR-level analysis. Do NOT call it again here — a second pass would re-process
-            // the already-transformed WGSL without markers, causing the fallback regex path
-            // to corrupt the output.
-
             // Prepend kernel method name as a comment for identification
             var methodName = entryPoint.MethodInfo?.Name ?? "unknown";
             wgslSource = $"// Kernel: {methodName}\n" + wgslSource;
 
+            // Run structural validation before caching
+            ValidateWGSL(wgslSource, methodName);
+
             LastGeneratedWGSL = wgslSource;
             AllGeneratedWGSL.Add(wgslSource);
-            // Always log scan and radix sort kernels for debugging
-            if (methodName.Contains("MultiPassScan") || methodName.Contains("SingleGroupScan")
-                || methodName.Contains("RadixSort") || methodName.Contains("WebGPUScan"))
+
+            // Populate named WGSL registry with structural metadata
+            int regWorkgroupSize = 0;
+            var regWgMatch = s_workgroupSizeSimplePattern.Match(wgslSource);
+            if (regWgMatch.Success)
+                regWorkgroupSize = int.Parse(regWgMatch.Groups[1].Value);
+            int regBindingCount = data.ExpectedBindingCountHolder.Count > 0
+                ? data.ExpectedBindingCountHolder[0] : 0;
+            int regSharedBytes = 0;
+            var sharedVarNames = new List<string>();
+            foreach (var m in s_sharedMemoryPattern.Matches(wgslSource)
+                .Cast<System.Text.RegularExpressions.Match>())
             {
-                Console.WriteLine($"=== WGSL for {methodName} ({wgslSource.Length} chars, {wgslSource.Split('\n').Length} lines) ===");
-                Console.WriteLine(wgslSource);
-                Console.WriteLine($"=== END {methodName} ===");
+                regSharedBytes += int.Parse(m.Groups[1].Value) * 4; // each element is 4 bytes
             }
-            if (VerboseLogging)
+            foreach (var m in s_sharedVarDeclPattern.Matches(wgslSource)
+                .Cast<System.Text.RegularExpressions.Match>())
             {
-                Log("--- GENERATED WGSL ---");
-                Log(wgslSource);
-                Log("-----------------------");
+                sharedVarNames.Add(m.Groups[1].Value);
+            }
+            // Count emulation functions defined in this shader
+            int emuFnCount = 0;
+            foreach (var m in s_fnNamePattern.Matches(wgslSource)
+                .Cast<System.Text.RegularExpressions.Match>())
+            {
+                var fn = m.Groups[1].Value;
+                if (fn.StartsWith("i64_") || fn.StartsWith("u64_") || fn.StartsWith("f64_"))
+                    emuFnCount++;
+            }
+            WGSLRegistry[methodName] = new WGSLEntry(
+                KernelName: methodName,
+                Source: wgslSource,
+                WorkgroupSize: regWorkgroupSize,
+                SharedMemoryBytes: regSharedBytes,
+                BindingCount: regBindingCount,
+                LineCount: wgslSource.Split('\n').Length,
+                EmulationFunctionCount: emuFnCount,
+                SharedMemoryVars: sharedVarNames.ToArray(),
+                UsesBarriers: wgslSource.Contains("workgroupBarrier()"),
+                UsesAtomics: wgslSource.Contains("atomicAdd(") || wgslSource.Contains("atomicMax(") ||
+                    wgslSource.Contains("atomicMin(") || wgslSource.Contains("atomicStore(") ||
+                    wgslSource.Contains("atomicLoad(") || wgslSource.Contains("atomicCompareExchangeWeak("),
+                UsesSubgroups: wgslSource.Contains("enable subgroups;"),
+                UniformityTransformApplied: wgslSource.Contains("_uf_group_iter") || wgslSource.Contains("_uf_tile_iter"),
+                UsesI64Emulation: wgslSource.Contains("emu_i64"),
+                UsesF64Emulation: wgslSource.Contains("emu_f64"),
+                Timestamp: DateTime.UtcNow);
+
+            // Auto-dump WGSL to file if configured (desktop only)
+            if (WGSLDumpPath != null && !OperatingSystem.IsBrowser())
+            {
+                try
+                {
+                    Directory.CreateDirectory(WGSLDumpPath);
+                    File.WriteAllText(Path.Combine(WGSLDumpPath, $"{methodName}.wgsl"), wgslSource);
+                }
+                catch { /* best-effort dump */ }
             }
 
+            Diag(WGSLDiagnostics.Compilation, $"--- GENERATED WGSL ({methodName}) ---");
+            if ((DiagnosticFlags & WGSLDiagnostics.Compilation) != 0)
+            {
+                Console.WriteLine(wgslSource);
+                Console.WriteLine("-----------------------");
+            }
 
             return new WebGPUCompiledKernel(
                 Context,

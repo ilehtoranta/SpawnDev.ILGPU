@@ -266,6 +266,9 @@ namespace ILGPU.Algorithms.Optimization.Optimizers
             Engine = engine;
 
             // Load kernels
+            var spec = accelerator.AcceleratorType == AcceleratorType.WebGPU
+                ? new KernelSpecialization(accelerator.MaxNumThreadsPerGroup, null)
+                : KernelSpecialization.Empty;
             moveParticles = accelerator.LoadKernel<
                 ArrayView<TRandomProvider>,
                 SingleVectorView<TNumericType>,
@@ -275,7 +278,7 @@ namespace ILGPU.Algorithms.Optimization.Optimizers
                 TElementType,
                 TElementType,
                 TElementType,
-                SpecializedValue<Index1D>>(MoveParticlesKernel);
+                SpecializedValue<Index1D>>(MoveParticlesKernel, spec);
         }
 
         /// <summary>

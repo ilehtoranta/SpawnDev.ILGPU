@@ -209,10 +209,13 @@ namespace ILGPU.Algorithms.MatrixOperations
             where TTarget : struct, ISparseMatrixShapeInfoTarget
         {
             // Load basic sparse matrix info kernel
+            var spec = accelerator.AcceleratorType == AcceleratorType.WebGPU
+                ? new KernelSpecialization(accelerator.MaxNumThreadsPerGroup, null)
+                : KernelSpecialization.Empty;
             var kernel = accelerator.LoadKernel<
                 LongIndex2D,
                 TPredicate,
-                TTarget>(SparseMatrixShapeInfoKernel);
+                TTarget>(SparseMatrixShapeInfoKernel, spec);
 
             // Determine the optimal group size for this kernel
             int groupSize = accelerator.EstimateGroupSize(kernel.GetKernel());

@@ -63,7 +63,33 @@ Unit tests live in `SpawnDev.ILGPU.Demo.Shared/UnitTests/`. The abstract base cl
 - **Desktop** (`SpawnDev.ILGPU.ConsoleDemo/`): `CudaTests`, `OpenCLTests`, `DesktopCPUTests` — run via `dotnet run --project SpawnDev.ILGPU.ConsoleDemo`
 - **Browser** (`SpawnDev.ILGPU.Demo/`): `WebGPUTests`, `WebGLTests`, `WasmTests`, `DefaultTests` — run via the Blazor WASM demo app's `/tests` route
 
-The `PlaywrightTestRunner/` project exists but should **not** be used for now. Test browser backends by running the demo app and navigating to `/tests` manually.
+### PlaywrightMultiTest (unified test runner)
+
+`PlaywrightMultiTest/` is an NUnit + Playwright .NET project that runs **all** tests (desktop and browser) in a single `dotnet test` invocation.
+
+```bash
+# Run all desktop + browser tests together (with timestamped results)
+timestamp=$(date +%Y%m%d_%H%M%S) && dotnet test PlaywrightMultiTest/PlaywrightMultiTest.csproj --logger "trx;LogFileName=results_${timestamp}.trx" --results-directory PlaywrightMultiTest/TestResults
+```
+
+Test results are persisted as timestamped `.trx` files in `PlaywrightMultiTest/TestResults/` to track changes between runs.
+
+**How it works:**
+- `ProjectDiscovery` scans the workspace for projects containing a `<PlaywrightMultiTest>` element in their `.csproj`
+- **Blazor WASM projects**: publishes the app, starts an HTTPS static file server, launches Chromium via Playwright (with `--enable-unsafe-webgpu`), navigates to the test page, and enumerates tests from the DOM
+- **Console/Exe projects**: publishes the app, runs the binary to enumerate tests, then runs each test individually as a subprocess
+- All discovered tests are surfaced as NUnit `TestCaseSource` entries, so standard NUnit filtering works (`--filter`)
+- The old `PlaywrightTestRunner/` project is deprecated and replaced by this
+
+## Engineering Philosophy
+
+**Treat performance as a first-class concern alongside correctness.** Correctness is non-negotiable, but performance is a close second — kernels may be dispatched thousands of times per second for real-time data processing. Every code path, generated shader, and runtime decision must be evaluated for both.
+
+- **No workarounds that mask underlying problems.** If a bug exists, fix the root cause. Workarounds hide issues that will surface elsewhere under different conditions.
+- **Quality, long-term code only.** Every change must handle edge cases robustly. Prefer solutions that work for all inputs over ones that work for common inputs.
+- **Understand the runtime cost model.** Shader modules are cached after first compilation — WGSL/GLSL size affects first-dispatch latency, not steady-state throughput. The GPU shader compiler (Tint/naga/driver) performs its own optimization. The transpiler's job is to produce correct, reasonably-sized shader code and let the GPU compiler handle instruction-level optimization.
+- **Generated shader quality matters.** Minimize bloat in generated WGSL/GLSL: deduplicate emulation libraries, hoist constants, eliminate dead variables. Cleaner shaders compile faster on first dispatch and are dramatically easier to debug.
+- **Transpiler efficiency matters for dynamic compilation.** When kernels are compiled with varying type parameters at runtime, C# transpiler performance directly impacts user-visible latency. Avoid regex in hot paths, pool allocations, pre-compute what can be pre-computed.
 
 ## Critical Constraints
 
@@ -72,3 +98,5 @@ The `PlaywrightTestRunner/` project exists but should **not** be used for now. T
 - **WebGPU batched submission** — `WebGPUStream` uses deferred encode + flush pattern
 - **Cross-backend impact** — changes to shared code (especially in `ILGPU/`) affect all 6 backends; consider all of them before modifying
 - **No quick fixes** — every change must be well thought out; for complex fixes, plan before implementing
+- **Do not hardcode hardware limits that are evolving** — e.g., WebGPU's 4GB buffer limit is being lifted; preserve full i64 index paths rather than assuming 32-bit indices are always sufficient
+- **Emulation paths must remain functional** — i64/u64 emulation cannot be disabled because ILGPU's IR uses Int64 for ArrayView.Length and indices; the choice is which emulation method to use (Dekker vs Ozaki for f64), not whether to emulate

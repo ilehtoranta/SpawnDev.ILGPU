@@ -6,6 +6,10 @@
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>enable</Nullable>
 		<AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+		<!-- mark as testable by PlaywrightMultiTest -->
+		<PlaywrightMultiTest>
+
+		</PlaywrightMultiTest>
 	</PropertyGroup>
 
 	<ItemGroup>
@@ -13,7 +17,6 @@
 		<ProjectReference Include="..\SpawnDev.ILGPU.Demo.Shared\SpawnDev.ILGPU.Demo.Shared.csproj" />
 		<ProjectReference Include="..\ILGPU\ILGPU.csproj" />
 		<ProjectReference Include="..\ILGPU.Algorithms\ILGPU.Algorithms.csproj" />
-		<PackageReference Include="SpawnDev.UnitTesting" Version="2.0.0" />
 	</ItemGroup>
 
 </Project>

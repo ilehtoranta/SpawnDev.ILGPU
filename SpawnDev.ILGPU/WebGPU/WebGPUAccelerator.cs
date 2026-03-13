@@ -18,6 +18,25 @@ namespace SpawnDev.ILGPU.WebGPU
     /// </summary>
     public class WebGPUAccelerator : KernelAccelerator<WebGPUCompiledKernel, WebGPUKernel>
     {
+        #region Pre-compiled Regex Patterns
+
+        // @workgroup_size(x[,y[,z]]) extraction
+        private static readonly Regex s_workgroupSizePattern =
+            new(@"@workgroup_size\((\d+)(?:\s*,\s*(\d+))?(?:\s*,\s*(\d+))?\)",
+                RegexOptions.Compiled);
+
+        // const workgroup_size declaration patching
+        private static readonly Regex s_constWorkgroupSizePattern =
+            new(@"const workgroup_size : vec3<u32> = vec3<u32>\(\d+u, \d+u, \d+u\);",
+                RegexOptions.Compiled);
+
+        // @workgroup_size(x) — first dimension only (for dispatch log)
+        private static readonly Regex s_workgroupSizeSimplePattern =
+            new(@"@workgroup_size\((\d+)",
+                RegexOptions.Compiled);
+
+        #endregion
+
         /// <summary>
         /// Gets the native WebGPU accelerator for low-level GPU access.
         /// </summary>
@@ -62,6 +81,36 @@ namespace SpawnDev.ILGPU.WebGPU
         private static HashSet<int>? _reusableBodyStructScalarSet;
         [ThreadStatic]
         private static Dictionary<int, ScalarPackingEntry>? _reusablePackedScalarLookup;
+
+        #endregion
+
+        #region Dispatch Log
+
+        /// <summary>
+        /// Record of a single kernel dispatch for post-mortem debugging.
+        /// </summary>
+        public record DispatchRecord(
+            string KernelName,
+            int WorkgroupSize,
+            uint GridDimX, uint GridDimY, uint GridDimZ,
+            int BindingCount,
+            bool WorkgroupSizePatched,
+            DateTime Timestamp);
+
+        private static readonly Queue<DispatchRecord> _dispatchLog = new();
+
+        /// <summary>
+        /// Ring buffer of recent kernel dispatches. Inspect after test failures
+        /// to see exact parameters for each launch.
+        /// </summary>
+        public static IReadOnlyCollection<DispatchRecord> DispatchLog => _dispatchLog;
+
+        /// <summary>
+        /// Maximum number of dispatch records to retain. Default 100.
+        /// </summary>
+        public static int MaxDispatchLogSize { get; set; } = 100;
+
+        #endregion
 
         // Cache for CopyStructToBytes<T> MethodInfo per type (avoids repeated MakeGenericMethod)
         private static readonly ConcurrentDictionary<Type, MethodInfo> _copyStructMethodCache = new();
@@ -236,8 +285,6 @@ namespace SpawnDev.ILGPU.WebGPU
                 MappedAtCreation = false
             });
         }
-
-        #endregion
 
         private WebGPUAccelerator(Context context, Device device) : base(context, device) { }
 
@@ -502,14 +549,12 @@ namespace SpawnDev.ILGPU.WebGPU
             var webGpuKernel = (WebGPUKernel)kernel;
             var compiledKernel = webGpuKernel.CompiledKernel;
 
-            // ---- DEBUG LOGGING: WGSL SOURCE ----
-            if (WebGPUBackend.VerboseLogging)
+            if ((WebGPUBackend.DiagnosticFlags & WGSLDiagnostics.Dispatch) != 0)
             {
-                WebGPUBackend.Log("\n[WebGPU-Debug] ---- GENERATED WGSL ----");
-                WebGPUBackend.Log(compiledKernel.WGSLSource);
-                WebGPUBackend.Log("[WebGPU-Debug] ------------------------\n");
+                Console.WriteLine($"\n[WebGPU] ---- WGSL for dispatch ----");
+                Console.WriteLine(compiledKernel.WGSLSource);
+                Console.WriteLine("[WebGPU] ----------------------------\n");
             }
-            // ------------------------------------
 
             // Build override constants for dynamic shared memory
             Dictionary<string, object>? overrideConstants = null;
@@ -543,14 +588,14 @@ namespace SpawnDev.ILGPU.WebGPU
             // the WGSL source so @workgroup_size and the const workgroup_size variable agree
             // with the actual dispatch dimensions. The shader cache handles deduplication.
             string wgslSource = compiledKernel.WGSLSource;
+            bool wasPatched = false;
             if (dimension is KernelConfig kcWg)
             {
                 int reqX = kcWg.GroupDim.X;
                 int reqY = kcWg.GroupDim.Y;
                 int reqZ = kcWg.GroupDim.Z;
 
-                var wgMatch = Regex.Match(
-                    wgslSource, @"@workgroup_size\((\d+)(?:\s*,\s*(\d+))?(?:\s*,\s*(\d+))?\)");
+                var wgMatch = s_workgroupSizePattern.Match(wgslSource);
                 if (wgMatch.Success)
                 {
                     int compiledX = int.Parse(wgMatch.Groups[1].Value);
@@ -559,15 +604,23 @@ namespace SpawnDev.ILGPU.WebGPU
 
                     if (compiledX != reqX || compiledY != reqY || compiledZ != reqZ)
                     {
-                        if (WebGPUBackend.VerboseLogging)
-                            if (WebGPUBackend.VerboseLogging) WebGPUBackend.Log($"[WebGPU] @workgroup_size mismatch: compiled=({compiledX},{compiledY},{compiledZ}), dispatch=({reqX},{reqY},{reqZ}). Patching WGSL.");
+                        wasPatched = true;
+                        // Always log workgroup_size patching as a warning — this indicates
+                        // the kernel was loaded without KernelSpecialization matching the
+                        // dispatch's GroupDim. Adding KernelSpecialization to the LoadKernel
+                        // call eliminates the need for runtime WGSL patching.
+                        WebGPUBackend.Diag(WGSLDiagnostics.Dispatch,
+                            $"[WebGPU] WARNING: Runtime @workgroup_size patching: " +
+                            $"compiled=({compiledX},{compiledY},{compiledZ}), " +
+                            $"dispatch=({reqX},{reqY},{reqZ}). " +
+                            $"Kernel: {compiledKernel.EntryPoint?.Name ?? "unknown"}. " +
+                            $"Consider adding KernelSpecialization to LoadKernel.");
 
                         wgslSource = wgslSource.Replace(
                             wgMatch.Value,
                             $"@workgroup_size({reqX}, {reqY}, {reqZ})");
 
-                        var constMatch = Regex.Match(
-                            wgslSource, @"const workgroup_size : vec3<u32> = vec3<u32>\(\d+u, \d+u, \d+u\);");
+                        var constMatch = s_constWorkgroupSizePattern.Match(wgslSource);
                         if (constMatch.Success)
                         {
                             wgslSource = wgslSource.Replace(
@@ -1249,8 +1302,7 @@ namespace SpawnDev.ILGPU.WebGPU
                 else if (dimension is LongIndex2D l2) { workX = (uint)Math.Ceiling(l2.X / 8.0); workY = (uint)Math.Ceiling(l2.Y / 8.0); }
                 else if (dimension is LongIndex3D l3) { workX = (uint)Math.Ceiling(l3.X / 4.0); workY = (uint)Math.Ceiling(l3.Y / 4.0); workZ = (uint)Math.Ceiling(l3.Z / 4.0); }
 
-                if (WebGPUBackend.VerboseLogging)
-                    if (WebGPUBackend.VerboseLogging) WebGPUBackend.Log($"[WebGPU-Debug] Dispatching: ({workX}, {workY}, {workZ})");
+                WebGPUBackend.Diag(WGSLDiagnostics.Dispatch, $"[WebGPU] Dispatching: ({workX}, {workY}, {workZ})");
 
                 // Use the stream's shared encoder for batched submission
                 var webGpuStream = stream as WebGPUStream ?? (WebGPUStream)webGpuAccel.DefaultStream;
@@ -1261,6 +1313,17 @@ namespace SpawnDev.ILGPU.WebGPU
                 pass.DispatchWorkgroups(workX, workY, workZ);
                 pass.End();
                 webGpuStream.IncrementPassCount();
+
+                // Log dispatch for post-mortem debugging
+                var dispatchKernelName = compiledKernel.EntryPoint.MethodInfo?.Name ?? "unknown";
+                int dispatchWgSize = 0;
+                var wgSizeMatch = s_workgroupSizeSimplePattern.Match(wgslSource);
+                if (wgSizeMatch.Success) dispatchWgSize = int.Parse(wgSizeMatch.Groups[1].Value);
+                _dispatchLog.Enqueue(new DispatchRecord(
+                    dispatchKernelName, dispatchWgSize, workX, workY, workZ,
+                    compiledKernel.ExpectedBindingCount, wasPatched, DateTime.UtcNow));
+                while (_dispatchLog.Count > MaxDispatchLogSize)
+                    _dispatchLog.Dequeue();
 
                 // Defer resource cleanup until the batch is flushed
                 webGpuStream.DeferBindGroupDisposal(bindGroup);

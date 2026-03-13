@@ -1,11 +1,12 @@
 ﻿using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.Extensions.FileProviders;
+using Microsoft.Extensions.Logging;
 using System.Net;
 
-namespace PlaywrightTestRunner
+namespace PlaywrightMultiTest
 {
-    internal class StaticFileServer
+    public class StaticFileServer
     {
         WebApplication? app;
         Task? runningTask;
@@ -41,6 +42,9 @@ namespace PlaywrightTestRunner
             {
                 var builder = WebApplication.CreateBuilder();
                 var port = new Uri(Url).Port;
+
+                // This wipes out Console, Debug, and any other default providers
+                builder.Logging.ClearProviders();
 
                 // Configure static file serving
                 builder.WebHost.UseKestrel();

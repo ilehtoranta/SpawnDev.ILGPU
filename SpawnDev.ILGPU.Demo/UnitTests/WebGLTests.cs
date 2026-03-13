@@ -684,6 +684,23 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
         public new async Task TwoPassScanSimulationTest() =>
             throw new UnsupportedTestException("WebGL: requires shared memory + barriers");
 
+        // --- Tests10: SharedMemoryResolver stress tests ---
+        [TestMethod]
+        public new async Task SharedMemSingleAllocTest() =>
+            throw new UnsupportedTestException("WebGL: no shared memory in vertex shaders");
+        [TestMethod]
+        public new async Task SharedMemDualDiffTypeTest() =>
+            throw new UnsupportedTestException("WebGL: no shared memory in vertex shaders");
+        [TestMethod]
+        public new async Task SharedMemSameTypeDiffSizeTest() =>
+            throw new UnsupportedTestException("WebGL: no shared memory in vertex shaders");
+        [TestMethod]
+        public new async Task SharedMemTileScanTest() =>
+            throw new UnsupportedTestException("WebGL: no shared memory in vertex shaders");
+        [TestMethod]
+        public new async Task SharedMemMultiGroupTest() =>
+            throw new UnsupportedTestException("WebGL: no shared memory in vertex shaders");
+
         // ====================================================================
         // Boids Pipeline Diagnostic Tests
         // These run sub-components of the Boids3D demo in isolation to pinpoint

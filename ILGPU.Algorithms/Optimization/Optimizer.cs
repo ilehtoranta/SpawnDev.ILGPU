@@ -529,6 +529,9 @@ namespace ILGPU.Algorithms.Optimization
                 XMath.DivRoundUp(maxNumParticles, GroupSize));
 
             // Load kernels
+            var spec = accelerator.AcceleratorType == AcceleratorType.WebGPU
+                ? new KernelSpecialization(accelerator.MaxNumThreadsPerGroup, null)
+                : KernelSpecialization.Empty;
             initializeParticles = accelerator.LoadKernel<
                 ArrayView<TRandomProvider>,
                 BoundsView<TNumericType>,
@@ -536,23 +539,23 @@ namespace ILGPU.Algorithms.Optimization
                 VariableView<TEvalType>,
                 TOptimizerFunc,
                 LongIndex1D,
-                SpecializedValue<Index1D>>(InitializeParticlesKernel);
+                SpecializedValue<Index1D>>(InitializeParticlesKernel, spec);
             evaluateParticles = accelerator.LoadKernel<
                 TOptimizerFunc,
                 TFunc,
                 LongIndex1D,
-                SpecializedValue<Index1D>>(EvaluateParticlesKernel);
+                SpecializedValue<Index1D>>(EvaluateParticlesKernel, spec);
             aggregateEvaluations1 = accelerator.LoadKernel<
                 TOptimizerFunc,
                 ArrayView<TEvalType>,
                 ArrayView<LongIndex1D>,
-                LongIndex1D>(AggregateEvaluations1Kernel);
+                LongIndex1D>(AggregateEvaluations1Kernel, spec);
             aggregateEvaluations2 = accelerator.LoadKernel<
                 TOptimizerFunc,
                 ArrayView<TEvalType>,
                 ArrayView<LongIndex1D>,
                 SingleVectorView<TNumericType>,
-                VariableView<TEvalType>>(AggregateEvaluations2Kernel);
+                VariableView<TEvalType>>(AggregateEvaluations2Kernel, spec);
 
             MaxNumParticles = maxNumParticles;
             VectorDimension = vectorDimension;

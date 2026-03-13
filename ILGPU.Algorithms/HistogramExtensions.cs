@@ -303,6 +303,9 @@ namespace ILGPU.Algorithms
             where TIncrementor : struct, IIncrementOperation<TBinType>
             where TLocator : struct, IComputeMultiBinOperation<T, TBinType, TIncrementor>
         {
+            var spec = accelerator.AcceleratorType == AcceleratorType.WebGPU
+                ? new KernelSpecialization(accelerator.MaxNumThreadsPerGroup, null)
+                : KernelSpecialization.Empty;
             var kernel = accelerator.LoadKernel<
                 HistogramDelegate<
                     T,
@@ -315,7 +318,8 @@ namespace ILGPU.Algorithms
                         typeof(TStride),
                         typeof(TBinType),
                         typeof(TIncrementor),
-                        typeof(TLocator)));
+                        typeof(TLocator)),
+                    spec);
 
             return (stream, view, histogram, histogramOverflow) =>
             {
@@ -381,6 +385,9 @@ namespace ILGPU.Algorithms
             where TIncrementor : struct, IIncrementOperation<TBinType>
             where TLocator : struct, IComputeMultiBinOperation<T, TBinType, TIncrementor>
         {
+            var spec = accelerator.AcceleratorType == AcceleratorType.WebGPU
+                ? new KernelSpecialization(accelerator.MaxNumThreadsPerGroup, null)
+                : KernelSpecialization.Empty;
             var kernel = accelerator.LoadKernel<
                 HistogramUncheckedDelegate<
                     T,
@@ -393,7 +400,8 @@ namespace ILGPU.Algorithms
                         typeof(TStride),
                         typeof(TBinType),
                         typeof(TIncrementor),
-                        typeof(TLocator)));
+                        typeof(TLocator)),
+                    spec);
 
             return (stream, view, histogram) =>
             {

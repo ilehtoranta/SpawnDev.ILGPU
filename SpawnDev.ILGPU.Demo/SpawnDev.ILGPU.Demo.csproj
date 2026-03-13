@@ -1,4 +1,4 @@
-<Project Sdk="Microsoft.NET.Sdk.BlazorWebAssembly">
+﻿<Project Sdk="Microsoft.NET.Sdk.BlazorWebAssembly">
 
 	<PropertyGroup>
 		<TargetFramework>net10.0</TargetFramework>
@@ -10,21 +10,31 @@
 		<PublishTrimmed>false</PublishTrimmed>
 		<!-- Disable AOT compilation - ILGPU needs IL reflection to work -->
 		<RunAOTCompilation>false</RunAOTCompilation>
+		<!-- mark as testable by PlaywrightMultiTest -->
+		<PlaywrightMultiTest>
+			
+		</PlaywrightMultiTest>
 	</PropertyGroup>
+
+	<ItemGroup>
+		<Content Remove="playwright-test.json" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<None Include="playwright-test.json" />
+	</ItemGroup>
 
 	<ItemGroup>
 		<PackageReference Include="Microsoft.AspNetCore.Components.WebAssembly" Version="10.0.2" />
 		<PackageReference Include="Microsoft.AspNetCore.Components.WebAssembly.DevServer" Version="10.0.2" PrivateAssets="all" />
-		
+
 	</ItemGroup>
 
 	<ItemGroup>
-	  <ProjectReference Include="..\SpawnDev.ILGPU\SpawnDev.ILGPU.csproj" />
-	  <ProjectReference Include="..\SpawnDev.ILGPU.Demo.Shared\SpawnDev.ILGPU.Demo.Shared.csproj" />
-	  <ProjectReference Include="..\ILGPU\ILGPU.csproj" />
-	  <ProjectReference Include="..\ILGPU.Algorithms\ILGPU.Algorithms.csproj" />
-	  <PackageReference Include="SpawnDev.UnitTesting" Version="2.0.0" />
-	  <PackageReference Include="SpawnDev.UnitTesting.Blazor" Version="2.1.0" />
+		<ProjectReference Include="..\SpawnDev.ILGPU\SpawnDev.ILGPU.csproj" />
+		<ProjectReference Include="..\SpawnDev.ILGPU.Demo.Shared\SpawnDev.ILGPU.Demo.Shared.csproj" />
+		<ProjectReference Include="..\ILGPU\ILGPU.csproj" />
+		<ProjectReference Include="..\ILGPU.Algorithms\ILGPU.Algorithms.csproj" />
 	</ItemGroup>
 
 </Project>

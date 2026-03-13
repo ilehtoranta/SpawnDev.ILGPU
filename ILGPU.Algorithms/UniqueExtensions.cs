@@ -147,13 +147,17 @@ namespace ILGPU.Algorithms
             where TComparisonOperation : struct, IComparisonOperation<T>
         {
             var initializer = accelerator.CreateInitializer<int, Stride1D.Dense>();
+            var spec = accelerator.AcceleratorType == AcceleratorType.WebGPU
+                ? new KernelSpecialization(accelerator.MaxNumThreadsPerGroup, null)
+                : KernelSpecialization.Empty;
             var kernel = accelerator.LoadKernel<
                 ArrayView<T>,
                 ArrayView<long>,
                 SequentialGroupExecutor,
                 SpecializedValue<int>,
                 Index1D>(
-                UniqueKernel<T, TComparisonOperation>);
+                UniqueKernel<T, TComparisonOperation>,
+                spec);
 
             return (stream, input, output, temp) =>
             {

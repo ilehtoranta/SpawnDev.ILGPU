@@ -315,25 +315,29 @@ namespace ILGPU.Algorithms
             where TStride : struct, IStride1D
             where TRandomProvider : unmanaged, IRandomProvider<TRandomProvider>
         {
+            var spec = accelerator.AcceleratorType == AcceleratorType.WebGPU
+                ? new KernelSpecialization(accelerator.MaxNumThreadsPerGroup, null)
+                : KernelSpecialization.Empty;
+
             var pass1Kernel = accelerator.LoadKernel<Pass1KernelDelegate<T,
                 TStride>>(PermutationKernel1Method.MakeGenericMethod(
-                    typeof(T), typeof(TStride)));
+                    typeof(T), typeof(TStride)), spec);
 
             var pass2Kernel = accelerator.LoadKernel<Pass2KernelDelegate<
                 T,
                 TStride,
                 Stride1D.Dense>>(PermutationKernel2Method.MakeGenericMethod(
-                    typeof(T), typeof(TStride), typeof(Stride1D.Dense)));
+                    typeof(T), typeof(TStride), typeof(Stride1D.Dense)), spec);
 
             var pass1DenseKernel = accelerator.LoadKernel<Pass1KernelDelegate<T,
                 Stride1D.Dense>>(PermutationKernel1Method.MakeGenericMethod(
-                    typeof(T), typeof(Stride1D.Dense)));
+                    typeof(T), typeof(Stride1D.Dense)), spec);
 
             var pass2DenseKernel = accelerator.LoadKernel<Pass2KernelDelegate<
                 T,
                 Stride1D.Dense,
                 TStride>>(PermutationKernel2Method.MakeGenericMethod(
-                    typeof(T), typeof(Stride1D.Dense), typeof(TStride)));
+                    typeof(T), typeof(Stride1D.Dense), typeof(TStride)), spec);
 
             return (stream, input, tempView, random) =>
             {

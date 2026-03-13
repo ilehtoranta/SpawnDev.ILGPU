@@ -25,6 +25,43 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
     /// </summary>
     public abstract partial class WGSLCodeGenerator : IBackendCodeGenerator<StringBuilder>
     {
+        #region Pre-compiled Regex Patterns
+
+        // Let-to-var hoisting pattern for switch/case block scope fix
+        private static readonly System.Text.RegularExpressions.Regex s_letHoistPattern =
+            new(@"^(\s*)let\s+(v_\d+)\s*=\s*(.+);",
+                System.Text.RegularExpressions.RegexOptions.Multiline | System.Text.RegularExpressions.RegexOptions.Compiled);
+
+        /// <summary>Checks if string is all word characters (letters, digits, underscore). Empty returns false.</summary>
+        protected static bool IsAllWordChars(string s)
+        {
+            if (s.Length == 0) return false;
+            for (int i = 0; i < s.Length; i++)
+            {
+                char c = s[i];
+                if (!char.IsLetterOrDigit(c) && c != '_') return false;
+            }
+            return true;
+        }
+
+        /// <summary>Checks if string matches pattern &amp;\w+ (ampersand followed by word chars only).</summary>
+        protected static bool IsAmpersandWordChars(string s)
+        {
+            return s.Length > 1 && s[0] == '&' && IsAllWordChars(s.AsSpan(1));
+        }
+
+        private static bool IsAllWordChars(ReadOnlySpan<char> s)
+        {
+            for (int i = 0; i < s.Length; i++)
+            {
+                char c = s[i];
+                if (!char.IsLetterOrDigit(c) && c != '_') return false;
+            }
+            return s.Length > 0;
+        }
+
+        #endregion
+
         #region Nested Types
 
         /// <summary>
@@ -53,23 +90,10 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 ScalarPackingManifest = new List<ScalarPackingEntry>();
                 HelperMethods = new Dictionary<Method, Allocas>();
                 
-                // Pre-populate SharedMemoryVarNames with deterministic names.
+                // Create SharedMemoryResolver with deterministic names from backend context.
                 // This MUST happen before helper function generators run (which is
                 // before the kernel generator), so both can use the same names.
-                // We store both the var name AND the full declaration string because
-                // the helper function generator needs to emit the declaration but
-                // doesn't have access to AllocaKindInformation metadata.
-                SharedMemoryVarNames = new Dictionary<Value, (string Name, string Declaration)>();
-                int sharedIdx = 0;
-                foreach (var alloca in sharedAllocations)
-                {
-                    var name = $"shared_{sharedIdx}";
-                    var wgslType = typeGenerator[alloca.ElementType];
-                    int entryCount = (int)alloca.ArraySize;
-                    var declaration = $"var<workgroup> {name} : array<{wgslType}, {entryCount}>;";
-                    SharedMemoryVarNames[alloca.Alloca] = (name, declaration);
-                    sharedIdx++;
-                }
+                SharedMemoryResolver = new SharedMemoryResolver(sharedAllocations, typeGenerator);
             }
 
             /// <summary>The parent backend.</summary>
@@ -116,18 +140,33 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             public List<int> ExpectedBindingCountHolder { get; } = new() { 0 };
 
             /// <summary>
-            /// Maps shared memory Alloca IR values to their module-scope WGSL variable names
-            /// and full declarations. Pre-populated in constructor from backendContext.
-            /// The tuple contains (VarName, FullDeclaration) where Declaration is
-            /// the complete WGSL var<workgroup> statement ready to emit.
+            /// Manages shared memory allocation, matching, and WGSL emission.
+            /// Replaces the previous SharedMemoryVarNames dictionary with a proper
+            /// encapsulation of the two-pass matching logic.
             /// </summary>
-            public Dictionary<Value, (string Name, string Declaration)> SharedMemoryVarNames { get; }
+            public SharedMemoryResolver SharedMemoryResolver { get; }
+
+            /// <summary>
+            /// Maps shared memory Alloca IR values to their module-scope WGSL variable names
+            /// and full declarations. Delegates to SharedMemoryResolver.Entries for backward
+            /// compatibility during the transition.
+            /// </summary>
+            public Dictionary<Value, (string Name, string Declaration)> SharedMemoryVarNames =>
+                SharedMemoryResolver.Entries;
 
             /// <summary>
             /// Maps helper methods to their allocas for inlining at call sites.
             /// Populated by WebGPUBackend.CreateFunctionCodeGenerator().
             /// </summary>
             public Dictionary<Method, Allocas> HelperMethods { get; }
+
+            /// <summary>
+            /// Tracks emulated i64/u64 constant values used during body generation.
+            /// Maps (lo, hi) u32 pairs to module-scope const names (e.g., _c_i64_0).
+            /// Populated by GenerateCode(PrimitiveValue), consumed by GenerateHeader()
+            /// to emit const declarations. Shared across kernel and helper generators.
+            /// </summary>
+            public Dictionary<(uint Lo, uint Hi), string> I64Constants { get; } = new();
         }
 
         /// <summary>
@@ -298,46 +337,19 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             {
                 // CRITICAL: Intercept shared-address-space Alloca values.
                 // The Alloca node from backendContext.SharedAllocations (stored in
-                // SharedMemoryVarNames) may be a DIFFERENT object instance from the one
+                // SharedMemoryResolver) may be a DIFFERENT object instance from the one
                 // referenced in the function body's IR. We detect shared Alloca values
                 // by type and redirect them to the pre-registered module-scope variable.
                 if (value is Alloca alloca && alloca.AddressSpace == MemoryAddressSpace.Shared)
                 {
-                    // Match by element type + array size to find the correct SharedMemoryVarNames
-                    // entry. The old "first unassigned" strategy can grab the wrong entry when
-                    // multiple shared allocations exist (e.g. RadixSort's histogram buffer vs
-                    // ExclusiveScan's workspace), swapping their array sizes.
-                    string allocaElemStr = alloca.AllocaType.ToString();
-                    long allocaSize = alloca.ArrayLength.Resolve() is global::ILGPU.IR.Values.PrimitiveValue pv
-                        ? pv.Int64Value : -1;
-                    // First pass: try to match by element type + array size
-                    foreach (var kvp in _baseArgs.SharedMemoryVarNames)
+                    if (_baseArgs.SharedMemoryResolver.TryResolve(
+                        alloca,
+                        (name, allocaValue) => valueVariables.Any(kv => kv.Value.Name == name && kv.Key != allocaValue),
+                        out var resolvedName))
                     {
-                        var (varName, declaration) = kvp.Value;
-                        if (valueVariables.Any(kv => kv.Value.Name == varName && kv.Key != value))
-                            continue;
-                        if (kvp.Key is Alloca candidate
-                            && candidate.AllocaType.ToString() == allocaElemStr
-                            && candidate.ArrayLength.Resolve() is global::ILGPU.IR.Values.PrimitiveValue cpv
-                            && cpv.Int64Value == allocaSize)
-                        {
-                            var wgslType = TypeGenerator[value.Type];
-                            var sharedVar = new Variable(varName, wgslType);
-                            valueVariables[value] = sharedVar;
-                            if (WebGPUBackend.VerboseLogging) Console.WriteLine($"[DIAG-LOAD-SHARED] Matched shared Alloca (hash={value.GetHashCode()}, size={allocaSize}) to '{varName}' by type+size");
-                            return sharedVar;
-                        }
-                    }
-                    // Second pass: fall back to first unassigned entry (single-allocation case)
-                    foreach (var kvp in _baseArgs.SharedMemoryVarNames)
-                    {
-                        var (varName, declaration) = kvp.Value;
-                        if (valueVariables.Any(kv => kv.Value.Name == varName && kv.Key != value))
-                            continue;
                         var wgslType = TypeGenerator[value.Type];
-                        var sharedVar = new Variable(varName, wgslType);
+                        var sharedVar = new Variable(resolvedName, wgslType);
                         valueVariables[value] = sharedVar;
-                        if (WebGPUBackend.VerboseLogging) Console.WriteLine($"[DIAG-LOAD-SHARED] Fallback: redirected shared Alloca (hash={value.GetHashCode()}) to '{varName}'");
                         return sharedVar;
                     }
                 }
@@ -573,9 +585,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             // We convert these to assignments and add var declarations at function scope.
             {
                 string loopCode = Builder.ToString(deferredInsertPosition, Builder.Length - deferredInsertPosition);
-                var letPattern = new System.Text.RegularExpressions.Regex(@"^(\s*)let\s+(v_\d+)\s*=\s*(.+);", System.Text.RegularExpressions.RegexOptions.Multiline);
                 var hoistedVars = new Dictionary<string, string>(); // name -> inferred type
-                string processed = letPattern.Replace(loopCode, match =>
+                string processed = s_letHoistPattern.Replace(loopCode, match =>
                 {
                     string indent = match.Groups[1].Value;
                     string varName = match.Groups[2].Value;
@@ -590,8 +601,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     if (expr.TrimStart().StartsWith("&"))
                     {
                         var trimmed = expr.TrimStart();
-                        bool isSimpleRef = System.Text.RegularExpressions.Regex.IsMatch(trimmed, @"^&\w+$");
-                        if (isSimpleRef)
+                        if (IsAmpersandWordChars(trimmed))
                         {
                             VariableBuilder.AppendLine($"    let {varName} = {trimmed};");
                             return ""; // Remove from case block; hoisted to function scope
@@ -651,7 +661,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     // Hoist simple identifier pointers; keep complex expressions in block.
                     if (inferredType.StartsWith("ptr<"))
                     {
-                        bool isSimpleIdent = System.Text.RegularExpressions.Regex.IsMatch(expr.Trim(), @"^\w+$");
+                        bool isSimpleIdent = IsAllWordChars(expr.Trim());
                         if (isSimpleIdent)
                         {
                             VariableBuilder.AppendLine($"    let {varName} = {expr.Trim()};");
@@ -974,8 +984,10 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     break;
 
                 default:
-                    AppendLine($"// Unhandled value type: {value.GetType().Name}");
-                    break;
+                    throw new NotSupportedException(
+                        $"WebGPU backend: unhandled IR value type '{value.GetType().Name}' " +
+                        $"in method '{Method?.Name ?? "unknown"}'. " +
+                        $"This IR node type must be implemented or added as an explicit case.");
             }
         }
 
@@ -1550,11 +1562,20 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
             if (isEmulatedI64)
             {
-                // For emu_i64 emulation, we need to split the 64-bit value into two 32-bit parts
+                // For emu_i64 emulation, we need to split the 64-bit value into two 32-bit parts.
+                // Deduplicate via module-scope const: repeated values (e.g., INT32_MIN, 0)
+                // reference a single const declaration instead of re-emitting the literal.
                 long longVal = value.Int64Value;
                 uint lo = (uint)(longVal & 0xFFFFFFFF);
                 uint hi = (uint)((ulong)longVal >> 32);
-                AppendLine($"{target} = vec2<u32>({lo}u, {hi}u);");
+                var key = (lo, hi);
+                var constants = _baseArgs.I64Constants;
+                if (!constants.TryGetValue(key, out var constName))
+                {
+                    constName = $"_c_i64_{constants.Count}";
+                    constants[key] = constName;
+                }
+                AppendLine($"{target} = {constName};");
                 return;
             }
 
@@ -1620,7 +1641,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
         public virtual void GenerateCode(StringValue value)
         {
-            AppendLine($"// String: {value.String}");
+            if (WebGPUBackend.EmitDebugStrings)
+                AppendLine($"// String: {value.String}");
         }
 
         // Phi

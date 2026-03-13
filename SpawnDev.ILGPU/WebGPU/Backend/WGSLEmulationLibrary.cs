@@ -969,5 +969,198 @@ fn f64_max(a: emu_f64, b: emu_f64) -> emu_f64 {
         }
 
         #endregion
+
+        #region Minimal Library (Per-Function Trimming)
+
+        private record EmulationFunc(string Name, string Code);
+
+        private static readonly List<EmulationFunc> _dekkerF64Funcs;
+        private static readonly List<EmulationFunc> _ozakiF64Funcs;
+        private static readonly List<EmulationFunc> _i64Funcs;
+        private static readonly Dictionary<string, HashSet<string>> _dekkerF64Deps;
+        private static readonly Dictionary<string, HashSet<string>> _ozakiF64Deps;
+        private static readonly Dictionary<string, HashSet<string>> _i64Deps;
+
+        static WGSLEmulationLibrary()
+        {
+            _dekkerF64Funcs = SplitIntoFunctions(F64Functions);
+            _ozakiF64Funcs = SplitIntoFunctions(OzakiF64Functions);
+            _i64Funcs = SplitIntoFunctions(I64Functions);
+            _dekkerF64Deps = BuildDependencies(_dekkerF64Funcs);
+            _ozakiF64Deps = BuildDependencies(_ozakiF64Funcs);
+            _i64Deps = BuildDependencies(_i64Funcs);
+        }
+
+        /// <summary>
+        /// Gets a minimal emulation library containing only the functions actually
+        /// used by the kernel body, plus their transitive dependencies.
+        /// Scans <paramref name="kernelBody"/> for emulation function calls and
+        /// includes only the needed subset, preserving dependency order.
+        /// </summary>
+        public static string GetMinimalEmulationLibrary(
+            bool includeF64, bool useOzakiF64, bool includeI64,
+            string kernelBody)
+        {
+            var sb = new System.Text.StringBuilder();
+
+            if (includeF64)
+            {
+                var funcs = useOzakiF64 ? _ozakiF64Funcs : _dekkerF64Funcs;
+                var deps = useOzakiF64 ? _ozakiF64Deps : _dekkerF64Deps;
+                sb.AppendLine(useOzakiF64 ? OzakiF64TypeAlias : F64TypeAlias);
+                AppendUsedFunctions(sb, funcs, deps, kernelBody);
+            }
+
+            if (includeI64)
+            {
+                sb.AppendLine(I64TypeAlias);
+                sb.AppendLine(U64TypeAlias);
+                AppendUsedFunctions(sb, _i64Funcs, _i64Deps, kernelBody);
+            }
+
+            return sb.ToString();
+        }
+
+        /// <summary>
+        /// Splits a WGSL library source string into individual function entries.
+        /// Each entry includes the function's preceding comment lines.
+        /// </summary>
+        private static List<EmulationFunc> SplitIntoFunctions(string library)
+        {
+            var result = new List<EmulationFunc>();
+            var lines = library.Split('\n');
+
+            // First pass: find all function definition lines
+            var funcPositions = new List<(int LineIndex, string Name)>();
+            for (int i = 0; i < lines.Length; i++)
+            {
+                var trimmed = lines[i].TrimStart();
+                if (trimmed.StartsWith("fn "))
+                {
+                    int nameEnd = trimmed.IndexOf('(', 3);
+                    if (nameEnd < 0) continue;
+                    string name = trimmed.Substring(3, nameEnd - 3).Trim();
+                    funcPositions.Add((i, name));
+                }
+            }
+
+            // Second pass: extract each function with its preceding comment block
+            for (int fi = 0; fi < funcPositions.Count; fi++)
+            {
+                var (fnLine, name) = funcPositions[fi];
+
+                // Back up to include preceding comment lines (skip section headers "// ====")
+                int commentStart = fnLine;
+                while (commentStart > 0)
+                {
+                    var prev = lines[commentStart - 1].TrimStart();
+                    if (prev.StartsWith("//") && !prev.StartsWith("// ===="))
+                        commentStart--;
+                    else
+                        break;
+                }
+
+                // Find closing brace via depth tracking
+                int braceDepth = 0;
+                bool seenBrace = false;
+                int funcEnd = fnLine;
+                for (int j = fnLine; j < lines.Length; j++)
+                {
+                    foreach (char c in lines[j])
+                    {
+                        if (c == '{') { braceDepth++; seenBrace = true; }
+                        else if (c == '}') braceDepth--;
+                    }
+                    if (seenBrace && braceDepth == 0)
+                    {
+                        funcEnd = j;
+                        break;
+                    }
+                }
+
+                // Build function code string
+                var funcSb = new System.Text.StringBuilder();
+                for (int j = commentStart; j <= funcEnd; j++)
+                {
+                    if (j > commentStart) funcSb.Append('\n');
+                    funcSb.Append(lines[j]);
+                }
+
+                result.Add(new EmulationFunc(name, funcSb.ToString()));
+            }
+
+            return result;
+        }
+
+        /// <summary>
+        /// Builds a dependency graph by scanning each function's code for calls
+        /// to other known function names in the same library.
+        /// </summary>
+        private static Dictionary<string, HashSet<string>> BuildDependencies(
+            List<EmulationFunc> funcs)
+        {
+            var allNames = new HashSet<string>();
+            foreach (var func in funcs) allNames.Add(func.Name);
+
+            var deps = new Dictionary<string, HashSet<string>>();
+            foreach (var func in funcs)
+            {
+                var funcDeps = new HashSet<string>();
+                foreach (var name in allNames)
+                {
+                    if (name != func.Name && func.Code.Contains(name + "("))
+                        funcDeps.Add(name);
+                }
+                deps[func.Name] = funcDeps;
+            }
+            return deps;
+        }
+
+        /// <summary>
+        /// Scans the kernel body for calls to emulation functions, resolves
+        /// transitive dependencies, and appends only the needed functions
+        /// to the StringBuilder in dependency order.
+        /// </summary>
+        private static void AppendUsedFunctions(
+            System.Text.StringBuilder sb,
+            List<EmulationFunc> funcs,
+            Dictionary<string, HashSet<string>> deps,
+            string kernelBody)
+        {
+            // Find directly used functions
+            var needed = new HashSet<string>();
+            foreach (var func in funcs)
+            {
+                if (kernelBody.Contains(func.Name + "("))
+                    needed.Add(func.Name);
+            }
+
+            // Add transitive dependencies (BFS)
+            var toProcess = new Queue<string>(needed);
+            while (toProcess.Count > 0)
+            {
+                var name = toProcess.Dequeue();
+                if (deps.TryGetValue(name, out var funcDeps))
+                {
+                    foreach (var dep in funcDeps)
+                    {
+                        if (needed.Add(dep))
+                            toProcess.Enqueue(dep);
+                    }
+                }
+            }
+
+            // Emit in original order (which is dependency order)
+            foreach (var func in funcs)
+            {
+                if (needed.Contains(func.Name))
+                {
+                    sb.AppendLine(func.Code);
+                    sb.AppendLine();
+                }
+            }
+        }
+
+        #endregion
     }
 }

@@ -1,4 +1,4 @@
-﻿namespace PlaywrightTestRunner
+﻿namespace PlaywrightMultiTest
 {
     [SetUpFixture]
     public class GlobalSetup
