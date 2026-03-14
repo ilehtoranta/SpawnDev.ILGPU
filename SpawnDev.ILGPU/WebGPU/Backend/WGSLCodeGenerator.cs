@@ -1067,13 +1067,13 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 bool isEmu64 = leftType == "emu_i64" || leftType == "emu_u64" || leftType == "emu_f64";
                 
                 // Fallback: check BasicValueType when emulation options are enabled
-                if (!isEmu64 && Backend.Options.EnableI64Emulation && 
+                if (!isEmu64 && Backend.EnableI64Emulation && 
                     (value.BasicValueType == BasicValueType.Int64))
                 {
                     isEmu64 = true;
                     leftType = value.IsUnsigned ? "emu_u64" : "emu_i64";
                 }
-                else if (!isEmu64 && Backend.Options.EnableF64Emulation && 
+                else if (!isEmu64 && Backend.EnableF64Emulation && 
                     value.BasicValueType == BasicValueType.Float64)
                 {
                     isEmu64 = true;
@@ -1141,7 +1141,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
             // Handle emulated emu_i64/emu_u64 negation
             var operandType = TypeGenerator[value.Value.Type];
-            if (Backend.Options.EnableI64Emulation && (operandType == "emu_i64" || operandType == "emu_u64") && value.Kind == UnaryArithmeticKind.Neg)
+            if (Backend.EnableI64Emulation && (operandType == "emu_i64" || operandType == "emu_u64") && value.Kind == UnaryArithmeticKind.Neg)
             {
                 AppendLine($"{target} = i64_neg({operand});");
                 return;
@@ -1553,8 +1553,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             Declare(target);
 
             // Check if we need emulation for this constant
-            bool isEmulatedF64 = Backend.Options.EnableF64Emulation && value.BasicValueType == BasicValueType.Float64;
-            bool isEmulatedI64 = Backend.Options.EnableI64Emulation && value.BasicValueType == BasicValueType.Int64;
+            bool isEmulatedF64 = Backend.EnableF64Emulation && value.BasicValueType == BasicValueType.Float64;
+            bool isEmulatedI64 = Backend.EnableI64Emulation && value.BasicValueType == BasicValueType.Int64;
 
             if (isEmulatedF64)
             {
@@ -2151,7 +2151,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
                         // Step 1: all threads write their value to shared memory
                         string storeVal = needsBitcast ? $"bitcast<{wgslType}>({reduceSrc})" : $"{reduceSrc}";
-                        bool isOzakiF64 = wgslType == "emu_f64" && Backend.Options.UseOzakiF64Emulation;
+                        bool isOzakiF64 = wgslType == "emu_f64" && Backend.UseOzakiF64Emulation;
                         if (is64Bit)
                         {
                             if (isOzakiF64)
@@ -2928,7 +2928,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             string wgslType = codeGenerator.GetReductionWgslType(srcMethodInfo) ?? irType;
             bool needsBitcast = wgslType != irType;
             bool is64Bit = wgslType.StartsWith("emu_");
-            bool isOzakiF64 = wgslType == "emu_f64" && backend.Options.UseOzakiF64Emulation;
+            bool isOzakiF64 = wgslType == "emu_f64" && backend.UseOzakiF64Emulation;
             string wgslAccumOp = GetWarpReduceAccumOp(wgslOp);
             string sfx = target.Name.Replace("v_", "_").TrimStart('_');
 
@@ -3100,7 +3100,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 // Step 1: all threads write their value to shared memory (2 u32 slots per thread)
                 string storeVal = needsBitcast ? $"bitcast<{wgslType}>({operand})" : $"{operand}";
 
-                bool isOzakiF64 = wgslType == "emu_f64" && backend.Options.UseOzakiF64Emulation;
+                bool isOzakiF64 = wgslType == "emu_f64" && backend.UseOzakiF64Emulation;
                 if (isOzakiF64)
                 {
                     // Ozaki emu_f64 = vec4<f32>: store all 4 components
@@ -3398,11 +3398,11 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 if (tReductionName.Contains("Int32")) return "i32";
                 if (tReductionName.Contains("Float32")) return "f32";
                 if (tReductionName.Contains("UInt64"))
-                    return Backend.Options.EnableI64Emulation ? "emu_u64" : "u32";
+                    return Backend.EnableI64Emulation ? "emu_u64" : "u32";
                 if (tReductionName.Contains("Int64"))
-                    return Backend.Options.EnableI64Emulation ? "emu_i64" : "i32";
+                    return Backend.EnableI64Emulation ? "emu_i64" : "i32";
                 if (tReductionName.Contains("Float64") || tReductionName.Contains("Double"))
-                    return Backend.Options.EnableF64Emulation ? "emu_f64" : "f32";
+                    return Backend.EnableF64Emulation ? "emu_f64" : "f32";
 
                 return null;
             }

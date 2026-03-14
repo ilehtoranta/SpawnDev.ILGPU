@@ -58,16 +58,16 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         public IRTypeContext TypeContext { get; }
 
         /// <summary>
-        /// Per-kernel override: when set to false, Int64 maps to i32 even if Backend.Options.EnableI64Emulation is true.
+        /// Per-kernel override: when set to false, Int64 maps to i32 even if Backend.EnableI64Emulation is true.
         /// Set by GenerateHeader based on whether the kernel parameters actually contain Int64.
-        /// When null, falls back to Backend.Options.EnableI64Emulation.
+        /// When null, falls back to Backend.EnableI64Emulation.
         /// </summary>
         public bool? KernelUsesI64 { get; set; }
 
         /// <summary>
-        /// Per-kernel override: when set to false, Float64 maps to f32 even if Backend.Options.EnableF64Emulation is true.
+        /// Per-kernel override: when set to false, Float64 maps to f32 even if Backend.EnableF64Emulation is true.
         /// Set by GenerateHeader based on whether the kernel parameters actually contain Float64.
-        /// When null, falls back to Backend.Options.EnableF64Emulation.
+        /// When null, falls back to Backend.EnableF64Emulation.
         /// </summary>
         public bool? KernelUsesF64 { get; set; }
 
@@ -108,8 +108,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         public string GetBasicValueType(BasicValueType type)
         {
             // Use per-kernel overrides if set, otherwise fall back to global options
-            var useI64Emu = KernelUsesI64 ?? Backend.Options.EnableI64Emulation;
-            var useF64Emu = KernelUsesF64 ?? Backend.Options.EnableF64Emulation;
+            var useI64Emu = KernelUsesI64 ?? Backend.EnableI64Emulation;
+            var useF64Emu = KernelUsesF64 ?? Backend.EnableF64Emulation;
             return type switch
             {
                 BasicValueType.Int1 => "bool",
@@ -127,8 +127,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         public string GetBasicValueType(ArithmeticBasicValueType type)
         {
             // Use per-kernel overrides if set, otherwise fall back to global options
-            var useI64Emu = KernelUsesI64 ?? Backend.Options.EnableI64Emulation;
-            var useF64Emu = KernelUsesF64 ?? Backend.Options.EnableF64Emulation;
+            var useI64Emu = KernelUsesI64 ?? Backend.EnableI64Emulation;
+            var useF64Emu = KernelUsesF64 ?? Backend.EnableF64Emulation;
             return type switch
             {
                 ArithmeticBasicValueType.UInt1 => "bool",

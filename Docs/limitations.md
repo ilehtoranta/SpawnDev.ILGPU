@@ -95,18 +95,23 @@ WGSL and GLSL natively support 32-bit floats (`f32` / `float`). Using `float` an
 
 ### f64 (Double Precision)
 
-`double` is **not natively supported** on most GPU hardware. Both GPU backends provide software emulation:
+`double` is **not natively supported** on most GPU hardware. Both GPU backends provide software emulation, controlled by `F64EmulationMode`:
 
 - **Dekker** (default): `vec2<f32>` — ~48–53 bits mantissa, fast
 - **Ozaki**: `vec4<f32>` — full IEEE 754, ~2x slower
+- **Disabled**: `double` promoted to `float` — max performance, loses precision
 
-Emulated doubles work well for many use cases (fractals, scientific compute) but have performance overhead. For rendering and visual applications, prefer `float`.
+Emulated doubles work well for many use cases (fractals, scientific compute) but have performance overhead. For rendering and visual applications, use `F64EmulationMode.Disabled`.
 
 > **Deep zoom limitation:** f32 precision limits useful Mandelbrot zoom to ~10⁶× magnification. Emulated f64 extends this significantly.
 
+### NaN / Infinity Detection
+
+GPU shader compilers may optimize away `val != val` self-comparisons or flush NaN during arithmetic. The WebGPU backend uses **bit-level detection** via `bitcast<u32>()` for reliable `float.IsNaN()` and `float.IsInfinity()` support. In kernels, always use `float.IsNaN(val)` and `float.IsInfinity(val)` — do not rely on manual patterns like `val != val` or `val * 0.0f != 0.0f`.
+
 ### i64 (Long / ULong)
 
-`long` and `ulong` are emulated as `vec2<u32>` when `EnableI64Emulation` is true.
+`long` and `ulong` are always emulated as `vec2<u32>`. This cannot be disabled — ILGPU's IR uses Int64 for `ArrayView.Length` and indices, so i64 emulation is required for correctness.
 
 ## IL Trimming & AOT
 

@@ -284,8 +284,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
                 var elementType = GetBufferElementType(param.ParameterType);
                 var wgslType = TypeGenerator[elementType];
-                bool isEmuF64 = Backend.Options.EnableF64Emulation && wgslType == "emu_f64";
-                bool isEmuI64 = Backend.Options.EnableI64Emulation && (wgslType == "emu_i64" || wgslType == "emu_u64");
+                bool isEmuF64 = Backend.EnableF64Emulation && wgslType == "emu_f64";
+                bool isEmuI64 = Backend.EnableI64Emulation && (wgslType == "emu_i64" || wgslType == "emu_u64");
 
                 // Body struct detection: structs containing view fields (e.g., ReductionImplementation,
                 // InitializerImplementation) must be decomposed into individual bindings.
@@ -393,8 +393,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                             // User scalar field: assign scalar slot
                             var scalarElemType = GetBufferElementType(fieldType);
                             var scalarWgslType = TypeGenerator[scalarElemType];
-                            bool fieldIsEmuF64 = Backend.Options.EnableF64Emulation && scalarWgslType == "emu_f64";
-                            bool fieldIsEmuI64 = Backend.Options.EnableI64Emulation && (scalarWgslType == "emu_i64" || scalarWgslType == "emu_u64");
+                            bool fieldIsEmuF64 = Backend.EnableF64Emulation && scalarWgslType == "emu_f64";
+                            bool fieldIsEmuI64 = Backend.EnableI64Emulation && (scalarWgslType == "emu_i64" || scalarWgslType == "emu_u64");
                             int slotCount = (fieldIsEmuF64 || fieldIsEmuI64) ? 2 : 1;
                             info.ScalarSlot = globalScalarSlotOffset;
                             globalScalarSlotOffset += slotCount;
@@ -431,8 +431,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
                 var elemType = GetBufferElementType(param.ParameterType);
                 var wType = TypeGenerator[elemType];
-                bool emuF64 = Backend.Options.EnableF64Emulation && wType == "emu_f64";
-                bool emuI64 = Backend.Options.EnableI64Emulation && (wType == "emu_i64" || wType == "emu_u64");
+                bool emuF64 = Backend.EnableF64Emulation && wType == "emu_f64";
+                bool emuI64 = Backend.EnableI64Emulation && (wType == "emu_i64" || wType == "emu_u64");
 
                 IsMultiDim(param.ParameterType, out _, out var isView, out _, out _, out _);
                 bool isStruct = param.ParameterType is global::ILGPU.IR.Types.StructureType && !isView;
@@ -514,8 +514,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             foreach (var fieldType in structType.Fields)
             {
                 string wgslType = TypeGenerator[fieldType];
-                bool isEmuF64 = Backend.Options.EnableF64Emulation && wgslType == "emu_f64";
-                bool isEmuI64u64 = Backend.Options.EnableI64Emulation &&
+                bool isEmuF64 = Backend.EnableF64Emulation && wgslType == "emu_f64";
+                bool isEmuI64u64 = Backend.EnableI64Emulation &&
                                    (wgslType == "emu_i64" || wgslType == "emu_u64");
                 int u32Count;
 
@@ -827,7 +827,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 builder.AppendLine("// ============ 64-bit Emulation Library ============");
                 builder.AppendLine(WGSLEmulationLibrary.GetMinimalEmulationLibrary(
                     needsF64Emulation,
-                    Backend.Options.UseOzakiF64Emulation,
+                    Backend.UseOzakiF64Emulation,
                     needsI64Emulation,
                     Builder.ToString()));
             }
@@ -1012,8 +1012,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                             bool fieldIsUnsignedAtomic = _bodyStructUnsignedAtomicFields.Contains((param.Index, fi));
 
                             string bindingWgslType = viewWgslType;
-                            bool is64Emu = (Backend.Options.EnableF64Emulation && viewWgslType == "emu_f64") ||
-                                           (Backend.Options.EnableI64Emulation && (viewWgslType == "emu_i64" || viewWgslType == "emu_u64"));
+                            bool is64Emu = (Backend.EnableF64Emulation && viewWgslType == "emu_f64") ||
+                                           (Backend.EnableI64Emulation && (viewWgslType == "emu_i64" || viewWgslType == "emu_u64"));
 
                             if (is64Emu)
                             {
@@ -1062,8 +1062,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                             var scalarElemType = GetBufferElementType(fieldType);
                             var scalarWgslType = TypeGenerator[scalarElemType];
 
-                            bool isEmuF64 = Backend.Options.EnableF64Emulation && scalarWgslType == "emu_f64";
-                            bool isEmuI64 = Backend.Options.EnableI64Emulation && (scalarWgslType == "emu_i64" || scalarWgslType == "emu_u64");
+                            bool isEmuF64 = Backend.EnableF64Emulation && scalarWgslType == "emu_f64";
+                            bool isEmuI64 = Backend.EnableI64Emulation && (scalarWgslType == "emu_i64" || scalarWgslType == "emu_u64");
                             int slotCount = (isEmuF64 || isEmuI64) ? 2 : 1;
 
                             info.ScalarSlot = scalarSlotOffset;
@@ -1101,17 +1101,17 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 bool isAtomic = _atomicParameters.Contains(param.Index);
 
                 // Check emulation
-                bool isEmulatedF64 = Backend.Options.EnableF64Emulation && wgslType == "emu_f64";
-                bool isEmulatedI64 = Backend.Options.EnableI64Emulation && (wgslType == "emu_i64" || wgslType == "emu_u64");
+                bool isEmulatedF64 = Backend.EnableF64Emulation && wgslType == "emu_f64";
+                bool isEmulatedI64 = Backend.EnableI64Emulation && (wgslType == "emu_i64" || wgslType == "emu_u64");
 
                 // If parameter is a view, check its element type for emulation tracking
                 if (isView)
                 {
                     var paramElemType = GetBufferElementType(param.ParameterType);
                     string elemWgslType = TypeGenerator[paramElemType];
-                    if (Backend.Options.EnableF64Emulation && elemWgslType == "emu_f64")
+                    if (Backend.EnableF64Emulation && elemWgslType == "emu_f64")
                         isEmulatedF64 = true;
-                    if (Backend.Options.EnableI64Emulation && (elemWgslType == "emu_i64" || elemWgslType == "emu_u64"))
+                    if (Backend.EnableI64Emulation && (elemWgslType == "emu_i64" || elemWgslType == "emu_u64"))
                         isEmulatedI64 = true;
                 }
 
@@ -1962,7 +1962,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             // CRITICAL: Set i64/f64 emulation flags BEFORE body generation.
             // GenerateCode() runs before GenerateHeader() (see CodeGeneratorBackend.Compile).
             // Without this, KernelUsesI64 is null during body generation, causing the
-            // TypeGenerator to fall back to Backend.Options.EnableI64Emulation (true),
+            // TypeGenerator to fall back to Backend.EnableI64Emulation (true),
             // emitting emu_i64 types and i64_from_i32 calls. But GenerateHeader() later
             // sets KernelUsesI64=false (if the kernel's own IR has no Int64) and omits the
             // emulation library — producing unresolved call targets in the WGSL.
@@ -2544,8 +2544,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 }
             }
 
-            TypeGenerator.KernelUsesI64 = Backend.Options.EnableI64Emulation && containsI64;
-            TypeGenerator.KernelUsesF64 = Backend.Options.EnableF64Emulation && containsF64;
+            TypeGenerator.KernelUsesI64 = Backend.EnableI64Emulation && containsI64;
+            TypeGenerator.KernelUsesF64 = Backend.EnableF64Emulation && containsF64;
         }
 
         /// <summary>
@@ -2838,11 +2838,11 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 var elementType = GetBufferElementType(param.ParameterType);
                 var wgslType = TypeGenerator[elementType];
 
-                if (Backend.Options.EnableF64Emulation && wgslType == "emu_f64")
+                if (Backend.EnableF64Emulation && wgslType == "emu_f64")
                 {
                     _emulatedF64Params.Add(param.Index);
                 }
-                else if (Backend.Options.EnableI64Emulation && (wgslType == "emu_i64" || wgslType == "emu_u64"))
+                else if (Backend.EnableI64Emulation && (wgslType == "emu_i64" || wgslType == "emu_u64"))
                 {
                     _emulatedI64Params.Add(param.Index);
                 }
@@ -2925,7 +2925,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     // emu_f64 is emulated as vec2<f32> when emulation is enabled
                     if (wgslType == "emu_f64")
                     {
-                        if (Backend.Options.UseOzakiF64Emulation)
+                        if (Backend.UseOzakiF64Emulation)
                             init = " = emu_f64(0.0, 0.0, 0.0, 0.0)";
                         else
                             init = " = emu_f64(0.0, 0.0)";
@@ -3045,8 +3045,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     var elementType = GetBufferElementType(param.ParameterType);
                     var wgslType = TypeGenerator[elementType];
 
-                    bool isEmuF64 = Backend.Options.EnableF64Emulation && wgslType == "emu_f64";
-                    bool isEmuI64 = Backend.Options.EnableI64Emulation && (wgslType == "emu_i64" || wgslType == "emu_u64");
+                    bool isEmuF64 = Backend.EnableF64Emulation && wgslType == "emu_f64";
+                    bool isEmuI64 = Backend.EnableI64Emulation && (wgslType == "emu_i64" || wgslType == "emu_u64");
 
                     int slotCount = (isEmuF64 || isEmuI64) ? 2 : 1;
                     packedScalarSlots[param.Index] = (scalarSlotOffset, slotCount, wgslType, isEmuF64, isEmuI64);
@@ -3091,7 +3091,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                                 // The IR type is Int64, but we use i32 since WGSL doesn't have i64 natively
                                 var scalarElemType = GetBufferElementType(fieldInfo.FieldType);
                                 var scalarWgslType = TypeGenerator[scalarElemType];
-                                bool isEmuI64 = Backend.Options.EnableI64Emulation && (scalarWgslType == "emu_i64" || scalarWgslType == "emu_u64");
+                                bool isEmuI64 = Backend.EnableI64Emulation && (scalarWgslType == "emu_i64" || scalarWgslType == "emu_u64");
 
                                 // For packed-struct view fields, the CPU sends the true element count
                                 // in a dedicated scalar slot (ViewCountSlot). Use that instead of
@@ -3127,8 +3127,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                             int slot = fieldInfo.ScalarSlot;
                             var scalarElemType = GetBufferElementType(fieldInfo.FieldType);
                             var scalarWgslType = TypeGenerator[scalarElemType];
-                            bool isEmuF64 = Backend.Options.EnableF64Emulation && scalarWgslType == "emu_f64";
-                            bool isEmuI64 = Backend.Options.EnableI64Emulation && (scalarWgslType == "emu_i64" || scalarWgslType == "emu_u64");
+                            bool isEmuF64 = Backend.EnableF64Emulation && scalarWgslType == "emu_f64";
+                            bool isEmuI64 = Backend.EnableI64Emulation && (scalarWgslType == "emu_i64" || scalarWgslType == "emu_u64");
 
                             if (isEmuF64)
                                 AppendLine($"var {fieldVarName} = f64_from_ieee754_bits(_scalar_params[{slot}], _scalar_params[{slot + 1}]);");
@@ -3315,7 +3315,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
             // When i64 emulation is active, Int64 indices become emu_i64 (vec2<u32>)
             // which cannot be used as WGSL array indices. Wrap with i64_to_i32().
-            bool offsetIsEmulatedI64 = Backend.Options.EnableI64Emulation
+            bool offsetIsEmulatedI64 = Backend.EnableI64Emulation
                 && value.Offset.Resolve().BasicValueType == BasicValueType.Int64;
             string offsetExpr = offsetIsEmulatedI64 ? $"i64_to_i32({offset})" : $"{offset}";
 
@@ -3334,8 +3334,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     var elemType = GetBufferElementType(bsFields[fieldIdx].FieldType);
                     string fieldTypeStr = TypeGenerator[elemType];
                     
-                    bool isEmuF64Field = Backend.Options.EnableF64Emulation && fieldTypeStr == "emu_f64";
-                    bool isEmuI64Field = Backend.Options.EnableI64Emulation && (fieldTypeStr == "emu_i64" || fieldTypeStr == "emu_u64");
+                    bool isEmuF64Field = Backend.EnableF64Emulation && fieldTypeStr == "emu_f64";
+                    bool isEmuI64Field = Backend.EnableI64Emulation && (fieldTypeStr == "emu_i64" || fieldTypeStr == "emu_u64");
 
                     if (isEmuF64Field || isEmuI64Field)
                     {
@@ -3812,19 +3812,19 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             // Check if this is an emulated 64-bit operation
             var leftType = TypeGenerator[value.Left.Type];
             var rightType = TypeGenerator[value.Right.Type];
-            bool isEmulatedF64 = Backend.Options.EnableF64Emulation && (leftType == "emu_f64" || rightType == "emu_f64");
-            bool isEmulatedI64 = Backend.Options.EnableI64Emulation && (leftType == "emu_i64" || leftType == "emu_u64" || rightType == "emu_i64" || rightType == "emu_u64");
+            bool isEmulatedF64 = Backend.EnableF64Emulation && (leftType == "emu_f64" || rightType == "emu_f64");
+            bool isEmulatedI64 = Backend.EnableI64Emulation && (leftType == "emu_i64" || leftType == "emu_u64" || rightType == "emu_i64" || rightType == "emu_u64");
             
             // Fallback: check BasicValueType when emulation options are enabled.
             // TypeGenerator may not return "emu_i64" for IR intermediate values (e.g., reduce accumulators).
             if (!isEmulatedF64 && !isEmulatedI64)
             {
-                if (Backend.Options.EnableI64Emulation && value.BasicValueType == BasicValueType.Int64)
+                if (Backend.EnableI64Emulation && value.BasicValueType == BasicValueType.Int64)
                 {
                     isEmulatedI64 = true;
                     leftType = value.IsUnsigned ? "emu_u64" : "emu_i64";
                 }
-                else if (Backend.Options.EnableF64Emulation && value.BasicValueType == BasicValueType.Float64)
+                else if (Backend.EnableF64Emulation && value.BasicValueType == BasicValueType.Float64)
                 {
                     isEmulatedF64 = true;
                     leftType = "emu_f64";
@@ -3834,7 +3834,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             // DIAGNOSTIC: Log all Max/Min operations to trace 64-bit detection
             if (value.Kind == BinaryArithmeticKind.Max || value.Kind == BinaryArithmeticKind.Min)
             {
-                if (WebGPUBackend.VerboseLogging) WebGPUBackend.Log($"[DIAG-BinaryArith] Kind={value.Kind} BVT={value.BasicValueType} leftType={leftType} rightType={rightType} isEmuI64={isEmulatedI64} isEmuF64={isEmulatedF64} I64Emu={Backend.Options.EnableI64Emulation} LeftIRType={value.Left.Type} IsUnsigned={value.IsUnsigned}");
+                if (WebGPUBackend.VerboseLogging) WebGPUBackend.Log($"[DIAG-BinaryArith] Kind={value.Kind} BVT={value.BasicValueType} leftType={leftType} rightType={rightType} isEmuI64={isEmulatedI64} isEmuF64={isEmulatedF64} I64Emu={Backend.EnableI64Emulation} LeftIRType={value.Left.Type} IsUnsigned={value.IsUnsigned}");
             }
 
             if (isEmulatedF64)
@@ -4079,7 +4079,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
             // Handle emulated emu_i64/emu_u64 negation
             var sourceType = TypeGenerator[value.Value.Type];
-            if (Backend.Options.EnableI64Emulation && (sourceType == "emu_i64" || sourceType == "emu_u64") && value.Kind == UnaryArithmeticKind.Neg)
+            if (Backend.EnableI64Emulation && (sourceType == "emu_i64" || sourceType == "emu_u64") && value.Kind == UnaryArithmeticKind.Neg)
             {
                 AppendLine($"{prefix}{target} = i64_neg({source});");
                 return;
@@ -4326,8 +4326,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             string rightType = TypeGenerator[value.Right.Type];
 
             // Check for emulated 64-bit compare
-            bool isEmulatedF64 = Backend.Options.EnableF64Emulation && (leftType == "emu_f64" || rightType == "emu_f64");
-            bool isEmulatedI64 = Backend.Options.EnableI64Emulation && (leftType == "emu_i64" || leftType == "emu_u64" || rightType == "emu_i64" || rightType == "emu_u64");
+            bool isEmulatedF64 = Backend.EnableF64Emulation && (leftType == "emu_f64" || rightType == "emu_f64");
+            bool isEmulatedI64 = Backend.EnableI64Emulation && (leftType == "emu_i64" || leftType == "emu_u64" || rightType == "emu_i64" || rightType == "emu_u64");
 
             if (isEmulatedF64)
             {
@@ -4424,10 +4424,10 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             bool isSourceUnsigned = (value.Flags & ConvertFlags.SourceUnsigned) == ConvertFlags.SourceUnsigned;
 
             // Emulated type detection
-            bool isEmulatedF64Target = Backend.Options.EnableF64Emulation && targetType == "emu_f64";
-            bool isEmulatedI64Target = Backend.Options.EnableI64Emulation && (targetType == "emu_i64" || targetType == "emu_u64");
-            bool isEmulatedF64Source = Backend.Options.EnableF64Emulation && sourceType == "emu_f64";
-            bool isEmulatedI64Source = Backend.Options.EnableI64Emulation && (sourceType == "emu_i64" || sourceType == "emu_u64");
+            bool isEmulatedF64Target = Backend.EnableF64Emulation && targetType == "emu_f64";
+            bool isEmulatedI64Target = Backend.EnableI64Emulation && (targetType == "emu_i64" || targetType == "emu_u64");
+            bool isEmulatedF64Source = Backend.EnableF64Emulation && sourceType == "emu_f64";
+            bool isEmulatedI64Source = Backend.EnableI64Emulation && (sourceType == "emu_i64" || sourceType == "emu_u64");
 
             // ---- TARGET is emulated emu_f64 ----
             if (isEmulatedF64Target)
@@ -4661,7 +4661,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
                                 // Helper: wrap i32 expression with i64_from_i32 when target expects emu_i64
                                 var targetWgslType = TypeGenerator[value.Type];
-                                bool needsI64Wrap = Backend.Options.EnableI64Emulation &&
+                                bool needsI64Wrap = Backend.EnableI64Emulation &&
                                     (targetWgslType == "emu_i64" || targetWgslType == "emu_u64");
                                 string WrapI32(string expr) => needsI64Wrap ? $"i64_from_i32({expr})" : expr;
 
@@ -4959,7 +4959,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
                 // Handle emulated i64 case
                 var targetWgslType = TypeGenerator[value.Type];
-                if (Backend.Options.EnableI64Emulation &&
+                if (Backend.EnableI64Emulation &&
                     (targetWgslType == "emu_i64" || targetWgslType == "emu_u64"))
                 {
                     lengthExpr = $"i64_from_i32({lengthExpr})";

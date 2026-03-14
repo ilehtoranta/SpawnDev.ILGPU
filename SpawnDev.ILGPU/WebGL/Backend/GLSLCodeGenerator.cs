@@ -988,7 +988,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             Declare(target);
 
             var operandType = TypeGenerator[value.Value.Type];
-            if (Backend.Options.EnableI64Emulation && (operandType == "uvec2") && value.Kind == UnaryArithmeticKind.Neg)
+            if (Backend.EnableI64Emulation && (operandType == "uvec2") && value.Kind == UnaryArithmeticKind.Neg)
             {
                 AppendLine($"{target} = i64_neg({operand});");
                 return;
@@ -1288,8 +1288,8 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             var type = TypeGenerator[value.Type];
             Declare(target);
 
-            bool isEmulatedF64 = Backend.Options.EnableF64Emulation && value.BasicValueType == BasicValueType.Float64;
-            bool isEmulatedI64 = Backend.Options.EnableI64Emulation && value.BasicValueType == BasicValueType.Int64;
+            bool isEmulatedF64 = Backend.EnableF64Emulation && value.BasicValueType == BasicValueType.Float64;
+            bool isEmulatedI64 = Backend.EnableI64Emulation && value.BasicValueType == BasicValueType.Int64;
 
             if (isEmulatedF64)
             {

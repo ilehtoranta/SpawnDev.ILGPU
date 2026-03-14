@@ -290,7 +290,7 @@
                 _ilgpuContext = await Context.CreateAsync(builder => builder.WebGL());
                 var glDevices = _ilgpuContext.GetWebGLDevices();
                 if (glDevices.Count == 0) throw new Exception("No WebGL2 device found");
-                var glOptions = new WebGLBackendOptions { EnableF64Emulation = false, EnableI64Emulation = false };
+                var glOptions = new WebGLBackendOptions { F64Emulation = F64EmulationMode.Disabled };
                 _ilgpuAccelerator = glDevices[0].CreateAccelerator(_ilgpuContext, glOptions);
                 break;
             case "Wasm":

@@ -719,7 +719,7 @@ namespace SpawnDev.ILGPU.WebGL
                 else
                 {
                     // Scalar argument (unchanged)
-                    if (arg is double dVal && webGlAccel.Backend.Options.EnableF64Emulation)
+                    if (arg is double dVal && webGlAccel.Backend.EnableF64Emulation)
                     {
                         var bits = BitConverter.DoubleToUInt64Bits(dVal);
                         jsParams.Add(new
@@ -730,7 +730,7 @@ namespace SpawnDev.ILGPU.WebGL
                             hi = (uint)(bits >> 32)
                         });
                     }
-                    else if (arg is long lVal && webGlAccel.Backend.Options.EnableI64Emulation)
+                    else if (arg is long lVal && webGlAccel.Backend.EnableI64Emulation)
                     {
                         var bits = (ulong)lVal;
                         jsParams.Add(new

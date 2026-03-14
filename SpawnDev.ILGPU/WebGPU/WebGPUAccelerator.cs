@@ -1132,7 +1132,7 @@ namespace SpawnDev.ILGPU.WebGPU
                         }
                         else if (arg is double dVal)
                         {
-                            if (webGpuAccel.Backend.Options.EnableF64Emulation)
+                            if (webGpuAccel.Backend.EnableF64Emulation)
                             {
                                 // Write full 64-bit IEEE-754 as 2 u32 values
                                 BitConverter.GetBytes(dVal).CopyTo(packedData, byteOffset);

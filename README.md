@@ -115,15 +115,16 @@ SpawnDev.ILGPU bundles ILGPU's native backends, so the same NuGet package works 
 - **WGSL transpilation** — C# kernels automatically compiled to WebGPU Shading Language
 - **GLSL transpilation** — C# kernels compiled to GLSL ES 3.0 vertex shaders with Transform Feedback for GPU compute
 - **Wasm compilation** — C# kernels compiled to native WebAssembly binary modules
-- **64-bit emulation** — Support for `double` (f64) and `long` (i64) via software emulation on browser GPU backends, with two f64 schemes: fast Dekker (`vec2<f32>`) and precise Ozaki (`vec4<f32>`)
+- **64-bit emulation** — `long`/`ulong` (i64) always emulated via `vec2<u32>` (required by ILGPU IR). `double` (f64) emulation configurable via `F64EmulationMode`: fast Dekker (`vec2<f32>`, default), precise Ozaki (`vec4<f32>`), or Disabled (promoted to f32)
 - **WebGPU extension auto-detection** — Probes adapter for `shader-f16`, `subgroups`, `timestamp-query`, and other features; conditionally enables them on the device
 - **Subgroup operations** — `Group.Broadcast` and `Warp.Shuffle` are supported on the WebGPU backend when the browser supports the `subgroups` extension
 - **Multi-worker dispatch** — Wasm backend distributes work across all available CPU cores via SharedArrayBuffer; falls back to a single off-thread worker when SAB is unavailable
 - **Zero-copy canvas rendering** — `ICanvasRenderer` presents pixel buffers to HTML canvases without CPU readback on GPU backends: WebGPU uses a fullscreen-triangle render pass reading directly from GPU storage; WebGL transfers an `ImageBitmap` from its worker and draws synchronously; Wasm reuses a cached `ImageData`. One API, all backends: `CanvasRendererFactory.Create(accelerator)`
 - **Blazor WebAssembly** — Seamless integration via [SpawnDev.BlazorJS](https://github.com/LostBeard/SpawnDev.BlazorJS)
 - **Shared memory & barriers** — Static and dynamic workgroup memory with `Group.Barrier()` synchronization (WebGPU, Wasm, Cuda, OpenCL)
-- **ILGPU Algorithms** — RadixSort, Scan, Reduce, Histogram, and other algorithm extensions are fully supported on WebGPU and tested in-browser; Wasm supports Scan/Reduce (RadixSort has a known bug)
+- **ILGPU Algorithms** — RadixSort, Scan, Reduce, Histogram, and other algorithm extensions are fully supported on WebGPU (including large-scale sorts up to 4M+ elements) and tested in-browser; Wasm supports Scan/Reduce (RadixSort has a known bug)
 - **Broadcast** — `Group.Broadcast` for intra-group value sharing (WebGPU, Wasm)
+- **Device loss handling** — WebGPU monitors `device.lost` and WebGL monitors `webglcontextlost`; `IsDeviceLost`/`IsContextLost` properties and `DeviceLost`/`ContextLost` events enable applications to detect GPU device loss and fail fast with clear errors instead of silent corruption
 - **GpuMatrix4x4** — GPU-friendly 4×4 matrix struct that auto-transposes from .NET's row-major `Matrix4x4` to GPU column-major order. Use `TransformPoint` and `TransformDirection` directly inside kernels for 3D transformations
 - **No native dependencies** — Entirely written in C#
 
@@ -253,40 +254,69 @@ static void VectorAddKernel(Index1D index, ArrayView<float> a, ArrayView<float> 
 
 ## Testing
 
-### Browser Tests
-Start the demo app and navigate to `/tests` to run the unit test suite.
+### PlaywrightMultiTest (Unified Runner)
 
-### Automated Tests (Playwright)
+All desktop and browser tests run in a single `dotnet test` invocation via the **PlaywrightMultiTest** NUnit project:
+
 ```bash
-# Windows
-_test.bat
+# Run all tests (desktop + browser) with timestamped results
+timestamp=$(date +%Y%m%d_%H%M%S) && dotnet test PlaywrightMultiTest/PlaywrightMultiTest.csproj \
+  --logger "trx;LogFileName=results_${timestamp}.trx" \
+  --results-directory PlaywrightMultiTest/TestResults
 
-# Linux/macOS
-./_test.sh
+# Run only WebGPU tests
+dotnet test PlaywrightMultiTest/PlaywrightMultiTest.csproj \
+  --filter "FullyQualifiedName~WebGPUTests."
+
+# Run a specific test
+dotnet test PlaywrightMultiTest/PlaywrightMultiTest.csproj \
+  --filter "FullyQualifiedName~WebGPUTests.AlgorithmRadixSortPairsTest"
+```
+
+**How it works:**
+- Publishes Blazor WASM and Console projects automatically
+- Launches Chromium via Playwright for browser tests (with `--enable-unsafe-webgpu`)
+- Runs desktop tests as individual subprocesses
+- Detects Blazor error UI during tests and captures browser console errors/warnings
+- All results surfaced as standard NUnit test cases with `.trx` output
+
+### Browser Tests (Manual)
+
+Start the demo app and navigate to `/tests` to run the browser test suite interactively:
+
+```bash
+dotnet run --project SpawnDev.ILGPU.Demo
+```
+
+### Desktop Tests (Manual)
+
+```bash
+dotnet run --project SpawnDev.ILGPU.ConsoleDemo
 ```
 
 ## Test Coverage
 
-**~590 tests** across seven test suites covering all core features on both browser and desktop.
+**1518 tests** across eight test suites covering all core features on both browser and desktop. All tests are run via the unified **PlaywrightMultiTest** runner in a single `dotnet test` invocation.
 
 ### Test Suites
 
-#### Browser (Blazor WebAssembly)
+#### Browser (Blazor WebAssembly via Playwright)
 
 | Suite | Backend | What's Tested |
 |-------|---------|---------------|
-| **WebGPUTests** | WebGPU | Full ILGPU feature set on GPU via WGSL |
+| **WebGPUTests** | WebGPU | Full ILGPU feature set on GPU via WGSL, including RadixSort, Scan, Reduce |
+| **WebGPUNoSubgroupsTests** | WebGPU (no subgroups) | Same tests with subgroups force-disabled to verify shared-memory emulation |
 | **WebGLTests** | WebGL | GPU compute via GLSL ES 3.0, f64/i64 emulation |
 | **WasmTests** | Wasm | Native WebAssembly binary dispatch to workers, shared memory, barriers |
 | **DefaultTests** | Auto | Device enumeration, preferred backend, kernel execution |
 
-#### Desktop (Console Runner)
+#### Desktop (Console Runner via subprocess)
 
 | Suite | Backend | What's Tested |
 |-------|---------|---------------|
 | **CudaTests** | CUDA | Full ILGPU feature set on NVIDIA GPU |
 | **OpenCLTests** | OpenCL | GPU compute on NVIDIA/AMD/Intel, dynamic subgroup feature detection |
-| **DesktopCPUTests** | CPU | Multi-threaded CPU accelerator with parallel mode |
+| **CPUTests** | CPU | Multi-threaded CPU accelerator (Nvidia preset: warp=32, warps=32) |
 
 ### Coverage by Area
 
@@ -327,54 +357,33 @@ _test.bat
 
 ### 64-bit Emulation
 
-GPU hardware typically only supports 32-bit operations. Both GPU backends (WebGPU and WebGL) provide software emulation for 64-bit types (`double`/f64 and `long`/i64), **enabled by default** for full precision parity with the Wasm backend (and native desktop backends).
+GPU hardware typically only supports 32-bit operations. Both GPU backends (WebGPU and WebGL) provide software emulation for 64-bit types.
 
-#### `double` (f64) Emulation Schemes
+**i64 emulation** (`long`/`ulong`) is always enabled — ILGPU's IR uses `Int64` for `ArrayView.Length` and indices, so i64 emulation via `vec2<u32>` is required for correctness.
 
-The WebGPU backend offers two emulation schemes for `double` precision:
+**f64 emulation** (`double`) is configurable via `F64EmulationMode`:
 
-| | **Dekker** (Default) | **Ozaki** |
-|---|---|---|
-| **Representation** | `vec2<f32>` (high + low) | `vec4<f32>` (quad-float) |
-| **Precision** | ~48–53 bits of mantissa | Strict IEEE 754 double precision |
-| **Memory** | 8 bytes per value | 16 bytes per value |
-| **Performance** | ⚡ Faster | 🐢 Slower (~2× overhead) |
-| **Best for** | General compute, fractals, most workloads | Scientific computing, financial calculations |
-| **Option** | `UseOzakiF64Emulation = false` | `UseOzakiF64Emulation = true` |
+| | **Dekker** (Default) | **Ozaki** | **Disabled** |
+|---|---|---|---|
+| **Representation** | `vec2<f32>` (high + low) | `vec4<f32>` (quad-float) | Native `f32` |
+| **Precision** | ~48–53 bits of mantissa | Strict IEEE 754 double precision | 32-bit only |
+| **Memory** | 8 bytes per value | 16 bytes per value | 4 bytes per value |
+| **Performance** | ⚡ Fast | 🐢 ~2× slower | ⚡⚡ Fastest |
+| **Best for** | General compute, fractals | Scientific, financial | Rendering, max perf |
 
 ```csharp
-// Default: Dekker double-float emulation (good precision, better performance)
+using SpawnDev.ILGPU;
+using SpawnDev.ILGPU.WebGPU.Backend;
+
+// Default: Dekker double-float emulation (good precision, fast)
 var options = new WebGPUBackendOptions();
-using var accelerator = await device.CreateAcceleratorAsync(context, options);
 
 // Ozaki quad-float emulation (strict IEEE 754 precision)
-var options = new WebGPUBackendOptions { UseOzakiF64Emulation = true };
-using var accelerator = await device.CreateAcceleratorAsync(context, options);
+var options = new WebGPUBackendOptions { F64Emulation = F64EmulationMode.Ozaki };
 
-// Disable f64 emulation entirely (double promoted to float for max performance)
-var options = new WebGPUBackendOptions { EnableF64Emulation = false };
-using var accelerator = await device.CreateAcceleratorAsync(context, options);
-```
+// Disable f64 emulation (double promoted to float for max performance)
+var options = new WebGPUBackendOptions { F64Emulation = F64EmulationMode.Disabled };
 
-#### Configuration Options
-
-| Option | Default | Description |
-|--------|---------|-------------|
-| `EnableF64Emulation` | `true` | 64-bit float (`double`) emulation. When disabled, `double` is promoted to `float`. |
-| `UseOzakiF64Emulation` | `false` | Use Ozaki `vec4<f32>` scheme instead of Dekker `vec2<f32>` for strict IEEE 754 compliance. |
-| `EnableI64Emulation` | `true` | 64-bit integer (`long`/`ulong`) emulation via `vec2<u32>` double-word technique. |
-
-To disable emulation for better performance (at the cost of precision):
-
-```csharp
-// WebGPU
-using SpawnDev.ILGPU.WebGPU.Backend;
-var options = new WebGPUBackendOptions { EnableF64Emulation = false, EnableI64Emulation = false };
-using var accelerator = await device.CreateAcceleratorAsync(context, options);
-
-// WebGL
-using SpawnDev.ILGPU.WebGL.Backend;
-var options = new WebGLBackendOptions { EnableF64Emulation = false, EnableI64Emulation = false };
 using var accelerator = await device.CreateAcceleratorAsync(context, options);
 ```
 

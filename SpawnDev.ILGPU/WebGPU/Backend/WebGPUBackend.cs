@@ -282,6 +282,15 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         /// </summary>
         public HashSet<string> EnabledFeatures { get; }
 
+        /// <summary>True if f64 emulation is enabled (Dekker or Ozaki).</summary>
+        internal bool EnableF64Emulation => Options.F64Emulation != F64EmulationMode.Disabled;
+
+        /// <summary>True if using Ozaki quad-float f64 emulation.</summary>
+        internal bool UseOzakiF64Emulation => Options.F64Emulation == F64EmulationMode.Ozaki;
+
+        /// <summary>Always true — i64 emulation is required by ILGPU IR.</summary>
+        internal bool EnableI64Emulation => true;
+
         /// <summary>Returns true if shader-f16 is enabled.</summary>
         public bool HasShaderF16 => EnabledFeatures.Contains("shader-f16");
 

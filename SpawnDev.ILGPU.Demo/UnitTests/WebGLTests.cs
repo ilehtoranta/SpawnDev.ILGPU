@@ -38,8 +38,7 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
                 throw new UnsupportedTestException("No WebGL2 devices found");
             var accelerator = devices[0].CreateAccelerator(context, new WebGLBackendOptions
             {
-                EnableF64Emulation = true,
-                EnableI64Emulation = true
+                F64Emulation = F64EmulationMode.Dekker,
             });
             return (context, accelerator);
         }
@@ -247,9 +246,7 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
                 throw new UnsupportedTestException("No WebGL2 devices found");
             var accelerator = devices[0].CreateAccelerator(context, new WebGLBackendOptions
             {
-                EnableF64Emulation = true,
-                UseOzakiF64Emulation = true,
-                EnableI64Emulation = true
+                F64Emulation = F64EmulationMode.Ozaki,
             });
             return (context, accelerator);
         }

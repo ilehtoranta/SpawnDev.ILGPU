@@ -109,10 +109,10 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 BasicValueType.Int8 => "int",   // GLSL ES 3.0 has no i8, promote
                 BasicValueType.Int16 => "int",  // GLSL ES 3.0 has no i16, promote
                 BasicValueType.Int32 => "int",
-                BasicValueType.Int64 => Backend.Options.EnableI64Emulation ? "uvec2" : "int",
+                BasicValueType.Int64 => Backend.EnableI64Emulation ? "uvec2" : "int",
                 BasicValueType.Float16 => "float", // Promoting
                 BasicValueType.Float32 => "float",
-                BasicValueType.Float64 => Backend.Options.EnableF64Emulation ? (Backend.Options.UseOzakiF64Emulation ? "vec4" : "vec2") : "float",
+                BasicValueType.Float64 => Backend.EnableF64Emulation ? (Backend.UseOzakiF64Emulation ? "vec4" : "vec2") : "float",
                 _ => null
             };
         }
@@ -128,14 +128,14 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 ArithmeticBasicValueType.Int8 => "int",
                 ArithmeticBasicValueType.Int16 => "int",
                 ArithmeticBasicValueType.Int32 => "int",
-                ArithmeticBasicValueType.Int64 => Backend.Options.EnableI64Emulation ? "uvec2" : "int",
+                ArithmeticBasicValueType.Int64 => Backend.EnableI64Emulation ? "uvec2" : "int",
                 ArithmeticBasicValueType.UInt8 => "uint",
                 ArithmeticBasicValueType.UInt16 => "uint",
                 ArithmeticBasicValueType.UInt32 => "uint",
-                ArithmeticBasicValueType.UInt64 => Backend.Options.EnableI64Emulation ? "uvec2" : "uint",
+                ArithmeticBasicValueType.UInt64 => Backend.EnableI64Emulation ? "uvec2" : "uint",
                 ArithmeticBasicValueType.Float16 => "float",
                 ArithmeticBasicValueType.Float32 => "float",
-                ArithmeticBasicValueType.Float64 => Backend.Options.EnableF64Emulation ? (Backend.Options.UseOzakiF64Emulation ? "vec4" : "vec2") : "float",
+                ArithmeticBasicValueType.Float64 => Backend.EnableF64Emulation ? (Backend.UseOzakiF64Emulation ? "vec4" : "vec2") : "float",
                 _ => null
             };
         }

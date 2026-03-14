@@ -290,14 +290,14 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             //    Including the library unconditionally produces a massive vertex shader
             //    that ANGLE's D3D11 backend cannot compile with Transform Feedback.
             var (kernelNeedsF64, kernelNeedsI64) = KernelUsesEmulatedTypes();
-            if ((Backend.Options.EnableF64Emulation && kernelNeedsF64) ||
-                (Backend.Options.EnableI64Emulation && kernelNeedsI64))
+            if ((Backend.EnableF64Emulation && kernelNeedsF64) ||
+                (Backend.EnableI64Emulation && kernelNeedsI64))
             {
                 Builder.AppendLine("// ============ 64-bit Emulation Library ============");
                 Builder.AppendLine(GLSLEmulationLibrary.GetEmulationLibrary(
-                    Backend.Options.EnableF64Emulation && kernelNeedsF64,
-                    Backend.Options.UseOzakiF64Emulation,
-                    Backend.Options.EnableI64Emulation && kernelNeedsI64));
+                    Backend.EnableF64Emulation && kernelNeedsF64,
+                    Backend.UseOzakiF64Emulation,
+                    Backend.EnableI64Emulation && kernelNeedsI64));
             }
 
             // 5. Insert a placeholder for struct type definitions.
@@ -354,9 +354,9 @@ namespace SpawnDev.ILGPU.WebGL.Backend
 
                 if (unwrapped is PrimitiveType pt)
                 {
-                    if (Backend.Options.EnableF64Emulation && pt.BasicValueType == BasicValueType.Float64)
+                    if (Backend.EnableF64Emulation && pt.BasicValueType == BasicValueType.Float64)
                         _emulatedF64Params.Add(param.Index);
-                    else if (Backend.Options.EnableI64Emulation && pt.BasicValueType == BasicValueType.Int64)
+                    else if (Backend.EnableI64Emulation && pt.BasicValueType == BasicValueType.Int64)
                         _emulatedI64Params.Add(param.Index);
                 }
             }
@@ -582,8 +582,8 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                     BasicValueType.Int32 => "int",
                     BasicValueType.Int16 => "int",
                     BasicValueType.Int8 => "int",
-                    BasicValueType.Float64 when Backend.Options.EnableF64Emulation => "uint",
-                    BasicValueType.Int64 when Backend.Options.EnableI64Emulation => "uint",
+                    BasicValueType.Float64 when Backend.EnableF64Emulation => "uint",
+                    BasicValueType.Int64 when Backend.EnableI64Emulation => "uint",
                     _ => "float"
                 };
             }
@@ -2133,8 +2133,8 @@ namespace SpawnDev.ILGPU.WebGL.Backend
 
             var leftType = TypeGenerator[value.Left.Type];
             var rightType = TypeGenerator[value.Right.Type];
-            bool isEmulatedF64 = Backend.Options.EnableF64Emulation && (leftType == "vec2" || rightType == "vec2" || (Backend.Options.UseOzakiF64Emulation && (leftType == "vec4" || rightType == "vec4")));
-            bool isEmulatedI64 = Backend.Options.EnableI64Emulation && (leftType == "uvec2" || rightType == "uvec2");
+            bool isEmulatedF64 = Backend.EnableF64Emulation && (leftType == "vec2" || rightType == "vec2" || (Backend.UseOzakiF64Emulation && (leftType == "vec4" || rightType == "vec4")));
+            bool isEmulatedI64 = Backend.EnableI64Emulation && (leftType == "uvec2" || rightType == "uvec2");
 
             if (isEmulatedF64)
             {
@@ -2234,8 +2234,8 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             var operandType = TypeGenerator[value.Value.Type];
             string prefix = _hoistedPrimitives.Contains(value) ? "" : $"{TypeGenerator[value.Type]} ";
 
-            bool isEmulatedF64 = Backend.Options.EnableF64Emulation && (operandType == "vec2" || (Backend.Options.UseOzakiF64Emulation && operandType == "vec4"));
-            bool isEmulatedI64 = Backend.Options.EnableI64Emulation && operandType == "uvec2";
+            bool isEmulatedF64 = Backend.EnableF64Emulation && (operandType == "vec2" || (Backend.UseOzakiF64Emulation && operandType == "vec4"));
+            bool isEmulatedI64 = Backend.EnableI64Emulation && operandType == "uvec2";
 
             if (isEmulatedF64)
             {
@@ -2272,7 +2272,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             string prefix = _hoistedPrimitives.Contains(value) ? "" : $"{TypeGenerator[value.Type]} ";
 
             var firstType = TypeGenerator[value.First.Type];
-            bool isEmulatedF64 = Backend.Options.EnableF64Emulation && (firstType == "vec2" || (Backend.Options.UseOzakiF64Emulation && firstType == "vec4"));
+            bool isEmulatedF64 = Backend.EnableF64Emulation && (firstType == "vec2" || (Backend.UseOzakiF64Emulation && firstType == "vec4"));
 
             if (isEmulatedF64)
             {
@@ -2293,8 +2293,8 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             string prefix = _hoistedPrimitives.Contains(value) ? "" : "bool ";
 
             var leftType = TypeGenerator[value.Left.Type];
-            bool isEmulatedF64 = Backend.Options.EnableF64Emulation && (leftType == "vec2" || (Backend.Options.UseOzakiF64Emulation && leftType == "vec4"));
-            bool isEmulatedI64 = Backend.Options.EnableI64Emulation && leftType == "uvec2";
+            bool isEmulatedF64 = Backend.EnableF64Emulation && (leftType == "vec2" || (Backend.UseOzakiF64Emulation && leftType == "vec4"));
+            bool isEmulatedI64 = Backend.EnableI64Emulation && leftType == "uvec2";
 
             if (isEmulatedF64)
             {
@@ -2332,10 +2332,10 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             var sourceType = TypeGenerator[value.Value.Type];
             string prefix = _hoistedPrimitives.Contains(value) ? "" : $"{targetType} ";
 
-            bool isEmulatedF64Target = Backend.Options.EnableF64Emulation && (targetType == "vec2" || (Backend.Options.UseOzakiF64Emulation && targetType == "vec4"));
-            bool isEmulatedI64Target = Backend.Options.EnableI64Emulation && targetType == "uvec2";
-            bool isEmulatedF64Source = Backend.Options.EnableF64Emulation && (sourceType == "vec2" || (Backend.Options.UseOzakiF64Emulation && sourceType == "vec4"));
-            bool isEmulatedI64Source = Backend.Options.EnableI64Emulation && sourceType == "uvec2";
+            bool isEmulatedF64Target = Backend.EnableF64Emulation && (targetType == "vec2" || (Backend.UseOzakiF64Emulation && targetType == "vec4"));
+            bool isEmulatedI64Target = Backend.EnableI64Emulation && targetType == "uvec2";
+            bool isEmulatedF64Source = Backend.EnableF64Emulation && (sourceType == "vec2" || (Backend.UseOzakiF64Emulation && sourceType == "vec4"));
+            bool isEmulatedI64Source = Backend.EnableI64Emulation && sourceType == "uvec2";
 
             // Detect unsigned source conversion (e.g. uint → float)
             bool isSourceUnsigned = (value.Flags & ConvertFlags.SourceUnsigned) == ConvertFlags.SourceUnsigned;

@@ -33,9 +33,7 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
             var device = devices[0];
             var options = new WebGPUBackendOptions
             {
-                EnableF64Emulation = enableEmulation,
-                UseOzakiF64Emulation = enableEmulation,
-                EnableI64Emulation = enableEmulation
+                F64Emulation = enableEmulation ? F64EmulationMode.Ozaki : F64EmulationMode.Disabled,
             };
             var accelerator = await device.CreateAcceleratorAsync(context, options);
             return (context, accelerator);
@@ -101,9 +99,7 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
             var device = context.GetWebGPUDevices()[0];
             var options = new WebGPUBackendOptions
             {
-                EnableF64Emulation = true,
-                UseOzakiF64Emulation = true,
-                EnableI64Emulation = true
+                F64Emulation = F64EmulationMode.Ozaki,
             };
             using var accelerator = await device.CreateAcceleratorAsync(context, options);
 

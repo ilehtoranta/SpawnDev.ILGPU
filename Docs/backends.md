@@ -105,14 +105,17 @@ if (devices.Count > 0)
 Use `WebGPUBackendOptions` to configure the transpiler:
 
 ```csharp
+using SpawnDev.ILGPU;
 using SpawnDev.ILGPU.WebGPU.Backend;
 
-var options = new WebGPUBackendOptions
-{
-    EnableF64Emulation = true,      // Default: true — emulate double precision
-    UseOzakiF64Emulation = false,   // Default: false — use Dekker (faster) vs Ozaki (precise)
-    EnableI64Emulation = true,      // Default: true — emulate long/ulong
-};
+// Default: Dekker f64 emulation (good precision, fast)
+var options = new WebGPUBackendOptions();
+
+// Ozaki f64 emulation (strict IEEE 754)
+var options = new WebGPUBackendOptions { F64Emulation = F64EmulationMode.Ozaki };
+
+// Disable f64 emulation (double → float, max performance)
+var options = new WebGPUBackendOptions { F64Emulation = F64EmulationMode.Disabled };
 
 using var accelerator = await devices[0].CreateAcceleratorAsync(context, options);
 ```
@@ -123,9 +126,10 @@ using var accelerator = await devices[0].CreateAcceleratorAsync(context, options
 - **Shared memory** — `SharedMemory.Allocate<T>()` maps to `var<workgroup>`
 - **Barriers** — `Group.Barrier()` maps to `workgroupBarrier()`
 - **Atomics** — `Atomic.Add`, `Atomic.Min`, `Atomic.Max`, `Atomic.CompareExchange`
-- **ILGPU Algorithms** — RadixSort, Scan, Reduce, Histogram, and other algorithm extensions are fully supported and tested. Use `CreateRadixSortPairs<TKey, TValue>()`, `CreateScan()`, `CreateReduce()`, etc. the same way as on desktop backends
+- **ILGPU Algorithms** — RadixSort, Scan, Reduce, Histogram, and other algorithm extensions are fully supported and tested (including large-scale sorts up to 4M+ elements). Use `CreateRadixSortPairs<TKey, TValue>()`, `CreateScan()`, `CreateReduce()`, etc. the same way as on desktop backends
 - **Subgroups** — `Group.Broadcast`, `Warp.Shuffle` (when the `subgroups` extension is available)
 - **Auto-detected extensions** — probes adapter for `shader-f16`, `subgroups`, `timestamp-query`, etc.
+- **Device loss detection** — monitors `device.lost` promise; `IsDeviceLost` property and `DeviceLost` event fire on unexpected GPU device loss (driver crash, GPU reset, VRAM exhaustion). Subsequent dispatch/synchronize calls throw `InvalidOperationException` with a clear message
 
 ### ILGPU Algorithms (WebGPU)
 
@@ -172,13 +176,14 @@ if (devices.Count > 0)
 ### Configuration Options
 
 ```csharp
+using SpawnDev.ILGPU;
 using SpawnDev.ILGPU.WebGL.Backend;
 
-var options = new WebGLBackendOptions
-{
-    EnableF64Emulation = true,   // Default: true
-    EnableI64Emulation = true,   // Default: true
-};
+// Default: Dekker f64 emulation
+var options = new WebGLBackendOptions();
+
+// Ozaki f64 emulation (strict IEEE 754)
+var options = new WebGLBackendOptions { F64Emulation = F64EmulationMode.Ozaki };
 
 using var accelerator = devices[0].CreateAccelerator(context, options);
 ```
@@ -286,32 +291,33 @@ using var accelerator = context.CreateCPUAccelerator(0);
 
 ## 64-bit Emulation
 
-GPU hardware typically supports only 32-bit operations. Both GPU backends provide software emulation for 64-bit types, **enabled by default**.
+GPU hardware typically supports only 32-bit operations. Both GPU backends provide software emulation for 64-bit types.
 
-### `double` (f64) Emulation Schemes
+**i64 emulation** (`long`/`ulong` via `vec2<u32>`) is always enabled — ILGPU's IR requires Int64 for `ArrayView.Length` and indices.
 
-| | **Dekker** (Default) | **Ozaki** |
-|---|---|---|
-| **Representation** | `vec2<f32>` (high + low) | `vec4<f32>` (quad-float) |
-| **Precision** | ~48–53 bits mantissa | Strict IEEE 754 |
-| **Memory** | 8 bytes | 16 bytes |
-| **Performance** | ⚡ Faster | 🐢 ~2× slower |
-| **Best for** | General compute, fractals | Scientific, financial |
+**f64 emulation** (`double`) is configurable via `F64EmulationMode`:
+
+| | **Dekker** (Default) | **Ozaki** | **Disabled** |
+|---|---|---|---|
+| **Representation** | `vec2<f32>` (high + low) | `vec4<f32>` (quad-float) | Native `f32` |
+| **Precision** | ~48–53 bits mantissa | Strict IEEE 754 | 32-bit only |
+| **Memory** | 8 bytes | 16 bytes | 4 bytes |
+| **Performance** | ⚡ Fast | 🐢 ~2× slower | ⚡⚡ Fastest |
+| **Best for** | General compute, fractals | Scientific, financial | Rendering, max perf |
 
 ### Configuration Examples
 
 ```csharp
+using SpawnDev.ILGPU;
+
 // Default: Dekker double-float emulation
 var options = new WebGPUBackendOptions();
 
 // Strict IEEE 754 precision
-var options = new WebGPUBackendOptions { UseOzakiF64Emulation = true };
+var options = new WebGPUBackendOptions { F64Emulation = F64EmulationMode.Ozaki };
 
-// Disable emulation (double → float, max performance)
-var options = new WebGPUBackendOptions { EnableF64Emulation = false };
-
-// Disable all emulation
-var options = new WebGPUBackendOptions { EnableF64Emulation = false, EnableI64Emulation = false };
+// Disable f64 emulation (double promoted to float, max performance)
+var options = new WebGPUBackendOptions { F64Emulation = F64EmulationMode.Disabled };
 ```
 
 ## Runtime Backend Switching

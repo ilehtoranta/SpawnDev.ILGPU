@@ -5,14 +5,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Build Commands
 
 ```bash
-# Build the main library (~17s, ~1049 pre-existing CS1591 warnings)
+# Build the main library (~2s, 0 errors)
 dotnet build SpawnDev.ILGPU/SpawnDev.ILGPU.csproj
 
 # Build the full solution
 dotnet build SpawnDev.ILGPU.slnx
 
 # Run desktop tests (CUDA, OpenCL, CPU backends)
-dotnet run --project SpawnDev.ILGPU.ConsoleDemo
+dotnet run --project SpawnDev.ILGPU.DemoConsole
 
 # Run browser tests — launch the Blazor WASM demo and navigate to /tests
 dotnet run --project SpawnDev.ILGPU.Demo
@@ -38,8 +38,8 @@ SpawnDev.ILGPU extends ILGPU with three browser GPU backends. It transpiles .NET
 ### 64-bit Emulation
 
 WebGPU/WebGL lack native f64 and i64. The library emulates them:
-- **f64**: Dekker (`vec2<f32>`) and Ozaki (`vec4<f32>`) double-float arithmetic
-- **i64**: `vec2<u32>` paired 32-bit operations
+- **f64**: Configurable via `F64EmulationMode` enum — Dekker (`vec2<f32>`, default), Ozaki (`vec4<f32>`), or Disabled
+- **i64**: Always enabled — `vec2<u32>` paired 32-bit operations (required by ILGPU IR for ArrayView.Length and indices)
 - Emulation library inclusion is controlled by flags set in `SetEmulationFlags()` which scans kernel + inlined helper IR for Int64/Float64 usage
 
 ### Key Code Paths
@@ -58,10 +58,12 @@ The `ILGPU/` and `ILGPU.Algorithms/` directories contain a modified fork of ILGP
 
 ## Test Infrastructure
 
-Unit tests live in `SpawnDev.ILGPU.Demo.Shared/UnitTests/`. The abstract base class `BackendTestBase` (split across `BackendTestBase.Tests1-9.cs` partial files) defines all tests. Backend-specific test classes inherit from it:
+Unit tests live in `SpawnDev.ILGPU.Demo.Shared/UnitTests/`. The abstract base class `BackendTestBase` (split across `BackendTestBase.Tests1-10.cs` partial files) defines all tests. Backend-specific test classes inherit from it:
 
-- **Desktop** (`SpawnDev.ILGPU.ConsoleDemo/`): `CudaTests`, `OpenCLTests`, `DesktopCPUTests` — run via `dotnet run --project SpawnDev.ILGPU.ConsoleDemo`
-- **Browser** (`SpawnDev.ILGPU.Demo/`): `WebGPUTests`, `WebGLTests`, `WasmTests`, `DefaultTests` — run via the Blazor WASM demo app's `/tests` route
+- **Desktop** (`SpawnDev.ILGPU.DemoConsole/`): `CudaTests`, `OpenCLTests`, `CPUTests` — run via `dotnet run --project SpawnDev.ILGPU.DemoConsole`
+- **Browser** (`SpawnDev.ILGPU.Demo/`): `WebGPUTests`, `WebGPUNoSubgroupsTests`, `WebGLTests`, `WasmTests`, `DefaultTests` — run via the Blazor WASM demo app's `/tests` route
+
+Backend-specific test classes override `RequireFeature()` to skip tests that depend on unavailable features (e.g., subgroup tests on `WebGPUNoSubgroupsTests`, RadixSort on `WasmTests`/`WebGLTests`).
 
 ### PlaywrightMultiTest (unified test runner)
 
@@ -99,4 +101,7 @@ Test results are persisted as timestamped `.trx` files in `PlaywrightMultiTest/T
 - **Cross-backend impact** — changes to shared code (especially in `ILGPU/`) affect all 6 backends; consider all of them before modifying
 - **No quick fixes** — every change must be well thought out; for complex fixes, plan before implementing
 - **Do not hardcode hardware limits that are evolving** — e.g., WebGPU's 4GB buffer limit is being lifted; preserve full i64 index paths rather than assuming 32-bit indices are always sufficient
-- **Emulation paths must remain functional** — i64/u64 emulation cannot be disabled because ILGPU's IR uses Int64 for ArrayView.Length and indices; the choice is which emulation method to use (Dekker vs Ozaki for f64), not whether to emulate
+- **i64 emulation is always on** — ILGPU's IR uses Int64 for ArrayView.Length and indices; there is no option to disable it
+- **f64 emulation is configurable** — `F64EmulationMode` enum: `Dekker` (default), `Ozaki`, or `Disabled`. The enum is defined in `SpawnDev.ILGPU` namespace (`F64EmulationMode.cs`), used by both `WebGPUBackendOptions` and `WebGLBackendOptions`
+- **Device loss detection** — WebGPU monitors `device.lost` promise; WebGL monitors `webglcontextlost` event via glWorker.js. `IsDeviceLost`/`IsContextLost` guards on dispatch and synchronize throw `InvalidOperationException` on lost device. Intentional disposal (`Dispose()`) is filtered out — only unexpected losses fire the `DeviceLost`/`ContextLost` events
+- **NaN/Inf detection uses bitcast** — WGSL `IsNaNF`/`IsInfF` use `bitcast<u32>()` bit-level checks, not `val != val` comparisons, because GPU shader compilers may optimize away self-comparisons or flush NaN

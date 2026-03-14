@@ -385,9 +385,7 @@
         _ilgpuContext = await Context.CreateAsync(builder => builder.WebGL());
         var devices = _ilgpuContext.GetWebGLDevices();
         if (devices.Count == 0) throw new Exception("No WebGL2 device found");
-        // Enable f64 emulation for full 64-bit float precision. I64 disabled to keep
-        // integer ops (loop counters, color packing) as native int32 for correctness.
-        var options = new WebGLBackendOptions { EnableF64Emulation = true, EnableI64Emulation = false };
+        var options = new WebGLBackendOptions { F64Emulation = F64EmulationMode.Dekker };
         _ilgpuAccelerator = devices[0].CreateAccelerator(_ilgpuContext, options);
     }
 
