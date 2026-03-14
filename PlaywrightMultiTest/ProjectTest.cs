@@ -48,6 +48,28 @@ public class ProjectTest
         TestFunc = (page) => RunTest(page);
     }
 
+    /// <summary>
+    /// Checks if the Blazor error UI (#blazor-error-ui) is visible on the page.
+    /// </summary>
+    private static async Task<bool> IsBlazorErrorVisible(IPage page)
+    {
+        return await page.EvaluateAsync<bool>(
+            "() => { var el = document.getElementById('blazor-error-ui'); return el != null && getComputedStyle(el).display !== 'none'; }");
+    }
+
+    /// <summary>
+    /// Dismisses the Blazor error UI by reloading the page if it's visible.
+    /// Returns the error text if one was found, null otherwise.
+    /// </summary>
+    private static async Task<string?> DismissBlazorErrorIfVisible(IPage page)
+    {
+        var visible = await IsBlazorErrorVisible(page);
+        if (!visible) return null;
+        var errorText = await page.EvaluateAsync<string>(
+            "() => { var el = document.getElementById('blazor-error-ui'); return el ? el.innerText : ''; }");
+        return string.IsNullOrWhiteSpace(errorText) ? "Blazor unhandled error (no message)" : errorText.Trim();
+    }
+
     public async Task RunTest(IPage page)
     {
         try
@@ -62,6 +84,21 @@ public class ProjectTest
                 // wait for test to load
                 await page.WaitForSelectorAsync(rowSelector, new() { Timeout = 30000 });
             }
+
+            // Check for pre-existing Blazor error before running test
+            var preError = await DismissBlazorErrorIfVisible(page);
+
+            // Capture console messages (errors + warnings) during the test
+            var consoleErrors = new List<string>();
+            var consoleWarnings = new List<string>();
+            void OnConsole(object? sender, IConsoleMessage msg)
+            {
+                if (msg.Type == "error")
+                    consoleErrors.Add(msg.Text);
+                else if (msg.Type == "warning")
+                    consoleWarnings.Add(msg.Text);
+            }
+            page.Console += OnConsole;
 
             // run the test
             var row = page.Locator(rowSelector);
@@ -84,6 +121,12 @@ public class ProjectTest
                 return await runButton.IsEnabledAsync();
             });
 
+            // Stop capturing console
+            page.Console -= OnConsole;
+
+            // Check for Blazor error UI that appeared during the test
+            var blazorError = await DismissBlazorErrorIfVisible(page);
+
             // current state text
             var stateMessage = await row.Locator(".test-state").TextContentAsync();
 
@@ -92,6 +135,16 @@ public class ProjectTest
 
             //  check for error  class
             var unsupported = await row.EvaluateAsync<bool>("el => el.classList.contains('test-unsupported')");
+
+            // Log console errors/warnings to stderr for diagnostics
+            if (consoleErrors.Count > 0 || consoleWarnings.Count > 0)
+            {
+                Console.Error.WriteLine($"[{Name}] Console: {consoleErrors.Count} error(s), {consoleWarnings.Count} warning(s)");
+                foreach (var err in consoleErrors)
+                    Console.Error.WriteLine($"  ERROR: {err}");
+                foreach (var warn in consoleWarnings)
+                    Console.Error.WriteLine($"  WARN: {warn}");
+            }
 
             ResultMessage = stateMessage;
 
@@ -103,14 +156,26 @@ public class ProjectTest
                     stateMessage = "Skipped";
                 }
             }
-            else if (wasError)
+            else if (wasError || blazorError != null)
             {
                 Result = TestResult.Error;
-                if (string.IsNullOrWhiteSpace(stateMessage))
+                if (blazorError != null && !wasError)
+                {
+                    // Test reported success but Blazor framework threw an unhandled error
+                    stateMessage = $"Blazor error during test: {blazorError}";
+                }
+                else if (string.IsNullOrWhiteSpace(stateMessage))
                 {
                     stateMessage = "Failed";
                 }
                 throw new Exception(stateMessage);
+            }
+            else if (consoleErrors.Count > 0)
+            {
+                // Test reported success but browser console had errors
+                Result = TestResult.Error;
+                var firstError = consoleErrors[0];
+                throw new Exception($"Browser console error: {firstError}");
             }
             else
             {
