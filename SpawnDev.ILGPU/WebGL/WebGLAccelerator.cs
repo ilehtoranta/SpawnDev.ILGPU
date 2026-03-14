@@ -30,6 +30,16 @@ namespace SpawnDev.ILGPU.WebGL
         public static string? LastGeneratedGLSL { get; private set; }
 
         /// <summary>
+        /// True if the WebGL context has been lost (driver crash, GPU reset, etc.).
+        /// </summary>
+        public bool IsContextLost { get; private set; }
+
+        /// <summary>
+        /// Fired when the WebGL context is lost. Parameter is a description message.
+        /// </summary>
+        public event Action<string>? ContextLost;
+
+        /// <summary>
         /// Gets the WebGL backend used for kernel compilation.
         /// </summary>
         public WebGLBackend Backend { get; private set; } = null!;
@@ -433,6 +443,9 @@ namespace SpawnDev.ILGPU.WebGL
         public static void RunKernel(Kernel kernel, AcceleratorStream stream, object dimension, object[] args)
         {
             var webGlAccel = (WebGLAccelerator)kernel.Accelerator;
+            if (webGlAccel.IsContextLost)
+                throw new InvalidOperationException("WebGL context has been lost and cannot accept commands.");
+
             var webGlKernel = (WebGLKernel)kernel;
             var compiledKernel = webGlKernel.CompiledKernel;
 
@@ -519,6 +532,21 @@ namespace SpawnDev.ILGPU.WebGL
                 if (msgType == "blitResult")
                 {
                     HandleBlitResponse(data);
+                    return;
+                }
+
+                if (msgType == "contextlost")
+                {
+                    IsContextLost = true;
+                    Console.Error.WriteLine("[WebGL] Context lost");
+                    ContextLost?.Invoke("WebGL context lost");
+                    return;
+                }
+
+                if (msgType == "contextrestored")
+                {
+                    IsContextLost = false;
+                    Console.Error.WriteLine("[WebGL] Context restored");
                     return;
                 }
 

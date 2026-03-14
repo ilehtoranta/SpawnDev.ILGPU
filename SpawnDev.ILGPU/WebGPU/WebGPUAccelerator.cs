@@ -53,6 +53,16 @@ namespace SpawnDev.ILGPU.WebGPU
         public HashSet<string> EnabledFeatures => NativeAccelerator?.EnabledFeatures ?? new HashSet<string>();
 
         /// <summary>
+        /// True if the underlying GPU device has been lost (driver crash, GPU reset, etc.).
+        /// </summary>
+        public bool IsDeviceLost => NativeAccelerator?.IsDeviceLost ?? false;
+
+        /// <summary>
+        /// Fired when the GPU device is lost. Parameters are (reason, message).
+        /// </summary>
+        public event Action<string, string>? DeviceLost;
+
+        /// <summary>
         /// Method info for the static RunKernel method used by kernel launchers.
         /// </summary>
         public static readonly MethodInfo RunKernelMethod = typeof(WebGPUAccelerator).GetMethod(
@@ -308,6 +318,7 @@ namespace SpawnDev.ILGPU.WebGPU
         {
             var accelerator = new WebGPUAccelerator(context, device);
             accelerator.NativeAccelerator = await device.NativeDevice.CreateAcceleratorAsync();
+            accelerator.NativeAccelerator.DeviceLost += (reason, msg) => accelerator.DeviceLost?.Invoke(reason, msg);
             accelerator.Backend = new WebGPUBackend(context, options ?? WebGPUBackendOptions.Default, accelerator.NativeAccelerator.EnabledFeatures);
             accelerator.Backend.DefaultMaxWorkgroupSize = accelerator.MaxNumThreadsPerGroup;
             if (WebGPUBackend.VerboseLogging) WebGPUBackend.Log($"[WebGPU-Init] DefaultMaxWorkgroupSize set to {accelerator.Backend.DefaultMaxWorkgroupSize} (MaxNumThreadsPerGroup={accelerator.MaxNumThreadsPerGroup})");
@@ -346,6 +357,7 @@ namespace SpawnDev.ILGPU.WebGPU
             var ilgpuDevice = new WebGPUILGPUDevice(externalDevice);
             var accelerator = new WebGPUAccelerator(context, ilgpuDevice);
             accelerator.NativeAccelerator = WebGPUNativeAccelerator.CreateFromExternalDevice(externalDevice);
+            accelerator.NativeAccelerator.DeviceLost += (reason, msg) => accelerator.DeviceLost?.Invoke(reason, msg);
             accelerator.Backend = new WebGPUBackend(context, options ?? WebGPUBackendOptions.Default, accelerator.NativeAccelerator.EnabledFeatures);
             accelerator.Backend.DefaultMaxWorkgroupSize = accelerator.MaxNumThreadsPerGroup;
             accelerator.Init(accelerator.Backend);
@@ -1371,6 +1383,9 @@ namespace SpawnDev.ILGPU.WebGPU
         protected override AcceleratorStream CreateStreamInternal() => new WebGPUStream(this);
         protected override void SynchronizeInternal()
         {
+            if (NativeAccelerator.IsDeviceLost)
+                throw new InvalidOperationException("WebGPU device has been lost and cannot accept commands.");
+
             // Flush any pending batched commands on the default stream
             ((WebGPUStream)DefaultStream).Flush();
             // Surface any GPU validation errors that occurred during dispatch

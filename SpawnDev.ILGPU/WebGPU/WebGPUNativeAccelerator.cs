@@ -56,6 +56,18 @@ namespace SpawnDev.ILGPU.WebGPU
         // Accumulated GPU validation errors surfaced via ThrowIfGpuErrors()
         private readonly List<string> _pendingGpuErrors = new();
 
+        /// <summary>
+        /// True once the GPU device has been lost (driver crash, GPU reset, etc.).
+        /// All subsequent dispatch and synchronize calls will throw.
+        /// </summary>
+        public bool IsDeviceLost { get; private set; }
+
+        /// <summary>
+        /// Fired when the GPU device is lost. Parameters are (reason, message).
+        /// Reason is one of: "destroyed", "unknown".
+        /// </summary>
+        public event Action<string, string>? DeviceLost;
+
         // Known-benign error substrings that should be logged but not propagated
         private static readonly string[] _benignErrorSubstrings = new[]
         {
@@ -98,6 +110,9 @@ namespace SpawnDev.ILGPU.WebGPU
 
             // Listen for uncaptured GPU errors
             _gpuDevice.OnUncapturedError += OnGPUUncapturedError;
+
+            // Monitor device loss (resolves once when the device becomes invalid)
+            _ = MonitorDeviceLostAsync();
 
             if (WebGPUBackend.VerboseLogging) WebGPUBackend.Log("[WebGPU] Accelerator created from external GPUDevice (shared with ORT)");
         }
@@ -202,6 +217,9 @@ namespace SpawnDev.ILGPU.WebGPU
             // Listen for uncaptured GPU errors (e.g., Invalid ComputePipeline, validation errors)
             _gpuDevice.OnUncapturedError += OnGPUUncapturedError;
 
+            // Monitor device loss (resolves once when the device becomes invalid)
+            _ = MonitorDeviceLostAsync();
+
             _queue = _gpuDevice.Queue;
             _isInitialized = true;
         }
@@ -244,6 +262,26 @@ namespace SpawnDev.ILGPU.WebGPU
         }
 
         /// <summary>
+        /// Monitors the GPU device's lost promise. Resolves once when the device becomes invalid.
+        /// </summary>
+        private async Task MonitorDeviceLostAsync()
+        {
+            try
+            {
+                var info = await _gpuDevice!.Lost;
+                IsDeviceLost = true;
+                var reason = info.Reason ?? "unknown";
+                var message = info.Message ?? "GPU device lost";
+                Console.Error.WriteLine($"[WebGPU] Device lost: reason={reason}, message={message}");
+                DeviceLost?.Invoke(reason, message);
+            }
+            catch
+            {
+                // Swallow — if the promise fails, we can't monitor device loss
+            }
+        }
+
+        /// <summary>
         /// Throws an <see cref="InvalidOperationException"/> if any GPU validation errors
         /// have been captured since the last call. Clears the error list after throwing.
         /// Called by <see cref="WebGPUAccelerator.SynchronizeInternal"/> to surface GPU
@@ -251,6 +289,9 @@ namespace SpawnDev.ILGPU.WebGPU
         /// </summary>
         internal void ThrowIfGpuErrors()
         {
+            if (IsDeviceLost)
+                throw new InvalidOperationException("WebGPU device has been lost and cannot accept commands.");
+
             if (_pendingGpuErrors.Count == 0)
                 return;
 
