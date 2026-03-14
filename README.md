@@ -43,14 +43,6 @@ The [WPF Demo](SpawnDev.ILGPU.WpfDemo) runs the same shared kernels on CUDA, Ope
 - GPU Boids — 3D flocking simulation with GPU physics
 - Benchmarks — Performance comparison across CUDA, OpenCL, and CPU backends
 
-### Console Demo
-
-The [Console Demo](SpawnDev.ILGPU.ConsoleDemo) runs the full unit test suite on desktop backends (CUDA, OpenCL, CPU).
-
-```bash
-dotnet run --project SpawnDev.ILGPU.ConsoleDemo
-```
-
 ### Screenshots
 [![Desktop Benchmark Screenshot](https://raw.githubusercontent.com/LostBeard/SpawnDev.ILGPU/master/SpawnDev.ILGPU.Demo/wwwroot/screenshots/benchmark-desktop-4.jpg)](https://lostbeard.github.io/SpawnDev.ILGPU/benchmarks)  
 [![Browser Benchmark Screenshot](https://raw.githubusercontent.com/LostBeard/SpawnDev.ILGPU/master/SpawnDev.ILGPU.Demo/wwwroot/screenshots/benchmark-browser-4.jpg)](https://lostbeard.github.io/SpawnDev.ILGPU/benchmarks)   
