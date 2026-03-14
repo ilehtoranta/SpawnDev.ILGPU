@@ -61,7 +61,9 @@ namespace PlaywrightMultiTest
 
             if (exited)
             {
-                p.WaitForExit(); // flush remaining buffered output
+                // WaitForExit() with no args can hang if child processes still hold
+                // redirected stream handles. Use a short timed wait instead.
+                p.WaitForExit(5000);
                 LogStatus($"RunDotnetAsync: done PID={p.Id} exit={p.ExitCode}");
                 return p.ExitCode;
             }
