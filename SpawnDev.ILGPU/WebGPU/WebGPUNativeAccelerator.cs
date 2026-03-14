@@ -263,15 +263,22 @@ namespace SpawnDev.ILGPU.WebGPU
 
         /// <summary>
         /// Monitors the GPU device's lost promise. Resolves once when the device becomes invalid.
+        /// Only fires the DeviceLost event for unexpected loss — not when the device is
+        /// intentionally destroyed via Dispose().
         /// </summary>
         private async Task MonitorDeviceLostAsync()
         {
             try
             {
                 var info = await _gpuDevice!.Lost;
-                IsDeviceLost = true;
                 var reason = info.Reason ?? "unknown";
                 var message = info.Message ?? "GPU device lost";
+
+                // Don't treat intentional disposal as a device loss error
+                if (_disposed || reason == "destroyed")
+                    return;
+
+                IsDeviceLost = true;
                 Console.Error.WriteLine($"[WebGPU] Device lost: reason={reason}, message={message}");
                 DeviceLost?.Invoke(reason, message);
             }
