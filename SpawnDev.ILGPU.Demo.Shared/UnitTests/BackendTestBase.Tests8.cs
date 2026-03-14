@@ -311,6 +311,142 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             output[tid * 2 + 1] = bufferValue;
         }
 
+        // ═══════════════════════════════════════════════════════════
+        //  Test 4: RadixSort position computation diagnostic.
+        //  Replicates RadixSortKernel1's exact logic for one pass
+        //  and outputs all intermediate values for diagnosis.
+        // ═══════════════════════════════════════════════════════════
+
+        /// <summary>
+        /// Kernel that replicates RadixSortKernel1's position computation
+        /// for a single 2-bit pass. Outputs intermediate values for each
+        /// of the first 8 threads (in-range elements).
+        /// Output layout per in-range thread (8 ints each):
+        ///   [value, bits, scanBucket0, scanBucket1, scanBucket2, scanBucket3, position, posBeforeLoop]
+        /// Followed by 4 counter values at offset 8*8=64.
+        /// </summary>
+        static void RadixSortPositionDiagKernel(
+            ArrayView<int> input,
+            ArrayView<int> output,
+            int dataLen,
+            int shift)
+        {
+            // Match RadixSortKernel1: groupSize=256, UnrollFactor=4
+            var scanMemory = SharedMemory.Allocate<int>(1024); // 256 * 4
+
+            int tid = Group.IdxX;
+            bool inRange = tid < dataLen;
+
+            // Read value
+            int value = 0;
+            if (inRange)
+                value = input[tid];
+            int bits = (value >> shift) & 3;
+
+            // Populate scanMemory (same as RadixSortKernel1)
+            for (int j = 0; j < 4; j++)
+                scanMemory[tid + 256 * j] = 0;
+            if (inRange)
+                scanMemory[tid + 256 * bits] = 1;
+            Group.Barrier();
+
+            // ExclusiveScan for each bucket (same as RadixSortKernel1)
+            for (int j = 0; j < 4; j++)
+            {
+                int address = tid + 256 * j;
+                scanMemory[address] =
+                    GroupExtensions.ExclusiveScan<int, AddInt32>(scanMemory[address]);
+            }
+            Group.Barrier();
+
+            // Read back scan results for this thread's bucket
+            int scanForMyBucket = scanMemory[tid + 256 * bits];
+
+            // Counter write (last thread only, same as RadixSortKernel1)
+            bool isLast = tid == Group.DimX - 1;
+            if (isLast)
+            {
+                for (int j = 0; j < 4; j++)
+                {
+                    int addr = tid + 256 * j;
+                    int adj = (inRange && j == bits) ? 1 : 0;
+                    scanMemory[addr] += adj;
+                    // Write counter to output at offset 64
+                    output[64 + j] = scanMemory[addr];
+                }
+            }
+            Group.Barrier();
+
+            // Position computation (same as RadixSortKernel1)
+            int gridSize = 0; // gridIdx * Group.DimX, gridIdx=0 for single tile
+            int posBeforeLoop = gridSize + scanMemory[tid + 256 * bits]
+                - ((inRange && isLast) ? 1 : 0);
+            int pos = posBeforeLoop;
+            for (int j = 1; j <= bits; j++)
+            {
+                int bucketTotal = scanMemory[256 * j - 1];
+                int extraAdj = (j - 1 == bits) ? 1 : 0;
+                pos += bucketTotal + extraAdj;
+            }
+
+            // Output diagnostic for in-range threads
+            if (inRange)
+            {
+                int off = tid * 8;
+                output[off + 0] = value;
+                output[off + 1] = bits;
+                output[off + 2] = scanMemory[tid + 256 * 0]; // scan bucket 0
+                output[off + 3] = scanMemory[tid + 256 * 1]; // scan bucket 1
+                output[off + 4] = scanMemory[tid + 256 * 2]; // scan bucket 2
+                output[off + 5] = scanMemory[tid + 256 * 3]; // scan bucket 3
+                output[off + 6] = pos;
+                output[off + 7] = posBeforeLoop;
+            }
+        }
+
+        [TestMethod]
+        public async Task RadixSortPositionDiagnosticTest() => await RunTest(async accelerator =>
+        {
+            int n = 8;
+            var data = new int[] { 3, 2, 1, 0, 3, 2, 1, 0 };
+            int outputLen = n * 8 + 4; // 8 ints per thread + 4 counters
+            using var inputBuf = accelerator.Allocate1D(data);
+            using var outputBuf = accelerator.Allocate1D(new int[outputLen]);
+
+            int groupSize = 256; // Match RadixSort's workgroup size
+            var kernel = accelerator.LoadStreamKernel<ArrayView<int>, ArrayView<int>, int, int>(
+                RadixSortPositionDiagKernel);
+            kernel(new KernelConfig(1, groupSize), inputBuf.View, outputBuf.View, n, 0);
+            await accelerator.SynchronizeAsync();
+
+            var result = await outputBuf.CopyToHostAsync<int>();
+
+            // Verify positions match expected
+            // Expected positions for [3,2,1,0,3,2,1,0] at shift=0:
+            // Thread 0 (val=3, bits=3): pos=6
+            // Thread 1 (val=2, bits=2): pos=4
+            // Thread 2 (val=1, bits=1): pos=2
+            // Thread 3 (val=0, bits=0): pos=0
+            // Thread 4 (val=3, bits=3): pos=7
+            // Thread 5 (val=2, bits=2): pos=5
+            // Thread 6 (val=1, bits=1): pos=3
+            // Thread 7 (val=0, bits=0): pos=1
+            var expectedPos = new int[] { 6, 4, 2, 0, 7, 5, 3, 1 };
+            var errors = new System.Collections.Generic.List<string>();
+            for (int t = 0; t < n; t++)
+            {
+                int actualPos = result[t * 8 + 6];
+                if (actualPos != expectedPos[t])
+                {
+                    errors.Add($"t{t}: pos={actualPos}, expected={expectedPos[t]}");
+                }
+            }
+            if (errors.Count > 0)
+            {
+                throw new Exception($"RadixSort position FAIL: " + string.Join("; ", errors));
+            }
+        });
+
         #endregion
     }
 }

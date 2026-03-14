@@ -580,6 +580,27 @@ namespace SpawnDev.ILGPU.WebGPU
                 }
             }
 
+            // For auto-grouped (implicitly grouped) kernels, pass the user dimension as an
+            // override constant so the WGSL range check can prevent excess threads from
+            // executing. Without this, WGSL's clamped array indexing causes OOB writes to
+            // overwrite the last valid element.
+            if (!compiledKernel.EntryPoint.IsExplicitlyGrouped)
+            {
+                uint userDim = 0;
+                if (dimension is Index1D i1d) userDim = (uint)i1d.X;
+                else if (dimension is Index2D i2d) userDim = (uint)(i2d.X * i2d.Y);
+                else if (dimension is Index3D i3d) userDim = (uint)(i3d.X * i3d.Y * i3d.Z);
+                else if (dimension is LongIndex1D l1d) userDim = (uint)l1d.X;
+                else if (dimension is LongIndex2D l2d) userDim = (uint)(l2d.X * l2d.Y);
+                else if (dimension is LongIndex3D l3d) userDim = (uint)(l3d.X * l3d.Y * l3d.Z);
+
+                if (userDim > 0)
+                {
+                    overrideConstants ??= new Dictionary<string, object>();
+                    overrideConstants["_ilgpu_user_dim"] = (double)userDim;
+                }
+            }
+
             // For explicitly grouped kernels (KernelConfig), the dispatch's GroupDim
             // specifies the number of threads per workgroup. WebGPU bakes this into the
             // shader as @workgroup_size at compile time, but the ILGPU algorithm kernels

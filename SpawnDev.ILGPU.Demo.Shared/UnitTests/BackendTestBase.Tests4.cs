@@ -149,9 +149,9 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
         {
             float val = input[index];
             int result = 0;
-            // Use manual comparison patterns that compile to IsNaNF/IsInfF IR
-            if (val != val) result |= 1;  // IsNaN
-            if (val * 0.0f != 0.0f) result |= 2; // Another NaN check (NaN * 0 = NaN)
+            // Bit 0 = IsNaN, Bit 1 = IsInf — use intrinsics that compile to IsNaNF/IsInfF IR
+            if (float.IsNaN(val)) result |= 1;
+            if (float.IsInfinity(val)) result |= 2;
             output[index] = result;
         }
 
@@ -447,9 +447,9 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             await accelerator.SynchronizeAsync();
             var result = await bufOut.CopyToHostAsync<int>();
 
-            // Bit 0 = IsNaN (val != val), Bit 1 = NaN via multiply (val * 0 != 0)
-            int[] expected = { 0, 3, 2, 2, 0, 0, 3, 0 };
-            // Note: Inf * 0 = NaN, so Inf values should have bit 1 set
+            // Bit 0 = IsNaN (val != val), Bit 1 = IsInf (float.IsInfinity)
+            // NaN: bit 0 only (1). +Inf/-Inf: bit 1 only (2). Normal: 0.
+            int[] expected = { 0, 1, 2, 2, 0, 0, 1, 0 };
             for (int i = 0; i < input.Length; i++)
             {
                 if (result[i] != expected[i])

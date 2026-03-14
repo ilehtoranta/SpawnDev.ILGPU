@@ -684,6 +684,30 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
         public new async Task TwoPassScanSimulationTest() =>
             throw new UnsupportedTestException("WebGL: requires shared memory + barriers");
 
+        // --- Tests6: AliasedBufferBindingTest ---
+        [TestMethod]
+        public new async Task AliasedBufferBindingTest() =>
+            throw new UnsupportedTestException("WebGL: SubView aliasing not supported (single-pass vertex shader architecture)");
+
+        // --- Tests6: New diagnostic RadixSort/Scan tests ---
+        [TestMethod]
+        public new async Task AlgorithmRadixSortNonPairsFloatTest() =>
+            throw new UnsupportedTestException("WebGL: RadixSort requires shared memory + peer-to-peer buffer copies");
+        [TestMethod]
+        public new async Task AlgorithmRadixSortNonPairsIntTest() =>
+            throw new UnsupportedTestException("WebGL: RadixSort requires shared memory + peer-to-peer buffer copies");
+        [TestMethod]
+        public new async Task RadixSortMinimalPatternsTest() =>
+            throw new UnsupportedTestException("WebGL: RadixSort requires shared memory + peer-to-peer buffer copies");
+        [TestMethod]
+        public new async Task RadixSortCounterScanTest() =>
+            throw new UnsupportedTestException("WebGL: requires shared memory + barriers");
+
+        // --- Tests8: RadixSort position diagnostic ---
+        [TestMethod]
+        public new async Task RadixSortPositionDiagnosticTest() =>
+            throw new UnsupportedTestException("WebGL: RadixSort requires shared memory + peer-to-peer buffer copies");
+
         // --- Tests10: SharedMemoryResolver stress tests ---
         [TestMethod]
         public new async Task SharedMemSingleAllocTest() =>

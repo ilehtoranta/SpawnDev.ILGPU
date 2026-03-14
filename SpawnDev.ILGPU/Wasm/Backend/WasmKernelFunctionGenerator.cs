@@ -172,6 +172,14 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         private readonly Dictionary<string, int> _sharedAllocaOffsets = new();
 
         /// <summary>
+        /// Stores (elementType string, arraySize) metadata for each shared alloca entry,
+        /// keyed by the same key as _sharedAllocaOffsets. Used for fallback matching
+        /// when the Alloca IR node encountered during code generation is a different
+        /// instance from the one registered during SetupSharedAllocations().
+        /// </summary>
+        private readonly Dictionary<string, (string ElemType, int ArraySize)> _sharedAllocaMetadata = new();
+
+        /// <summary>
         /// Element size in bytes for dynamic shared memory allocations.
         /// </summary>
         private int _dynamicSharedElementSize = 0;
@@ -1534,21 +1542,26 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             {
                 var key = GetValueKey(allocaInfo.Alloca);
                 int elemSize = 4; // default i32
+                string elemTypeStr = "i32";
 
                 // Determine element size from the alloca type
                 if (allocaInfo.Alloca.Type is AddressSpaceType addrType)
                 {
+                    elemTypeStr = addrType.ElementType.ToString();
                     if (addrType.ElementType is PrimitiveType pt)
                         elemSize = GetElementSize(pt.BasicValueType);
                     else if (addrType.ElementType is StructureType st)
                         elemSize = st.Size;
                 }
 
+                int arraySize = allocaInfo.IsArray ? allocaInfo.ArraySize : 1;
+
                 if (isDynamic)
                 {
                     // Dynamic shared memory: size determined at runtime
                     // Placed at the end of static shared allocations
                     _sharedAllocaOffsets[key] = _sharedMemorySize;
+                    _sharedAllocaMetadata[key] = (elemTypeStr, arraySize);
                     _dynamicSharedElementSize = elemSize;
                     _hasBarriers = true;
                     WasmBackend.Log($"[Wasm-SharedMem] Dynamic alloca {key}: offset={_sharedMemorySize}, elemSize={elemSize}");
@@ -1560,6 +1573,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                     // Align to 4 bytes
                     arrayBytes = (arrayBytes + 3) & ~3;
                     _sharedAllocaOffsets[key] = _sharedMemorySize;
+                    _sharedAllocaMetadata[key] = (elemTypeStr, arraySize);
                     _sharedMemorySize += arrayBytes;
                     _hasBarriers = true;
                     WasmBackend.Log($"[Wasm-SharedMem] Static array alloca {key}: offset={_sharedMemorySize - arrayBytes}, size={arrayBytes}, arrayLen={allocaInfo.ArraySize}, elemSize={elemSize}");
@@ -1569,6 +1583,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                     // Single scalar shared
                     int scalarBytes = (elemSize + 3) & ~3; // align to 4
                     _sharedAllocaOffsets[key] = _sharedMemorySize;
+                    _sharedAllocaMetadata[key] = (elemTypeStr, arraySize);
                     _sharedMemorySize += scalarBytes;
                     _hasBarriers = true;
                     WasmBackend.Log($"[Wasm-SharedMem] Scalar alloca {key}: offset={_sharedMemorySize - scalarBytes}, size={scalarBytes}");
@@ -1582,24 +1597,57 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         public override void GenerateCode(Alloca value)
         {
             var key = GetValueKey(value);
-            if (_sharedAllocaOffsets.TryGetValue(key, out int offset))
+            if (!_sharedAllocaOffsets.TryGetValue(key, out int offset))
             {
-                // Shared memory allocation: compute address in linear memory
-                var target = AllocateLocal(value);
-                WasmModuleBuilder.EmitLocalGet(Code, _sharedMemBaseLocal);
-                if (offset > 0)
+                // Primary key miss — try fallback matching by element type + array size.
+                // The Alloca IR node from GenerateCode may be a different instance
+                // from the one registered during SetupSharedAllocations().
+                if (value.AddressSpace == MemoryAddressSpace.Shared)
                 {
-                    WasmModuleBuilder.EmitI32Const(Code, offset);
-                    Code.Add(WasmOpCodes.I32Add);
+                    string allocaElemType = value.AllocaType.ToString();
+                    long allocaArrayLen = value.ArrayLength.Resolve() is global::ILGPU.IR.Values.PrimitiveValue pv
+                        ? pv.Int64Value : -1;
+
+                    string? matchedKey = null;
+                    foreach (var kvp in _sharedAllocaMetadata)
+                    {
+                        if (kvp.Value.ElemType == allocaElemType && kvp.Value.ArraySize == allocaArrayLen)
+                        {
+                            matchedKey = kvp.Key;
+                            break;
+                        }
+                    }
+
+                    if (matchedKey != null && _sharedAllocaOffsets.TryGetValue(matchedKey, out offset))
+                    {
+                        WasmBackend.Log($"[Wasm-SharedMem] Alloca {key}: fallback match to {matchedKey} (type={allocaElemType}, size={allocaArrayLen})");
+                    }
+                    else
+                    {
+                        // No match found — emit base alloca as a safety fallback
+                        WasmBackend.Log($"[Wasm-SharedMem] WARNING: Alloca {key} (type={allocaElemType}, size={allocaArrayLen}) has no matching shared entry");
+                        base.GenerateCode(value);
+                        return;
+                    }
                 }
-                WasmModuleBuilder.EmitLocalSet(Code, target);
-                WasmBackend.Log($"[Wasm-SharedMem] Alloca {key}: sharedMemBase + {offset}");
+                else
+                {
+                    // Not shared memory — local alloca
+                    base.GenerateCode(value);
+                    return;
+                }
             }
-            else
+
+            // Shared memory allocation: compute address in linear memory
+            var target = AllocateLocal(value);
+            WasmModuleBuilder.EmitLocalGet(Code, _sharedMemBaseLocal);
+            if (offset > 0)
             {
-                // Local alloca (not shared memory) — fall through to base
-                base.GenerateCode(value);
+                WasmModuleBuilder.EmitI32Const(Code, offset);
+                Code.Add(WasmOpCodes.I32Add);
             }
+            WasmModuleBuilder.EmitLocalSet(Code, target);
+            WasmBackend.Log($"[Wasm-SharedMem] Alloca {key}: sharedMemBase + {offset}");
         }
 
         #endregion

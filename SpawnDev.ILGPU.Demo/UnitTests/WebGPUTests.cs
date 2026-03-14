@@ -396,6 +396,13 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
     {
         protected override string BackendName => "WebGPU (No Subgroups)";
 
+        protected override void RequireFeature(Accelerator accelerator, string featureName, string? reason = null)
+        {
+            // Subgroups are force-disabled in this test class — skip subgroup-dependent tests
+            if (featureName is "subgroup_shuffle" or "subgroups")
+                throw new UnsupportedTestException(reason ?? $"Feature '{featureName}' not available (subgroups force-disabled)");
+        }
+
         protected override async Task<(Context context, Accelerator accelerator)> CreateAcceleratorAsync()
         {
             var builder = Context.Create()

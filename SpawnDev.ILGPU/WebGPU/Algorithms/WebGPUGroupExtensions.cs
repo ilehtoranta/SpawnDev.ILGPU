@@ -95,9 +95,13 @@ namespace SpawnDev.ILGPU.WebGPU.Algorithms
             boundaries = new ScanBoundaries<T>(
                 sharedMemory[0],
                 sharedMemory[Group.Dimension.Size - 1]);
-            return Group.IsFirstThread
+            T result = Group.IsFirstThread
                 ? default(TScanOperation).Identity
                 : sharedMemory[Group.LinearIndex - 1];
+            // Barrier ensures all threads have finished reading shared memory
+            // before a subsequent scan call overwrites it.
+            Group.Barrier();
+            return result;
         }
 
         /// <summary cref="GroupExtensions.InclusiveScanWithBoundaries{T, TScanOperation}(
@@ -114,7 +118,11 @@ namespace SpawnDev.ILGPU.WebGPU.Algorithms
             boundaries = new ScanBoundaries<T>(
                 sharedMemory[0],
                 sharedMemory[Group.Dimension.Size - 1]);
-            return sharedMemory[Group.LinearIndex];
+            T result = sharedMemory[Group.LinearIndex];
+            // Barrier ensures all threads have finished reading shared memory
+            // before a subsequent scan call overwrites it.
+            Group.Barrier();
+            return result;
         }
 
         /// <summary>

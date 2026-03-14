@@ -18,7 +18,7 @@ namespace PlaywrightMultiTest
         static Task<ProjectRunner> GetRunner() => _projectRunner ??= new Func<Task<ProjectRunner>>(async () =>
         {
             var ret = new ProjectRunner();
-            await ret.Init();
+            await ret.Init().ConfigureAwait(false);
             return ret;
         })();
 
@@ -27,8 +27,9 @@ namespace PlaywrightMultiTest
         /// </summary>
         private ProjectRunner() { }
 
-        private static async Task<int> RunDotnetAsync(string args, string workingDir)
+        private static async Task<int> RunDotnetAsync(string args, string workingDir, int timeoutMs = 300000)
         {
+            LogStatus($"RunDotnetAsync: dotnet {args.Split(' ')[0]} (timeout={timeoutMs/1000}s)");
             var startInfo = new ProcessStartInfo("dotnet", args)
             {
                 WorkingDirectory = workingDir,
@@ -38,23 +39,48 @@ namespace PlaywrightMultiTest
                 RedirectStandardError = true,
             };
             using var p = Process.Start(startInfo);
-            if (p == null) return -1;
+            if (p == null) { LogStatus("RunDotnetAsync: Process.Start returned null!"); return -1; }
+            LogStatus($"RunDotnetAsync: started PID={p.Id}");
             // Must read stdout/stderr to prevent deadlock when the pipe buffer fills.
             // dotnet publish can produce hundreds of warning lines that exceed the 4KB
             // pipe buffer, causing the child process to block on write indefinitely.
             var stdoutTask = p.StandardOutput.ReadToEndAsync();
             var stderrTask = p.StandardError.ReadToEndAsync();
-            await p.WaitForExitAsync();
-            await Task.WhenAll(stdoutTask, stderrTask);
+            using var cts = new CancellationTokenSource(timeoutMs);
+            try
+            {
+                await p.WaitForExitAsync(cts.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                LogStatus($"RunDotnetAsync: TIMEOUT after {timeoutMs / 1000}s, killing PID={p.Id}...");
+                try { p.Kill(entireProcessTree: true); } catch { }
+                return -1;
+            }
+            await Task.WhenAll(stdoutTask, stderrTask).ConfigureAwait(false);
+            LogStatus($"RunDotnetAsync: done PID={p.Id} exit={p.ExitCode}");
             return p.ExitCode;
         }
         /// <summary>
         /// Async initialization method for the ProjectRunner. This is where you can perform any setup that needs to happen before tests are enumerated, such as reading configuration files, setting up logging, etc.
         /// </summary>
         /// <returns></returns>
+        // Status file for diagnosing startup hangs
+        private static readonly string StatusFile = Path.Combine(
+            AppContext.BaseDirectory, "..", "..", "..", "init_status.log");
+        private static void LogStatus(string msg)
+        {
+            var tid = Environment.CurrentManagedThreadId;
+            var isPool = Thread.CurrentThread.IsThreadPoolThread;
+            var line = $"[{DateTime.Now:HH:mm:ss.fff}] [T{tid}{(isPool ? ",pool" : "")}] {msg}";
+            Console.Error.WriteLine($"[PlaywrightMultiTest] {msg}");
+            try { File.AppendAllText(StatusFile, line + "\n"); } catch { }
+        }
+
         private async Task Init()
         {
-            Debug.WriteLine("Init()");
+            try { File.WriteAllText(StatusFile, ""); } catch { } // clear
+            LogStatus("Init() started");
 
             string[] args = Environment.GetCommandLineArgs();
             // Support both --filter=VALUE and --filter VALUE formats
@@ -72,7 +98,9 @@ namespace PlaywrightMultiTest
             }
 
 
+            LogStatus("Discovering projects...");
             var projects = ProjectDiscovery.GetWorkspaceRoot();
+            LogStatus($"Found {projects.Count()} projects");
             // add tests to _tests list based on the projects found. You can use the ProjectDetails to determine what kind of project it is and how to get the tests from it. For example, if it's a Blazor WASM project, you might want to start a Playwright instance and navigate to the app to get the tests. If it's a console app, you might want to run the exe with a specific argument to get the tests.
             foreach (var project in projects)
             {
@@ -90,7 +118,9 @@ namespace PlaywrightMultiTest
                     var indexPath = Path.Combine(testableProject.ProjectDetails.WwwRoot, "index.html");
 
                     // build a publish version of the app for testing
-                    var pubResult = await RunDotnetAsync($"publish \"{project.CsprojPath}\" -c Release", project.Directory);
+                    LogStatus($"Publishing {project.Name}...");
+                    var pubResult = await RunDotnetAsync($"publish \"{project.CsprojPath}\" -c Release", project.Directory).ConfigureAwait(false);
+                    LogStatus($"Publish {project.Name}: exit={pubResult}");
                     if (pubResult != 0 || !File.Exists(indexPath))
                     {
                         // build failed
@@ -100,6 +130,7 @@ namespace PlaywrightMultiTest
 
                     try
                     {
+                        LogStatus("Installing Playwright browsers...");
                         var exitCode = Microsoft.Playwright.Program.Main(new[] { "install" });
 
                         if (exitCode != 0)
@@ -115,8 +146,10 @@ namespace PlaywrightMultiTest
                         testableProject.Server.Start();
 
                         // create a playwright browser, navigate to the app, and enumerate the tests
-                        testableProject.Playwright = await Playwright.CreateAsync();
+                        LogStatus("Creating Playwright instance...");
+                        testableProject.Playwright = await Playwright.CreateAsync().ConfigureAwait(false);
                         // launch browser
+                        LogStatus("Launching Chromium...");
                         testableProject.Browser = await testableProject.Playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions
                         {
                             Headless = false,
@@ -124,25 +157,47 @@ namespace PlaywrightMultiTest
                             {
                                 "--enable-unsafe-webgpu",
                                 // Force D3D12 (Native Windows WebGPU backend)
-                                "--enable-features=Vulkan,WebGPUService,SkiaGraphite", 
+                                "--enable-features=Vulkan,WebGPUService,SkiaGraphite",
                                 // DO NOT use --disable-vulkan-surface on Windows; it kills hardware compositing
                                 "--ignore-gpu-blocklist",
                                 //"--use-angle=d3d12", // Much more stable on Windows than Vulkan
                                 "--no-sandbox"
                             }
                             //SlowMo = 500 // Slows down operations by 500ms so you can follow along
-                        });
+                        }).ConfigureAwait(false);
                         // new browser context
-                        testableProject.BrowserContext = await testableProject.Browser.NewContextAsync();
+                        testableProject.BrowserContext = await testableProject.Browser.NewContextAsync().ConfigureAwait(false);
                         // new page
-                        testableProject.Page = await testableProject.BrowserContext.NewPageAsync();
+                        testableProject.Page = await testableProject.BrowserContext.NewPageAsync().ConfigureAwait(false);
 
-                        // go to the app's unit tests page. This assumes that your Blazor WASM app has a page that lists the unit tests and is accessible at the root URL. You would need to implement this page in your Blazor WASM app to return the tests you want to run.
+                        // Temporary: capture browser console output containing WGSL dumps to a log file
+                        var wgslDumpDir = Path.Combine(project.Directory, "..", "PlaywrightMultiTest", "WGSLDumps");
+                        Directory.CreateDirectory(wgslDumpDir);
+                        var consoleLogPath = Path.Combine(wgslDumpDir, "browser_console.log");
+                        File.WriteAllText(consoleLogPath, ""); // clear previous log
+                        testableProject.Page.Console += (_, msg) =>
+                        {
+                            var text = msg.Text;
+                            // Only log messages related to WGSL dumps or errors
+                            if (text.Contains("WGSL") || text.Contains("@compute") || text.Contains("@workgroup_size") || msg.Type == "error")
+                            {
+                                try
+                                {
+                                    File.AppendAllText(consoleLogPath, $"[{msg.Type}] {text}\n---END_MSG---\n");
+                                }
+                                catch { }
+                            }
+                        };
+
+                        // go to the app's unit tests page.
                         var testPageUrl = new Uri(new Uri(baseUrl), testableProject.TestPage).ToString();
-                        await testableProject.Page.GotoAsync(testPageUrl);
+                        LogStatus($"Navigating to {testPageUrl}...");
+                        await testableProject.Page.GotoAsync(testPageUrl).ConfigureAwait(false);
+                        LogStatus("Page loaded, waiting for test table...");
 
                         // wait for tests to load
-                        await testableProject.Page.WaitForSelectorAsync("table.unit-test-ready", new() { Timeout = 30000 });
+                        await testableProject.Page.WaitForSelectorAsync("table.unit-test-ready", new() { Timeout = 30000 }).ConfigureAwait(false);
+                        LogStatus("Test table ready");
 
                         // get the table
                         var table = testableProject.Page.Locator("table.unit-test-view");
@@ -154,7 +209,7 @@ namespace PlaywrightMultiTest
                         var rows = tbody.Locator("tr");
 
                         // iterate the rows
-                        int rowCount = await rows.CountAsync();
+                        int rowCount = await rows.CountAsync().ConfigureAwait(false);
 
                         // wait for the tests to load. This assumes that your Blazor WASM app will render an element with the id "test-list" that contains the list of tests. You would need to implement this in your Blazor WASM app to return the tests you want to run.
                         // get a list of tests
@@ -165,10 +220,10 @@ namespace PlaywrightMultiTest
                             var currentRow = rows.Nth(i);
 
                             // get test type name
-                            var typeName = await currentRow.Locator(".test-type-name").TextContentAsync();
+                            var typeName = await currentRow.Locator(".test-type-name").TextContentAsync().ConfigureAwait(false);
 
                             // get test method name
-                            var methodName = await currentRow.Locator(".test-method-name").TextContentAsync();
+                            var methodName = await currentRow.Locator(".test-method-name").TextContentAsync().ConfigureAwait(false);
 
                             var rowTest = new ProjectTest(testableProject, typeName!, methodName!, testPageUrl);
 
@@ -182,11 +237,12 @@ namespace PlaywrightMultiTest
 
                             testableProject.Tests.Add(rowTest);
                         }
+                        LogStatus($"Browser tests enumerated: {testableProject.Tests.Count} tests");
 
                     }
                     catch (Exception ex)
                     {
-                        Console.Error.WriteLine($"[PlaywrightMultiTest] Error initializing {project.Name}: {ex.Message}");
+                        LogStatus($"Error initializing {project.Name}: {ex.Message}");
                     }
                 }
                 else if (project.AppProjectType == ProjectType.Exe)
@@ -203,7 +259,9 @@ namespace PlaywrightMultiTest
                     testableProject.Tests.Add(buildTest);
 
                     // build a publish version of the app for testing
-                    var pubResult = await RunDotnetAsync($"publish \"{project.CsprojPath}\" -c Release", project.Directory);
+                    LogStatus($"Publishing {project.Name}...");
+                    var pubResult = await RunDotnetAsync($"publish \"{project.CsprojPath}\" -c Release", project.Directory).ConfigureAwait(false);
+                    LogStatus($"Publish {project.Name}: exit={pubResult}");
                     var publishedBinary = project.ExistingPublishBinary;
                     if (pubResult != 0 || string.IsNullOrEmpty(publishedBinary))
                     {
@@ -213,7 +271,9 @@ namespace PlaywrightMultiTest
                     }
 
                     // get list of tests by running the exe with a specific argument
-                    var result = await ProcessRunner.Run(publishedBinary);
+                    LogStatus($"Enumerating tests from {Path.GetFileName(publishedBinary)}...");
+                    var result = await ProcessRunner.Run(publishedBinary).ConfigureAwait(false);
+                    LogStatus($"Enumeration done: exit={result.ExitCode}, lines={result.Text.Split('\n', StringSplitOptions.RemoveEmptyEntries).Length}");
                     var testList = result.Text.Split(new[] { '\n', '\r' }, StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
                     foreach (var test in testList)
                     {
@@ -235,7 +295,7 @@ namespace PlaywrightMultiTest
 
                         rowTest.TestFunc = async (page) =>
                         {
-                            var result = await ProcessRunner.Run(publishedBinary, rowTest.Name);
+                            var result = await ProcessRunner.Run(publishedBinary, rowTest.Name, timeout: 120_000).ConfigureAwait(false);
                             var resultLines = result.Text.Split(new[] { '\n', '\r' }, StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
                             var testResltTest = resultLines.LastOrDefault(o => o.StartsWith("TEST: "))?.Substring(6);
                             var unitTest = testResltTest != null ? JsonSerializer.Deserialize<UnitTest>(testResltTest) : null;
@@ -279,6 +339,8 @@ namespace PlaywrightMultiTest
                     var nmt11 = true;
                 }
             }
+            LogStatus($"Init() complete. Total projects={TestableProjects.Count}, " +
+                $"total tests={TestableProjects.Sum(p => p.Tests.Count)}");
             var nmt = true;
         }
         IEnumerable<TestCaseData>? _TestCases;
@@ -322,11 +384,11 @@ namespace PlaywrightMultiTest
             {
                 if (testableProject is TestableBlazorWasm blazorProj)
                 {
-                    try { if (blazorProj.Page != null) await blazorProj.Page.CloseAsync(); } catch { }
-                    try { if (blazorProj.BrowserContext != null) await blazorProj.BrowserContext.CloseAsync(); } catch { }
-                    try { if (blazorProj.Browser != null) await blazorProj.Browser.CloseAsync(); } catch { }
+                    try { if (blazorProj.Page != null) await blazorProj.Page.CloseAsync().ConfigureAwait(false); } catch { }
+                    try { if (blazorProj.BrowserContext != null) await blazorProj.BrowserContext.CloseAsync().ConfigureAwait(false); } catch { }
+                    try { if (blazorProj.Browser != null) await blazorProj.Browser.CloseAsync().ConfigureAwait(false); } catch { }
                     try { blazorProj.Playwright?.Dispose(); } catch { }
-                    try { if (blazorProj.Server != null) await blazorProj.Server.Stop(); } catch { }
+                    try { if (blazorProj.Server != null) await blazorProj.Server.Stop().ConfigureAwait(false); } catch { }
                 }
                 else if (testableProject is TestableConsole consoleProj)
                 {

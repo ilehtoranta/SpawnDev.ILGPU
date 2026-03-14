@@ -57,6 +57,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         private bool _usesBroadcast = false;
         private string _broadcastType = "i32"; // WGSL type for _broadcast_temp (set by ScanForSubgroupAndBroadcastUsage)
         private bool _usesSubgroups = false;
+        private bool _usesBarriers = false;
         // Set to true by GenerateGroupAllReduce so the module-scope atomic<i32> workgroup var is emitted.
         // The static handler sets this via the public property to signal the need for _grp_reduce_i32.
         private bool _usesGroupReduce = false;
@@ -841,6 +842,17 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 builder.AppendLine();
             }
 
+            // For auto-grouped (implicitly grouped) kernels, emit an override constant for the
+            // user dimension. WebGPU dispatches ceil(userDim/workgroupSize) workgroups, which
+            // often exceeds the actual data size. Without a range check, excess threads execute
+            // and WGSL's clamped array indexing causes OOB writes to overwrite the last valid
+            // element. The override constant is set per-dispatch in WebGPUAccelerator.RunKernel().
+            if (!EntryPoint.IsExplicitlyGrouped && KernelParamOffset > 0)
+            {
+                builder.AppendLine("override _ilgpu_user_dim : u32 = 4294967295u;");
+                builder.AppendLine();
+            }
+
             // Emit struct definitions (may reference emu_i64/emu_f64 from the library above)
             TypeGenerator.GenerateTypeDefinitions(builder);
 
@@ -1363,35 +1375,53 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         }
 
         /// <summary>
-        /// Scans the method for Broadcast and subgroup IR nodes to determine what features are needed.
-        /// Sets _usesBroadcast (for shared memory temp) and _usesSubgroups (for enable subgroups directive).
+        /// Scans the method for Broadcast, subgroup, and barrier IR nodes to determine what features are needed.
+        /// Sets _usesBroadcast (for shared memory temp), _usesSubgroups (for enable subgroups directive),
+        /// and _usesBarriers (for uniformity-sensitive range check decisions).
+        /// Called early in GenerateCode() so flags are available before SetupIndexVariables().
         /// </summary>
         private void ScanForSubgroupAndBroadcastUsage()
         {
             _usesBroadcast = false;
             _usesSubgroups = false;
+            _usesBarriers = false;
 
-            foreach (var block in Method.Blocks)
+            // Scan the kernel method and all inlined helper methods for subgroup/barrier usage.
+            // Helper methods are inlined at WGSL emission time, so their IR nodes affect
+            // uniformity requirements of the final shader.
+            var methodsToScan = new List<Method> { Method };
+            foreach (var (helperMethod, _) in _generatorArgs.HelperMethods)
+                methodsToScan.Add(helperMethod);
+
+            foreach (var method in methodsToScan)
             {
-                foreach (var entry in block)
+                foreach (var block in method.Blocks)
                 {
-                    switch (entry.Value)
+                    foreach (var entry in block)
                     {
-                        case global::ILGPU.IR.Values.Broadcast broadcast:
-                            if (broadcast.Kind == global::ILGPU.IR.Values.BroadcastKind.GroupLevel)
-                            {
-                                _usesBroadcast = true;
-                                _broadcastType = TypeGenerator[broadcast.Type];
-                            }
-                            else
-                                _usesSubgroups = true; // warp-level broadcast uses subgroupBroadcastFirst
-                            break;
-                        case global::ILGPU.IR.Values.WarpShuffle:
-                        case global::ILGPU.IR.Values.SubWarpShuffle:
-                        case global::ILGPU.IR.Values.LaneIdxValue:
-                        case global::ILGPU.IR.Values.WarpSizeValue:
-                            _usesSubgroups = true;
-                            break;
+                        switch (entry.Value)
+                        {
+                            case global::ILGPU.IR.Values.Broadcast broadcast:
+                                if (broadcast.Kind == global::ILGPU.IR.Values.BroadcastKind.GroupLevel)
+                                {
+                                    _usesBroadcast = true;
+                                    _broadcastType = TypeGenerator[broadcast.Type];
+                                }
+                                else
+                                    _usesSubgroups = true; // warp-level broadcast uses subgroupBroadcastFirst
+                                break;
+                            case global::ILGPU.IR.Values.WarpShuffle:
+                            case global::ILGPU.IR.Values.SubWarpShuffle:
+                            case global::ILGPU.IR.Values.LaneIdxValue:
+                            case global::ILGPU.IR.Values.WarpSizeValue:
+                                _usesSubgroups = true;
+                                break;
+                            case global::ILGPU.IR.Values.Barrier:
+                            case global::ILGPU.IR.Values.PredicateBarrier:
+                            case global::ILGPU.IR.Values.MemoryBarrier:
+                                _usesBarriers = true;
+                                break;
+                        }
                     }
                 }
             }
@@ -1939,89 +1969,14 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             // Fix: scan kernel AND helper methods' IR here so body and header are consistent.
             SetEmulationFlags();
 
-            // DIAGNOSTIC: Dump kernel structure for scan kernels
+            // Pre-scan for subgroup, broadcast, and barrier usage BEFORE SetupIndexVariables().
+            // The range check (early return for excess threads) breaks WGSL static uniformity
+            // analysis for kernels using subgroups or barriers, so we need these flags set first.
+            ScanForSubgroupAndBroadcastUsage();
+
             var _kernelMethodName = Method.Handle.Name ?? "unknown";
             _isScanKernel = _kernelMethodName.Contains("MultiPassScan") || _kernelMethodName.Contains("SingleGroupScan")
                          || _kernelMethodName.Contains("RadixSort");
-            if (_isScanKernel)
-            {
-                Console.WriteLine($"[DIAG-KERNEL] === Compiling kernel: {_kernelMethodName} ===");
-                Console.WriteLine($"[DIAG-KERNEL] Method blocks: {Method.Blocks.Count}");
-                Console.WriteLine($"[DIAG-KERNEL] Helper methods in scope: {_generatorArgs.HelperMethods.Count}");
-                foreach (var (helperMethod, helperAllocas) in _generatorArgs.HelperMethods)
-                {
-                    Console.WriteLine($"[DIAG-KERNEL]   Helper: {helperMethod.Handle.Name ?? helperMethod.Name} (id={helperMethod.Id}, blocks={helperMethod.Blocks.Count}, shared={helperAllocas.SharedAllocations.Length}, local={helperAllocas.LocalAllocations.Length})");
-                }
-                Console.WriteLine($"[DIAG-KERNEL] Kernel shared allocs: {Allocas.SharedAllocations.Length}");
-                Console.WriteLine($"[DIAG-KERNEL] Kernel local allocs: {Allocas.LocalAllocations.Length}");
-                // Dump IR structure: list all blocks and their MethodCall nodes
-                foreach (var block in Method.Blocks)
-                {
-                    var methodCalls = new List<string>();
-                    foreach (var val in block)
-                    {
-                        if (val.Value is MethodCall mc)
-                            methodCalls.Add($"MethodCall({mc.Target.Handle.Name ?? mc.Target.Name}, ret={mc.Type})");
-                    }
-                    if (methodCalls.Count > 0)
-                        Console.WriteLine($"[DIAG-KERNEL]   Block {block.Id}: {string.Join(", ", methodCalls)}");
-                }
-                // Dump full IR block structure: blocks, phis, terminators, barriers
-                Console.WriteLine($"[DIAG-IR] --- IR Block Structure ---");
-                foreach (var block in Method.Blocks)
-                {
-                    var termStr = block.Terminator switch
-                    {
-                        global::ILGPU.IR.Values.IfBranch ib => $"IfBranch(cond={ib.Condition.GetType().Name}, true=B{ib.TrueTarget.Id}, false=B{ib.FalseTarget.Id})",
-                        global::ILGPU.IR.Values.UnconditionalBranch ub => $"UnconditionalBranch(target=B{ub.Target.Id})",
-                        global::ILGPU.IR.Values.ReturnTerminator _ => "Return",
-                        _ => block.Terminator?.GetType().Name ?? "null"
-                    };
-                    Console.WriteLine($"[DIAG-IR] Block {block.Id} ({block.Count} values, term={termStr}):");
-                    foreach (var val in block)
-                    {
-                        if (val.Value is PhiValue phi)
-                        {
-                            var sources = new List<string>();
-                            for (int pi = 0; pi < phi.Count; pi++)
-                                sources.Add($"B{phi.Sources[pi].Id}:{phi[pi].Resolve().GetType().Name}");
-                            Console.WriteLine($"[DIAG-IR]   PHI {val.Value.Id} : {val.Value.Type} = phi({string.Join(", ", sources)})");
-                        }
-                        else if (val.Value is global::ILGPU.IR.Values.Barrier)
-                            Console.WriteLine($"[DIAG-IR]   BARRIER {val.Value.Id}");
-                        else if (val.Value is global::ILGPU.IR.Values.MemoryBarrier)
-                            Console.WriteLine($"[DIAG-IR]   MEM_BARRIER {val.Value.Id}");
-                        else if (val.Value is global::ILGPU.IR.Values.Broadcast bc)
-                            Console.WriteLine($"[DIAG-IR]   BROADCAST {val.Value.Id} : {val.Value.Type} (kind={bc.Kind})");
-                        else if (val.Value is global::ILGPU.IR.Values.NewView)
-                            Console.WriteLine($"[DIAG-IR]   NEWVIEW {val.Value.Id} : {val.Value.Type}");
-                        else if (val.Value is Alloca alloca)
-                            Console.WriteLine($"[DIAG-IR]   ALLOCA {val.Value.Id} : {val.Value.Type} (isShared={alloca.AddressSpace == MemoryAddressSpace.Shared})");
-                        else if (val.Value is global::ILGPU.IR.Values.TerminatorValue)
-                        { /* skip, shown in termStr */ }
-                    }
-                }
-                Console.WriteLine($"[DIAG-IR] --- End IR Block Structure ---");
-
-                // Dump loop analysis
-                Console.WriteLine($"[DIAG-LOOPS] Loop analysis: {_loops.Count} loops detected");
-                foreach (var loop in _loops)
-                {
-                    var headerIds = string.Join(",", loop.Headers.ToArray().Select(h => $"B{h.Id}"));
-                    var exitIds = string.Join(",", loop.Exits.Select(e => $"B{e.Id}"));
-                    var bodyIds = string.Join(",", loop.AllMembers.Select(m => $"B{m.Id}"));
-                    Console.WriteLine($"[DIAG-LOOPS]   Loop level={loop.Level} headers=[{headerIds}] exits=[{exitIds}] members=[{bodyIds}]");
-                }
-
-                // Dump post-dominator tree for all blocks
-                Console.WriteLine($"[DIAG-PD] --- Post-Dominator Tree ---");
-                foreach (var block in Method.Blocks)
-                {
-                    var ipd = _postDominators.GetImmediateDominator(block);
-                    Console.WriteLine($"[DIAG-PD] B{block.Id} → ipd=B{ipd?.Id.ToString() ?? "null"}");
-                }
-                Console.WriteLine($"[DIAG-PD] --- End Post-Dominator Tree ---");
-            }
 
             string workgroupSize = GetWorkgroupSize();
 
@@ -2688,6 +2643,20 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             var indexVar = Allocate(indexParam);
             _hoistedIndexFields.Clear();
 
+            // Auto-grouped range check: for implicitly grouped kernels, the dispatch may
+            // launch more threads than data elements. Without a range check, WGSL's clamped
+            // array indexing causes excess threads to overwrite the last valid element.
+            //
+            // However, we MUST skip the range check if the kernel uses subgroup operations
+            // (subgroupShuffle, subgroupBroadcastFirst), group broadcast, or group reduce.
+            // The early `return` introduces a non-uniform control flow path, and WGSL's
+            // STATIC uniformity analysis will reject any subsequent subgroup/barrier calls
+            // — even if the branch is never taken at runtime.
+            // For such kernels, the user is responsible for ensuring the element count is a
+            // multiple of the workgroup size, or the kernel must handle excess threads itself.
+            bool kernelUsesUniformOps = _usesSubgroups || _usesBroadcast || _usesBarriers || _usesGroupReduce;
+            bool needsRangeCheck = !EntryPoint.IsExplicitlyGrouped && !kernelUsesUniformOps;
+
             // 1D Kernel
             if (EntryPoint.IndexType == IndexType.Index1D)
             {
@@ -2697,6 +2666,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 //   (group_id.x + group_id.y * num_workgroups.x) * workgroup_size.x + local_index
                 // When workY=1, group_id.y=0 → identical to the original 1D formula.
                 AppendLine($"var {indexVar.Name} : i32 = i32(local_index + (group_id.x + group_id.y * num_workgroups.x) * workgroup_size.x);");
+                if (needsRangeCheck)
+                    AppendLine($"if (u32({indexVar.Name}) >= _ilgpu_user_dim) {{ return; }}");
             }
             // 2D Kernel
             else if (EntryPoint.IndexType == IndexType.Index2D)
@@ -2745,6 +2716,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 // Map to emulated i64: pack the 32-bit global linear index into the low word.
                 // Accounts for 2D dispatch fallback (same reasoning as Index1D above).
                 AppendLine($"var {indexVar.Name} : vec2<u32> = vec2<u32>(u32(local_index) + (u32(group_id.x) + u32(group_id.y) * u32(num_workgroups.x)) * u32(workgroup_size.x), 0u); // LongIndex1D (emu_i64)");
+                if (needsRangeCheck)
+                    AppendLine($"if ({indexVar.Name}.x >= _ilgpu_user_dim) {{ return; }}");
             }
             // LongIndex2D Kernel
             else if (EntryPoint.IndexType == IndexType.LongIndex2D)
@@ -3192,7 +3165,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     }
                     else if (packInfo.isEmuI64)
                     {
-                        AppendLine($"var {variable.Name} = emu_i64(_scalar_params[{slot}], _scalar_params[{slot + 1}]);");
+                        AppendLine($"var {variable.Name} = {packInfo.wgslType}(_scalar_params[{slot}], _scalar_params[{slot + 1}]);");
                     }
                     else
                     {
@@ -3249,7 +3222,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                         }
                         else if (_emulatedI64Params.Contains(param.Index))
                         {
-                            AppendLine($"var {variable.Name} = emu_i64(param{param.Index}[0], param{param.Index}[1]);");
+                            var emuType = TypeGenerator[GetBufferElementType(param.ParameterType)];
+                            AppendLine($"var {variable.Name} = {emuType}(param{param.Index}[0], param{param.Index}[1]);");
                         }
                         else
                         {

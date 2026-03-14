@@ -887,23 +887,30 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             // Dynamically check if subgroups are available
             RequireFeature(accelerator, "subgroup_shuffle", "Subgroup/Warp shuffle operations require 'subgroup_shuffle' feature");
 
-            // Use 32 threads — small enough to fit in a single subgroup on all GPUs
+            // Use 32 threads. Note: subgroup_size varies by GPU (4, 8, 16, 32, 64).
+            // Warp.Shuffle(val, 0) reads from lane 0 of each thread's own subgroup,
+            // NOT global thread 0.
             int len = 32;
             var data = new int[len];
             for (int i = 0; i < len; i++) data[i] = i + 10; // [10, 11, 12, ..., 41]
             using var buf = accelerator.Allocate1D(data);
+            using var warpSizeBuf = accelerator.Allocate1D<int>(1);
 
-            // Warp.Shuffle(val, 0) should make every thread read lane 0's value
-            var kernel = accelerator.LoadStreamKernel<Index1D, ArrayView<int>>(SubgroupShuffleKernel);
-            kernel(new KernelConfig(1, len), (Index1D)len, buf.View);
+            var kernel = accelerator.LoadStreamKernel<Index1D, ArrayView<int>, ArrayView<int>>(SubgroupShuffleKernel);
+            kernel(new KernelConfig(1, len), (Index1D)len, buf.View, warpSizeBuf.View);
             await accelerator.SynchronizeAsync();
 
+            var warpSizeResult = await warpSizeBuf.CopyToHostAsync<int>();
+            int warpSize = warpSizeResult[0];
             var result = await buf.CopyToHostAsync<int>();
-            // All threads should have lane 0's value (10)
+
+            // Each thread should have lane 0 of its own subgroup's value
             for (int i = 0; i < len; i++)
             {
-                if (result[i] != 10)
-                    throw new Exception($"SubgroupShuffleTest failed at [{i}]: Expected 10, got {result[i]}");
+                int subgroupBase = (i / warpSize) * warpSize;
+                int expected = data[subgroupBase]; // lane 0's original value
+                if (result[i] != expected)
+                    throw new Exception($"SubgroupShuffleTest failed at [{i}]: Expected {expected} (warpSize={warpSize}, subgroupBase={subgroupBase}), got {result[i]}");
             }
         });
 

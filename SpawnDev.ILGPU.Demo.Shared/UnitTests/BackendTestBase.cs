@@ -669,13 +669,15 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             data[gid] = broadcasted;
         }
 
-        protected static void SubgroupShuffleKernel(Index1D index, ArrayView<int> data)
+        protected static void SubgroupShuffleKernel(Index1D index, ArrayView<int> data, ArrayView<int> warpSizeOut)
         {
             int gid = Grid.GlobalIndex.X;
             int val = data[gid];
             // Each thread reads from lane 0 of its subgroup via warp shuffle
             int shuffled = Warp.Shuffle(val, 0);
             data[gid] = shuffled;
+            if (gid == 0)
+                warpSizeOut[0] = Warp.WarpSize;
         }
 
         /// <summary>

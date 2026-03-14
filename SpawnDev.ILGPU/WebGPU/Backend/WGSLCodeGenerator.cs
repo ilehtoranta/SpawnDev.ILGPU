@@ -1173,9 +1173,18 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 UnaryArithmeticKind.FloorF => $"floor({operand})",
                 UnaryArithmeticKind.CeilingF => $"ceil({operand})",
                 UnaryArithmeticKind.Log10F => $"(log({operand}) / 2.302585093)",
-                UnaryArithmeticKind.IsNaNF => $"({operand} != {operand})",
-                UnaryArithmeticKind.IsInfF => $"(abs({operand}) == (1.0 / 0.0))",
-                UnaryArithmeticKind.IsFinF => $"(({operand} == {operand}) && (abs({operand}) != (1.0 / 0.0)))",
+                // Bit-level NaN/Inf detection for f32 — GPU shader compilers may
+                // optimize away `val != val` or flush NaN in comparisons.
+                // f32 NaN: exponent=0xFF, mantissa!=0. f32 Inf: exponent=0xFF, mantissa==0.
+                UnaryArithmeticKind.IsNaNF => operandType == "f32"
+                    ? $"((bitcast<u32>({operand}) & 0x7F800000u) == 0x7F800000u && (bitcast<u32>({operand}) & 0x007FFFFFu) != 0u)"
+                    : $"({operand} != {operand})",
+                UnaryArithmeticKind.IsInfF => operandType == "f32"
+                    ? $"((bitcast<u32>({operand}) & 0x7FFFFFFFu) == 0x7F800000u)"
+                    : $"(abs({operand}) == (1.0 / 0.0))",
+                UnaryArithmeticKind.IsFinF => operandType == "f32"
+                    ? $"((bitcast<u32>({operand}) & 0x7F800000u) != 0x7F800000u)"
+                    : $"(({operand} == {operand}) && (abs({operand}) != (1.0 / 0.0)))",
 
                 // Bit Operations
                 UnaryArithmeticKind.PopC => $"i32(countOneBits({operand}))",

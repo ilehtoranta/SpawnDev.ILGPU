@@ -215,6 +215,30 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
         public new async Task TwoPassScanSimulationTest() =>
             throw new UnsupportedTestException("Wasm: algorithm tests require shared memory + barriers");
 
+        // --- Tests6: AliasedBufferBindingTest ---
+        [TestMethod]
+        public new async Task AliasedBufferBindingTest() =>
+            throw new UnsupportedTestException("Wasm: SubView aliasing causes i64/i32 type mismatch in generated Wasm bytecode");
+
+        // --- Tests6: New diagnostic RadixSort/Scan tests ---
+        [TestMethod]
+        public new async Task AlgorithmRadixSortNonPairsFloatTest() =>
+            throw new UnsupportedTestException("Wasm: RadixSort generates infinite loop in Wasm bytecode (browser lockup)");
+        [TestMethod]
+        public new async Task AlgorithmRadixSortNonPairsIntTest() =>
+            throw new UnsupportedTestException("Wasm: RadixSort generates infinite loop in Wasm bytecode (browser lockup)");
+        [TestMethod]
+        public new async Task RadixSortMinimalPatternsTest() =>
+            throw new UnsupportedTestException("Wasm: RadixSort generates infinite loop in Wasm bytecode (browser lockup)");
+        [TestMethod]
+        public new async Task RadixSortCounterScanTest() =>
+            throw new UnsupportedTestException("Wasm: algorithm tests require shared memory + barriers");
+
+        // --- Tests8: RadixSort position diagnostic ---
+        [TestMethod]
+        public new async Task RadixSortPositionDiagnosticTest() =>
+            throw new UnsupportedTestException("Wasm: RadixSort generates infinite loop in Wasm bytecode (browser lockup)");
+
     }
 }
 

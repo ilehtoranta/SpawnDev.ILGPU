@@ -1296,7 +1296,6 @@ namespace ILGPU.Algorithms
                     // Perform the first step writing to the temp scan view
                     TRadixSortOperation radixSortOperation = default;
 
-                    int loopIter = 0;
                     for (int bitIdx = 0; bitIdx < radixSortOperation.NumBits;)
                     {
                         initializer(stream, counterView, 0);
@@ -1315,6 +1314,7 @@ namespace ILGPU.Algorithms
                             counterView,
                             counterView2,
                             tempScanView);
+
                         pass2Kernel(
                             stream,
                             (gridDim, groupDim),
@@ -1328,6 +1328,7 @@ namespace ILGPU.Algorithms
                         Debug.Assert(bitIdx < radixSortOperation.NumBits);
 
                         initializer(stream, counterView, 0);
+
                         pass1DenseKernel(
                             stream,
                             (gridDim, groupDim),
@@ -1343,6 +1344,7 @@ namespace ILGPU.Algorithms
                             counterView,
                             counterView2,
                             tempScanView);
+
                         pass2DenseKernel(
                             stream,
                             (gridDim, groupDim),
@@ -1353,7 +1355,6 @@ namespace ILGPU.Algorithms
                             lengthInformation,
                             bitIdx);
                         bitIdx += specialization.BitIncrement;
-                        loopIter++;
                     }
                 };
             }

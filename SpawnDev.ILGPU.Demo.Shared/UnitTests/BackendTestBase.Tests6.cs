@@ -938,12 +938,261 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
 
             var sortedKeys = await keysBuf.CopyToHostAsync<float>();
 
+            // Temporary: dump sorted output for debugging
+            var dumpStr = string.Join(", ", sortedKeys.Take(32).Select(k => k.ToString("F1")));
+            Console.Error.WriteLine($"RADIX_DUMP: first32=[{dumpStr}]");
+            var dumpLast = string.Join(", ", sortedKeys.Skip(n - 8).Select(k => k.ToString("F1")));
+            Console.Error.WriteLine($"RADIX_DUMP: last8=[{dumpLast}]");
+
             // After descending sort, keys should be 128, 127, ..., 1
             for (int i = 0; i < n; i++)
             {
                 float expectedKey = (float)(n - i);
                 if (MathF.Abs(sortedKeys[i] - expectedKey) > 0.001f)
                     throw new Exception($"RadixSort descending failed at {i}. Expected {expectedKey}, got {sortedKeys[i]}");
+            }
+        });
+
+        /// <summary>
+        /// Diagnostic test: non-pairs RadixSort on plain floats (ascending) to isolate core sort from pairs wrapper.
+        /// </summary>
+        [TestMethod]
+        public async Task AlgorithmRadixSortNonPairsFloatTest() => await RunTest(async accelerator =>
+        {
+            int n = 128;
+            var data = new float[n];
+            // Reverse order: 128, 127, ..., 1
+            for (int i = 0; i < n; i++)
+                data[i] = (float)(n - i);
+
+            using var dataBuf = accelerator.Allocate1D(data);
+            var tempSize = accelerator.ComputeRadixSortTempStorageSize<float, AscendingFloat>(n);
+            using var tempBuf = accelerator.Allocate1D<int>(tempSize);
+
+            var radixSort = accelerator.CreateRadixSort<float, Stride1D.Dense, AscendingFloat>();
+            radixSort(
+                accelerator.DefaultStream,
+                dataBuf.View,
+                tempBuf.View.AsContiguous());
+            await accelerator.SynchronizeAsync();
+
+            var sorted = await dataBuf.CopyToHostAsync<float>();
+            var dumpStr = string.Join(", ", sorted.Take(32).Select(k => k.ToString("F1")));
+            Console.Error.WriteLine($"RADIX_DUMP_FLOAT: first32=[{dumpStr}]");
+
+            for (int i = 0; i < n; i++)
+            {
+                float expected = (float)(i + 1);
+                if (MathF.Abs(sorted[i] - expected) > 0.001f)
+                    throw new Exception($"Non-pairs float RadixSort failed at {i}. Expected {expected}, got {sorted[i]}");
+            }
+        });
+
+        /// <summary>
+        /// Diagnostic test: non-pairs RadixSort on plain integers to isolate core sort from pairs wrapper.
+        /// </summary>
+        [TestMethod]
+        public async Task AlgorithmRadixSortNonPairsIntTest() => await RunTest(async accelerator =>
+        {
+            int n = 32;
+            var data = new int[n];
+            // Reverse order: 32, 31, ..., 1
+            for (int i = 0; i < n; i++)
+                data[i] = n - i;
+
+            using var dataBuf = accelerator.Allocate1D(data);
+            var tempSize = accelerator.ComputeRadixSortTempStorageSize<int, AscendingInt32>(n);
+            using var tempBuf = accelerator.Allocate1D<int>(tempSize);
+
+            var radixSort = accelerator.CreateRadixSort<int, Stride1D.Dense, AscendingInt32>();
+            radixSort(
+                accelerator.DefaultStream,
+                dataBuf.View,
+                tempBuf.View.AsContiguous());
+            await accelerator.SynchronizeAsync();
+
+            var sorted = await dataBuf.CopyToHostAsync<int>();
+            var dumpStr = string.Join(", ", sorted.Take(32));
+            Console.Error.WriteLine($"RADIX_DUMP_INT: sorted=[{dumpStr}]");
+
+            for (int i = 0; i < n; i++)
+            {
+                if (sorted[i] != i + 1)
+                    throw new Exception($"Non-pairs RadixSort failed at {i}. Expected {i + 1}, got {sorted[i]}");
+            }
+        });
+
+        /// <summary>
+        /// RadixSort on tiny arrays with specific patterns.
+        /// Tests: already sorted, reverse order.
+        /// </summary>
+        [TestMethod]
+        public async Task RadixSortMinimalPatternsTest() => await RunTest(async accelerator =>
+        {
+            var failures = new System.Collections.Generic.List<string>();
+
+            async Task TestPattern(string label, int[] data, int[] expected)
+            {
+                int n = data.Length;
+                using var dataBuf = accelerator.Allocate1D((int[])data.Clone());
+                var tempSize = accelerator.ComputeRadixSortTempStorageSize<int, AscendingInt32>(n);
+                using var tempBuf = accelerator.Allocate1D<int>(tempSize);
+
+                var radixSort = accelerator.CreateRadixSort<int, Stride1D.Dense, AscendingInt32>();
+                radixSort(
+                    accelerator.DefaultStream,
+                    dataBuf.View,
+                    tempBuf.View.AsContiguous());
+                await accelerator.SynchronizeAsync();
+
+                var sorted = await dataBuf.CopyToHostAsync<int>();
+
+                int errors = 0;
+                int firstError = -1;
+                for (int i = 0; i < n; i++)
+                {
+                    if (sorted[i] != expected[i])
+                    {
+                        errors++;
+                        if (firstError < 0) firstError = i;
+                    }
+                }
+
+                if (errors > 0)
+                {
+                    var inputStr = string.Join(",", data.Take(Math.Min(n, 64)));
+                    var outputStr = string.Join(",", sorted.Take(Math.Min(n, 64)));
+                    var expectedStr = string.Join(",", expected.Take(Math.Min(n, 64)));
+                    failures.Add($"{label}: FAIL {errors}/{n} at [{firstError}], " +
+                        $"input=[{inputStr}] output=[{outputStr}] expected=[{expectedStr}]");
+                }
+            }
+
+            await TestPattern("already_sorted",
+                new[] { 0, 0, 1, 1, 2, 2, 3, 3 },
+                new[] { 0, 0, 1, 1, 2, 2, 3, 3 });
+
+            await TestPattern("vals_0to3_dup",
+                new[] { 3, 2, 1, 0, 3, 2, 1, 0 },
+                new[] { 0, 0, 1, 1, 2, 2, 3, 3 });
+
+            if (failures.Count > 0)
+            {
+                throw new Exception(
+                    $"RadixSort {failures.Count} pattern(s) failed:\n" +
+                    string.Join("\n", failures));
+            }
+        });
+
+        /// <summary>
+        /// Test inclusive scan on counter-sized (4-element) int buffers — verifies
+        /// the scan step used between RadixSortKernel1 and RadixSortKernel2.
+        /// </summary>
+        [TestMethod]
+        public async Task RadixSortCounterScanTest() => await RunTest(async accelerator =>
+        {
+            var scan = accelerator.CreateScan<int, Stride1D.Dense, Stride1D.Dense, AddInt32>(
+                ScanKind.Inclusive);
+
+            var scanTemp = accelerator.ComputeScanTempStorageSize<int>(4);
+
+            // Case 1: all elements in bucket 0 → counter = [4, 0, 0, 0]
+            using var inBuf1 = accelerator.Allocate1D(new int[] { 4, 0, 0, 0 });
+            using var outBuf1 = accelerator.Allocate1D<int>(4);
+            using var tempBuf1 = accelerator.Allocate1D<int>(scanTemp);
+            scan(accelerator.DefaultStream, inBuf1.View, outBuf1.View, tempBuf1.View.AsContiguous());
+            await accelerator.SynchronizeAsync();
+            var result1 = await outBuf1.CopyToHostAsync<int>();
+            if (result1[0] != 4 || result1[1] != 4 || result1[2] != 4 || result1[3] != 4)
+                throw new Exception($"Scan failed case1: got [{string.Join(",", result1)}]");
+
+            // Case 2: one per bucket → counter = [1, 1, 1, 1]
+            using var inBuf2 = accelerator.Allocate1D(new int[] { 1, 1, 1, 1 });
+            using var outBuf2 = accelerator.Allocate1D<int>(4);
+            using var tempBuf2 = accelerator.Allocate1D<int>(scanTemp);
+            scan(accelerator.DefaultStream, inBuf2.View, outBuf2.View, tempBuf2.View.AsContiguous());
+            await accelerator.SynchronizeAsync();
+            var result2 = await outBuf2.CopyToHostAsync<int>();
+            if (result2[0] != 1 || result2[1] != 2 || result2[2] != 3 || result2[3] != 4)
+                throw new Exception($"Scan failed case2: got [{string.Join(",", result2)}]");
+
+            // Case 3: typical distribution → counter = [30, 35, 32, 31]
+            using var inBuf3 = accelerator.Allocate1D(new int[] { 30, 35, 32, 31 });
+            using var outBuf3 = accelerator.Allocate1D<int>(4);
+            using var tempBuf3 = accelerator.Allocate1D<int>(scanTemp);
+            scan(accelerator.DefaultStream, inBuf3.View, outBuf3.View, tempBuf3.View.AsContiguous());
+            await accelerator.SynchronizeAsync();
+            var result3 = await outBuf3.CopyToHostAsync<int>();
+            if (result3[0] != 30 || result3[1] != 65 || result3[2] != 97 || result3[3] != 128)
+                throw new Exception($"Scan failed case3: got [{string.Join(",", result3)}]");
+        });
+
+        /// <summary>
+        /// Test: dispatch a kernel with two SubViews of the same buffer as separate params.
+        /// This isolates whether aliased buffer bindings cause corruption on WebGPU.
+        /// </summary>
+        static void AliasedBufferIdentityKernel(
+            Index1D index,
+            ArrayView<int> data,
+            ArrayView<int> counter,
+            ArrayView<int> debug)
+        {
+            // Thread 0 writes the view lengths to debug buffer for inspection
+            if (index == 0)
+            {
+                debug[0] = data.IntLength;
+                debug[1] = counter.IntLength;
+            }
+            if (index < data.IntLength)
+            {
+                // Just copy each element to itself (identity)
+                data[index] = data[index];
+            }
+            if (index < counter.IntLength)
+            {
+                // Increment counter[index] to prove we can write to it
+                counter[index] = counter[index] + 1;
+            }
+        }
+
+        [TestMethod]
+        public async Task AliasedBufferBindingTest() => await RunTest(async accelerator =>
+        {
+            // Allocate a single buffer large enough for both views
+            // Layout: data[0..7] at offset 0, counter[0..3] at offset 64 (256-byte aligned)
+            int totalInts = 128; // 512 bytes
+            int[] initBuf = new int[totalInts];
+            initBuf[0] = 10; initBuf[1] = 20; initBuf[2] = 30; initBuf[3] = 40;
+            initBuf[4] = 50; initBuf[5] = 60; initBuf[6] = 70; initBuf[7] = 80;
+            using var buf = accelerator.Allocate1D(initBuf);
+            await accelerator.SynchronizeAsync();
+
+            var dataView = buf.View.SubView(0, 8);
+            var counterView = buf.View.SubView(64, 4);
+
+            using var debugBuf = accelerator.Allocate1D(new int[4]);
+
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<
+                Index1D, ArrayView<int>, ArrayView<int>, ArrayView<int>>(
+                AliasedBufferIdentityKernel);
+
+            kernel(8, dataView, counterView, debugBuf.View.AsContiguous());
+            await accelerator.SynchronizeAsync();
+
+            var result = await buf.CopyToHostAsync<int>();
+            var debugResult = await debugBuf.CopyToHostAsync<int>();
+
+            // Data should be unchanged (identity copy)
+            for (int i = 0; i < 8; i++)
+            {
+                if (result[i] != initBuf[i])
+                    throw new Exception($"AliasedBuffer: data[{i}] = {result[i]}, expected {initBuf[i]}");
+            }
+            // Counter should be [1,1,1,1] (incremented from 0)
+            for (int i = 0; i < 4; i++)
+            {
+                if (result[64 + i] != 1)
+                    throw new Exception($"AliasedBuffer: counter[{i}] = {result[64 + i]}, expected 1");
             }
         });
 
