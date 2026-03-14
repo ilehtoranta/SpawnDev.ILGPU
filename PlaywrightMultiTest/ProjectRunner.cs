@@ -38,28 +38,39 @@ namespace PlaywrightMultiTest
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
             };
-            using var p = Process.Start(startInfo);
-            if (p == null) { LogStatus("RunDotnetAsync: Process.Start returned null!"); return -1; }
+            using var p = new Process();
+            p.StartInfo = startInfo;
+            p.EnableRaisingEvents = true;
+
+            // Use event-based async reads to avoid pipe buffer deadlocks
+            p.OutputDataReceived += (_, _) => { };
+            p.ErrorDataReceived += (_, _) => { };
+
+            var exitTcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            p.Exited += (_, _) => exitTcs.TrySetResult(true);
+
+            p.Start();
             LogStatus($"RunDotnetAsync: started PID={p.Id}");
-            // Must read stdout/stderr to prevent deadlock when the pipe buffer fills.
-            // dotnet publish can produce hundreds of warning lines that exceed the 4KB
-            // pipe buffer, causing the child process to block on write indefinitely.
-            var stdoutTask = p.StandardOutput.ReadToEndAsync();
-            var stderrTask = p.StandardError.ReadToEndAsync();
+            p.BeginOutputReadLine();
+            p.BeginErrorReadLine();
+
+            // Wait for exit or timeout
             using var cts = new CancellationTokenSource(timeoutMs);
-            try
+            using var reg = cts.Token.Register(() => exitTcs.TrySetResult(false));
+            var exited = await exitTcs.Task.ConfigureAwait(false);
+
+            if (exited)
             {
-                await p.WaitForExitAsync(cts.Token).ConfigureAwait(false);
+                p.WaitForExit(); // flush remaining buffered output
+                LogStatus($"RunDotnetAsync: done PID={p.Id} exit={p.ExitCode}");
+                return p.ExitCode;
             }
-            catch (OperationCanceledException)
+            else
             {
                 LogStatus($"RunDotnetAsync: TIMEOUT after {timeoutMs / 1000}s, killing PID={p.Id}...");
                 try { p.Kill(entireProcessTree: true); } catch { }
                 return -1;
             }
-            await Task.WhenAll(stdoutTask, stderrTask).ConfigureAwait(false);
-            LogStatus($"RunDotnetAsync: done PID={p.Id} exit={p.ExitCode}");
-            return p.ExitCode;
         }
         /// <summary>
         /// Async initialization method for the ProjectRunner. This is where you can perform any setup that needs to happen before tests are enumerated, such as reading configuration files, setting up logging, etc.

@@ -114,18 +114,30 @@ public static class ProjectDiscovery
         };
 
         var output = new List<string>();
-        using var process = Process.Start(startInfo);
-        if (process == null)
-            return output;
+        using var process = new Process();
+        process.StartInfo = startInfo;
+        process.EnableRaisingEvents = true;
 
         process.OutputDataReceived += (_, e) =>
         {
             if (!string.IsNullOrWhiteSpace(e.Data))
                 output.Add(e.Data!.Trim());
         };
+        process.ErrorDataReceived += (_, e) => { }; // drain stderr to prevent buffer deadlock
+
+        var exitTcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        process.Exited += (_, _) => exitTcs.TrySetResult(true);
+        using var reg = ct.Register(() => exitTcs.TrySetResult(false));
+
+        process.Start();
         process.BeginOutputReadLine();
-        var error = await process.StandardError.ReadToEndAsync(ct);
-        await process.WaitForExitAsync(ct);
+        process.BeginErrorReadLine();
+
+        var exited = await exitTcs.Task;
+        if (exited)
+            process.WaitForExit(); // flush remaining buffered output
+        else
+            try { process.Kill(entireProcessTree: true); } catch { }
 
         return output;
     }

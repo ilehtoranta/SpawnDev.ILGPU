@@ -938,12 +938,6 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
 
             var sortedKeys = await keysBuf.CopyToHostAsync<float>();
 
-            // Temporary: dump sorted output for debugging
-            var dumpStr = string.Join(", ", sortedKeys.Take(32).Select(k => k.ToString("F1")));
-            Console.Error.WriteLine($"RADIX_DUMP: first32=[{dumpStr}]");
-            var dumpLast = string.Join(", ", sortedKeys.Skip(n - 8).Select(k => k.ToString("F1")));
-            Console.Error.WriteLine($"RADIX_DUMP: last8=[{dumpLast}]");
-
             // After descending sort, keys should be 128, 127, ..., 1
             for (int i = 0; i < n; i++)
             {
@@ -977,9 +971,6 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             await accelerator.SynchronizeAsync();
 
             var sorted = await dataBuf.CopyToHostAsync<float>();
-            var dumpStr = string.Join(", ", sorted.Take(32).Select(k => k.ToString("F1")));
-            Console.Error.WriteLine($"RADIX_DUMP_FLOAT: first32=[{dumpStr}]");
-
             for (int i = 0; i < n; i++)
             {
                 float expected = (float)(i + 1);
@@ -1012,9 +1003,6 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             await accelerator.SynchronizeAsync();
 
             var sorted = await dataBuf.CopyToHostAsync<int>();
-            var dumpStr = string.Join(", ", sorted.Take(32));
-            Console.Error.WriteLine($"RADIX_DUMP_INT: sorted=[{dumpStr}]");
-
             for (int i = 0; i < n; i++)
             {
                 if (sorted[i] != i + 1)
