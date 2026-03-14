@@ -288,12 +288,6 @@ Start the demo app and navigate to `/tests` to run the browser test suite intera
 dotnet run --project SpawnDev.ILGPU.Demo
 ```
 
-### Desktop Tests (Manual)
-
-```bash
-dotnet run --project SpawnDev.ILGPU.ConsoleDemo
-```
-
 ## Test Coverage
 
 **1518 tests** across eight test suites covering all core features on both browser and desktop. All tests are run via the unified **PlaywrightMultiTest** runner in a single `dotnet test` invocation.
