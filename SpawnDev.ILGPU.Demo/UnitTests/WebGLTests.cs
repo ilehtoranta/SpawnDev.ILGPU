@@ -704,6 +704,9 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
         [TestMethod]
         public new async Task RadixSortPositionDiagnosticTest() =>
             throw new UnsupportedTestException("WebGL: RadixSort requires shared memory + peer-to-peer buffer copies");
+        [TestMethod]
+        public new async Task RadixSort100KBenchmarkTest() =>
+            throw new UnsupportedTestException("WebGL: RadixSort requires shared memory + barriers");
 
         // --- Tests10: SharedMemoryResolver stress tests ---
         [TestMethod]
