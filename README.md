@@ -82,7 +82,7 @@ Comprehensive documentation is available in the [Docs](Docs/) folder:
 | **Shared Memory** | ✅ | ❌ | ✅ |
 | **Group.Barrier()** | ✅ | ❌ | ✅ |
 | **Dynamic Shared Memory** | ✅ | ❌ | ✅ |
-| **ILGPU Algorithms** | ✅ RadixSort, Scan, Reduce, etc. | ❌ | ✅ RadixSort, Scan, Reduce, etc. |
+| **ILGPU Algorithms** | ✅ RadixSort, Scan, Reduce, etc. | ❌ | ✅ Scan, Reduce; RadixSort (≤64 elements) |
 | **Atomics** | ✅ | ❌ | ✅ |
 | **64-bit (f64/i64)** | ✅ Emulated | ✅ Emulated | ✅ Native |
 | **Browser support** | Chrome/Edge 113+ | All modern browsers | All modern browsers |

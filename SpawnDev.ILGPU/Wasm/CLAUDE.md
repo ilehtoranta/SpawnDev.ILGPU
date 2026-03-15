@@ -67,6 +67,20 @@ counter for the helper's barriers, emit one more `EmitBarrier(_barrierCounter++)
 **Canary test**: `AlgorithmRadixSortNonPairsIntTest` sorts [32,31,...,1] → [1,2,...,32].
 If this test produces duplicates or non-deterministic results, the post-helper barrier is broken.
 
+## Known Limitation: Multi-Group Barrier Dispatch (v4.0.0)
+
+Wasm barrier kernels are fully correct for **single-group workloads** (up to 64 elements for
+groupSize=64). Multi-group workloads (n > groupSize) have a cross-group memory visibility issue:
+the worker script loops `for (g = 0; g < numGroups; g++) { kernel(...); }`, but writes from
+group 0 are not reliably visible to reads in group 1 across parallel Web Workers, despite
+`atomic.fence`, atomic kernel loads/stores, and JS-level `Atomics.store/load` fences.
+
+This affects RadixSort on datasets larger than 64 elements. The benchmark caps Wasm RadixSort
+at n=64. Desktop backends (CUDA/OpenCL/CPU) have no such limitation.
+
+**Future fix**: Requires either a cooperative single-worker scheduler (like the CPU backend)
+or a browser-level fix to SharedArrayBuffer visibility semantics for `atomic.fence`.
+
 ## Debugging
 - `WasmBackend.LastWasmBinary` — capture last compiled kernel
 - `WasmBackend.AllKernelInfos` — compilation summaries

@@ -1729,13 +1729,9 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 {
                     _hasBarriers = true;
 
-                    // CRITICAL: Emit an extra barrier AFTER each helper call that uses barriers.
-                    // The helper's internal barriers ensure all workers reach the end of the
-                    // helper, but workers resume at different speeds after the last barrier.
-                    // Without this post-call barrier, a fast worker can start the NEXT helper
-                    // call while a slow worker is still inside the previous one. Since the
-                    // helper uses shared memory at fixed offsets, this causes a data race.
-                    // (See Wasm/CLAUDE.md "Post-helper barrier" rule.)
+                    // Emit an extra barrier AFTER each helper call that uses barriers.
+                    // Without this, a fast worker can start the NEXT helper call while
+                    // a slow worker is still inside the previous one.
                     EmitBarrier(_barrierCounter);
                     _barrierCounter++;
                 }

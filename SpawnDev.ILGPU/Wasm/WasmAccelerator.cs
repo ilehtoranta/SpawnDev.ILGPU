@@ -447,7 +447,9 @@ namespace SpawnDev.ILGPU.Wasm
                 // Barrier slots region: each barrier = 8 bytes (arrival counter i32 + sense flag i32)
                 int barrierBase = (afterShared + 3) & ~3; // 4-byte align
                 int barrierSize = compiledKernel.BarrierCount * 8;
-                int totalWithBarriers = barrierBase + barrierSize;
+                // Add 4 bytes for inter-group fence slot (used by multi-group barrier dispatch)
+                int fenceSlot = barrierBase + barrierSize;
+                int totalWithBarriers = fenceSlot + 4;
 
                 if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm] Memory layout: buffers={totalMemoryBytes}, scratch={scratchBase}, sharedMem={sharedMemBase}({sharedMemSize}), barrier={barrierBase}({barrierSize}), hasBarriers={compiledKernel.HasBarriers}, groupSize={groupSize}");
 
@@ -478,7 +480,7 @@ namespace SpawnDev.ILGPU.Wasm
                     _cachedWasmPages = wasmPages;
                     _cachedWasmMemory = js.Call<JSObject>(
                         "eval",
-                        $"new WebAssembly.Memory({{ initial: {wasmPages}, maximum: 65536, shared: true }})");
+                        $"new WebAssembly.Memory({{ initial: {wasmPages}, maximum: 2048, shared: true }})");
                     _cachedMemoryBuffer = _cachedWasmMemory.JSRef!.Get<SharedArrayBuffer>("buffer");
                     _initializedWorkers.Clear();
                     wasmMemory = _cachedWasmMemory;
@@ -489,7 +491,7 @@ namespace SpawnDev.ILGPU.Wasm
                     // Concurrent dispatches — create isolated per-dispatch memory
                     disposeWasmMemory = js.Call<JSObject>(
                         "eval",
-                        $"new WebAssembly.Memory({{ initial: {wasmPages}, maximum: 65536, shared: true }})");
+                        $"new WebAssembly.Memory({{ initial: {wasmPages}, maximum: 2048, shared: true }})");
                     disposeBuffer = disposeWasmMemory.JSRef!.Get<SharedArrayBuffer>("buffer");
                     wasmMemory = disposeWasmMemory;
                     memoryBuffer = disposeBuffer;
@@ -738,7 +740,7 @@ namespace SpawnDev.ILGPU.Wasm
                 // Dispatch to workers
                 await DispatchToWorkers(
                     totalItems, gridDimX, gridDimY, scratchBase, scratchPerThread,
-                    sharedMemBase, barrierBase, compiledKernel,
+                    sharedMemBase, barrierBase, fenceSlot, compiledKernel,
                     groupSize, numGroups,
                     flatArgs, compiledKernel.WasmBinary,
                     wasmMemory, memoryBuffer, bufferOffsets, bufferInfos,
@@ -774,6 +776,7 @@ namespace SpawnDev.ILGPU.Wasm
             int scratchPerThread,
             int sharedMemBase,
             int barrierBase,
+            int fenceSlot,
             WasmCompiledKernel compiledKernel,
             int groupSize,
             int numGroups,
@@ -808,7 +811,7 @@ namespace SpawnDev.ILGPU.Wasm
             string argStr = string.Join(", ", flatArgs);
             var workerScript = BuildWasmWorkerScript(
                 gridDimX, gridDimY, scratchBase, scratchPerThread,
-                sharedMemBase, barrierBase,
+                sharedMemBase, barrierBase, fenceSlot,
                 groupSize, numGroups, hasBarriers, argStr,
                 dynamicSharedElements);
 
@@ -1039,7 +1042,7 @@ namespace SpawnDev.ILGPU.Wasm
         /// </summary>
         private static string BuildWasmWorkerScript(
             int gridDimX, int gridDimY, int scratchBase, int scratchPerThread,
-            int sharedMemBase, int barrierBase,
+            int sharedMemBase, int barrierBase, int fenceSlot,
             int groupSize, int numGroups, bool hasBarriers,
             string argStr,
             int dynamicSharedLength = 0)
@@ -1056,13 +1059,17 @@ namespace SpawnDev.ILGPU.Wasm
             {
                 // Barrier kernel: multi-worker dispatch.
                 // Each worker is one thread within the workgroup.
-                // All workers iterate over all groups, synchronizing at barriers.
+                // Workers iterate over all groups, synchronizing at barriers within each call.
+                // Between group iterations, use Atomics.store as a memory fence to ensure
+                // all workers' writes from the previous group are visible before the next
+                // group reads them (SharedArrayBuffer cross-agent visibility requires this).
                 sb.AppendLine("    const threadId = d.threadId;");
                 sb.AppendLine($"    const groupSize = {groupSize};");
                 sb.AppendLine($"    const numGroups = {numGroups};");
-                sb.AppendLine();
                 sb.AppendLine($"    const scratchPerThread = {scratchPerThread};");
                 sb.AppendLine($"    const myScratch = {scratchBase} + threadId * scratchPerThread;");
+                sb.AppendLine($"    const _fence = new Int32Array(d.memory.buffer, {fenceSlot}, 1);");
+                sb.AppendLine();
                 sb.AppendLine("    for (let g = 0; g < numGroups; g++) {");
                 sb.AppendLine("      const globalIdx = g * groupSize + threadId;");
                 sb.Append($"      kernel(globalIdx, {gridDimX}, {gridDimY}, myScratch, {groupSize}, threadId, {sharedMemBase}, {barrierBase}, {dynamicSharedLength}");
@@ -1072,6 +1079,11 @@ namespace SpawnDev.ILGPU.Wasm
                     sb.Append(argStr);
                 }
                 sb.AppendLine(");");
+                // Memory fence between groups: atomic store to barrier region forces
+                // all prior non-atomic writes to be visible to other workers.
+                // Uses the barrier region (already allocated, 4-byte aligned) as the fence target.
+                sb.AppendLine("      Atomics.store(_fence, 0, g);");
+                sb.AppendLine("      Atomics.load(_fence, 0);");
                 sb.AppendLine("    }");
             }
             else
