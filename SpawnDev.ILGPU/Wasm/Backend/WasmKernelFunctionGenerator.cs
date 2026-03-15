@@ -184,12 +184,215 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         /// </summary>
         private int _dynamicSharedElementSize = 0;
 
+        // === Helper function mode ===
+
+        /// <summary>
+        /// Whether this generator is producing a helper function (not the kernel entry point).
+        /// Helper functions have different parameter setup and return value handling.
+        /// </summary>
+        private bool _isHelperFunction = false;
+
+        /// <summary>
+        /// Wasm local index for the helper's return value (non-void helpers only).
+        /// </summary>
+        private uint _helperResultLocal;
+
+        /// <summary>
+        /// Wasm type of the helper's return value, or null for void helpers.
+        /// </summary>
+        private byte? _helperResultType;
+
+        // === Exposed state for helper generation ===
+
+        /// <summary>
+        /// Exposes shared memory alloca offsets for use by helper function generators.
+        /// </summary>
+        internal IReadOnlyDictionary<string, int> SharedAllocaOffsets => _sharedAllocaOffsets;
+
+        /// <summary>
+        /// Exposes shared memory alloca metadata for use by helper function generators.
+        /// </summary>
+        internal IReadOnlyDictionary<string, (string ElemType, int ArraySize)> SharedAllocaMetadata => _sharedAllocaMetadata;
+
+        /// <summary>
+        /// Exposes the current shared memory size for use by helper function generators.
+        /// </summary>
+        internal int SharedMemorySizeValue => _sharedMemorySize;
+
         public WasmKernelFunctionGenerator(
             in GeneratorArgs args,
             Method method,
             Allocas allocas)
             : base(args, method, allocas)
         {
+        }
+
+        /// <summary>
+        /// Result of generating a helper function body.
+        /// </summary>
+        internal class HelperFunctionResult
+        {
+            public byte[] ParamTypes { get; set; } = Array.Empty<byte>();
+            public byte[] ResultTypes { get; set; } = Array.Empty<byte>();
+            public List<WasmLocal> Locals { get; set; } = new();
+            public byte[] Code { get; set; } = Array.Empty<byte>();
+            public int BarrierCount { get; set; }
+            public int SharedMemorySize { get; set; }
+        }
+
+        /// <summary>
+        /// Generates this method as a standalone helper function (not the kernel entry point).
+        /// Called from WasmBackend.CreateKernel() for multi-block helpers.
+        ///
+        /// The helper function receives the same fixed context params as the kernel
+        /// (globalIdx, dimX, dimY, scratchBase, groupDimX, threadIdX, sharedMemBase,
+        /// barrierBase, dynamicSharedLength), followed by the helper's IR parameters.
+        /// Returns a value via the Wasm function return mechanism.
+        /// </summary>
+        internal HelperFunctionResult GenerateAsHelper(
+            IReadOnlyDictionary<string, int> sharedAllocaOffsets,
+            IReadOnlyDictionary<string, (string ElemType, int ArraySize)> sharedAllocaMetadata,
+            int sharedMemorySize,
+            Dictionary<string, uint> mathImports)
+        {
+            _isHelperFunction = true;
+            MathImports = mathImports;
+
+            // Copy shared memory allocation state from the kernel generator.
+            // The kernel has already computed offsets for all static shared allocas
+            // (including this helper's). The helper starts from this base and may
+            // add more allocations (e.g., Broadcast slots) during code generation.
+            foreach (var kv in sharedAllocaOffsets)
+                _sharedAllocaOffsets[kv.Key] = kv.Value;
+            foreach (var kv in sharedAllocaMetadata)
+                _sharedAllocaMetadata[kv.Key] = kv.Value;
+            _sharedMemorySize = sharedMemorySize;
+            if (sharedMemorySize > 0)
+                _hasBarriers = true;
+
+            // Set up helper-specific parameters
+            SetupHelperParameters();
+
+            // Generate code (state machine for multi-block)
+            var blocks = Method.Blocks;
+            _blockCount = blocks.Count;
+
+            if (_blockCount <= 1)
+            {
+                _isStateMachine = false;
+                if (_blockCount == 1)
+                {
+                    var singleBlock = blocks.First();
+                    foreach (var value in singleBlock)
+                        GenerateCodeFor(value);
+                    if (singleBlock.Terminator != null)
+                        GenerateCodeFor(singleBlock.Terminator);
+                }
+            }
+            else
+            {
+                GenerateStateMachineCode(blocks);
+            }
+
+            // After the state machine, push the return value onto the stack
+            // (Wasm returns the value on the stack when the function ends)
+            if (_helperResultType.HasValue)
+            {
+                WasmModuleBuilder.EmitLocalGet(Code, _helperResultLocal);
+            }
+
+            // Determine result types
+            byte[] resultTypes = _helperResultType.HasValue
+                ? new[] { _helperResultType.Value }
+                : Array.Empty<byte>();
+
+            return new HelperFunctionResult
+            {
+                ParamTypes = FuncParamTypes.ToArray(),
+                ResultTypes = resultTypes,
+                Locals = _locals,
+                Code = Code.ToArray(),
+                BarrierCount = _barrierCounter,
+                SharedMemorySize = _sharedMemorySize,
+            };
+        }
+
+        /// <summary>
+        /// Sets up parameter-to-local mappings for a helper function.
+        /// Fixed context params first (same as kernel), then the helper's IR params.
+        /// </summary>
+        private void SetupHelperParameters()
+        {
+            _locals.Clear();
+            _localMap.Clear();
+            _nextLocalIndex = 0;
+            _paramCount = 0;
+
+            // Fixed context params (same order as kernel — 9 params)
+            _globalIdxLocal = _nextLocalIndex++;
+            _paramCount++;
+            _dimXLocal = _nextLocalIndex++;
+            _paramCount++;
+            _dimYLocal = _nextLocalIndex++;
+            _paramCount++;
+            _scratchBaseLocal = _nextLocalIndex++;
+            _paramCount++;
+            _scratchNextOffset = 0;
+            _groupDimXLocal = _nextLocalIndex++;
+            _paramCount++;
+            _threadIdXLocal = _nextLocalIndex++;
+            _paramCount++;
+            _sharedMemBaseLocal = _nextLocalIndex++;
+            _paramCount++;
+            _barrierBaseLocal = _nextLocalIndex++;
+            _paramCount++;
+            _dynamicSharedLengthLocal = _nextLocalIndex++;
+            _paramCount++;
+
+            FuncParamTypes.Clear();
+            FuncParamTypes.Add(WasmOpCodes.I32); // globalIdx
+            FuncParamTypes.Add(WasmOpCodes.I32); // dimX
+            FuncParamTypes.Add(WasmOpCodes.I32); // dimY
+            FuncParamTypes.Add(WasmOpCodes.I32); // scratchBase
+            FuncParamTypes.Add(WasmOpCodes.I32); // groupDimX
+            FuncParamTypes.Add(WasmOpCodes.I32); // threadIdX
+            FuncParamTypes.Add(WasmOpCodes.I32); // sharedMemBase
+            FuncParamTypes.Add(WasmOpCodes.I32); // barrierBase
+            FuncParamTypes.Add(WasmOpCodes.I32); // dynamicSharedLength
+
+            // Helper's IR parameters
+            var parameters = Method.Parameters;
+            for (int i = 0; i < parameters.Count; i++)
+            {
+                var param = parameters[i];
+                var wasmType = GetWasmTypeFromIR(param.Type);
+                FuncParamTypes.Add(wasmType);
+                uint paramLocal = _nextLocalIndex++;
+                _paramCount++;
+                _localMap[GetValueKey(param)] = paramLocal;
+
+                WasmBackend.Log($"[Wasm-Helper] param[{i}] '{GetValueKey(param)}' -> local_{paramLocal} (type={wasmType:X2})");
+            }
+
+            // Determine return type from the method's return type
+            var returnType = Method.ReturnType;
+            if (returnType != null && !returnType.IsVoidType)
+            {
+                _helperResultType = GetWasmTypeFromIR(returnType);
+                _helperResultLocal = AllocateNewLocal(_helperResultType.Value);
+                WasmBackend.Log($"[Wasm-Helper] Return type: {_helperResultType:X2}, resultLocal=local_{_helperResultLocal}");
+            }
+
+            // Re-register shared memory allocations. The offsets were pre-computed by the
+            // kernel generator and copied in GenerateAsHelper(). SetupSharedAllocations
+            // will skip keys that already exist (guard in that method), ensuring no
+            // double-counting. However, if the alloca IR values here have different keys
+            // from the kernel's copy (different instances), this re-registration ensures
+            // they're properly mapped.
+            SetupSharedAllocations(Allocas.SharedAllocations, isDynamic: false);
+            SetupSharedAllocations(Allocas.DynamicSharedAllocations, isDynamic: true);
+
+            WasmBackend.Log($"[Wasm-Helper] Setup complete: {_nextLocalIndex} locals, {FuncParamTypes.Count} params, sharedMem={_sharedMemorySize}");
         }
 
         /// <summary>
@@ -277,8 +480,25 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             if (startIdx == 1 && parameters.Count > 0)
             {
                 _indexParam = parameters[0];
-                _localMap[GetValueKey(_indexParam)] = _globalIdxLocal;
-                WasmBackend.Log($"[Wasm-Setup] Index param {GetValueKey(_indexParam)} -> local_{_globalIdxLocal}, IndexType={_indexType}");
+
+                // Check if the implicit index is Int64 (LongIndex1D).
+                // globalIdx is i32, but the IR parameter might be i64.
+                // Create an i64 local that extends globalIdx for i64 params.
+                if (GetWasmTypeFromIR(parameters[0].Type) == WasmOpCodes.I64)
+                {
+                    // Int64 implicit index (LongIndex1D) = paddedNumDataElements.
+                    // This is NOT the thread index — it's the loop bound / extent.
+                    // Don't map to _globalIdxLocal. Instead, let it be a regular user param
+                    // by NOT mapping it and NOT incrementing startIdx.
+                    _indexParam = null; // not an index param
+                    startIdx = 0; // all params are user params
+                    WasmBackend.Log($"[Wasm-Setup] Int64 param is extent, not index — treating as user param");
+                }
+                else
+                {
+                    _localMap[GetValueKey(_indexParam)] = _globalIdxLocal;
+                    WasmBackend.Log($"[Wasm-Setup] Index param {GetValueKey(_indexParam)} -> local_{_globalIdxLocal}, IndexType={_indexType}");
+                }
             }
 
             for (int i = startIdx; i < parameters.Count; i++)
@@ -361,12 +581,26 @@ namespace SpawnDev.ILGPU.Wasm.Backend
 
                     WasmBackend.Log($"[Wasm-Setup]   Scalar: {GetValueKey(param)}=local_{valLocal}");
 
+                    // Record struct layout info for dispatch-side serialization
+                    List<StructFieldInfo> structFields = null;
+                    if (paramType is StructureType sType)
+                    {
+                        structFields = new List<StructFieldInfo>();
+                        WasmBackend.Log($"[Wasm-Setup]   Struct layout: fields={sType.NumFields}, size={sType.Size}, alignment={sType.Alignment}");
+                        FlattenStructLayout(sType, 0, structFields);
+                        foreach (var sf in structFields)
+                            WasmBackend.Log($"[Wasm-Setup]     leaf: offset={sf.Offset}, wasmType=0x{sf.WasmType:X2}, size={sf.Size}, isViewPtr={sf.IsViewPtr}");
+                    }
+
                     _paramInfos.Add(new WasmParamInfo
                     {
                         Index = i,
                         Name = $"param{i}",
                         IsScalar = true,
                         WasmType = wasmType,
+                        StructFields = structFields,
+                        StructSize = (paramType is StructureType st) ? st.Size : 0,
+                        IRTypeName = paramType?.GetType().Name + ":" + paramType?.ToString(),
                     });
                 }
             }
@@ -385,12 +619,15 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             _generatorArgs.SharedMemorySize = _sharedMemorySize;
             _generatorArgs.DynamicSharedElementSize = _dynamicSharedElementSize;
 
+            // (i64 fixup removed — Int64 params are now handled as user params)
+
             WasmBackend.Log($"[Wasm-Setup] Final: _nextLocalIndex={_nextLocalIndex}, _paramCount={_paramCount}, FuncParamTypes={FuncParamTypes.Count}");
             WasmBackend.Log($"[Wasm-Setup] _localMap: {string.Join(", ", _localMap.Select(kv => $"{kv.Key}={kv.Value}"))}");
             WasmBackend.Log($"[Wasm-Setup] SharedMemorySize={_sharedMemorySize}, HasBarriers={_hasBarriers}");
         }
 
         private bool _parametersInitialized = false;
+        private bool _needsI64IndexFixup = false;
 
         /// <summary>
         /// GenerateHeader is called AFTER GenerateCode by ILGPU.
@@ -433,7 +670,17 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                             if (phi.Sources[j] == branch.BasicBlock)
                             {
                                 var phiLocal = GetLocal(phi);
-                                EmitGetLocal(phi[j].Resolve());
+                                var srcValue = phi[j].Resolve();
+                                EmitGetLocal(srcValue);
+
+                                // Coerce type if source and PHI local differ
+                                var srcType = GetWasmTypeFromIR(srcValue.Type);
+                                var phiType = GetLocalType(phiLocal);
+                                if (srcType == WasmOpCodes.I64 && phiType == WasmOpCodes.I32)
+                                    Code.Add(WasmOpCodes.I32WrapI64);
+                                else if (srcType == WasmOpCodes.I32 && phiType == WasmOpCodes.I64)
+                                    Code.Add(WasmOpCodes.I64ExtendI32S);
+
                                 WasmModuleBuilder.EmitLocalSet(Code, phiLocal);
                             }
                         }
@@ -469,6 +716,81 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         }
 
         /// <summary>
+        /// Assigns Wasm function indices to multi-block helper methods.
+        /// Called at the start of kernel GenerateCode(), after all helpers have been
+        /// registered in data.HelperMethods by CreateFunctionCodeGenerator().
+        /// </summary>
+        private void AssignHelperFunctionIndices()
+        {
+            if (_generatorArgs.HelperFunctionIndices.Count > 0)
+                return; // Already assigned (e.g., called twice)
+
+            // Log helper info
+            foreach (var kvp in _generatorArgs.HelperMethods)
+                WasmBackend.Log($"Wasm: Helper '{kvp.Key.Name}' blocks={kvp.Key.Blocks.Count}");
+
+            if (_generatorArgs.HelperMethods.Count == 0)
+                return; // No helpers
+
+            int importCount = WasmBackend.UnaryMathFuncs.Length + WasmBackend.BinaryMathFuncs.Length;
+            int nextHelperFuncIdx = importCount + 1; // +1 for the kernel function
+
+            foreach (var kvp in _generatorArgs.HelperMethods)
+            {
+                int barrierCount = ComputeEffectiveBarrierCount(kvp.Key);
+                // Promote to separate Wasm function if:
+                // - Multi-block (needs its own state machine, can't nest), OR
+                // - Contains barriers directly or in sub-helpers (sense locals must be
+                //   isolated per call to prevent stale sense values when called
+                //   multiple times in a loop)
+                if (kvp.Key.Blocks.Count > 1 || barrierCount > 0)
+                {
+                    _generatorArgs.HelperFunctionIndices[kvp.Key] = nextHelperFuncIdx++;
+                    _generatorArgs.HelperBarrierCounts[kvp.Key] = barrierCount;
+                    _generatorArgs.HelperFunctionOrder.Add(kvp.Key);
+                    string reason = kvp.Key.Blocks.Count > 1 ? "multi-block" : "has-barriers";
+                    WasmBackend.Log($"Wasm: Helper '{kvp.Key.Name}' promoted ({reason}): funcIdx={_generatorArgs.HelperFunctionIndices[kvp.Key]}, barriers={barrierCount}, blocks={kvp.Key.Blocks.Count}");
+                }
+            }
+        }
+
+        /// <summary>
+        /// Computes the effective barrier count for a method, recursively counting
+        /// barriers from sub-helper MethodCalls. This is necessary because a helper's
+        /// barriers may not be direct IR Barrier values — they may be in sub-methods
+        /// that are called via MethodCall within the helper's blocks.
+        ///
+        /// Each Barrier value counts as 1, each Broadcast as 2 (store barrier + load barrier).
+        /// Each MethodCall to a known helper adds that helper's effective barrier count.
+        /// </summary>
+        private int ComputeEffectiveBarrierCount(Method method, HashSet<Method>? visited = null)
+        {
+            visited ??= new HashSet<Method>();
+            if (!visited.Add(method))
+                return 0; // Prevent infinite recursion for cyclic calls
+
+            int count = 0;
+            foreach (var block in method.Blocks)
+            {
+                foreach (var entry in block)
+                {
+                    var value = entry.Value;
+                    if (value is global::ILGPU.IR.Values.Barrier)
+                        count++;
+                    else if (value is global::ILGPU.IR.Values.Broadcast)
+                        count += 2;
+                    else if (value is global::ILGPU.IR.Values.MethodCall call)
+                    {
+                        // Recursively count barriers in sub-helpers
+                        if (_generatorArgs.HelperMethods.ContainsKey(call.Target))
+                            count += ComputeEffectiveBarrierCount(call.Target, visited);
+                    }
+                }
+            }
+            return count;
+        }
+
+        /// <summary>
         /// Generates the function body by visiting all blocks.
         /// For multi-block kernels, uses a state machine with loop/block/br_table.
         /// </summary>
@@ -477,6 +799,12 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             // CRITICAL: Set up parameter mappings FIRST, before any IR visiting.
             // ILGPU calls GenerateCode() BEFORE GenerateHeader().
             SetupParameters();
+
+            // Assign function indices for multi-block helpers. This must happen here
+            // (not in CreateKernelCodeGenerator) because ILGPU calls CreateKernelCodeGenerator
+            // BEFORE CreateFunctionCodeGenerator, so data.HelperMethods is empty at that point.
+            // By the time GenerateCode() runs, all helpers have been registered.
+            AssignHelperFunctionIndices();
 
             var blocks = Method.Blocks;
             _blockCount = blocks.Count;
@@ -504,6 +832,10 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             _generatorArgs.BarrierCount = _barrierCounter;
             _generatorArgs.HasBarriers = _hasBarriers;
             _generatorArgs.SharedMemorySize = _sharedMemorySize; // Re-propagate (broadcast may have added slots)
+
+            // NOTE: Barrier sense flag reset for multi-group dispatch is handled in the
+            // JavaScript worker loop (BuildWasmWorkerScript) to avoid generating
+            // unreachable code after the Wasm return instruction.
 
             WasmBackend.Log($"[Wasm-CodeGen] Final BarrierCount={_barrierCounter}, HasBarriers={_hasBarriers}, SharedMemorySize={_sharedMemorySize}");
         }
@@ -548,6 +880,13 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             }
 
             WasmBackend.Log($"[Wasm-SM] State machine with {_blockCount} blocks, _stateLocal=local_{_stateLocal}");
+
+            // Log block map for diagnostics (visible in AllKernelInfos via WasmBackend.Log)
+            foreach (var kvp in _blockMap)
+            {
+                var termName = kvp.Key.Terminator?.GetType().Name ?? "none";
+                WasmBackend.Log($"[Wasm-SM]   Block {kvp.Value}: {kvp.Key} terminator={termName}");
+            }
 
             // Initialize state to 0 (first block)
             WasmModuleBuilder.EmitI32Const(Code, 0);
@@ -609,6 +948,13 @@ namespace SpawnDev.ILGPU.Wasm.Backend
 
         public override void GenerateCode(ReturnTerminator returnTerminator)
         {
+            // Helper functions: store return value before exiting
+            if (_isHelperFunction && _helperResultType.HasValue && !returnTerminator.IsVoidReturn)
+            {
+                EmitGetLocal(returnTerminator.ReturnValue.Resolve());
+                WasmModuleBuilder.EmitLocalSet(Code, _helperResultLocal);
+            }
+
             if (_isStateMachine)
             {
                 // Set state to an invalid value and br to $loop.
@@ -641,6 +987,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
 
             int trueBlock = GetBlockIndex(branch.TrueTarget);
             int falseBlock = GetBlockIndex(branch.FalseTarget);
+            WasmBackend.Log($"[Wasm-SM] IfBranch: true→{trueBlock} false→{falseBlock} (blockCount={_blockCount})");
 
             EmitGetLocal(branch.Condition.Resolve());
             Code.Add(WasmOpCodes.If);
@@ -863,14 +1210,29 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 }
             }
 
-            // Check if source is a Parameter that maps to an ArrayView
-            if (source is global::ILGPU.IR.Values.Parameter param && IsViewType(param.Type))
+            // Check if source is (or traces to) a Parameter that maps to an ArrayView.
+            // For ArrayView1D params, the source might be a GetField(param, field)
+            // rather than the Parameter directly. Use TraceToParameter to resolve.
+            int resolvedParamIdx = -1;
+            if (source is global::ILGPU.IR.Values.Parameter directParam && IsViewType(directParam.Type))
             {
-                int paramIdx = -1;
                 for (int pi = 0; pi < Method.Parameters.Count; pi++)
-                {
-                    if (Method.Parameters[pi] == param) { paramIdx = pi; break; }
-                }
+                    if (Method.Parameters[pi] == directParam) { resolvedParamIdx = pi; break; }
+            }
+            else
+            {
+                // Trace through GetField/NewView/etc. to find the underlying view param
+                resolvedParamIdx = TraceToParameter(source);
+                // Only use if the resolved param is actually a view
+                if (resolvedParamIdx >= 0 && resolvedParamIdx < Method.Parameters.Count
+                    && !IsViewType(Method.Parameters[resolvedParamIdx].Type))
+                    resolvedParamIdx = -1;
+            }
+
+            if (resolvedParamIdx >= 0)
+            {
+                var param = Method.Parameters[resolvedParamIdx];
+                int paramIdx = resolvedParamIdx;
                 if (_paramLocals.TryGetValue(paramIdx, out var locals))
                 {
                     var targetWasmType = GetWasmType(value);
@@ -887,12 +1249,16 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                     }
                     else if (fieldIndex < strideStartField)
                     {
-                        // Extent/index/length fields — these are i64 fields
-                        // Field 1 = offset (always 0 for views)
-                        // Field 2+ = extent dimensions or length
-                        if (fieldIndex == 1)
+                        // Context-sensitive field handling:
+                        // - ArrayView1D (StructureType): fields = [ptr, Extent(i64), Stride...]
+                        //   Field 1 = Extent = Length → return locals[1]
+                        // - ArrayView (AddressSpaceType): fields = [ptr, Index(i64), Length(i64)]
+                        //   Field 1 = Index/Offset → always 0 for whole-buffer views
+                        //   Field 2 = Length → return locals[1]
+                        bool isStructView = param.Type is StructureType;
+                        if (fieldIndex == 1 && !isStructView)
                         {
-                            // Index/Offset - always zero
+                            // ArrayView's Index/Offset field — always 0
                             if (targetWasmType == WasmOpCodes.I64)
                                 WasmModuleBuilder.EmitI64Const(Code, 0);
                             else
@@ -900,7 +1266,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                         }
                         else
                         {
-                            // Length/extent fields - return length from locals[1]
+                            // Length/Extent — return element count from locals[1]
                             WasmModuleBuilder.EmitLocalGet(Code, locals[1]);
                             if (targetWasmType == WasmOpCodes.I64)
                                 Code.Add(WasmOpCodes.I64ExtendI32S);
@@ -1241,36 +1607,104 @@ namespace SpawnDev.ILGPU.Wasm.Backend
 
         #endregion
 
-        #region Override: MethodCall (Inline Helper Functions)
+        #region Override: MethodCall (Helper Functions)
 
         /// <summary>
-        /// Overrides MethodCall to inline helper functions (e.g., redirected algorithm intrinsics)
-        /// directly into the kernel. The Wasm backend produces a single-function module, so
-        /// helper function calls must be inlined rather than emitted as separate functions.
-        /// 
-        /// For multi-block helpers, generates a nested state machine with its own
-        /// block map, state local, and dispatch loop.
+        /// Overrides MethodCall to handle helper functions:
+        /// - Single-block helpers are inlined directly (fast, no state machine needed).
+        /// - Multi-block helpers are emitted as separate Wasm functions and called via
+        ///   the 'call' instruction. This avoids nested state machines which corrupt
+        ///   control flow when both the kernel and helper have multiple blocks.
         /// </summary>
         public override void GenerateCode(MethodCall methodCall)
         {
             var targetMethod = methodCall.Target;
 
-            // Check if this is a helper function we can inline
-            if (_generatorArgs.HelperMethods.TryGetValue(targetMethod, out var helperAllocas))
+            // Check if this is a helper function
+            if (!_generatorArgs.HelperMethods.TryGetValue(targetMethod, out var helperAllocas))
             {
+                // Not a helper — fall through to base class
+                base.GenerateCode(methodCall);
+                return;
+            }
+
+            // Set up the helper's shared memory allocations (needed for both paths
+            // so that the kernel's _sharedMemorySize accounts for the helper's allocas)
+            SetupSharedAllocations(helperAllocas.SharedAllocations, isDynamic: false);
+            SetupSharedAllocations(helperAllocas.DynamicSharedAllocations, isDynamic: true);
+
+            // Allocate result local if non-void
+            uint? resultLocal = null;
+            if (!methodCall.Type.IsVoidType)
+            {
+                resultLocal = AllocateLocal(methodCall, GetWasmType(methodCall));
+            }
+
+            // Check if this is a multi-block helper with a pre-assigned function index
+            if (_generatorArgs.HelperFunctionIndices.TryGetValue(targetMethod, out int helperFuncIdx))
+            {
+                // Multi-block helper: emit function call
+                int helperBarrierCount = _generatorArgs.HelperBarrierCounts[targetMethod];
+
+                WasmBackend.Log($"[Wasm-Call] Calling helper '{targetMethod.Name}' funcIdx={helperFuncIdx}, barriers={helperBarrierCount}, barrierOffset={_barrierCounter}");
+
+                // No barrier reset needed — generation-counting barriers require no
+                // per-call reset. The generation counter monotonically increases, so
+                // fresh function locals always read the correct current generation.
+
+                // Push context params (same order as the helper's fixed params)
+                WasmModuleBuilder.EmitLocalGet(Code, _globalIdxLocal);
+                WasmModuleBuilder.EmitLocalGet(Code, _dimXLocal);
+                WasmModuleBuilder.EmitLocalGet(Code, _dimYLocal);
+                WasmModuleBuilder.EmitLocalGet(Code, _scratchBaseLocal);
+                WasmModuleBuilder.EmitLocalGet(Code, _groupDimXLocal);
+                WasmModuleBuilder.EmitLocalGet(Code, _threadIdXLocal);
+                WasmModuleBuilder.EmitLocalGet(Code, _sharedMemBaseLocal);
+
+                // Adjusted barrier base: offset by current barrier counter
+                WasmModuleBuilder.EmitLocalGet(Code, _barrierBaseLocal);
+                if (_barrierCounter > 0)
+                {
+                    WasmModuleBuilder.EmitI32Const(Code, _barrierCounter * 8);
+                    Code.Add(WasmOpCodes.I32Add);
+                }
+
+                WasmModuleBuilder.EmitLocalGet(Code, _dynamicSharedLengthLocal);
+
+                // Push the helper's IR arguments
+                for (int i = 0; i < targetMethod.Parameters.Count && i < methodCall.Nodes.Length; i++)
+                {
+                    EmitGetLocal(methodCall.Nodes[i].Resolve());
+                }
+
+                // Emit call instruction
+                WasmModuleBuilder.EmitCall(Code, (uint)helperFuncIdx);
+
+                // Pop result if non-void
+                if (resultLocal.HasValue)
+                {
+                    WasmModuleBuilder.EmitLocalSet(Code, resultLocal.Value);
+                }
+
+                // Advance barrier counter for subsequent barriers/calls
+                _barrierCounter += helperBarrierCount;
+                if (helperBarrierCount > 0)
+                    _hasBarriers = true;
+
+                WasmBackend.Log($"[Wasm-Call] Done calling '{targetMethod.Name}', barrierCounter now={_barrierCounter}");
+            }
+            else
+            {
+                // Inline path: single-block or multi-block (nested SM fallback)
                 WasmBackend.Log($"[Wasm-Inline] Inlining helper: {targetMethod.Name} ({targetMethod.Parameters.Count} params, {methodCall.Nodes.Length} args)");
 
-                // Step 1: Set up the helper's shared memory allocations
-                SetupSharedAllocations(helperAllocas.SharedAllocations, isDynamic: false);
-                SetupSharedAllocations(helperAllocas.DynamicSharedAllocations, isDynamic: true);
-
-                // Step 2: Map call arguments to helper's parameters
+                // Map call arguments to helper's parameters
                 for (int i = 0; i < targetMethod.Parameters.Count && i < methodCall.Nodes.Length; i++)
                 {
                     var param = targetMethod.Parameters[i];
                     var arg = methodCall.Nodes[i].Resolve();
                     var paramKey = GetValueKey(param);
-                    
+
                     if (_localMap.TryGetValue(GetValueKey(arg), out uint argLocal))
                     {
                         _localMap[paramKey] = argLocal;
@@ -1286,14 +1720,6 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                     }
                 }
 
-                // Step 3: Allocate result local if non-void
-                uint? resultLocal = null;
-                if (!methodCall.Type.IsVoidType)
-                {
-                    resultLocal = AllocateLocal(methodCall, GetWasmType(methodCall));
-                }
-
-                // Step 4: Visit the helper's IR blocks
                 var blocks = targetMethod.Blocks;
                 var blockList = blocks.ToList();
 
@@ -1306,7 +1732,6 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                         foreach (var value in block)
                             GenerateCodeFor(value);
 
-                        // Handle return terminator
                         if (block.Terminator is ReturnTerminator ret && resultLocal.HasValue && !ret.IsVoidReturn)
                         {
                             EmitGetLocal(ret.ReturnValue.Resolve());
@@ -1316,15 +1741,13 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 }
                 else
                 {
-                    // Multi-block: nested state machine
-                    // Save the kernel's state machine context
+                    // Multi-block: nested state machine (fallback for when function call is unavailable)
                     var savedBlockMap = new Dictionary<BasicBlock, int>(_blockMap);
                     var savedStateLocal = _stateLocal;
                     var savedBlockCount = _blockCount;
                     var savedIsStateMachine = _isStateMachine;
                     var savedCurrentBlockEmitIndex = _currentBlockEmitIndex;
 
-                    // Set up a new state machine for the helper
                     _blockMap.Clear();
                     _isStateMachine = true;
                     _stateLocal = AllocateNewLocal(WasmOpCodes.I32);
@@ -1333,88 +1756,55 @@ namespace SpawnDev.ILGPU.Wasm.Backend
 
                     int blockIndex = 0;
                     foreach (var block in blockList)
-                    {
                         _blockMap[block] = blockIndex++;
-                    }
 
-                    WasmBackend.Log($"[Wasm-Inline] Nested state machine with {helperBlockCount} blocks, stateLocal=local_{_stateLocal}");
-
-                    // Initialize state to 0
                     WasmModuleBuilder.EmitI32Const(Code, 0);
                     WasmModuleBuilder.EmitLocalSet(Code, _stateLocal);
 
-                    // block $exit
-                    Code.Add(WasmOpCodes.Block);
-                    Code.Add(WasmOpCodes.Void);
-
-                    // loop $loop
-                    Code.Add(WasmOpCodes.Loop);
-                    Code.Add(WasmOpCodes.Void);
-
-                    // Nested dispatch blocks
+                    Code.Add(WasmOpCodes.Block); Code.Add(WasmOpCodes.Void);
+                    Code.Add(WasmOpCodes.Loop); Code.Add(WasmOpCodes.Void);
                     for (int i = 0; i < helperBlockCount; i++)
                     {
-                        Code.Add(WasmOpCodes.Block);
-                        Code.Add(WasmOpCodes.Void);
+                        Code.Add(WasmOpCodes.Block); Code.Add(WasmOpCodes.Void);
                     }
 
-                    // br_table dispatch
                     WasmModuleBuilder.EmitLocalGet(Code, _stateLocal);
                     Code.Add(WasmOpCodes.BrTable);
                     WasmModuleBuilder.EmitU32Leb128(Code, (uint)helperBlockCount);
                     for (int i = 0; i < helperBlockCount; i++)
                         WasmModuleBuilder.EmitU32Leb128(Code, (uint)i);
-                    WasmModuleBuilder.EmitU32Leb128(Code, (uint)(helperBlockCount + 1)); // default -> exit
+                    WasmModuleBuilder.EmitU32Leb128(Code, (uint)(helperBlockCount + 1));
 
-                    // Generate code for each block
                     int blockIdx = 0;
                     foreach (var block in blockList)
                     {
-                        Code.Add(WasmOpCodes.End); // end of dispatch block
-
-                        // CRITICAL: update _currentBlockEmitIndex so GetBrDepthToLoop() works
+                        Code.Add(WasmOpCodes.End);
                         _currentBlockEmitIndex = blockIdx;
 
-                        WasmBackend.Log($"[Wasm-Inline] Block {blockIdx}: {block.Id}");
-
-                        // Visit all values
                         foreach (var value in block)
                             GenerateCodeFor(value);
 
-                        // Handle terminator
                         if (block.Terminator is ReturnTerminator ret)
                         {
-                            // Capture return value and break out of the state machine
                             if (resultLocal.HasValue && !ret.IsVoidReturn)
                             {
                                 EmitGetLocal(ret.ReturnValue.Resolve());
                                 WasmModuleBuilder.EmitLocalSet(Code, resultLocal.Value);
                             }
-                            // br $exit: After closing dispatch block k, remaining nesting is:
-                            //   $block(k+1)...$block(N-1) = N-k-1 scopes
-                            //   + $loop = 1 scope
-                            //   + $exit = target
-                            // So depth to $exit = (N-k-1) + 1 + 0 = N-k
                             Code.Add(WasmOpCodes.Br);
-                            WasmModuleBuilder.EmitU32Leb128(Code, (uint)(helperBlockCount - blockIdx)); // br to $exit
+                            WasmModuleBuilder.EmitU32Leb128(Code, (uint)(helperBlockCount - blockIdx));
                         }
                         else if (block.Terminator != null)
                         {
-                            // The terminator handlers (IfBranch, UnconditionalBranch)
-                            // already emit EmitBranchToBlock which includes br $loop.
-                            // Do NOT add an extra br here.
                             GenerateCodeFor(block.Terminator);
                         }
 
                         blockIdx++;
                     }
 
-                    // end loop $loop
                     Code.Add(WasmOpCodes.End);
-                    // end block $exit
                     Code.Add(WasmOpCodes.End);
 
-                    // Restore the kernel's state machine context
                     _blockMap.Clear();
                     foreach (var kv in savedBlockMap)
                         _blockMap[kv.Key] = kv.Value;
@@ -1425,11 +1815,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 }
 
                 WasmBackend.Log($"[Wasm-Inline] Done inlining {targetMethod.Name}");
-                return;
             }
-
-            // Fall through to base class for non-helper calls
-            base.GenerateCode(methodCall);
         }
 
         /// <summary>
@@ -1502,13 +1888,13 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             // We must extend i32 → i64 using I64ExtendI32S.
             var target = AllocateLocal(value, WasmOpCodes.I64);
 
-            // Trace the view back to its kernel parameter
+            // Trace the view back to its kernel parameter.
+            // For ArrayView<T> params, value.View.Resolve() IS the Parameter directly.
+            // For ArrayView1D<T, TStride> params, the view goes through GetField
+            // (to extract BaseView from the struct) — we must trace through the
+            // chain of operations to find the original Parameter.
             var viewSource = value.View.Resolve();
-            int paramIdx = -1;
-            for (int pi = 0; pi < Method.Parameters.Count; pi++)
-            {
-                if (Method.Parameters[pi] == viewSource) { paramIdx = pi; break; }
-            }
+            int paramIdx = TraceToParameter(viewSource);
 
             if (paramIdx >= 0 && _paramLocals.TryGetValue(paramIdx, out var locals) && locals.Length > 1)
             {
@@ -1522,10 +1908,47 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             {
                 // Fallback: emit 0 as i64 (should not happen for well-formed kernels)
                 WasmModuleBuilder.EmitI64Const(Code, 0);
-                WasmBackend.Log($"[Wasm-GetViewLength] WARN: could not resolve view to parameter, emitting 0L");
+                WasmBackend.Log($"[Wasm-GetViewLength] WARN: could not resolve view to parameter (source={viewSource?.GetType().Name}), emitting 0L");
             }
 
             WasmModuleBuilder.EmitLocalSet(Code, target);
+        }
+
+        /// <summary>
+        /// Traces an IR value back through GetField, NewView, AddressSpaceCast, etc.
+        /// to find the underlying kernel Parameter. Returns the parameter index, or -1.
+        /// This is needed because ArrayView1D params wrap ArrayView via GetField(BaseView),
+        /// so the view doesn't directly resolve to the Parameter.
+        /// </summary>
+        private int TraceToParameter(Value source)
+        {
+            var current = source;
+            int depth = 0;
+            while (current != null && depth < 20)
+            {
+                if (current is global::ILGPU.IR.Values.Parameter)
+                {
+                    for (int pi = 0; pi < Method.Parameters.Count; pi++)
+                    {
+                        if (Method.Parameters[pi] == current) return pi;
+                    }
+                    return -1;
+                }
+
+                if (current is GetField gf)
+                    current = gf.ObjectValue.Resolve();
+                else if (current is NewView nv)
+                    current = nv.Pointer.Resolve();
+                else if (current is AddressSpaceCast asc)
+                    current = asc.Value.Resolve();
+                else if (current is PointerCast pc)
+                    current = pc.Value.Resolve();
+                else
+                    break;
+
+                depth++;
+            }
+            return -1;
         }
 
         #endregion
@@ -1541,6 +1964,8 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             foreach (var allocaInfo in allocas)
             {
                 var key = GetValueKey(allocaInfo.Alloca);
+
+
                 int elemSize = 4; // default i32
                 string elemTypeStr = "i32";
 
@@ -1632,8 +2057,33 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 }
                 else
                 {
-                    // Not shared memory — local alloca
-                    base.GenerateCode(value);
+                    // Not shared memory — local alloca.
+                    // Allocate in scratch memory (NOT address 0, which would corrupt
+                    // the data buffer region — see Wasm/CLAUDE.md RADIX RULE).
+                    int allocSize = 8; // default
+                    if (value.Type is AddressSpaceType localAddrType)
+                    {
+                        if (localAddrType.ElementType is PrimitiveType localPt)
+                            allocSize = GetElementSize(localPt.BasicValueType);
+                        else if (localAddrType.ElementType is StructureType localSt)
+                            allocSize = localSt.Size;
+                    }
+                    if (value.ArrayLength.Resolve() is global::ILGPU.IR.Values.PrimitiveValue localPv)
+                        allocSize *= localPv.Int32Value;
+
+                    int baseOff = _scratchNextOffset;
+                    _scratchNextOffset += allocSize;
+                    _scratchNextOffset = (_scratchNextOffset + 7) & ~7;
+
+                    var localTarget = AllocateLocal(value, WasmOpCodes.I32);
+                    WasmModuleBuilder.EmitLocalGet(Code, _scratchBaseLocal);
+                    if (baseOff > 0)
+                    {
+                        WasmModuleBuilder.EmitI32Const(Code, baseOff);
+                        Code.Add(WasmOpCodes.I32Add);
+                    }
+                    WasmModuleBuilder.EmitLocalSet(Code, localTarget);
+                    WasmBackend.Log($"[Wasm-Alloca] Local alloca: key={key}, size={allocSize}, scratchOffset={baseOff}");
                     return;
                 }
             }
@@ -1790,84 +2240,69 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         }
 
         /// <summary>
-        /// Per-barrier local sense variables. Each barrier instruction gets a Wasm local
-        /// that tracks this thread's expected sense value (0 or 1). This is essential for
-        /// barriers inside loops — without per-thread sense tracking, a fast thread can
-        /// re-enter the barrier before slow threads exit, causing stale sense reads.
-        /// </summary>
-        private readonly Dictionary<int, uint> _barrierSenseLocals = new();
-
-        /// <summary>
-        /// Emits a loop-safe sense-reversing barrier using Wasm atomic instructions.
-        /// 
+        /// Emits a generation-counting barrier using Wasm atomic instructions.
+        ///
         /// Each barrier uses 8 bytes at barrierBase + (barrierIdx * 8):
         ///   - offset +0: arrival counter (i32)
-        ///   - offset +4: sense flag (i32)
-        /// 
-        /// Each barrier also has a per-thread local variable (mySense) that starts at 0
-        /// and flips after each use. This makes the barrier safe for re-entry in loops.
-        /// 
+        ///   - offset +4: generation counter (i32)
+        ///
+        /// No per-thread local state is needed. The generation counter monotonically
+        /// increases. Each invocation reads the current generation, waits for it to
+        /// increment. This is safe for:
+        ///   - Loop re-entry (generation keeps increasing)
+        ///   - Cross-function calls (no stale per-thread sense locals)
+        ///   - Multi-group dispatch (no reset needed between groups)
+        ///
         /// Algorithm:
         ///   atomic.fence                                    // flush prior stores
-        ///   mySense = 1 - mySense                          // flip local sense
+        ///   myGen = i32.atomic.load(genAddr)                // read current gen
         ///   old = i32.atomic.rmw.add(arrivalAddr, 1)
         ///   if (old + 1 == groupDimX):                      // last thread
         ///     i32.atomic.store(arrivalAddr, 0)              // reset counter
-        ///     i32.atomic.store(senseAddr, mySense)          // publish release sense
-        ///     memory.atomic.notify(senseAddr, MAX)          // wake all waiters
+        ///     i32.atomic.rmw.add(genAddr, 1)                // bump generation
+        ///     memory.atomic.notify(genAddr, MAX)            // wake all waiters
         ///   else:
         ///     loop:                                         // spin-wait
-        ///       cur = i32.atomic.load(senseAddr)
-        ///       if (cur == mySense) break                   // released
-        ///       memory.atomic.wait32(senseAddr, cur, -1)    // block until change
+        ///       curGen = i32.atomic.load(genAddr)
+        ///       if (curGen != myGen) break                  // generation advanced
+        ///       memory.atomic.wait32(genAddr, curGen, -1)   // block until change
         ///   atomic.fence                                    // acquire: see others' stores
         /// </summary>
         private void EmitBarrier(int barrierIdx)
         {
             int byteOffset = barrierIdx * 8;
 
-            // Get or create the per-thread local sense variable for this barrier.
-            // The local persists across loop iterations, giving each thread its own
-            // sense tracking for this specific barrier instruction.
-            if (!_barrierSenseLocals.TryGetValue(barrierIdx, out uint mySenseLocal))
-            {
-                mySenseLocal = AllocateNewLocal(WasmOpCodes.I32);
-                _barrierSenseLocals[barrierIdx] = mySenseLocal;
-            }
-
-            // Temp locals for addresses and arrival count
             var arrivalAddrLocal = AllocateNewLocal(WasmOpCodes.I32);
-            var senseAddrLocal = AllocateNewLocal(WasmOpCodes.I32);
+            var genAddrLocal = AllocateNewLocal(WasmOpCodes.I32);
+            var myGenLocal = AllocateNewLocal(WasmOpCodes.I32);
             var arrivedLocal = AllocateNewLocal(WasmOpCodes.I32);
 
             // === Step 0: Fence — flush all prior non-atomic stores ===
-            // Regular i32.store to shared memory is NOT ordered across workers.
-            // atomic.fence ensures that all stores made before the barrier
-            // (e.g., shared[tid] = value) are visible in the SharedArrayBuffer
-            // before we announce our arrival.
             Code.Add(WasmOpCodes.AtomicPrefix);
             WasmModuleBuilder.EmitU32Leb128(Code, 0x03); // atomic.fence
-            Code.Add(0x00); // memory index 0
+            Code.Add(0x00);
 
-            // === Step 1: Flip local sense (0→1 or 1→0) ===
-            // mySense = 1 - mySense
-            WasmModuleBuilder.EmitI32Const(Code, 1);
-            WasmModuleBuilder.EmitLocalGet(Code, mySenseLocal);
-            Code.Add(WasmOpCodes.I32Sub);
-            WasmModuleBuilder.EmitLocalSet(Code, mySenseLocal);
-
-            // === Step 2: Compute barrier addresses ===
+            // === Step 1: Compute barrier addresses ===
             // arrivalAddr = barrierBase + byteOffset
             WasmModuleBuilder.EmitLocalGet(Code, _barrierBaseLocal);
             WasmModuleBuilder.EmitI32Const(Code, byteOffset);
             Code.Add(WasmOpCodes.I32Add);
             WasmModuleBuilder.EmitLocalSet(Code, arrivalAddrLocal);
 
-            // senseAddr = barrierBase + byteOffset + 4
+            // genAddr = barrierBase + byteOffset + 4
             WasmModuleBuilder.EmitLocalGet(Code, _barrierBaseLocal);
             WasmModuleBuilder.EmitI32Const(Code, byteOffset + 4);
             Code.Add(WasmOpCodes.I32Add);
-            WasmModuleBuilder.EmitLocalSet(Code, senseAddrLocal);
+            WasmModuleBuilder.EmitLocalSet(Code, genAddrLocal);
+
+            // === Step 2: Read current generation ===
+            // myGen = i32.atomic.load(genAddr)
+            WasmModuleBuilder.EmitLocalGet(Code, genAddrLocal);
+            Code.Add(WasmOpCodes.AtomicPrefix);
+            WasmModuleBuilder.EmitU32Leb128(Code, WasmOpCodes.I32AtomicLoad);
+            Code.Add(0x02);
+            Code.Add(0x00);
+            WasmModuleBuilder.EmitLocalSet(Code, myGenLocal);
 
             // === Step 3: Atomically increment arrival counter ===
             // arrived = i32.atomic.rmw.add(arrivalAddr, 1) + 1
@@ -1875,14 +2310,13 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             WasmModuleBuilder.EmitI32Const(Code, 1);
             Code.Add(WasmOpCodes.AtomicPrefix);
             WasmModuleBuilder.EmitU32Leb128(Code, WasmOpCodes.I32AtomicRmwAdd);
-            Code.Add(0x02); // alignment = 4 bytes (2^2)
-            Code.Add(0x00); // offset = 0
+            Code.Add(0x02);
+            Code.Add(0x00);
             WasmModuleBuilder.EmitI32Const(Code, 1);
             Code.Add(WasmOpCodes.I32Add);
             WasmModuleBuilder.EmitLocalSet(Code, arrivedLocal);
 
             // === Step 4: Branch on last thread ===
-            // if (arrived == groupDimX)
             WasmModuleBuilder.EmitLocalGet(Code, arrivedLocal);
             WasmModuleBuilder.EmitLocalGet(Code, _groupDimXLocal);
             Code.Add(WasmOpCodes.I32Eq);
@@ -1890,9 +2324,9 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             Code.Add(WasmOpCodes.If);
             Code.Add(WasmOpCodes.Void);
 
-            // === LAST THREAD: reset counter, publish sense, notify ===
+            // === LAST THREAD: reset counter, bump generation, notify ===
 
-            // i32.atomic.store(arrivalAddr, 0) — reset counter
+            // i32.atomic.store(arrivalAddr, 0)
             WasmModuleBuilder.EmitLocalGet(Code, arrivalAddrLocal);
             WasmModuleBuilder.EmitI32Const(Code, 0);
             Code.Add(WasmOpCodes.AtomicPrefix);
@@ -1900,16 +2334,17 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             Code.Add(0x02);
             Code.Add(0x00);
 
-            // i32.atomic.store(senseAddr, mySense) — publish the target sense
-            WasmModuleBuilder.EmitLocalGet(Code, senseAddrLocal);
-            WasmModuleBuilder.EmitLocalGet(Code, mySenseLocal);
+            // i32.atomic.rmw.add(genAddr, 1) — bump generation
+            WasmModuleBuilder.EmitLocalGet(Code, genAddrLocal);
+            WasmModuleBuilder.EmitI32Const(Code, 1);
             Code.Add(WasmOpCodes.AtomicPrefix);
-            WasmModuleBuilder.EmitU32Leb128(Code, WasmOpCodes.I32AtomicStore);
+            WasmModuleBuilder.EmitU32Leb128(Code, WasmOpCodes.I32AtomicRmwAdd);
             Code.Add(0x02);
             Code.Add(0x00);
+            Code.Add(WasmOpCodes.Drop); // discard old value
 
-            // memory.atomic.notify(senseAddr, MAX_WAITERS)
-            WasmModuleBuilder.EmitLocalGet(Code, senseAddrLocal);
+            // memory.atomic.notify(genAddr, MAX_WAITERS)
+            WasmModuleBuilder.EmitLocalGet(Code, genAddrLocal);
             WasmModuleBuilder.EmitI32Const(Code, int.MaxValue);
             Code.Add(WasmOpCodes.AtomicPrefix);
             WasmModuleBuilder.EmitU32Leb128(Code, WasmOpCodes.MemoryAtomicNotify);
@@ -1919,38 +2354,31 @@ namespace SpawnDev.ILGPU.Wasm.Backend
 
             Code.Add(WasmOpCodes.Else);
 
-            // === NOT LAST: spin-wait until global sense matches local sense ===
-            // This is a spin-wait loop: we must keep checking because wait32 may
-            // return spuriously or with not-equal if another iteration's release
-            // changed the sense before we entered the wait.
-
-            // block $exit
+            // === NOT LAST: spin-wait until generation advances ===
             Code.Add(WasmOpCodes.Block);
             Code.Add(WasmOpCodes.Void);
-
-            // loop $spin
             Code.Add(WasmOpCodes.Loop);
             Code.Add(WasmOpCodes.Void);
 
-            // cur = i32.atomic.load(senseAddr)
-            var curSenseLocal = AllocateNewLocal(WasmOpCodes.I32);
-            WasmModuleBuilder.EmitLocalGet(Code, senseAddrLocal);
+            // curGen = i32.atomic.load(genAddr)
+            var curGenLocal = AllocateNewLocal(WasmOpCodes.I32);
+            WasmModuleBuilder.EmitLocalGet(Code, genAddrLocal);
             Code.Add(WasmOpCodes.AtomicPrefix);
             WasmModuleBuilder.EmitU32Leb128(Code, WasmOpCodes.I32AtomicLoad);
             Code.Add(0x02);
             Code.Add(0x00);
-            WasmModuleBuilder.EmitLocalSet(Code, curSenseLocal);
+            WasmModuleBuilder.EmitLocalSet(Code, curGenLocal);
 
-            // if (cur == mySense) break out of spin loop
-            WasmModuleBuilder.EmitLocalGet(Code, curSenseLocal);
-            WasmModuleBuilder.EmitLocalGet(Code, mySenseLocal);
-            Code.Add(WasmOpCodes.I32Eq);
+            // if (curGen != myGen) break — generation advanced
+            WasmModuleBuilder.EmitLocalGet(Code, curGenLocal);
+            WasmModuleBuilder.EmitLocalGet(Code, myGenLocal);
+            Code.Add(WasmOpCodes.I32Ne);
             Code.Add(WasmOpCodes.BrIf);
-            WasmModuleBuilder.EmitU32Leb128(Code, 1); // br_if $exit (depth 1 from loop)
+            WasmModuleBuilder.EmitU32Leb128(Code, 1); // br_if $exit
 
-            // memory.atomic.wait32(senseAddr, cur, -1) — block until sense changes
-            WasmModuleBuilder.EmitLocalGet(Code, senseAddrLocal);
-            WasmModuleBuilder.EmitLocalGet(Code, curSenseLocal);
+            // memory.atomic.wait32(genAddr, curGen, -1)
+            WasmModuleBuilder.EmitLocalGet(Code, genAddrLocal);
+            WasmModuleBuilder.EmitLocalGet(Code, curGenLocal);
             WasmModuleBuilder.EmitI64Const(Code, -1);
             Code.Add(WasmOpCodes.AtomicPrefix);
             WasmModuleBuilder.EmitU32Leb128(Code, WasmOpCodes.MemoryAtomicWait32);
@@ -1958,22 +2386,20 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             Code.Add(0x00);
             Code.Add(WasmOpCodes.Drop);
 
-            // br $spin — go back and re-check
+            // br $spin
             Code.Add(WasmOpCodes.Br);
-            WasmModuleBuilder.EmitU32Leb128(Code, 0); // br $spin (depth 0 = innermost loop)
+            WasmModuleBuilder.EmitU32Leb128(Code, 0);
 
             Code.Add(WasmOpCodes.End); // end loop $spin
             Code.Add(WasmOpCodes.End); // end block $exit
-
             Code.Add(WasmOpCodes.End); // end if/else
 
-            // === Step 5: Fence — acquire: ensure loads after the barrier
-            // see all stores made by other threads before the barrier.
+            // === Step 5: Fence — acquire ===
             Code.Add(WasmOpCodes.AtomicPrefix);
             WasmModuleBuilder.EmitU32Leb128(Code, 0x03); // atomic.fence
-            Code.Add(0x00); // memory index 0
+            Code.Add(0x00);
 
-            WasmBackend.Log($"[Wasm-Barrier] Emitted loop-safe barrier #{barrierIdx} at byteOffset={byteOffset}");
+            WasmBackend.Log($"[Wasm-Barrier] Emitted generation barrier #{barrierIdx} at byteOffset={byteOffset}");
         }
 
         #endregion
@@ -1983,16 +2409,50 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         /// <summary>
         /// Checks if an IR type is an ArrayView type.
         /// </summary>
+        /// <summary>
+        /// Recursively flattens an IR StructureType into its leaf fields.
+        /// ILGPU's StructureType already stores flattened fields (no nested structs),
+        /// so we can enumerate them directly.
+        /// </summary>
+        private void FlattenStructLayout(StructureType sType, int baseOffset, List<StructFieldInfo> result)
+        {
+            for (int i = 0; i < sType.NumFields; i++)
+            {
+                var fieldType = sType[i]; // Already a leaf type (flattened by ILGPU)
+                var fieldOffset = sType.GetOffset(new FieldAccess(i));
+                var wasmType = GetWasmTypeFromIR(fieldType);
+
+                result.Add(new StructFieldInfo
+                {
+                    Offset = baseOffset + fieldOffset,
+                    WasmType = wasmType,
+                    Size = fieldType.Size,
+                    IsViewPtr = fieldType is AddressSpaceType,
+                });
+            }
+        }
+
         protected bool IsViewType(TypeNode type)
         {
-            if (type is StructureType structType)
-            {
-                var typeName = structType.ToString();
-                if (typeName.Contains("ArrayView") || typeName.Contains("View"))
-                    return true;
-            }
             if (type is AddressSpaceType)
                 return true;
+            if (type is StructureType structType)
+            {
+                // A view StructureType (ArrayView1D<T, TStride>) has AddressSpaceType as
+                // its first DirectField. This is the pointer field from ArrayView<T>.
+                //
+                // A struct-with-embedded-view (InitializerImplementation<T, TStride>) has
+                // a StructureType as its first DirectField (the ArrayView1D wrapper),
+                // NOT a direct AddressSpaceType.
+                //
+                // This distinction works because ILGPU represents ArrayView<T> as
+                // AddressSpaceType (a pointer), while ArrayView1D wraps it by having
+                // AddressSpaceType as its first direct field plus extent + stride.
+                // User structs containing views have the view as a nested struct field.
+                if (structType.DirectFields.Length > 0
+                    && structType.DirectFields[0] is AddressSpaceType)
+                    return true;
+            }
             return false;
         }
 

@@ -64,7 +64,7 @@ namespace ILGPU.Runtime
         /// <summary>
         /// Returns the native pointer of this buffer.
         /// </summary>
-        public IntPtr NativePtr { get; protected set; }
+        public IntPtr NativePtr { get; set; }
 
         /// <summary>
         /// Returns the length of this buffer.

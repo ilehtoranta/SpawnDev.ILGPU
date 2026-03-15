@@ -14,7 +14,9 @@ using global::ILGPU.Backends.EntryPoints;
 using global::ILGPU.IR;
 using global::ILGPU.IR.Analyses;
 using global::ILGPU.IR.Intrinsics;
+using global::ILGPU.IR.Values;
 using global::ILGPU.Runtime;
+using System.IO;
 using System.Reflection;
 using System.Text;
 
@@ -43,12 +45,38 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         public static bool VerboseLogging { get; set; } = false;
 
         /// <summary>
-        /// Logs a message if VerboseLogging is enabled.
+        /// When set, dumps generated Wasm binaries to this directory. Desktop only.
+        /// </summary>
+        public static string? WasmDumpPath { get; set; }
+
+        /// <summary>Diagnostic: info about all compiled kernels.</summary>
+        public static readonly List<string> AllKernelInfos = new();
+
+        /// <summary>Diagnostic: last compiled Wasm binary (for inspection).</summary>
+        public static byte[]? LastWasmBinary { get; set; }
+
+        /// <summary>Diagnostic: all compiled Wasm binaries (for capturing multi-kernel compilations like RadixSort).</summary>
+        public static List<byte[]> AllWasmBinaries = new();
+
+        /// <summary>
+        /// Circular buffer of recent log messages for diagnostics.
+        /// Always captures the last N messages regardless of VerboseLogging.
+        /// </summary>
+        public static readonly List<string> RecentLogs = new();
+        private static readonly int MaxRecentLogs = 500;
+
+        /// <summary>
+        /// Logs a message if VerboseLogging is enabled. Always captures to RecentLogs.
         /// </summary>
         public static void Log(string message)
         {
             if (VerboseLogging)
+            {
                 Console.WriteLine(message);
+                RecentLogs.Add(message);
+                if (RecentLogs.Count > MaxRecentLogs)
+                    RecentLogs.RemoveAt(0);
+            }
         }
 
         #endregion
@@ -71,6 +99,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
 
             InitIntrinsicProvider();
             RegisterMathIntrinsics();
+            RegisterScanIntrinsics();
 
             InitializeKernelTransformers(builder =>
             {
@@ -171,6 +200,38 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 new global::ILGPU.Backends.Wasm.WasmIntrinsic(
                     target,
                     IntrinsicImplementationMode.Redirect));
+        }
+
+        private void RegisterScanIntrinsics()
+        {
+            var manager = GetIntrinsicManager(Context);
+            var groupExtType = typeof(global::ILGPU.Algorithms.GroupExtensions);
+            var wasmGroupType = typeof(SpawnDev.ILGPU.Wasm.Algorithms.WasmGroupExtensions);
+
+            void RegScan(string name)
+            {
+                try
+                {
+                    var src = groupExtType.GetMethod(name, BindingFlags.Public | BindingFlags.Static);
+                    if (src == null) return;
+                    manager.RegisterMethod(src, new global::ILGPU.Backends.Wasm.WasmIntrinsic(
+                        wasmGroupType, name, IntrinsicImplementationMode.Redirect));
+                    Log($"Wasm: Scan intrinsic {name} registered");
+                }
+                catch (Exception ex)
+                {
+                    Log($"Wasm: Scan intrinsic {name} FAILED: {ex.Message}");
+                }
+            }
+
+            RegScan("Reduce");
+            RegScan("AllReduce");
+            RegScan("ExclusiveScan");
+            RegScan("InclusiveScan");
+            RegScan("ExclusiveScanWithBoundaries");
+            RegScan("InclusiveScanWithBoundaries");
+            RegScan("ExclusiveScanNextIteration");
+            RegScan("InclusiveScanNextIteration");
         }
 
         private void RegisterMathIntrinsics()
@@ -329,6 +390,12 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 mathImports[name] = funcIdx++;
             gen.MathImports = mathImports;
 
+            // NOTE: Function index assignment for multi-block helpers is done in
+            // WasmKernelFunctionGenerator.AssignHelperFunctionIndices(), called at the
+            // start of GenerateCode(). This is because CreateKernelCodeGenerator runs
+            // BEFORE CreateFunctionCodeGenerator (ILGPU compilation order), so
+            // data.HelperMethods is empty at this point.
+
             KernelGenerator = gen;
             return gen;
         }
@@ -375,25 +442,81 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             // Pass math imports to the code generator
             kernelGen.MathImports = mathImports;
 
-            // Add function type for the kernel
+            // Add function type for the kernel (void return)
             var paramTypes = kernelGen.GetParamTypes();
             int typeIdx = moduleBuilder.AddFuncType(paramTypes, Array.Empty<byte>());
 
-            // Add function (index = importFuncCount + 0)
+            // Add kernel function (index = importFuncCount + 0)
             int funcIdx = moduleBuilder.AddFunction(typeIdx);
 
             // Export as "kernel"
             moduleBuilder.ExportFunction("kernel", funcIdx);
 
-            // Set function body
+            // Set kernel function body (defined function index 0)
             moduleBuilder.SetFunctionBody(0, kernelGen._locals, kernelGen.Code.ToArray());
+
+            // Generate helper function bodies for multi-block helpers
+            int definedFuncIndex = 1; // 0 = kernel
+            int maxSharedMemorySize = data.SharedMemorySize;
+
+            foreach (var helperMethod in data.HelperFunctionOrder)
+            {
+                var helperAllocas = data.HelperMethods[helperMethod];
+                var helperGen = new WasmKernelFunctionGenerator(data, helperMethod, helperAllocas);
+                var result = helperGen.GenerateAsHelper(
+                    kernelGen.SharedAllocaOffsets,
+                    kernelGen.SharedAllocaMetadata,
+                    kernelGen.SharedMemorySizeValue,
+                    mathImports);
+
+                // Add helper function type
+                int helperTypeIdx = moduleBuilder.AddFuncType(result.ParamTypes, result.ResultTypes);
+
+                // Add helper function (index must match pre-assigned index)
+                int helperFuncIdx = moduleBuilder.AddFunction(helperTypeIdx);
+                int expectedIdx = data.HelperFunctionIndices[helperMethod];
+                if (helperFuncIdx != expectedIdx)
+                {
+                    Log($"Wasm: WARNING: Helper '{helperMethod.Name}' funcIdx mismatch: got {helperFuncIdx}, expected {expectedIdx}");
+                }
+
+                // Set helper function body
+                moduleBuilder.SetFunctionBody(definedFuncIndex, result.Locals, result.Code);
+                definedFuncIndex++;
+
+                // Track max shared memory (helpers may allocate Broadcast slots)
+                if (result.SharedMemorySize > maxSharedMemorySize)
+                    maxSharedMemorySize = result.SharedMemorySize;
+
+                Log($"Wasm: Helper '{helperMethod.Name}' generated: funcIdx={helperFuncIdx}, params={result.ParamTypes.Length}, locals={result.Locals.Count}, code={result.Code.Length}b, barriers={result.BarrierCount}, sharedMem={result.SharedMemorySize}");
+            }
+
+            // Update shared memory size to account for helper Broadcast slots
+            data.SharedMemorySize = maxSharedMemorySize;
 
             // Emit binary
             var wasmBinary = moduleBuilder.Emit();
 
+            // Dump Wasm binary to file for debugging (desktop only)
+            if (WasmDumpPath != null && !OperatingSystem.IsBrowser())
+            {
+                try
+                {
+                    Directory.CreateDirectory(WasmDumpPath);
+                    var name = $"kernel_{wasmBinary.Length}";
+                    File.WriteAllBytes(Path.Combine(WasmDumpPath, $"{name}.wasm"), wasmBinary);
+                }
+                catch { }
+            }
+
+            // Record compilation info for diagnostics
+            var info = $"Kernel params={paramTypes.Length} (userParams={data.ParamInfos.Count}), locals={kernelGen._locals.Count}, code={kernelGen.Code.Count}b, helpers={data.HelperFunctionOrder.Count}, sharedMem={data.SharedMemorySize}, barriers={data.BarrierCount}, hasBarriers={data.HasBarriers}, dynSharedElemSize={data.DynamicSharedElementSize}";
             Log($"--- GENERATED WASM BINARY ({wasmBinary.Length} bytes) ---");
-            Log($"Params: {paramTypes.Length}, Locals: {kernelGen._locals.Count}, Code: {kernelGen.Code.Count} bytes");
+            Log(info);
             Log("---");
+            AllKernelInfos.Add(info);
+            LastWasmBinary = wasmBinary;
+            AllWasmBinaries.Add(wasmBinary);
 
             return new WasmCompiledKernel(
                 Context,

@@ -163,6 +163,7 @@ namespace ILGPU.Algorithms
             return accelerator.AcceleratorType switch
             {
                 AcceleratorType.CPU => 1,
+                AcceleratorType.Wasm => 1,
                 // Single-pass scan: CreateSinglePassScan makes 2 Allocate() calls
                 // (Allocate<T>, Allocate<int>). Each adds up to 63 ints of 256-byte padding.
                 AcceleratorType.Cuda => ComputeNumIntElementsForSinglePassScan<T>()
@@ -1245,8 +1246,12 @@ namespace ILGPU.Algorithms
         {
             return accelerator.AcceleratorType switch
             {
-                // We use a single-grouped kernel
+                // Single-group scan: one kernel dispatch, no inter-pass sync needed
                 AcceleratorType.CPU =>
+                    CreateSingleGroupScan<T, TStrideIn, TStrideOut, TScanOperation>(
+                        accelerator,
+                        kind),
+                AcceleratorType.Wasm =>
                     CreateSingleGroupScan<T, TStrideIn, TStrideOut, TScanOperation>(
                         accelerator,
                         kind),

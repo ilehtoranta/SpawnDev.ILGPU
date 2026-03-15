@@ -54,6 +54,11 @@ namespace ILGPU.Runtime
         /// Represents a WebGL2 accelerator (GPU via WebGL2 Transform Feedback in browsers/WASM).
         /// </summary>
         WebGL,
+
+        /// <summary>
+        /// Represents a WebAssembly compute accelerator (CPU threads via Web Workers).
+        /// </summary>
+        Wasm,
     }
 
 

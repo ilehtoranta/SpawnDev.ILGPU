@@ -88,5 +88,37 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         public bool IsScalar { get; set; }
         public byte WasmType { get; set; } = WasmOpCodes.I32;
         public int ElementSize { get; set; } = 4;
+
+        /// <summary>
+        /// For struct parameters: the flattened IR field layout.
+        /// Each entry describes a leaf field's offset, type, and size within the struct.
+        /// Used at dispatch time to manually serialize the struct to match the IR layout.
+        /// </summary>
+        public List<StructFieldInfo> StructFields { get; set; }
+
+        /// <summary>
+        /// For struct parameters: total size in bytes according to IR layout.
+        /// </summary>
+        public int StructSize { get; set; }
+
+        /// <summary>
+        /// Debug: the IR type name for this parameter.
+        /// </summary>
+        public string IRTypeName { get; set; }
+    }
+
+    /// <summary>
+    /// Describes a leaf field within an IR StructureType.
+    /// </summary>
+    public class StructFieldInfo
+    {
+        /// <summary>Byte offset within the struct.</summary>
+        public int Offset { get; set; }
+        /// <summary>Wasm type (I32, I64, F32, F64).</summary>
+        public byte WasmType { get; set; }
+        /// <summary>Size in bytes.</summary>
+        public int Size { get; set; }
+        /// <summary>True if this is the pointer field of a view (needs buffer offset patching).</summary>
+        public bool IsViewPtr { get; set; }
     }
 }

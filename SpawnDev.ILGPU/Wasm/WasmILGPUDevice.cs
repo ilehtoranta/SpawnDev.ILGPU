@@ -17,7 +17,7 @@ namespace SpawnDev.ILGPU.Wasm
     /// Represents an ILGPU Device implementation for the WebAssembly backend.
     /// Always available in Blazor WASM environments.
     /// </summary>
-    [DeviceType(AcceleratorType.CPU)]
+    [DeviceType(AcceleratorType.Wasm)]
     public sealed class WasmILGPUDevice : Device
     {
         #region Static
@@ -62,10 +62,10 @@ namespace SpawnDev.ILGPU.Wasm
             HardwareConcurrency = GetHardwareConcurrency();
             Name = $"WebAssembly Compute ({HardwareConcurrency} cores)";
             WarpSize = 1;
-            MaxGroupSize = new Index3D(1024, 1024, 1024);
-            MaxNumThreadsPerGroup = 1024;
+            MaxGroupSize = new Index3D(64, 1, 1);
+            MaxNumThreadsPerGroup = 64;
             NumMultiprocessors = HardwareConcurrency;
-            MaxNumThreadsPerMultiprocessor = 1024;  // Must be >= MaxNumThreadsPerGroup for GridExtensions
+            MaxNumThreadsPerMultiprocessor = 64;
             MaxGridSize = new Index3D(int.MaxValue, 1, 1);
             MemorySize = 2L * 1024 * 1024 * 1024;
             MaxSharedMemoryPerGroup = 65536;

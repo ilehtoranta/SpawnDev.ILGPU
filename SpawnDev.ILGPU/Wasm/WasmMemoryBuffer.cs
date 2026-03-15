@@ -54,6 +54,12 @@ namespace SpawnDev.ILGPU.Wasm
 
             // Create a Uint8Array view for raw data access
             TypedArrayView = new Uint8Array(SharedBuffer);
+
+            // NativePtr = 0: Wasm buffers don't use native pointers.
+            // ArrayView.LoadEffectiveAddressAsPtr() returns NativePtr + Index * ElementSize.
+            // With NativePtr=0, SubView offsets are purely Index-based (correct for Wasm).
+            // The multi-pass scan (which needs non-zero NativePtr) is not used for Wasm —
+            // Wasm routes to single-group scan via AcceleratorType.Wasm in ScanExtensions.
         }
 
         /// <summary>
@@ -94,7 +100,6 @@ namespace SpawnDev.ILGPU.Wasm
             byte value,
             in ArrayView<byte> targetView)
         {
-            // Phase 1: Set all bytes to the given value via JS typed array fill
             int offset = (int)targetView.LoadEffectiveAddressAsPtr();
             int length = (int)targetView.LengthInBytes;
             using var view = new Uint8Array(SharedBuffer, offset, length);
@@ -107,16 +112,12 @@ namespace SpawnDev.ILGPU.Wasm
             in ArrayView<byte> sourceView,
             in ArrayView<byte> targetView)
         {
-            // sourceView is in THIS (Wasm) buffer, targetView is in a CPU buffer.
-            // Read bytes from our SharedArrayBuffer and write to the CPU target.
             int srcOffset = (int)sourceView.LoadEffectiveAddressAsPtr();
             int length = (int)sourceView.LengthInBytes;
 
-            // Read bytes from SharedArrayBuffer
             using var srcUint8 = new Uint8Array(SharedBuffer, srcOffset, length);
             byte[] data = srcUint8.ReadBytes();
 
-            // Write to target CPU memory
             unsafe
             {
                 var targetPtr = targetView.LoadEffectiveAddressAsPtr();
@@ -130,11 +131,8 @@ namespace SpawnDev.ILGPU.Wasm
             in ArrayView<byte> sourceView,
             in ArrayView<byte> targetView)
         {
-            // sourceView is in a CPU buffer, targetView is in THIS (Wasm) buffer.
-            // Read bytes from the CPU source and write to our SharedArrayBuffer.
             int length = (int)sourceView.LengthInBytes;
 
-            // Read bytes from CPU memory
             byte[] data = new byte[length];
             unsafe
             {

@@ -68,6 +68,25 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             /// </summary>
             public Dictionary<Method, Allocas> HelperMethods { get; } = new();
 
+            /// <summary>
+            /// Maps multi-block helper methods to their Wasm function indices.
+            /// Populated during CreateKernelCodeGenerator so the kernel generator
+            /// can emit 'call' instructions instead of nested state machines.
+            /// </summary>
+            public Dictionary<Method, int> HelperFunctionIndices { get; } = new();
+
+            /// <summary>
+            /// Pre-computed barrier counts per multi-block helper method.
+            /// Each Barrier IR value counts as 1, each Broadcast as 2.
+            /// </summary>
+            public Dictionary<Method, int> HelperBarrierCounts { get; } = new();
+
+            /// <summary>
+            /// Ordered list of multi-block helper methods, for deterministic
+            /// function index assignment and module emission order.
+            /// </summary>
+            public List<Method> HelperFunctionOrder { get; } = new();
+
             public GeneratorArgs(
                 WasmBackend backend,
                 EntryPoint entryPoint,
@@ -266,13 +285,20 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         /// </summary>
         protected byte GetLocalType(uint localIndex)
         {
+            // Check if the kernel function generator has param type info
+            if (this is WasmKernelFunctionGenerator kfg
+                && localIndex < (uint)kfg.FuncParamTypes.Count)
+            {
+                return kfg.FuncParamTypes[(int)localIndex];
+            }
+
             if (localIndex < (uint)_paramCount)
-                return WasmOpCodes.I32; // All Wasm function params are i32 (pointers/indices)
-            
+                return WasmOpCodes.I32; // default for params without explicit type info
+
             int localOffset = (int)localIndex - (int)_paramCount;
             if (localOffset >= 0 && localOffset < _locals.Count)
                 return _locals[localOffset].Type;
-            
+
             return WasmOpCodes.I32; // fallback
         }
 
@@ -969,7 +995,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
 
         public virtual void GenerateCode(FloatAsIntCast value)
         {
-            var target = AllocateLocal(value);
+            var target = AllocateLocal(value, GetWasmType(value));
             EmitGetLocal(value.Value.Resolve());
             var srcType = GetWasmTypeFromIR(value.Value.Resolve().Type);
             if (srcType == WasmOpCodes.F32) Code.Add(WasmOpCodes.I32ReinterpretF32);
@@ -979,7 +1005,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
 
         public virtual void GenerateCode(IntAsFloatCast value)
         {
-            var target = AllocateLocal(value);
+            var target = AllocateLocal(value, GetWasmType(value));
             EmitGetLocal(value.Value.Resolve());
             var srcType = GetWasmTypeFromIR(value.Value.Resolve().Type);
             if (srcType == WasmOpCodes.I32) Code.Add(WasmOpCodes.F32ReinterpretI32);
@@ -1035,8 +1061,16 @@ namespace SpawnDev.ILGPU.Wasm.Backend
 
         public virtual void GenerateCode(NullValue value)
         {
-            var target = AllocateLocal(value);
-            WasmModuleBuilder.EmitI32Const(Code, 0);
+            var wasmType = GetWasmType(value);
+            var target = AllocateLocal(value, wasmType);
+            if (wasmType == WasmOpCodes.I64)
+                WasmModuleBuilder.EmitI64Const(Code, 0);
+            else if (wasmType == WasmOpCodes.F32)
+                WasmModuleBuilder.EmitF32Const(Code, 0);
+            else if (wasmType == WasmOpCodes.F64)
+                WasmModuleBuilder.EmitF64Const(Code, 0);
+            else
+                WasmModuleBuilder.EmitI32Const(Code, 0);
             WasmModuleBuilder.EmitLocalSet(Code, target);
         }
 
@@ -1878,7 +1912,11 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                     break;
 
                 default:
-                    // No-op for unhandled values
+                    // LOUD warning: unhandled IR value types cause locals to stay at 0,
+                    // which silently corrupts address computations (see RADIX RULE in Wasm/CLAUDE.md)
+                    WasmBackend.Log($"[Wasm-IR] *** UNHANDLED IR VALUE: {value.GetType().Name} id={value.Id} type={value.Type} ***");
+                    // Also record to dispatch log so it's visible in test output
+                    WasmAccelerator._dispatchLog += $"|UNHANDLED:{value.GetType().Name}";
                     break;
             }
         }

@@ -1247,9 +1247,11 @@ namespace ILGPU.Algorithms
             }
             else
             {
-                // WebGPU needs explicit KernelSpecialization to bake the correct
-                // @workgroup_size into compiled WGSL, avoiding runtime regex patching.
-                var radixSpec = accelerator.AcceleratorType == AcceleratorType.WebGPU
+                // WebGPU/Wasm need explicit KernelSpecialization to bake the correct
+                // workgroup size into compiled code, enabling static SharedMemory
+                // allocations (SpecializedValue<int> becomes a compile-time constant).
+                var radixSpec = (accelerator.AcceleratorType == AcceleratorType.WebGPU
+                    || accelerator.AcceleratorType == AcceleratorType.Wasm)
                     ? new KernelSpecialization(
                         accelerator.MaxNumThreadsPerGroup, null)
                     : KernelSpecialization.Empty;
