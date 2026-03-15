@@ -7,6 +7,15 @@ Write parallel compute code in C# and let the library pick the best available ba
 
 > **Your existing ILGPU kernels run in the browser with zero changes to the kernel code — and the same code runs on desktop too.**
 
+## What's New in 4.0.0
+
+- **Wasm RadixSort** — ILGPU's RadixSort algorithm now works on the Wasm backend with full multi-worker parallelism. Fixed 7 codegen and dispatch bugs including struct-with-view serialization, view field mapping, local alloca addressing, and barrier synchronization
+- **Wasm barrier kernel improvements** — Per-thread scratch memory prevents cross-worker data races. Post-helper barriers ensure correct scan/reduce synchronization across parallel workers. Atomic loads/stores for cross-worker memory visibility
+- **WebGPU backend refactor** — Extracted `SharedMemoryResolver` and `UniformityAnalyzer` subsystems. Per-function emulation library trimming. Dead variable elimination. i64 constant hoisting. Pre-compiled regex patterns. WGSL pre-validation
+- **WebGPU RadixSort** — All RadixSort variants passing (including 4M+ element sorts, pairs, descending). Fixed shared memory sizing, scan barriers, range checks, and alignment padding
+- **Device loss detection** — WebGPU monitors `device.lost` promise; WebGL monitors `webglcontextlost` event. `IsDeviceLost`/`IsContextLost` properties and events enable fail-fast error handling
+- **Unified test infrastructure** — `PlaywrightMultiTest` runs all 1500+ tests (desktop + browser) in a single `dotnet test` invocation. 153 Wasm tests, 0 failures
+
 ## Architecture
 
 **Browser backends** (Blazor WebAssembly) — auto-selected: WebGPU → WebGL → Wasm
@@ -73,7 +82,7 @@ Comprehensive documentation is available in the [Docs](Docs/) folder:
 | **Shared Memory** | ✅ | ❌ | ✅ |
 | **Group.Barrier()** | ✅ | ❌ | ✅ |
 | **Dynamic Shared Memory** | ✅ | ❌ | ✅ |
-| **ILGPU Algorithms** | ✅ RadixSort, Scan, Reduce, etc. | ❌ | ⚠️ RadixSort excluded (Wasm bug) |
+| **ILGPU Algorithms** | ✅ RadixSort, Scan, Reduce, etc. | ❌ | ✅ RadixSort, Scan, Reduce, etc. |
 | **Atomics** | ✅ | ❌ | ✅ |
 | **64-bit (f64/i64)** | ✅ Emulated | ✅ Emulated | ✅ Native |
 | **Browser support** | Chrome/Edge 113+ | All modern browsers | All modern browsers |
@@ -114,7 +123,7 @@ SpawnDev.ILGPU bundles ILGPU's native backends, so the same NuGet package works 
 - **Zero-copy canvas rendering** — `ICanvasRenderer` presents pixel buffers to HTML canvases without CPU readback on GPU backends: WebGPU uses a fullscreen-triangle render pass reading directly from GPU storage; WebGL transfers an `ImageBitmap` from its worker and draws synchronously; Wasm reuses a cached `ImageData`. One API, all backends: `CanvasRendererFactory.Create(accelerator)`
 - **Blazor WebAssembly** — Seamless integration via [SpawnDev.BlazorJS](https://github.com/LostBeard/SpawnDev.BlazorJS)
 - **Shared memory & barriers** — Static and dynamic workgroup memory with `Group.Barrier()` synchronization (WebGPU, Wasm, Cuda, OpenCL)
-- **ILGPU Algorithms** — RadixSort, Scan, Reduce, Histogram, and other algorithm extensions are fully supported on WebGPU (including large-scale sorts up to 4M+ elements) and tested in-browser; Wasm supports Scan/Reduce (RadixSort has a known bug)
+- **ILGPU Algorithms** — RadixSort, Scan, Reduce, Histogram, and other algorithm extensions are fully supported on WebGPU (including large-scale sorts up to 4M+ elements) and Wasm (with multi-worker barrier synchronization), tested in-browser across all backends
 - **Broadcast** — `Group.Broadcast` for intra-group value sharing (WebGPU, Wasm)
 - **Device loss handling** — WebGPU monitors `device.lost` and WebGL monitors `webglcontextlost`; `IsDeviceLost`/`IsContextLost` properties and `DeviceLost`/`ContextLost` events enable applications to detect GPU device loss and fail fast with clear errors instead of silent corruption
 - **GpuMatrix4x4** — GPU-friendly 4×4 matrix struct that auto-transposes from .NET's row-major `Matrix4x4` to GPU column-major order. Use `TransformPoint` and `TransformDirection` directly inside kernels for 3D transformations

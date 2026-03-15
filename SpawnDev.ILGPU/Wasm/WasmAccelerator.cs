@@ -332,7 +332,7 @@ namespace SpawnDev.ILGPU.Wasm
                             viewSubOffsets.Add(subViewByteOffset);
 
                             // Log buffer identity for dispatch debugging
-                            if (dispNum >= 2 && dispNum <= 8)
+                            if (dispNum >= 2 && dispNum <= 20)
                                 _dispatchLog += $"|D{dispNum}V{i}:buf={wasmBuf.GetHashCode()%1000},sub={subViewByteOffset},len={iav.Length}";
 
                             // Extract stride via cached reflection for multi-dimensional views
@@ -423,9 +423,13 @@ namespace SpawnDev.ILGPU.Wasm
                     bufferOffsets.Add(totalMemoryBytes);
                     totalMemoryBytes += (int)buf.LengthInBytes;
                 }
-                // Scratch memory for struct construction (after all buffers)
-                int scratchBase = (totalMemoryBytes + 7) & ~7; // 8-byte align
-                int scratchSize = 4096; // 4KB for temporary structs
+                // Scratch memory for struct construction (after all buffers).
+                // For barrier kernels, each worker needs its own scratch to avoid races.
+                int scratchPerThread = Math.Max(compiledKernel.ScratchPerThread, 64); // min 64 bytes
+                int scratchBase = (totalMemoryBytes + 7) & ~7;
+                int scratchSize = compiledKernel.HasBarriers
+                    ? scratchPerThread * groupSize  // per-thread scratch for barrier kernels
+                    : 4096;                          // shared scratch for non-barrier kernels
                 int afterScratch = scratchBase + scratchSize;
 
                 // Shared memory region (for barrier kernels)
@@ -733,7 +737,7 @@ namespace SpawnDev.ILGPU.Wasm
 
                 // Dispatch to workers
                 await DispatchToWorkers(
-                    totalItems, gridDimX, gridDimY, scratchBase,
+                    totalItems, gridDimX, gridDimY, scratchBase, scratchPerThread,
                     sharedMemBase, barrierBase, compiledKernel,
                     groupSize, numGroups,
                     flatArgs, compiledKernel.WasmBinary,
@@ -767,6 +771,7 @@ namespace SpawnDev.ILGPU.Wasm
             int gridDimX,
             int gridDimY,
             int scratchBase,
+            int scratchPerThread,
             int sharedMemBase,
             int barrierBase,
             WasmCompiledKernel compiledKernel,
@@ -802,7 +807,7 @@ namespace SpawnDev.ILGPU.Wasm
             // Build the worker script
             string argStr = string.Join(", ", flatArgs);
             var workerScript = BuildWasmWorkerScript(
-                gridDimX, gridDimY, scratchBase,
+                gridDimX, gridDimY, scratchBase, scratchPerThread,
                 sharedMemBase, barrierBase,
                 groupSize, numGroups, hasBarriers, argStr,
                 dynamicSharedElements);
@@ -990,15 +995,19 @@ namespace SpawnDev.ILGPU.Wasm
             await Task.WhenAll(tasks);
 
             // Debug: dump first 4 bytes of each buffer in Wasm memory after kernel
-            if (dispNum >= 2 && dispNum <= 8)
+            if (dispNum >= 2 && dispNum <= 6)
             {
                 for (int bi = 0; bi < bufferInfos.Count; bi++)
                 {
                     int off = bufferOffsets[bi];
-                    using var rawView = new Uint8Array(memoryBuffer, off, 4);
+                    int bufLen = (int)bufferInfos[bi].buffer.LengthInBytes;
+                    int dumpLen = Math.Min(bufLen, 16); // first 4 ints
+                    using var rawView = new Uint8Array(memoryBuffer, off, dumpLen);
                     var rawBytes = rawView.ReadBytes();
-                    int val = BitConverter.ToInt32(rawBytes);
-                    _dispatchLog += $"|D{dispNum}B{bi}={val}";
+                    string vals = "";
+                    for (int j = 0; j + 3 < rawBytes.Length; j += 4)
+                        vals += (j > 0 ? "," : "") + BitConverter.ToInt32(rawBytes, j);
+                    _dispatchLog += $"|D{dispNum}B{bi}=[{vals}]";
                 }
             }
 
@@ -1029,7 +1038,7 @@ namespace SpawnDev.ILGPU.Wasm
         ///   and iterates over its assigned items with the same kernel signature (groupDimX=dimX, threadIdX=globalIdx).
         /// </summary>
         private static string BuildWasmWorkerScript(
-            int gridDimX, int gridDimY, int scratchBase,
+            int gridDimX, int gridDimY, int scratchBase, int scratchPerThread,
             int sharedMemBase, int barrierBase,
             int groupSize, int numGroups, bool hasBarriers,
             string argStr,
@@ -1045,16 +1054,18 @@ namespace SpawnDev.ILGPU.Wasm
 
             if (hasBarriers)
             {
-                // Barrier kernel: group-based dispatch
+                // Barrier kernel: multi-worker dispatch.
                 // Each worker is one thread within the workgroup.
                 // All workers iterate over all groups, synchronizing at barriers.
                 sb.AppendLine("    const threadId = d.threadId;");
                 sb.AppendLine($"    const groupSize = {groupSize};");
                 sb.AppendLine($"    const numGroups = {numGroups};");
                 sb.AppendLine();
+                sb.AppendLine($"    const scratchPerThread = {scratchPerThread};");
+                sb.AppendLine($"    const myScratch = {scratchBase} + threadId * scratchPerThread;");
                 sb.AppendLine("    for (let g = 0; g < numGroups; g++) {");
                 sb.AppendLine("      const globalIdx = g * groupSize + threadId;");
-                sb.Append($"      kernel(globalIdx, {gridDimX}, {gridDimY}, {scratchBase}, {groupSize}, threadId, {sharedMemBase}, {barrierBase}, {dynamicSharedLength}");
+                sb.Append($"      kernel(globalIdx, {gridDimX}, {gridDimY}, myScratch, {groupSize}, threadId, {sharedMemBase}, {barrierBase}, {dynamicSharedLength}");
                 if (argStr.Length > 0)
                 {
                     sb.Append(", ");

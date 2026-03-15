@@ -831,7 +831,10 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             // so they must be read after all blocks have been visited.
             _generatorArgs.BarrierCount = _barrierCounter;
             _generatorArgs.HasBarriers = _hasBarriers;
-            _generatorArgs.SharedMemorySize = _sharedMemorySize; // Re-propagate (broadcast may have added slots)
+            _generatorArgs.SharedMemorySize = _sharedMemorySize;
+            // Record scratch bytes used per thread. For barrier kernels, each worker needs
+            // its own scratch region to avoid races on StructureValue/Alloca memory.
+            _generatorArgs.ScratchPerThread = (_scratchNextOffset + 7) & ~7; // 8-byte aligned
 
             // NOTE: Barrier sense flag reset for multi-group dispatch is handled in the
             // JavaScript worker loop (BuildWasmWorkerScript) to avoid generating
@@ -1077,30 +1080,39 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             // Push the address (byte offset in linear memory)
             EmitGetLocal(source2);
 
-            // Emit the appropriate load instruction
-            byte loadOp;
-            uint align;
-            switch (wasmType)
+            // For barrier kernels, use atomic loads for cross-worker visibility
+            if (_hasBarriers && (wasmType == WasmOpCodes.I32 || wasmType == WasmOpCodes.I64))
             {
-                case WasmOpCodes.I64:
-                    loadOp = WasmOpCodes.I64Load;
-                    align = 3; // 2^3 = 8 byte alignment
-                    break;
-                case WasmOpCodes.F32:
-                    loadOp = WasmOpCodes.F32Load;
-                    align = 2; // 2^2 = 4 byte alignment
-                    break;
-                case WasmOpCodes.F64:
-                    loadOp = WasmOpCodes.F64Load;
-                    align = 3;
-                    break;
-                default: // I32
-                    loadOp = WasmOpCodes.I32Load;
-                    align = 2;
-                    break;
+                byte atomicLoadOp = wasmType == WasmOpCodes.I64
+                    ? WasmOpCodes.I64AtomicLoad : WasmOpCodes.I32AtomicLoad;
+                uint atomicAlign = wasmType == WasmOpCodes.I64 ? 3u : 2u;
+                WasmModuleBuilder.EmitAtomicRmw(Code, atomicLoadOp, atomicAlign, 0);
             }
-
-            WasmModuleBuilder.EmitLoad(Code, loadOp, align, 0);
+            else
+            {
+                byte loadOp;
+                uint align;
+                switch (wasmType)
+                {
+                    case WasmOpCodes.I64:
+                        loadOp = WasmOpCodes.I64Load;
+                        align = 3;
+                        break;
+                    case WasmOpCodes.F32:
+                        loadOp = WasmOpCodes.F32Load;
+                        align = 2;
+                        break;
+                    case WasmOpCodes.F64:
+                        loadOp = WasmOpCodes.F64Load;
+                        align = 3;
+                        break;
+                    default:
+                        loadOp = WasmOpCodes.I32Load;
+                        align = 2;
+                        break;
+                }
+                WasmModuleBuilder.EmitLoad(Code, loadOp, align, 0);
+            }
             WasmModuleBuilder.EmitLocalSet(Code, target2);
         }
 
@@ -1480,51 +1492,76 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                         Code.Add(WasmOpCodes.I32Add);
                     }
 
-                    // Load field value from source address + offset
+                    // Load field value from source address + offset (atomic for barrier kernels)
                     EmitGetLocal(storeValue);
                     if (byteOffset > 0)
                     {
                         WasmModuleBuilder.EmitI32Const(Code, byteOffset);
                         Code.Add(WasmOpCodes.I32Add);
                     }
-                    WasmModuleBuilder.EmitLoad(Code, loadOp, align, 0);
+                    if (_hasBarriers && (fieldWasmType == WasmOpCodes.I32 || fieldWasmType == WasmOpCodes.I64))
+                    {
+                        byte atomicLoadOp = fieldWasmType == WasmOpCodes.I64
+                            ? WasmOpCodes.I64AtomicLoad : WasmOpCodes.I32AtomicLoad;
+                        WasmModuleBuilder.EmitAtomicRmw(Code, atomicLoadOp, align, 0);
+                    }
+                    else
+                        WasmModuleBuilder.EmitLoad(Code, loadOp, align, 0);
 
-                    // Store to destination
-                    WasmModuleBuilder.EmitStore(Code, storeOp, align, 0);
+                    // Store to destination (atomic for barrier kernels)
+                    if (_hasBarriers && (fieldWasmType == WasmOpCodes.I32 || fieldWasmType == WasmOpCodes.I64))
+                        WasmModuleBuilder.EmitAtomicRmw(Code,
+                            fieldWasmType == WasmOpCodes.I64 ? WasmOpCodes.I64AtomicStore : WasmOpCodes.I32AtomicStore,
+                            align, 0);
+                    else
+                        WasmModuleBuilder.EmitStore(Code, storeOp, align, 0);
                 }
                 return;
             }
 
-            // Non-struct types: standard typed store
+            // Non-struct types: typed store.
+            // For barrier kernels (multi-worker dispatch), use ATOMIC stores to ensure
+            // cross-worker visibility on SharedArrayBuffer. Non-atomic i32.store writes
+            // are not guaranteed to be visible to other workers after atomic.fence.
             var wasmType = GetWasmTypeFromIR(storeValue.Type);
 
-            // Push address, then value
             EmitGetLocal(target);
             EmitGetLocal(storeValue);
 
-            byte sOp;
-            uint sAlign;
-            switch (wasmType)
+            if (_hasBarriers && (wasmType == WasmOpCodes.I32 || wasmType == WasmOpCodes.I64))
             {
-                case WasmOpCodes.I64:
-                    sOp = WasmOpCodes.I64Store;
-                    sAlign = 3;
-                    break;
-                case WasmOpCodes.F32:
-                    sOp = WasmOpCodes.F32Store;
-                    sAlign = 2;
-                    break;
-                case WasmOpCodes.F64:
-                    sOp = WasmOpCodes.F64Store;
-                    sAlign = 3;
-                    break;
-                default:
-                    sOp = WasmOpCodes.I32Store;
-                    sAlign = 2;
-                    break;
+                // Atomic store for integer types in barrier kernels
+                byte atomicStoreOp = wasmType == WasmOpCodes.I64
+                    ? WasmOpCodes.I64AtomicStore : WasmOpCodes.I32AtomicStore;
+                uint atomicAlign = wasmType == WasmOpCodes.I64 ? 3u : 2u;
+                WasmModuleBuilder.EmitAtomicRmw(Code, atomicStoreOp, atomicAlign, 0);
             }
-
-            WasmModuleBuilder.EmitStore(Code, sOp, sAlign, 0);
+            else
+            {
+                // Non-barrier kernels or float types: regular store
+                byte sOp;
+                uint sAlign;
+                switch (wasmType)
+                {
+                    case WasmOpCodes.I64:
+                        sOp = WasmOpCodes.I64Store;
+                        sAlign = 3;
+                        break;
+                    case WasmOpCodes.F32:
+                        sOp = WasmOpCodes.F32Store;
+                        sAlign = 2;
+                        break;
+                    case WasmOpCodes.F64:
+                        sOp = WasmOpCodes.F64Store;
+                        sAlign = 3;
+                        break;
+                    default:
+                        sOp = WasmOpCodes.I32Store;
+                        sAlign = 2;
+                        break;
+                }
+                WasmModuleBuilder.EmitStore(Code, sOp, sAlign, 0);
+            }
         }
 
         public override void GenerateCode(StructureValue value)
@@ -1689,7 +1726,19 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 // Advance barrier counter for subsequent barriers/calls
                 _barrierCounter += helperBarrierCount;
                 if (helperBarrierCount > 0)
+                {
                     _hasBarriers = true;
+
+                    // CRITICAL: Emit an extra barrier AFTER each helper call that uses barriers.
+                    // The helper's internal barriers ensure all workers reach the end of the
+                    // helper, but workers resume at different speeds after the last barrier.
+                    // Without this post-call barrier, a fast worker can start the NEXT helper
+                    // call while a slow worker is still inside the previous one. Since the
+                    // helper uses shared memory at fixed offsets, this causes a data race.
+                    // (See Wasm/CLAUDE.md "Post-helper barrier" rule.)
+                    EmitBarrier(_barrierCounter);
+                    _barrierCounter++;
+                }
 
                 WasmBackend.Log($"[Wasm-Call] Done calling '{targetMethod.Name}', barrierCounter now={_barrierCounter}");
             }

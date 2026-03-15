@@ -185,30 +185,7 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
         [TestMethod]
         public new async Task AlgorithmRadixSortNonPairsFloatTest() =>
             throw new UnsupportedTestException("Wasm: RadixSort produces wrong results");
-        // Diagnostic: test with 64 elements (one full group, all threads have data)
-        [TestMethod]
-        public new async Task AlgorithmRadixSortNonPairsIntTest() => await RunTest(async accelerator =>
-        {
-            // Use the base class test (32 elements, reverse order)
-            int n = 32;
-            var data = new int[n];
-            for (int i = 0; i < n; i++) data[i] = n - i; // [32,31,...,1]
-
-            using var dataBuf = accelerator.Allocate1D(data);
-            var tempSize = accelerator.ComputeRadixSortTempStorageSize<int, AscendingInt32>(n);
-            using var tempBuf = accelerator.Allocate1D<int>(tempSize);
-
-            var radixSort = accelerator.CreateRadixSort<int, Stride1D.Dense, AscendingInt32>();
-            radixSort(accelerator.DefaultStream, dataBuf.View, tempBuf.View.AsContiguous());
-            await accelerator.SynchronizeAsync();
-
-            var sorted = await dataBuf.CopyToHostAsync<int>();
-            for (int i = 0; i < n; i++)
-            {
-                if (sorted[i] != i + 1)
-                    throw new Exception($"RadixSort failed at {i}. Expected {i + 1}, got {sorted[i]}");
-            }
-        });
+        // AlgorithmRadixSortNonPairsIntTest: inherited from base (no override needed)
         [TestMethod]
         public new async Task RadixSortMinimalPatternsTest() =>
             throw new UnsupportedTestException("Wasm: RadixSort produces wrong results");

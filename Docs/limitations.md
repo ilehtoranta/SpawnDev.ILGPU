@@ -169,8 +169,8 @@ Not all ILGPU features work on all backends:
 ¹ Requires device subgroup support. OpenCL shuffle needs `cl_intel_subgroups` (Intel) or `cl_khr_subgroup_shuffle` + `cl_khr_subgroup_shuffle_relative` (NVIDIA/AMD). Dynamically detected.  
 ² Requires `subgroups` WebGPU extension  
 ³ Most algorithms require shared memory or atomics  
-⁴ WebGPU: RadixSort, Scan, Reduce, Histogram fully supported and tested  
-⁵ Wasm: Scan and Reduce work; RadixSort excluded (infinite-loop bug in generated Wasm)
+⁴ WebGPU: RadixSort, Scan, Reduce, Histogram fully supported and tested
+⁵ Wasm: RadixSort, Scan, Reduce fully supported with multi-worker barrier synchronization (v4.0.0)
 
 ## Browser Compatibility
 

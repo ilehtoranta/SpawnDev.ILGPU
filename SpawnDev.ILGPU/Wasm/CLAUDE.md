@@ -49,11 +49,23 @@ ArrayView1D's BaseView access creates a GetField indirection that breaks direct 
 
 **RADIX RULE**: All atomic/store writes to shared histograms MUST verify the bucket index multiplier in the address computation. When the codegen unrolls a per-bucket loop, each iteration must use a DIFFERENT counter address — `counter_base + (numGroups * bucket + gridIndex) * sizeof(int)`. If the unrolled writes all share the same `local` for the index (e.g. `gridIndex` which is 0 for single-group), they all hit `counter[0]` and the histogram is silently wrong. The data appears unchanged (no crash, no trap) because the scan of an all-zero histogram produces all-zero offsets, so the scatter is a no-op.
 
-**Current status**: RESOLVED. The counter addresses were actually correct (confirmed by WAT re-analysis with 15 blocks). The real issue was the scan helper's local alloca corruption — see Local Alloca rule below.
+**Current status**: RESOLVED. Counter addresses were correct. The real issues were: local alloca at address 0, and missing post-helper barriers. See rules below.
 
 ## Tribal Knowledge: Local Alloca Must Use Scratch (March 2026)
 
 **LOCAL ALLOCA RULE**: The base `Alloca` handler in `WasmCodeGenerator.cs` sets local alloca addresses to `i32.const 0`. This causes the kernel to write to Wasm memory address 0 (the data buffer region). The `WasmKernelFunctionGenerator` MUST override this for non-shared allocas to allocate scratch memory (`scratchBaseLocal + offset`). Without this fix, the ExclusiveScan helper's output struct gets written to address 0, corrupting sorted data between RadixSort passes.
+
+## Tribal Knowledge: Post-Helper Barrier (March 2026)
+
+**POST-HELPER BARRIER RULE**: After every helper function call that uses barriers, the codegen
+MUST emit an additional barrier. Without it, a fast worker can start the next helper call while
+a slow worker is still completing the previous one. Since helpers use shared memory at fixed
+offsets, overlapping calls corrupt scan results, causing non-deterministic duplicate values in
+the RadixSort presort. The fix is in `GenerateCode(MethodCall)` — after advancing the barrier
+counter for the helper's barriers, emit one more `EmitBarrier(_barrierCounter++)`.
+
+**Canary test**: `AlgorithmRadixSortNonPairsIntTest` sorts [32,31,...,1] → [1,2,...,32].
+If this test produces duplicates or non-deterministic results, the post-helper barrier is broken.
 
 ## Debugging
 - `WasmBackend.LastWasmBinary` — capture last compiled kernel

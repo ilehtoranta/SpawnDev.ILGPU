@@ -61,6 +61,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             /// Dynamic shared memory element size in bytes (populated by kernel generator).
             /// </summary>
             public int DynamicSharedElementSize { get; set; }
+            public int ScratchPerThread { get; set; }
 
             /// <summary>
             /// Helper function methods and their allocas, keyed by Method.

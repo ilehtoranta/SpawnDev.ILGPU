@@ -16,7 +16,7 @@ SpawnDev.ILGPU supports multiple backends for running ILGPU kernels. In the brow
 | **Group.Barrier()** | ✅ | ❌ | ✅ |
 | **Dynamic Shared Memory** | ✅ | ❌ | ✅ |
 | **Atomics** | ✅ | ❌ | ✅ |
-| **ILGPU Algorithms** | ✅ RadixSort, Scan, Reduce, Histogram | ❌ | ⚠️ Scan/Reduce only (RadixSort excluded) |
+| **ILGPU Algorithms** | ✅ RadixSort, Scan, Reduce, Histogram | ❌ | ✅ RadixSort, Scan, Reduce |
 | **64-bit (f64/i64)** | ✅ Emulated | ✅ Emulated | ✅ Native |
 | **Browser support** | Chrome/Edge 113+ | All modern browsers | All modern browsers |
 
@@ -234,7 +234,7 @@ if (devices.Count > 0)
 - **Dynamic shared memory** — runtime-sized workgroup memory via `SharedMemory.GetDynamic()`
 - **Group.Broadcast** — intra-group value sharing
 - **Atomics** — supported via `SharedArrayBuffer`
-- **ILGPU Algorithms** — Scan and Reduce are supported. RadixSort is currently excluded due to a known infinite-loop bug in generated Wasm bytecode
+- **ILGPU Algorithms** — RadixSort, Scan, and Reduce are fully supported with multi-worker barrier synchronization. The Wasm backend uses per-thread scratch memory and post-helper barriers to ensure correct parallel execution across Web Workers
 
 ### SharedArrayBuffer Requirement
 

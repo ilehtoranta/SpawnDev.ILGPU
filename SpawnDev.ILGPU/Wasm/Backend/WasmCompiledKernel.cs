@@ -53,6 +53,12 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         public int DynamicSharedElementSize { get; }
 
         /// <summary>
+        /// Scratch memory bytes used per thread. For barrier kernels, each worker needs
+        /// its own scratch region (total = ScratchPerThread × groupSize).
+        /// </summary>
+        public int ScratchPerThread { get; }
+
+        /// <summary>
         /// Creates a new compiled Wasm kernel.
         /// </summary>
         public WasmCompiledKernel(
@@ -64,7 +70,8 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             int sharedMemorySize = 0,
             int barrierCount = 0,
             bool hasBarriers = false,
-            int dynamicSharedElementSize = 0)
+            int dynamicSharedElementSize = 0,
+            int scratchPerThread = 0)
             : base(context, entryPoint, null)
         {
             WasmBinary = wasmBinary;
@@ -74,6 +81,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             BarrierCount = barrierCount;
             HasBarriers = hasBarriers;
             DynamicSharedElementSize = dynamicSharedElementSize;
+            ScratchPerThread = scratchPerThread;
         }
     }
 

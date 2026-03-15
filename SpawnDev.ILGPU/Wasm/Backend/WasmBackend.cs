@@ -527,7 +527,8 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 data.SharedMemorySize,
                 data.BarrierCount,
                 data.HasBarriers,
-                data.DynamicSharedElementSize);
+                data.DynamicSharedElementSize,
+                data.ScratchPerThread);
         }
 
         #endregion
