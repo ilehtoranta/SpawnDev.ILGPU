@@ -174,7 +174,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             {
                 _locals.Add(new WasmLocal { Count = 1, Type = wasmType });
                 string typeName = wasmType switch { WasmOpCodes.I32 => "i32", WasmOpCodes.I64 => "i64", WasmOpCodes.F32 => "f32", WasmOpCodes.F64 => "f64", _ => $"0x{wasmType:X2}" };
-                WasmBackend.Log($"[Wasm-Local] AllocateLocal: local_{index} = {typeName} (key={key}, IR={value.GetType().Name}, IRType={value.Type})");
+                if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm-Local] AllocateLocal: local_{index} = {typeName} (key={key}, IR={value.GetType().Name}, IRType={value.Type})");
             }
             return index;
         }
@@ -1146,7 +1146,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             catch
             {
                 // If we can't resolve the struct type, fall through with no offset
-                WasmBackend.Log($"[Wasm] Warning: Could not resolve struct type for LoadFieldAddress field {fieldIndex}");
+                if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm] Warning: Could not resolve struct type for LoadFieldAddress field {fieldIndex}");
             }
 
             WasmModuleBuilder.EmitLocalSet(Code, target);
@@ -1240,7 +1240,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             var pointer = value.Pointer.Resolve();
             EmitGetLocal(pointer);
             WasmModuleBuilder.EmitLocalSet(Code, target);
-            WasmBackend.Log($"[Wasm-NewView] target=local_{target} <- pointer=local_{GetLocal(pointer)} (IR={pointer.GetType().Name} id={pointer.Id})");
+            if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm-NewView] target=local_{target} <- pointer=local_{GetLocal(pointer)} (IR={pointer.GetType().Name} id={pointer.Id})");
         }
 
         // Barriers & Atomics
@@ -1316,7 +1316,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             }
 
             // Fallback: non-atomic (shouldn't reach here)
-            WasmBackend.Log($"[Wasm] WARNING: Unhandled atomic kind: {atomic.Kind} for type {wasmType:X2}");
+            if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm] WARNING: Unhandled atomic kind: {atomic.Kind} for type {wasmType:X2}");
             EmitGetLocal(address);
             EmitTypedLoad(wasmType);
             WasmModuleBuilder.EmitLocalSet(Code, target);
@@ -1670,7 +1670,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                             break;
                         default:
                             handled = false;
-                            WasmBackend.Log($"[Wasm] WARNING: Unhandled intrinsic method: {sourceName}");
+                            if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm] WARNING: Unhandled intrinsic method: {sourceName}");
                             break;
                     }
 
@@ -1683,7 +1683,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             }
 
             // Non-intrinsic call - return zero for now
-            WasmBackend.Log($"[Wasm] WARNING: Unhandled non-intrinsic MethodCall returning 0: {(methodCall.Target.HasSource ? methodCall.Target.Source.Name : methodCall.Target.Name)} (void={methodCall.Type.IsVoidType})");
+            if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm] WARNING: Unhandled non-intrinsic MethodCall returning 0: {(methodCall.Target.HasSource ? methodCall.Target.Source.Name : methodCall.Target.Name)} (void={methodCall.Type.IsVoidType})");
             if (!methodCall.Type.IsVoidType)
             {
                 var target2 = AllocateLocal(methodCall, GetWasmType(methodCall));
@@ -1712,7 +1712,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         /// </summary>
         protected void GenerateCodeFor(Value value)
         {
-            WasmBackend.Log($"[Wasm-IR] Visit: {value.GetType().Name} Type={value.Type} IsVoid={value.Type.IsVoidType}");
+            if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm-IR] Visit: {value.GetType().Name} Type={value.Type} IsVoid={value.Type.IsVoidType}");
 
             // Skip void values (except terminators, stores, barriers)
             if (value.Type.IsVoidType &&
@@ -1722,7 +1722,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 !(value is global::ILGPU.IR.Values.Barrier) &&
                 !(value is PredicateBarrier))
             {
-                WasmBackend.Log($"[Wasm-IR] Skipping void value: {value.GetType().Name}");
+                if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm-IR] Skipping void value: {value.GetType().Name}");
                 return;
             }
 
@@ -1915,7 +1915,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 default:
                     // LOUD warning: unhandled IR value types cause locals to stay at 0,
                     // which silently corrupts address computations (see RADIX RULE in Wasm/CLAUDE.md)
-                    WasmBackend.Log($"[Wasm-IR] *** UNHANDLED IR VALUE: {value.GetType().Name} id={value.Id} type={value.Type} ***");
+                    if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm-IR] *** UNHANDLED IR VALUE: {value.GetType().Name} id={value.Id} type={value.Type} ***");
                     // Also record to dispatch log so it's visible in test output
                     WasmAccelerator._dispatchLog += $"|UNHANDLED:{value.GetType().Name}";
                     break;

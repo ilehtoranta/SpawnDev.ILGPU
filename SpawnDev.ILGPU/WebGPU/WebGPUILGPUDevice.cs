@@ -169,7 +169,7 @@ namespace SpawnDev.ILGPU.WebGPU
             if (availableBytes <= 0)
             {
                 MaxNumThreadsPerGroup = 64;
-                if (Backend.WebGPUBackend.VerboseLogging) Console.WriteLine($"[WebGPUILGPUDevice] SharedMem={MaxSharedMemoryPerGroup}B too small, capping group size to {MaxNumThreadsPerGroup}");
+                if (Backend.WebGPUBackend.VerboseLogging) WebGPUBackend.Log($"[WebGPUILGPUDevice] SharedMem={MaxSharedMemoryPerGroup}B too small, capping group size to {MaxNumThreadsPerGroup}");
                 return;
             }
 
@@ -183,7 +183,7 @@ namespace SpawnDev.ILGPU.WebGPU
                 MaxNumThreadsPerGroup = Math.Max(64, capped);
             }
 
-            if (Backend.WebGPUBackend.VerboseLogging) Console.WriteLine($"[WebGPUILGPUDevice] SharedMem={MaxSharedMemoryPerGroup}B, maxGroupForSharedMem={maxGroupForSharedMem}, MaxNumThreadsPerGroup: {original} -> {MaxNumThreadsPerGroup}");
+            if (Backend.WebGPUBackend.VerboseLogging) WebGPUBackend.Log($"[WebGPUILGPUDevice] SharedMem={MaxSharedMemoryPerGroup}B, maxGroupForSharedMem={maxGroupForSharedMem}, MaxNumThreadsPerGroup: {original} -> {MaxNumThreadsPerGroup}");
         }
 
         /// <summary>

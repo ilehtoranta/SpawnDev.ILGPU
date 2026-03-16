@@ -415,17 +415,17 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 // SwitchBranch requires the state machine — bail out
                 if (terminator is global::ILGPU.IR.Values.SwitchBranch)
                 {
-                    WebGLBackend.Log($"[GLSL-SCF] FALLBACK: SwitchBranch found at block {i}");
+                    if (WebGLBackend.VerboseLogging) WebGLBackend.Log($"[GLSL-SCF] FALLBACK: SwitchBranch found at block {i}");
                     return false;
                 }
             }
 
             // For now, only handle single-loop or no-loop CFGs.
             // Multiple nested loops or complex patterns fall back to state machine.
-            WebGLBackend.Log($"[GLSL-SCF] blocks={blockList.Count} loopHeaders={loopHeaders.Count} backEdges={backEdgeSources.Count} headers=[{string.Join(",", loopHeaders)}]");
+            if (WebGLBackend.VerboseLogging) WebGLBackend.Log($"[GLSL-SCF] blocks={blockList.Count} loopHeaders={loopHeaders.Count} backEdges={backEdgeSources.Count} headers=[{string.Join(",", loopHeaders)}]");
             if (loopHeaders.Count > 1)
             {
-                WebGLBackend.Log("[GLSL-SCF] FALLBACK: multiple loop headers detected, using state machine");
+                if (WebGLBackend.VerboseLogging) WebGLBackend.Log("[GLSL-SCF] FALLBACK: multiple loop headers detected, using state machine");
                 return false;
             }
 
@@ -823,7 +823,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 !(value is PredicateBarrier))
                 return;
 
-            WebGLBackend.Log($"[GLSL] Generating code for: {value.GetType().FullName} - {value}");
+            if (WebGLBackend.VerboseLogging) WebGLBackend.Log($"[GLSL] Generating code for: {value.GetType().FullName} - {value}");
 
             if (value.GetType().Name.Contains("Throw"))
             {

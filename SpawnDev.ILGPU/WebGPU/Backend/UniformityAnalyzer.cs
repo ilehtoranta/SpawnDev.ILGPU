@@ -232,8 +232,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     {
                         var stepTrace = TraceToBuiltinSource(stepValue, 8);
 
-                        WebGPUBackend.Diag(WGSLDiagnostics.Uniformity,
-                            $"[Uniformity] ClassifyLoopType: step traces to {stepTrace}");
+                        if (WebGPUBackend.VerboseLogging)
+                            WebGPUBackend.Log($"[Uniformity] ClassifyLoopType: step traces to {stepTrace}");
 
                         if (stepTrace == BuiltinTraceResult.GroupDimension)
                             return LoopType.TileLoop;

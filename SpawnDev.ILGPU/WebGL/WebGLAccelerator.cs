@@ -61,10 +61,12 @@ namespace SpawnDev.ILGPU.WebGL
         /// </summary>
         public static bool VerboseLogging { get; set; } = false;
 
-        internal static void Log(string message)
-        {
-            if (VerboseLogging) Console.WriteLine(message);
-        }
+        /// <summary>
+        /// Writes a message to the console.
+        /// Caller MUST check <see cref="VerboseLogging"/> BEFORE constructing the message string.
+        /// </summary>
+        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
+        internal static void Log(string message) => Console.WriteLine(message);
 
         // ---- Dedicated GL Worker ----
         private Worker? _glWorker;
@@ -180,8 +182,8 @@ namespace SpawnDev.ILGPU.WebGL
             // Initialize the dedicated GL worker
             accelerator.InitializeGLWorker();
 
-            Log($"[WebGL] Accelerator created with dedicated GL worker: {device.NativeDevice.Name}");
-            Log($"[WebGL] Max TF Components: {device.NativeDevice.MaxTransformFeedbackInterleavedComponents}");
+            if (VerboseLogging) Log($"[WebGL] Accelerator created with dedicated GL worker: {device.NativeDevice.Name}");
+            if (VerboseLogging) Log($"[WebGL] Max TF Components: {device.NativeDevice.MaxTransformFeedbackInterleavedComponents}");
 
             return accelerator;
         }
@@ -220,7 +222,7 @@ namespace SpawnDev.ILGPU.WebGL
                 }
             };
 
-            Log("[WebGL] GL Worker initialized and OffscreenCanvas transferred");
+            if (VerboseLogging) Log("[WebGL] GL Worker initialized and OffscreenCanvas transferred");
         }
 
 
@@ -468,7 +470,7 @@ namespace SpawnDev.ILGPU.WebGL
             else if (dimension is LongIndex2D l2) { dimX = (int)l2.X; dimY = (int)l2.Y; totalVertices = dimX * dimY; }
             else if (dimension is LongIndex3D l3) { dimX = (int)l3.X; dimY = (int)l3.Y; dimZ = (int)l3.Z; totalVertices = dimX * dimY * dimZ; }
 
-            Log($"[WebGL-Debug] Dispatch: {totalVertices} vertices (dim={dimX}x{dimY}x{dimZ})");
+            if (VerboseLogging) Log($"[WebGL-Debug] Dispatch: {totalVertices} vertices (dim={dimX}x{dimY}x{dimZ})");
 
             // Marshal arguments — now returns buffer_ref params, no ArrayBuffer transfers
             var (jsParams, strideMap, outputs) = MarshalArguments(compiledKernel, args, webGlAccel);
@@ -538,7 +540,7 @@ namespace SpawnDev.ILGPU.WebGL
                 if (msgType == "contextlost")
                 {
                     IsContextLost = true;
-                    Console.Error.WriteLine("[WebGL] Context lost");
+                    if (VerboseLogging) Log("[WebGL] Context lost");
                     ContextLost?.Invoke("WebGL context lost");
                     return;
                 }
@@ -546,7 +548,7 @@ namespace SpawnDev.ILGPU.WebGL
                 if (msgType == "contextrestored")
                 {
                     IsContextLost = false;
-                    Console.Error.WriteLine("[WebGL] Context restored");
+                    if (VerboseLogging) Log("[WebGL] Context restored");
                     return;
                 }
 
@@ -555,7 +557,7 @@ namespace SpawnDev.ILGPU.WebGL
 
                 if (!_pendingDispatches.TryRemove(dispatchId, out var pending))
                 {
-                    Log($"[WebGL] Warning: received response for unknown dispatchId {dispatchId}");
+                    if (VerboseLogging) Log($"[WebGL] Warning: received response for unknown dispatchId {dispatchId}");
                     return;
                 }
 
@@ -572,7 +574,7 @@ namespace SpawnDev.ILGPU.WebGL
             }
             catch (Exception ex)
             {
-                Log($"[WebGL] Error processing worker response: {ex.Message}");
+                if (VerboseLogging) Log($"[WebGL] Error processing worker response: {ex.Message}");
             }
         }
 
@@ -584,7 +586,7 @@ namespace SpawnDev.ILGPU.WebGL
             var requestId = data.JSRef!.Get<int>("requestId");
             if (!_pendingBlits.TryRemove(requestId, out var blit))
             {
-                Log($"[WebGL] Warning: received blitResult for unknown requestId {requestId}");
+                if (VerboseLogging) Log($"[WebGL] Warning: received blitResult for unknown requestId {requestId}");
                 return;
             }
 
@@ -611,7 +613,7 @@ namespace SpawnDev.ILGPU.WebGL
             var requestId = data.JSRef!.Get<int>("requestId");
             if (!_pendingReadbacks.TryRemove(requestId, out var pending))
             {
-                Log($"[WebGL] Warning: received readback for unknown requestId {requestId}");
+                if (VerboseLogging) Log($"[WebGL] Warning: received readback for unknown requestId {requestId}");
                 return;
             }
 

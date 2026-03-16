@@ -43,7 +43,7 @@ namespace SpawnDev.ILGPU.WebGPU
             // Create shader module from WGSL source
             accelerator._lastCompiledWGSL = wgslSource;
             // DEBUG: Store WGSL in a JS global for browser-side inspection (only when verbose logging is on)
-            if (WebGPU.Backend.WebGPUBackend.VerboseLogging)
+            if (Backend.WebGPUBackend.VerboseLogging)
             {
                 try { BlazorJS.BlazorJSRuntime.JS.Set("wgslDebug", wgslSource); } catch { }
             }
@@ -162,21 +162,22 @@ namespace SpawnDev.ILGPU.WebGPU
 
         private static async Task CheckShaderAsync(GPUShaderModule shaderModule, string entryPoint, GPUDevice device)
         {
+            if (!Backend.WebGPUBackend.VerboseLogging) return;
             try
             {
                 using var info = await shaderModule.GetCompilationInfo();
                 foreach (var msg in info.Messages)
                 {
                     if (msg.Type == "error" || msg.Type == "warning")
-                        Console.Error.WriteLine($"[WGSL-{msg.Type.ToUpper()}] {entryPoint} L{msg.LineNum}:{msg.LinePos} - {msg.Message}");
+                        Backend.WebGPUBackend.Log($"[WGSL-{msg.Type.ToUpper()}] {entryPoint} L{msg.LineNum}:{msg.LinePos} - {msg.Message}");
                 }
                 using var error = await device.PopErrorScope();
                 if (error != null)
-                    Console.Error.WriteLine($"[WebGPU-ValidationError] {entryPoint}: {error.Message}");
+                    Backend.WebGPUBackend.Log($"[WebGPU-ValidationError] {entryPoint}: {error.Message}");
             }
             catch (Exception ex)
             {
-                Console.Error.WriteLine($"[WGSL-Check] Exception for {entryPoint}: {ex.Message}");
+                Backend.WebGPUBackend.Log($"[WGSL-Check] Exception for {entryPoint}: {ex.Message}");
             }
         }
 

@@ -197,7 +197,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     && cpv.Int64Value == allocaSize)
                 {
                     varName = name;
-                    WebGPUBackend.Diag(WGSLDiagnostics.SharedMemory,
+                    if (WebGPUBackend.VerboseLogging) WebGPUBackend.Log(
                         $"[SharedMemoryResolver] Matched alloca (hash={alloca.GetHashCode()}, " +
                         $"type={allocaElemStr}, size={allocaSize}) to '{name}' by type+size");
                     return true;
@@ -211,7 +211,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 if (isNameClaimedByOther(name, alloca))
                     continue;
                 varName = name;
-                WebGPUBackend.Diag(WGSLDiagnostics.SharedMemory,
+                if (WebGPUBackend.VerboseLogging) WebGPUBackend.Log(
                     $"[SharedMemoryResolver] Fallback: redirected alloca (hash={alloca.GetHashCode()}) to '{name}'");
                 return true;
             }
@@ -241,7 +241,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 var wgslType = typeGenerator[allocaNode.Type];
                 registerVariable(allocaNode, varName, wgslType);
 
-                WebGPUBackend.Diag(WGSLDiagnostics.SharedMemory,
+                if (WebGPUBackend.VerboseLogging) WebGPUBackend.Log(
                     $"[SharedMemoryResolver] Emitting: name={varName}, alloca hash={allocaNode.GetHashCode()}");
 
                 builder.AppendLine(declaration);
@@ -292,7 +292,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
                     var wgslType = typeGenerator[alloca.Alloca.Type];
                     registerVariable(alloca.Alloca, kvp.Value.Name, wgslType);
-                    WebGPUBackend.Diag(WGSLDiagnostics.SharedMemory,
+                    if (WebGPUBackend.VerboseLogging) WebGPUBackend.Log(
                         $"[SharedMemoryResolver] Matched kernel alloca (hash={alloca.Alloca.GetHashCode()}, " +
                         $"size={allocaArraySize}) to '{kvp.Value.Name}' by type+size");
                     break;
@@ -320,12 +320,12 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 {
                     var wgslType = typeGenerator[sharedAlloca.Alloca.Type];
                     registerVariable(sharedAlloca.Alloca, preAssigned.Name, wgslType);
-                    WebGPUBackend.Diag(WGSLDiagnostics.SharedMemory,
+                    if (WebGPUBackend.VerboseLogging) WebGPUBackend.Log(
                         $"[SharedMemoryResolver] Registered helper alloca -> {preAssigned.Name}");
                 }
                 else
                 {
-                    WebGPUBackend.Diag(WGSLDiagnostics.SharedMemory,
+                    if (WebGPUBackend.VerboseLogging) WebGPUBackend.Log(
                         $"[SharedMemoryResolver] WARNING: helper alloca not found " +
                         $"(hash={sharedAlloca.Alloca.GetHashCode()})");
                 }

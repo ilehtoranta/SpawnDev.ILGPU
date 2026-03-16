@@ -66,17 +66,17 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         private static readonly int MaxRecentLogs = 500;
 
         /// <summary>
-        /// Logs a message if VerboseLogging is enabled. Always captures to RecentLogs.
+        /// Writes a message to the console and captures to RecentLogs.
+        /// Caller MUST check <see cref="VerboseLogging"/> BEFORE constructing the message string
+        /// to avoid allocating interpolated strings when logging is disabled.
         /// </summary>
+        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
         public static void Log(string message)
         {
-            if (VerboseLogging)
-            {
-                Console.WriteLine(message);
-                RecentLogs.Add(message);
-                if (RecentLogs.Count > MaxRecentLogs)
-                    RecentLogs.RemoveAt(0);
-            }
+            Console.WriteLine(message);
+            RecentLogs.Add(message);
+            if (RecentLogs.Count > MaxRecentLogs)
+                RecentLogs.RemoveAt(0);
         }
 
         #endregion
@@ -159,7 +159,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
 
                     if (wasmIndex >= containers.Length)
                     {
-                        Log($"Wasm: Resizing IntrinsicManager containers from {containers.Length} to {wasmIndex + 1}");
+                        if (VerboseLogging) Log($"Wasm: Resizing IntrinsicManager containers from {containers.Length} to {wasmIndex + 1}");
                         var newContainers = Array.CreateInstance(containerType, wasmIndex + 1);
                         Array.Copy(containers, newContainers, containers.Length);
                         containers = newContainers;
@@ -168,7 +168,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
 
                     var newContainer = createMethod.Invoke(null, null);
                     containers.SetValue(newContainer, wasmIndex);
-                    Log("Wasm: Initialized BackendContainer.");
+                    if (VerboseLogging) Log("Wasm: Initialized BackendContainer.");
                 }
                 else
                 {
@@ -178,7 +178,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                     var matchers = matchersField.GetValue(container!);
                     if (matchers == null)
                     {
-                        Log("Wasm: BackendContainer found but uninitialized. Re-initializing.");
+                        if (VerboseLogging) Log("Wasm: BackendContainer found but uninitialized. Re-initializing.");
                         var createMethod = containerType.GetMethod("Create", BindingFlags.Static | BindingFlags.Public)!;
                         var newContainer = createMethod.Invoke(null, null);
                         containers.SetValue(newContainer, wasmIndex);
@@ -187,14 +187,14 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             }
             catch (Exception ex)
             {
-                Log($"Wasm: Error fixing IntrinsicManager: {ex}");
+                if (VerboseLogging) Log($"Wasm: Error fixing IntrinsicManager: {ex}");
             }
         }
 
         private void RegisterRedirect(MethodInfo original, MethodInfo target)
         {
             if (original == null || target == null) return;
-            Log($"Wasm: Redirecting {original.DeclaringType?.Name}.{original.Name} -> {target.DeclaringType?.Name}.{target.Name}");
+            if (VerboseLogging) Log($"Wasm: Redirecting {original.DeclaringType?.Name}.{original.Name} -> {target.DeclaringType?.Name}.{target.Name}");
             GetIntrinsicManager(Context).RegisterMethod(
                 original,
                 new global::ILGPU.Backends.Wasm.WasmIntrinsic(
@@ -216,11 +216,11 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                     if (src == null) return;
                     manager.RegisterMethod(src, new global::ILGPU.Backends.Wasm.WasmIntrinsic(
                         wasmGroupType, name, IntrinsicImplementationMode.Redirect));
-                    Log($"Wasm: Scan intrinsic {name} registered");
+                    if (VerboseLogging) Log($"Wasm: Scan intrinsic {name} registered");
                 }
                 catch (Exception ex)
                 {
-                    Log($"Wasm: Scan intrinsic {name} FAILED: {ex.Message}");
+                    if (VerboseLogging) Log($"Wasm: Scan intrinsic {name} FAILED: {ex.Message}");
                 }
             }
 
@@ -264,7 +264,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
 
                     if (wrapper != null)
                     {
-                        Log($"Wasm: Mapping {type.Name}.{name}({string.Join(",", pTypes.Select(pt => pt.Name))}) to {t.Name}.{name}");
+                        if (VerboseLogging) Log($"Wasm: Mapping {type.Name}.{name}({string.Join(",", pTypes.Select(pt => pt.Name))}) to {t.Name}.{name}");
                         RegisterRedirect(target, wrapper);
                     }
                 }
@@ -309,12 +309,12 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 {
                     RegAll(xmathType, "Rsqrt");
                     RegAll(xmathType, "Rcp");
-                    Log("Wasm: Registered XMath intrinsics (Rsqrt, Rcp)");
+                    if (VerboseLogging) Log("Wasm: Registered XMath intrinsics (Rsqrt, Rcp)");
                 }
             }
             catch (Exception ex)
             {
-                Log($"Wasm: Error registering XMath intrinsics: {ex.Message}");
+                if (VerboseLogging) Log($"Wasm: Error registering XMath intrinsics: {ex.Message}");
             }
         }
 
@@ -480,7 +480,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 int expectedIdx = data.HelperFunctionIndices[helperMethod];
                 if (helperFuncIdx != expectedIdx)
                 {
-                    Log($"Wasm: WARNING: Helper '{helperMethod.Name}' funcIdx mismatch: got {helperFuncIdx}, expected {expectedIdx}");
+                    if (VerboseLogging) Log($"Wasm: WARNING: Helper '{helperMethod.Name}' funcIdx mismatch: got {helperFuncIdx}, expected {expectedIdx}");
                 }
 
                 // Set helper function body
@@ -491,7 +491,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 if (result.SharedMemorySize > maxSharedMemorySize)
                     maxSharedMemorySize = result.SharedMemorySize;
 
-                Log($"Wasm: Helper '{helperMethod.Name}' generated: funcIdx={helperFuncIdx}, params={result.ParamTypes.Length}, locals={result.Locals.Count}, code={result.Code.Length}b, barriers={result.BarrierCount}, sharedMem={result.SharedMemorySize}");
+                if (VerboseLogging) Log($"Wasm: Helper '{helperMethod.Name}' generated: funcIdx={helperFuncIdx}, params={result.ParamTypes.Length}, locals={result.Locals.Count}, code={result.Code.Length}b, barriers={result.BarrierCount}, sharedMem={result.SharedMemorySize}");
             }
 
             // Update shared memory size to account for helper Broadcast slots
@@ -514,9 +514,12 @@ namespace SpawnDev.ILGPU.Wasm.Backend
 
             // Record compilation info for diagnostics
             var info = $"Kernel params={paramTypes.Length} (userParams={data.ParamInfos.Count}), locals={kernelGen._locals.Count}, code={kernelGen.Code.Count}b, helpers={data.HelperFunctionOrder.Count}, sharedMem={data.SharedMemorySize}, barriers={data.BarrierCount}, hasBarriers={data.HasBarriers}, dynSharedElemSize={data.DynamicSharedElementSize}";
-            Log($"--- GENERATED WASM BINARY ({wasmBinary.Length} bytes) ---");
-            Log(info);
-            Log("---");
+            if (VerboseLogging)
+            {
+                Log($"--- GENERATED WASM BINARY ({wasmBinary.Length} bytes) ---");
+                Log(info);
+                Log("---");
+            }
             AllKernelInfos.Add(info);
             LastWasmBinary = wasmBinary;
             AllWasmBinaries.Add(wasmBinary);

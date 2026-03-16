@@ -121,7 +121,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 var sharedVar = new Variable(varName, wgslType);
                 valueVariables[allocaNode] = sharedVar;
                 declaredVariables.Add(varName);
-                if (WebGPUBackend.VerboseLogging) Console.WriteLine($"[DIAG-FUNC-SHARED-REG] Registered (no emit): {varName} for method {Method.Handle.Name}_{Method.Id}");
+                if (WebGPUBackend.VerboseLogging) WebGPUBackend.Log($"[DIAG-FUNC-SHARED-REG] Registered (no emit): {varName} for method {Method.Handle.Name}_{Method.Id}");
             }
         }
 
@@ -139,7 +139,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             // code at module scope (outside fn main), causing WGSL validation errors.
             if (_args.HelperMethods.ContainsKey(Method))
             {
-                if (WebGPUBackend.VerboseLogging) Console.WriteLine($"[WGSL-FuncGen] Skipping code gen for inlined helper: {Method.Handle.Name}_{Method.Id}");
+                if (WebGPUBackend.VerboseLogging) WebGPUBackend.Log($"[WGSL-FuncGen] Skipping code gen for inlined helper: {Method.Handle.Name}_{Method.Id}");
                 return;
             }
 

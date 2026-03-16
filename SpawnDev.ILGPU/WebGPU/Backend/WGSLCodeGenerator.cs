@@ -312,7 +312,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             var name = $"v_{varCounter++}";
             var type = TypeGenerator[value.Type];
             if (type.StartsWith("ptr<"))
-                if (WebGPUBackend.VerboseLogging) Console.WriteLine($"[DIAG-ALLOCATE] Allocated {name} with ptr type '{type}' for IR value type={value.Type} kind={value.GetType().Name} hash={value.GetHashCode()}");
+                if (WebGPUBackend.VerboseLogging) WebGPUBackend.Log($"[DIAG-ALLOCATE] Allocated {name} with ptr type '{type}' for IR value type={value.Type} kind={value.GetType().Name} hash={value.GetHashCode()}");
             var variable = new Variable(name, type);
             valueVariables[value] = variable;
             return variable;
@@ -383,7 +383,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             // are bound via 'let' at the point of assignment or come from function parameters.
             if (variable.Type.StartsWith("ptr<"))
             {
-                if (WebGPUBackend.VerboseLogging) Console.WriteLine($"[DIAG-DECLARE] Skipping ptr type declaration for {variable.Name} : {variable.Type}");
+                if (WebGPUBackend.VerboseLogging) WebGPUBackend.Log($"[DIAG-DECLARE] Skipping ptr type declaration for {variable.Name} : {variable.Type}");
                 return;
             }
 
@@ -1437,7 +1437,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 // For shared memory: alias the target to the source array name (no WGSL emission).
                 // LoadElementAddress will then directly produce &shared_0[idx].
                 valueVariables[value] = new Variable(source.Name, source.Type);
-                if (WebGPUBackend.VerboseLogging) Console.WriteLine($"[DIAG-NEWVIEW-SHARED] Aliased {target} -> {source.Name} (no WGSL emit)");
+                if (WebGPUBackend.VerboseLogging) WebGPUBackend.Log($"[DIAG-NEWVIEW-SHARED] Aliased {target} -> {source.Name} (no WGSL emit)");
             }
             else
             {

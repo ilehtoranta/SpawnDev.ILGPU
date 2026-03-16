@@ -1297,7 +1297,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 }
                 else
                 {
-                    WebGPUBackend.Log("[WGSL] Skipping unused _scalar_params binding — body does not reference it");
+                    if (WebGPUBackend.VerboseLogging) WebGPUBackend.Log("[WGSL] Skipping unused _scalar_params binding — body does not reference it");
                 }
             }
 
@@ -2131,12 +2131,12 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                         // as 'var'. They will be bound as 'let' at their point of use.
                         if (!inferredType.StartsWith("ptr<"))
                         {
-                            if (WebGPU.Backend.WebGPUBackend.VerboseLogging) Console.WriteLine($"[DIAG-MISSING-DECL] Adding var {varName} : {inferredType}");
+                            if (WebGPU.Backend.WebGPUBackend.VerboseLogging) WebGPUBackend.Log($"[DIAG-MISSING-DECL] Adding var {varName} : {inferredType}");
                             missingDeclarations.Add($"    var {varName} : {inferredType};");
                         }
                         else
                         {
-                            if (WebGPU.Backend.WebGPUBackend.VerboseLogging) Console.WriteLine($"[DIAG-MISSING-SKIP] Skipping ptr var {varName} : {inferredType}");
+                            if (WebGPU.Backend.WebGPUBackend.VerboseLogging) WebGPUBackend.Log($"[DIAG-MISSING-SKIP] Skipping ptr var {varName} : {inferredType}");
                         }
                         declaredVariables.Add(varName);
                     }
@@ -2279,8 +2279,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                             Builder.Append(lines[li]);
                         }
                     }
-                    WebGPUBackend.Diag(WGSLDiagnostics.Compilation,
-                        $"[DeadVarElim] Removed {removedCount} unused declarations");
+                    if (WebGPUBackend.VerboseLogging)
+                        WebGPUBackend.Log($"[DeadVarElim] Removed {removedCount} unused declarations");
                 }
             }
 
@@ -2441,18 +2441,18 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             // on the compiled group size matching @workgroup_size.
             if (WebGPU.Backend.WebGPUBackend.VerboseLogging)
             {
-                Console.WriteLine($"[WorkgroupSize] MaxWorkgroupSize={_generatorArgs.MaxWorkgroupSize}, IsExplicitlyGrouped={EntryPoint.IsExplicitlyGrouped}, IndexType={EntryPoint.IndexType}");
-                Console.WriteLine($"[WorkgroupSize] SharedAllocations count={_generatorArgs.SharedAllocations.Length}");
+                WebGPUBackend.Log($"[WorkgroupSize] MaxWorkgroupSize={_generatorArgs.MaxWorkgroupSize}, IsExplicitlyGrouped={EntryPoint.IsExplicitlyGrouped}, IndexType={EntryPoint.IndexType}");
+                WebGPUBackend.Log($"[WorkgroupSize] SharedAllocations count={_generatorArgs.SharedAllocations.Length}");
                 foreach (var alloca in _generatorArgs.SharedAllocations)
                 {
-                    Console.WriteLine($"[WorkgroupSize]   SharedAlloc: type={alloca.ElementType}, arraySize={alloca.ArraySize}");
+                    WebGPUBackend.Log($"[WorkgroupSize]   SharedAlloc: type={alloca.ElementType}, arraySize={alloca.ArraySize}");
                 }
             }
 
             if (_generatorArgs.MaxWorkgroupSize.HasValue)
             {
                 int wgSize = _generatorArgs.MaxWorkgroupSize.Value;
-                if (WebGPU.Backend.WebGPUBackend.VerboseLogging) Console.WriteLine($"[WorkgroupSize] Using MaxWorkgroupSize={wgSize}");
+                if (WebGPU.Backend.WebGPUBackend.VerboseLogging) WebGPUBackend.Log($"[WorkgroupSize] Using MaxWorkgroupSize={wgSize}");
                 return EntryPoint.IndexType switch
                 {
                     IndexType.Index1D => $"{wgSize}",
@@ -2477,7 +2477,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 // Group.DimX to return the wrong value and corrupting all index math
                 // (TileInfo, grid-stride loops, etc.).
                 int maxAllowedWorkgroupSize = _generatorArgs.Backend.DefaultMaxWorkgroupSize ?? 1024;
-                if (WebGPU.Backend.WebGPUBackend.VerboseLogging) Console.WriteLine($"[WorkgroupSize] ExplicitlyGrouped with shared memory. Max shared elements={maxSharedElements}, deviceMax={maxAllowedWorkgroupSize}");
+                if (WebGPU.Backend.WebGPUBackend.VerboseLogging) WebGPUBackend.Log($"[WorkgroupSize] ExplicitlyGrouped with shared memory. Max shared elements={maxSharedElements}, deviceMax={maxAllowedWorkgroupSize}");
 
                 // Common ILGPU patterns: shared memory = groupSize * N where N is a small factor (1, 2, 4, ..., 64)
                 // Try to find the largest power-of-2 factor that gives a reasonable groupSize (32..deviceMax)
@@ -2486,7 +2486,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     long candidateGroupSize = maxSharedElements / factor;
                     if (candidateGroupSize >= 32 && candidateGroupSize <= maxAllowedWorkgroupSize && (candidateGroupSize & (candidateGroupSize - 1)) == 0)
                     {
-                        if (WebGPU.Backend.WebGPUBackend.VerboseLogging) Console.WriteLine($"[WorkgroupSize] Inferred groupSize={candidateGroupSize} from shared[{maxSharedElements}]/factor={factor}, deviceMax={maxAllowedWorkgroupSize}");
+                        if (WebGPU.Backend.WebGPUBackend.VerboseLogging) WebGPUBackend.Log($"[WorkgroupSize] Inferred groupSize={candidateGroupSize} from shared[{maxSharedElements}]/factor={factor}, deviceMax={maxAllowedWorkgroupSize}");
                         return EntryPoint.IndexType switch
                         {
                             IndexType.Index1D => $"{candidateGroupSize}",
@@ -2496,7 +2496,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 }
             }
 
-            if (WebGPU.Backend.WebGPUBackend.VerboseLogging) Console.WriteLine($"[WorkgroupSize] Using default fallback (64)");
+            if (WebGPU.Backend.WebGPUBackend.VerboseLogging) WebGPUBackend.Log($"[WorkgroupSize] Using default fallback (64)");
             // Default fallback for auto-grouped kernels where no specialization is provided
             return EntryPoint.IndexType switch
             {
@@ -2947,11 +2947,11 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 // IR types (StructureType containing pointers) are mapped to ptr<> by TypeGenerator.
                 if (wgslType.StartsWith("ptr<"))
                 {
-                    if (WebGPU.Backend.WebGPUBackend.VerboseLogging) Console.WriteLine($"[DIAG-HOIST-SKIP] Skipping ptr type hoist for {variable.Name} : {wgslType}, IR type={val.Type}, kind={val.GetType().Name}");
+                    if (WebGPU.Backend.WebGPUBackend.VerboseLogging) WebGPUBackend.Log($"[DIAG-HOIST-SKIP] Skipping ptr type hoist for {variable.Name} : {wgslType}, IR type={val.Type}, kind={val.GetType().Name}");
                     continue;
                 }
 
-                if (WebGPU.Backend.WebGPUBackend.VerboseLogging) Console.WriteLine($"[DIAG-HOIST-EMIT] Emitting hoisted var {variable.Name} : {wgslType}, IR type={val.Type}, kind={val.GetType().Name}");
+                if (WebGPU.Backend.WebGPUBackend.VerboseLogging) WebGPUBackend.Log($"[DIAG-HOIST-EMIT] Emitting hoisted var {variable.Name} : {wgslType}, IR type={val.Type}, kind={val.GetType().Name}");
                 AppendLine($"var {variable.Name} : {wgslType}{init};");
                 declaredVariables.Add(variable.Name);
             }
@@ -3485,11 +3485,11 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             }
 
             var sourceVal = Load(value.Source);
-            // DIAGNOSTIC: Log fallback LEA path for scan kernels
-            var _leaKernelName = Method.Handle.Name ?? "";
-            if (_leaKernelName.Contains("MultiPassScan") || _leaKernelName.Contains("SingleGroupScan"))
+            if (WebGPU.Backend.WebGPUBackend.VerboseLogging)
             {
-                Console.WriteLine($"[DIAG-LEA] Fallback LEA: target={target.Name}, source={sourceVal.Name} (type={sourceVal.Type}), IR source type={value.Source.Type}, IR source kind={value.Source.Resolve().GetType().Name}, isNewView={value.Source.Resolve() is NewView}, isPointerType={value.Source.Type.IsPointerType}");
+                var _leaKernelName = Method.Handle.Name ?? "";
+                if (_leaKernelName.Contains("MultiPassScan") || _leaKernelName.Contains("SingleGroupScan"))
+                    WebGPUBackend.Log($"[DIAG-LEA] Fallback LEA: target={target.Name}, source={sourceVal.Name} (type={sourceVal.Type}), IR source type={value.Source.Type}, IR source kind={value.Source.Resolve().GetType().Name}, isNewView={value.Source.Resolve() is NewView}, isPointerType={value.Source.Type.IsPointerType}");
             }
             AppendIndent();
             Builder.Append($"let {target.Name} = ");
@@ -3963,8 +3963,6 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
         private void PushPhiValues(BasicBlock targetBlock, BasicBlock sourceBlock)
         {
-            var _phiKernelName = Method.Handle.Name ?? "";
-            bool _logPhis = _phiKernelName.Contains("MultiPassScan") || _phiKernelName.Contains("SingleGroupScan");
             foreach (var value in targetBlock)
             {
                 if (value.Value is PhiValue phi)
@@ -3982,12 +3980,12 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                             matched = true;
                         }
                     }
-                    if (_logPhis && !matched)
+                    if (WebGPU.Backend.WebGPUBackend.VerboseLogging && !matched)
                     {
                         var allSources = new List<string>();
                         for (int i = 0; i < phi.Count; i++)
                             allSources.Add($"B{phi.Sources[i].Id}");
-                        Console.WriteLine($"[DIAG-PHI] WARNING: No match for phi {targetVar} in B{targetBlock.Id} from source B{sourceBlock.Id}. Phi sources: [{string.Join(", ", allSources)}]");
+                        WebGPUBackend.Log($"[DIAG-PHI] WARNING: No match for phi {targetVar} in B{targetBlock.Id} from source B{sourceBlock.Id}. Phi sources: [{string.Join(", ", allSources)}]");
                     }
                 }
             }
@@ -5037,8 +5035,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     if (loopNode.Exits.Length > 0)
                     {
                         block = loopNode.Exits[0];
-                        if (_isScanKernel)
-                            Console.WriteLine($"[CODEGEN] Post-loop exit: start=B{block.Id} stopBlock=B{stopBlock?.Id}");
+                        if (WebGPU.Backend.WebGPUBackend.VerboseLogging && _isScanKernel)
+                            WebGPUBackend.Log($"[CODEGEN] Post-loop exit: start=B{block.Id} stopBlock=B{stopBlock?.Id}");
                         // Skip pass-through blocks in the exit chain, but never
                         // skip past the stopBlock — the caller owns that boundary.
                         int skipLimit = 10;
@@ -5048,8 +5046,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                                 && !HasNonPhiInstructions(block))
                             {
                                 // Pure pass-through block — mark visited and skip
-                                if (_isScanKernel)
-                                    Console.WriteLine($"[CODEGEN]   Skip pass-through B{block.Id} → B{exitUBranch.Target.Id}");
+                                if (WebGPU.Backend.WebGPUBackend.VerboseLogging && _isScanKernel)
+                                    WebGPUBackend.Log($"[CODEGEN]   Skip pass-through B{block.Id} → B{exitUBranch.Target.Id}");
                                 visited.Add(block);
                                 block = exitUBranch.Target;
                             }
@@ -5084,7 +5082,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 }
 
                 // Emit Block Body — with diagnostic annotations for scan kernels
-                if (_isScanKernel)
+                if (WebGPU.Backend.WebGPUBackend.VerboseLogging && _isScanKernel)
                 {
                     var termDesc = block.Terminator switch
                     {
@@ -5096,7 +5094,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     string loopInfo = currentLoop != null ? $" inLoop" : "";
                     string stopInfo = stopBlock != null ? $" stop=B{stopBlock.Id}" : "";
                     AppendLine($"// BB_{block.Id} ({termDesc}{loopInfo}{stopInfo})");
-                    Console.WriteLine($"[CODEGEN] Process BB_{block.Id} {termDesc}{loopInfo}{stopInfo}");
+                    WebGPUBackend.Log($"[CODEGEN] Process BB_{block.Id} {termDesc}{loopInfo}{stopInfo}");
                 }
                 GenerateBasicBlockCode(block);
 
@@ -5187,15 +5185,15 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     // currentLoop.Contains check to break — skipping remaining loop body.
                     if (currentLoop != null && mergeNode != null && !currentLoop.Contains(mergeNode))
                     {
-                        if (_isScanKernel)
-                            Console.WriteLine($"[CODEGEN] CLAMP mergeNode B{mergeNode.Id} (outside loop) → stopBlock B{stopBlock?.Id}");
+                        if (WebGPU.Backend.WebGPUBackend.VerboseLogging && _isScanKernel)
+                            WebGPUBackend.Log($"[CODEGEN] CLAMP mergeNode B{mergeNode.Id} (outside loop) → stopBlock B{stopBlock?.Id}");
                         mergeNode = stopBlock;
                     }
 
-                    if (_isScanKernel)
+                    if (WebGPU.Backend.WebGPUBackend.VerboseLogging && _isScanKernel)
                     {
                         AppendLine($"// IF from BB_{block.Id}: merge=BB_{mergeNode?.Id.ToString() ?? "null"} true=BB_{trueTarget.Id} false=BB_{falseTarget.Id}");
-                        Console.WriteLine($"[CODEGEN] IF BB_{block.Id}: merge=B{mergeNode?.Id.ToString() ?? "null"} true=B{trueTarget.Id} false=B{falseTarget.Id}");
+                        WebGPUBackend.Log($"[CODEGEN] IF BB_{block.Id}: merge=B{mergeNode?.Id.ToString() ?? "null"} true=B{trueTarget.Id} false=B{falseTarget.Id}");
                     }
 
                     if (falseTarget == mergeNode)
@@ -5262,7 +5260,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                         AppendLine("}");
                     }
 
-                    if (_isScanKernel && mergeNode != null)
+                    if (WebGPU.Backend.WebGPUBackend.VerboseLogging && _isScanKernel && mergeNode != null)
                         AppendLine($"// MERGE → BB_{mergeNode.Id}");
                     block = mergeNode;
                 }
@@ -5536,7 +5534,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             string threadCounterName = null;
             
             if (WebGPU.Backend.WebGPUBackend.VerboseLogging)
-                Console.WriteLine($"[UniformityDirect] Analyzing loop header block {headerBlock.Id} ({headerBlock.Count} values, IR barriers={loopHasIRBarriers})");
+                WebGPUBackend.Log($"[UniformityDirect] Analyzing loop header block {headerBlock.Id} ({headerBlock.Count} values, IR barriers={loopHasIRBarriers})");
             
             foreach (var valueEntry in headerBlock)
             {
@@ -5545,7 +5543,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     string varName = Load(phi).ToString();
                     
                     if (WebGPU.Backend.WebGPUBackend.VerboseLogging)
-                        Console.WriteLine($"[UniformityDirect]   Found phi: {varName} with {phi.Nodes.Length} nodes");
+                        WebGPUBackend.Log($"[UniformityDirect]   Found phi: {varName} with {phi.Nodes.Length} nodes");
                     
                     // Combine ALL phi node results before classifying.
                     var phiResult = BuiltinTraceResult.Unknown;
@@ -5556,13 +5554,13 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                         var traceResult = UniformityAnalyzer.TraceToBuiltinSource(resolved, 8);
                         
                         if (WebGPU.Backend.WebGPUBackend.VerboseLogging)
-                            Console.WriteLine($"[UniformityDirect]     Node[{phiIdx}] type={resolved.GetType().Name} -> {traceResult}");
+                            WebGPUBackend.Log($"[UniformityDirect]     Node[{phiIdx}] type={resolved.GetType().Name} -> {traceResult}");
                         
                         phiResult = UniformityAnalyzer.CombineTraceResults(phiResult, traceResult);
                     }
                     
                     if (WebGPU.Backend.WebGPUBackend.VerboseLogging)
-                        Console.WriteLine($"[UniformityDirect]   Phi combined result: {phiResult}");
+                        WebGPUBackend.Log($"[UniformityDirect]   Phi combined result: {phiResult}");
                     
                     phiClassifications[phi] = phiResult;
                     phiVarNames[phi] = varName;
@@ -5583,7 +5581,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             }
             
             if (WebGPU.Backend.WebGPUBackend.VerboseLogging)
-                Console.WriteLine($"[UniformityDirect] Result: group={groupCounterName ?? "null"}, thread={threadCounterName ?? "null"}");
+                WebGPUBackend.Log($"[UniformityDirect] Result: group={groupCounterName ?? "null"}, thread={threadCounterName ?? "null"}");
 
             // ─── Classify loop type by analyzing the counter increment ───
             // Tile loops (step = GroupDimension / workgroup_size) have uniform
@@ -5596,7 +5594,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             {
                 loopType = UniformityAnalyzer.ClassifyLoopType(tcPhi, loopNode);
                 if (WebGPU.Backend.WebGPUBackend.VerboseLogging)
-                    Console.WriteLine($"[UniformityDirect] Loop classified as: {loopType}");
+                    WebGPUBackend.Log($"[UniformityDirect] Loop classified as: {loopType}");
             }
 
             // ─── Pre-loop analysis: determine if synthetic uniform counter is needed ───
@@ -5651,11 +5649,11 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                                     usedTileCounter = true;
 
                                     if (WebGPU.Backend.WebGPUBackend.VerboseLogging)
-                                        Console.WriteLine($"[UniformityDirect] TILE LOOP counter: var {syntheticGroupCounterVar} = {uniformInit}");
+                                        WebGPUBackend.Log($"[UniformityDirect] TILE LOOP counter: var {syntheticGroupCounterVar} = {uniformInit}");
                                 }
                                 else if (WebGPU.Backend.WebGPUBackend.VerboseLogging)
                                 {
-                                    Console.WriteLine($"[UniformityDirect] TILE LOOP: failed to decompose init, falling back to grid-stride counter");
+                                    WebGPUBackend.Log($"[UniformityDirect] TILE LOOP: failed to decompose init, falling back to grid-stride counter");
                                 }
                             }
 
@@ -5674,18 +5672,18 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                                 }
 
                                 if (WebGPU.Backend.WebGPUBackend.VerboseLogging)
-                                    Console.WriteLine($"[UniformityDirect] SYNTHETIC counter: var {syntheticGroupCounterVar} (linearized={ShouldLinearizeGridX()})");
+                                    WebGPUBackend.Log($"[UniformityDirect] SYNTHETIC counter: var {syntheticGroupCounterVar} (linearized={ShouldLinearizeGridX()})");
                             }
                         }
                     }
                 }
             }
             
-            if (_isScanKernel)
+            if (WebGPU.Backend.WebGPUBackend.VerboseLogging && _isScanKernel)
             {
                 var exitIds = string.Join(",", loopNode.Exits.Select(e => $"B{e.Id}"));
                 AppendLine($"// LOOP header=BB_{headerBlock.Id} exits=[{exitIds}]");
-                Console.WriteLine($"[CODEGEN] LOOP header=B{headerBlock.Id} exits=[{exitIds}] outerStop=B{outerStopBlock?.Id}");
+                WebGPUBackend.Log($"[CODEGEN] LOOP header=B{headerBlock.Id} exits=[{exitIds}] outerStop=B{outerStopBlock?.Id}");
             }
             AppendLine("loop {");
             PushIndent();
@@ -5773,7 +5771,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                                 }
                                 else if (WebGPU.Backend.WebGPUBackend.VerboseLogging)
                                 {
-                                    Console.WriteLine($"[UniformityDirect] SKIP: thread counter {threadCounterName} is {threadType ?? "unknown"}, not scalar i32");
+                                    WebGPUBackend.Log($"[UniformityDirect] SKIP: thread counter {threadCounterName} is {threadType ?? "unknown"}, not scalar i32");
                                 }
                             }
                             
@@ -5784,7 +5782,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                                 AppendLine($"let {breakConditionExpr} = {uniformExpr};");
                                 
                                 if (WebGPU.Backend.WebGPUBackend.VerboseLogging)
-                                    Console.WriteLine($"[UniformityDirect] EMIT uniform break: let {breakConditionExpr} = {uniformExpr}");
+                                    WebGPUBackend.Log($"[UniformityDirect] EMIT uniform break: let {breakConditionExpr} = {uniformExpr}");
                             }
                         }
                     }

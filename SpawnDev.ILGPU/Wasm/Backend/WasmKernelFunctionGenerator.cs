@@ -371,7 +371,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 _paramCount++;
                 _localMap[GetValueKey(param)] = paramLocal;
 
-                WasmBackend.Log($"[Wasm-Helper] param[{i}] '{GetValueKey(param)}' -> local_{paramLocal} (type={wasmType:X2})");
+                if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm-Helper] param[{i}] '{GetValueKey(param)}' -> local_{paramLocal} (type={wasmType:X2})");
             }
 
             // Determine return type from the method's return type
@@ -380,7 +380,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             {
                 _helperResultType = GetWasmTypeFromIR(returnType);
                 _helperResultLocal = AllocateNewLocal(_helperResultType.Value);
-                WasmBackend.Log($"[Wasm-Helper] Return type: {_helperResultType:X2}, resultLocal=local_{_helperResultLocal}");
+                if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm-Helper] Return type: {_helperResultType:X2}, resultLocal=local_{_helperResultLocal}");
             }
 
             // Re-register shared memory allocations. The offsets were pre-computed by the
@@ -392,7 +392,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             SetupSharedAllocations(Allocas.SharedAllocations, isDynamic: false);
             SetupSharedAllocations(Allocas.DynamicSharedAllocations, isDynamic: true);
 
-            WasmBackend.Log($"[Wasm-Helper] Setup complete: {_nextLocalIndex} locals, {FuncParamTypes.Count} params, sharedMem={_sharedMemorySize}");
+            if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm-Helper] Setup complete: {_nextLocalIndex} locals, {FuncParamTypes.Count} params, sharedMem={_sharedMemorySize}");
         }
 
         /// <summary>
@@ -407,7 +407,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             var entryPoint = _generatorArgs.EntryPoint;
             var parameters = Method.Parameters;
 
-            WasmBackend.Log($"[Wasm-Setup] Parameters.Count={parameters.Count}, IsExplicitlyGrouped={entryPoint.IsExplicitlyGrouped}, _nextLocalIndex={_nextLocalIndex}");
+            if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm-Setup] Parameters.Count={parameters.Count}, IsExplicitlyGrouped={entryPoint.IsExplicitlyGrouped}, _nextLocalIndex={_nextLocalIndex}");
 
             // Reset local tracking — params occupy indices 0..N-1
             // in the Wasm function. We track the param count so that
@@ -492,12 +492,12 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                     // by NOT mapping it and NOT incrementing startIdx.
                     _indexParam = null; // not an index param
                     startIdx = 0; // all params are user params
-                    WasmBackend.Log($"[Wasm-Setup] Int64 param is extent, not index — treating as user param");
+                    if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm-Setup] Int64 param is extent, not index — treating as user param");
                 }
                 else
                 {
                     _localMap[GetValueKey(_indexParam)] = _globalIdxLocal;
-                    WasmBackend.Log($"[Wasm-Setup] Index param {GetValueKey(_indexParam)} -> local_{_globalIdxLocal}, IndexType={_indexType}");
+                    if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm-Setup] Index param {GetValueKey(_indexParam)} -> local_{_globalIdxLocal}, IndexType={_indexType}");
                 }
             }
 
@@ -507,7 +507,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 var paramType = param.Type;
                 bool isView = IsViewType(paramType);
 
-                WasmBackend.Log($"[Wasm-Setup] param[{i}] id={param.Id} type={paramType} isView={isView} _nextLocalIndex={_nextLocalIndex}");
+                if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm-Setup] param[{i}] id={param.Id} type={paramType} isView={isView} _nextLocalIndex={_nextLocalIndex}");
 
                 if (isView)
                 {
@@ -532,7 +532,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                     _paramLocals[i] = new[] { offsetLocal, lengthLocal, strideLocal, stride2Local };
                     _localMap[GetValueKey(param)] = offsetLocal;
 
-                    WasmBackend.Log($"[Wasm-Setup]   View: {GetValueKey(param)}=local_{offsetLocal} (length=local_{lengthLocal}, stride=local_{strideLocal}, stride2=local_{stride2Local})");
+                    if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm-Setup]   View: {GetValueKey(param)}=local_{offsetLocal} (length=local_{lengthLocal}, stride=local_{strideLocal}, stride2=local_{stride2Local})");
 
                     // Determine stride field start index from the IR struct type
                     // The struct layout is: [View, Int64..., Int32...] where Int32 fields are strides
@@ -553,7 +553,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                         }
                     }
                     _viewStrideStartField[i] = strideStart;
-                    WasmBackend.Log($"[Wasm-Setup]   View strideStartField={strideStart}");
+                    if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm-Setup]   View strideStartField={strideStart}");
 
                     var elemType = GetViewElementType(paramType);
                     int elemSize = 4;
@@ -579,17 +579,18 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                     _paramLocals[i] = new[] { valLocal };
                     _localMap[GetValueKey(param)] = valLocal;
 
-                    WasmBackend.Log($"[Wasm-Setup]   Scalar: {GetValueKey(param)}=local_{valLocal}");
+                    if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm-Setup]   Scalar: {GetValueKey(param)}=local_{valLocal}");
 
                     // Record struct layout info for dispatch-side serialization
                     List<StructFieldInfo> structFields = null;
                     if (paramType is StructureType sType)
                     {
                         structFields = new List<StructFieldInfo>();
-                        WasmBackend.Log($"[Wasm-Setup]   Struct layout: fields={sType.NumFields}, size={sType.Size}, alignment={sType.Alignment}");
+                        if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm-Setup]   Struct layout: fields={sType.NumFields}, size={sType.Size}, alignment={sType.Alignment}");
                         FlattenStructLayout(sType, 0, structFields);
-                        foreach (var sf in structFields)
-                            WasmBackend.Log($"[Wasm-Setup]     leaf: offset={sf.Offset}, wasmType=0x{sf.WasmType:X2}, size={sf.Size}, isViewPtr={sf.IsViewPtr}");
+                        if (WasmBackend.VerboseLogging)
+                            foreach (var sf in structFields)
+                                WasmBackend.Log($"[Wasm-Setup]     leaf: offset={sf.Offset}, wasmType=0x{sf.WasmType:X2}, size={sf.Size}, isViewPtr={sf.IsViewPtr}");
                     }
 
                     _paramInfos.Add(new WasmParamInfo
@@ -621,9 +622,12 @@ namespace SpawnDev.ILGPU.Wasm.Backend
 
             // (i64 fixup removed — Int64 params are now handled as user params)
 
-            WasmBackend.Log($"[Wasm-Setup] Final: _nextLocalIndex={_nextLocalIndex}, _paramCount={_paramCount}, FuncParamTypes={FuncParamTypes.Count}");
-            WasmBackend.Log($"[Wasm-Setup] _localMap: {string.Join(", ", _localMap.Select(kv => $"{kv.Key}={kv.Value}"))}");
-            WasmBackend.Log($"[Wasm-Setup] SharedMemorySize={_sharedMemorySize}, HasBarriers={_hasBarriers}");
+            if (WasmBackend.VerboseLogging)
+            {
+                WasmBackend.Log($"[Wasm-Setup] Final: _nextLocalIndex={_nextLocalIndex}, _paramCount={_paramCount}, FuncParamTypes={FuncParamTypes.Count}");
+                WasmBackend.Log($"[Wasm-Setup] _localMap: {string.Join(", ", _localMap.Select(kv => $"{kv.Key}={kv.Value}"))}");
+                WasmBackend.Log($"[Wasm-Setup] SharedMemorySize={_sharedMemorySize}, HasBarriers={_hasBarriers}");
+            }
         }
 
         private bool _parametersInitialized = false;
@@ -726,8 +730,9 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 return; // Already assigned (e.g., called twice)
 
             // Log helper info
-            foreach (var kvp in _generatorArgs.HelperMethods)
-                WasmBackend.Log($"Wasm: Helper '{kvp.Key.Name}' blocks={kvp.Key.Blocks.Count}");
+            if (WasmBackend.VerboseLogging)
+                foreach (var kvp in _generatorArgs.HelperMethods)
+                    WasmBackend.Log($"Wasm: Helper '{kvp.Key.Name}' blocks={kvp.Key.Blocks.Count}");
 
             if (_generatorArgs.HelperMethods.Count == 0)
                 return; // No helpers
@@ -749,7 +754,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                     _generatorArgs.HelperBarrierCounts[kvp.Key] = barrierCount;
                     _generatorArgs.HelperFunctionOrder.Add(kvp.Key);
                     string reason = kvp.Key.Blocks.Count > 1 ? "multi-block" : "has-barriers";
-                    WasmBackend.Log($"Wasm: Helper '{kvp.Key.Name}' promoted ({reason}): funcIdx={_generatorArgs.HelperFunctionIndices[kvp.Key]}, barriers={barrierCount}, blocks={kvp.Key.Blocks.Count}");
+                    if (WasmBackend.VerboseLogging) WasmBackend.Log($"Wasm: Helper '{kvp.Key.Name}' promoted ({reason}): funcIdx={_generatorArgs.HelperFunctionIndices[kvp.Key]}, barriers={barrierCount}, blocks={kvp.Key.Blocks.Count}");
                 }
             }
         }
@@ -840,7 +845,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             // JavaScript worker loop (BuildWasmWorkerScript) to avoid generating
             // unreachable code after the Wasm return instruction.
 
-            WasmBackend.Log($"[Wasm-CodeGen] Final BarrierCount={_barrierCounter}, HasBarriers={_hasBarriers}, SharedMemorySize={_sharedMemorySize}");
+            if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm-CodeGen] Final BarrierCount={_barrierCounter}, HasBarriers={_hasBarriers}, SharedMemorySize={_sharedMemorySize}");
         }
 
         /// <summary>
@@ -882,13 +887,16 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 blockIndex++;
             }
 
-            WasmBackend.Log($"[Wasm-SM] State machine with {_blockCount} blocks, _stateLocal=local_{_stateLocal}");
-
-            // Log block map for diagnostics (visible in AllKernelInfos via WasmBackend.Log)
-            foreach (var kvp in _blockMap)
+            if (WasmBackend.VerboseLogging)
             {
-                var termName = kvp.Key.Terminator?.GetType().Name ?? "none";
-                WasmBackend.Log($"[Wasm-SM]   Block {kvp.Value}: {kvp.Key} terminator={termName}");
+                WasmBackend.Log($"[Wasm-SM] State machine with {_blockCount} blocks, _stateLocal=local_{_stateLocal}");
+
+                // Log block map for diagnostics (visible in AllKernelInfos via WasmBackend.Log)
+                foreach (var kvp in _blockMap)
+                {
+                    var termName = kvp.Key.Terminator?.GetType().Name ?? "none";
+                    WasmBackend.Log($"[Wasm-SM]   Block {kvp.Value}: {kvp.Key} terminator={termName}");
+                }
             }
 
             // Initialize state to 0 (first block)
@@ -927,7 +935,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
 
                 _currentBlockEmitIndex = blockIndex;
 
-                WasmBackend.Log($"[Wasm-SM] Block {blockIndex}: {block}");
+                if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm-SM] Block {blockIndex}: {block}");
 
                 // Generate code for all values in this block
                 foreach (var value in block)
@@ -990,7 +998,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
 
             int trueBlock = GetBlockIndex(branch.TrueTarget);
             int falseBlock = GetBlockIndex(branch.FalseTarget);
-            WasmBackend.Log($"[Wasm-SM] IfBranch: true→{trueBlock} false→{falseBlock} (blockCount={_blockCount})");
+            if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm-SM] IfBranch: true→{trueBlock} false→{falseBlock} (blockCount={_blockCount})");
 
             EmitGetLocal(branch.Condition.Resolve());
             Code.Add(WasmOpCodes.If);
@@ -1125,8 +1133,11 @@ namespace SpawnDev.ILGPU.Wasm.Backend
 
             var sourceLocal = GetLocal(source);
             var indexLocal = GetLocal(index);
-            WasmBackend.Log($"[Wasm-LEA] target=local_{target}, source=local_{sourceLocal} (IR={source.GetType().Name} id={source.Id} type={source.Type}), index=local_{indexLocal} (IR={index.GetType().Name} id={index.Id})");
-            WasmBackend.Log($"[Wasm-LEA] _localMap dump: {string.Join(", ", _localMap.Select(kv => $"{kv.Key}={kv.Value}"))}");
+            if (WasmBackend.VerboseLogging)
+            {
+                WasmBackend.Log($"[Wasm-LEA] target=local_{target}, source=local_{sourceLocal} (IR={source.GetType().Name} id={source.Id} type={source.Type}), index=local_{indexLocal} (IR={index.GetType().Name} id={index.Id})");
+                WasmBackend.Log($"[Wasm-LEA] _localMap dump: {string.Join(", ", _localMap.Select(kv => $"{kv.Key}={kv.Value}"))}");
+            }
 
             // Determine element size
             int elemSize = 4;
@@ -1150,7 +1161,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             if (GetWasmTypeFromIR(index.Type) == WasmOpCodes.I64)
                 Code.Add(WasmOpCodes.I32WrapI64);
 
-            WasmBackend.Log($"[Wasm-LEA] value.Type={value.Type}, elemSize={elemSize}");
+            if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm-LEA] value.Type={value.Type}, elemSize={elemSize}");
             WasmModuleBuilder.EmitI32Const(Code, elemSize);
             Code.Add(WasmOpCodes.I32Mul);
             Code.Add(WasmOpCodes.I32Add);
@@ -1248,7 +1259,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 if (_paramLocals.TryGetValue(paramIdx, out var locals))
                 {
                     var targetWasmType = GetWasmType(value);
-                    WasmBackend.Log($"[Wasm-GetField] View param[{paramIdx}] field={fieldIndex} targetType={targetWasmType:X} localsCount={locals.Length} sourceType={param.Type}");
+                    if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm-GetField] View param[{paramIdx}] field={fieldIndex} targetType={targetWasmType:X} localsCount={locals.Length} sourceType={param.Type}");
 
                     // Determine stride start field for this view parameter
                     int strideStartField = _viewStrideStartField.GetValueOrDefault(paramIdx, 3);
@@ -1683,7 +1694,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 // Multi-block helper: emit function call
                 int helperBarrierCount = _generatorArgs.HelperBarrierCounts[targetMethod];
 
-                WasmBackend.Log($"[Wasm-Call] Calling helper '{targetMethod.Name}' funcIdx={helperFuncIdx}, barriers={helperBarrierCount}, barrierOffset={_barrierCounter}");
+                if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm-Call] Calling helper '{targetMethod.Name}' funcIdx={helperFuncIdx}, barriers={helperBarrierCount}, barrierOffset={_barrierCounter}");
 
                 // No barrier reset needed — generation-counting barriers require no
                 // per-call reset. The generation counter monotonically increases, so
@@ -1736,12 +1747,12 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                     _barrierCounter++;
                 }
 
-                WasmBackend.Log($"[Wasm-Call] Done calling '{targetMethod.Name}', barrierCounter now={_barrierCounter}");
+                if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm-Call] Done calling '{targetMethod.Name}', barrierCounter now={_barrierCounter}");
             }
             else
             {
                 // Inline path: single-block or multi-block (nested SM fallback)
-                WasmBackend.Log($"[Wasm-Inline] Inlining helper: {targetMethod.Name} ({targetMethod.Parameters.Count} params, {methodCall.Nodes.Length} args)");
+                if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm-Inline] Inlining helper: {targetMethod.Name} ({targetMethod.Parameters.Count} params, {methodCall.Nodes.Length} args)");
 
                 // Map call arguments to helper's parameters
                 for (int i = 0; i < targetMethod.Parameters.Count && i < methodCall.Nodes.Length; i++)
@@ -1753,7 +1764,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                     if (_localMap.TryGetValue(GetValueKey(arg), out uint argLocal))
                     {
                         _localMap[paramKey] = argLocal;
-                        WasmBackend.Log($"[Wasm-Inline]   param[{i}] '{paramKey}' -> existing local_{argLocal}");
+                        if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm-Inline]   param[{i}] '{paramKey}' -> existing local_{argLocal}");
                     }
                     else
                     {
@@ -1761,7 +1772,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                         var local = AllocateLocal(param, paramWasmType);
                         EmitGetLocal(arg);
                         WasmModuleBuilder.EmitLocalSet(Code, local);
-                        WasmBackend.Log($"[Wasm-Inline]   param[{i}] '{paramKey}' -> new local_{local} (copied)");
+                        if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm-Inline]   param[{i}] '{paramKey}' -> new local_{local} (copied)");
                     }
                 }
 
@@ -1859,7 +1870,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                     _currentBlockEmitIndex = savedCurrentBlockEmitIndex;
                 }
 
-                WasmBackend.Log($"[Wasm-Inline] Done inlining {targetMethod.Name}");
+                if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm-Inline] Done inlining {targetMethod.Name}");
             }
         }
 
@@ -1918,7 +1929,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             var target = AllocateLocal(value);
             WasmModuleBuilder.EmitLocalGet(Code, _dynamicSharedLengthLocal);
             WasmModuleBuilder.EmitLocalSet(Code, target);
-            WasmBackend.Log($"[Wasm-DynShared] DynamicMemoryLengthValue -> local_{target} = local_{_dynamicSharedLengthLocal}");
+            if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm-DynShared] DynamicMemoryLengthValue -> local_{target} = local_{_dynamicSharedLengthLocal}");
         }
 
         /// <summary>
@@ -1947,13 +1958,13 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 // Extend to i64 since GetViewLength returns long.
                 WasmModuleBuilder.EmitLocalGet(Code, locals[1]);
                 Code.Add(WasmOpCodes.I64ExtendI32S);
-                WasmBackend.Log($"[Wasm-GetViewLength] param[{paramIdx}] length -> local_{locals[1]} (i32 extended to i64)");
+                if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm-GetViewLength] param[{paramIdx}] length -> local_{locals[1]} (i32 extended to i64)");
             }
             else
             {
                 // Fallback: emit 0 as i64 (should not happen for well-formed kernels)
                 WasmModuleBuilder.EmitI64Const(Code, 0);
-                WasmBackend.Log($"[Wasm-GetViewLength] WARN: could not resolve view to parameter (source={viewSource?.GetType().Name}), emitting 0L");
+                if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm-GetViewLength] WARN: could not resolve view to parameter (source={viewSource?.GetType().Name}), emitting 0L");
             }
 
             WasmModuleBuilder.EmitLocalSet(Code, target);
@@ -2034,7 +2045,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                     _sharedAllocaMetadata[key] = (elemTypeStr, arraySize);
                     _dynamicSharedElementSize = elemSize;
                     _hasBarriers = true;
-                    WasmBackend.Log($"[Wasm-SharedMem] Dynamic alloca {key}: offset={_sharedMemorySize}, elemSize={elemSize}");
+                    if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm-SharedMem] Dynamic alloca {key}: offset={_sharedMemorySize}, elemSize={elemSize}");
                     // Don't advance _sharedMemorySize — dynamic size is not known at compile time
                 }
                 else if (allocaInfo.IsArray)
@@ -2046,7 +2057,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                     _sharedAllocaMetadata[key] = (elemTypeStr, arraySize);
                     _sharedMemorySize += arrayBytes;
                     _hasBarriers = true;
-                    WasmBackend.Log($"[Wasm-SharedMem] Static array alloca {key}: offset={_sharedMemorySize - arrayBytes}, size={arrayBytes}, arrayLen={allocaInfo.ArraySize}, elemSize={elemSize}");
+                    if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm-SharedMem] Static array alloca {key}: offset={_sharedMemorySize - arrayBytes}, size={arrayBytes}, arrayLen={allocaInfo.ArraySize}, elemSize={elemSize}");
                 }
                 else
                 {
@@ -2056,7 +2067,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                     _sharedAllocaMetadata[key] = (elemTypeStr, arraySize);
                     _sharedMemorySize += scalarBytes;
                     _hasBarriers = true;
-                    WasmBackend.Log($"[Wasm-SharedMem] Scalar alloca {key}: offset={_sharedMemorySize - scalarBytes}, size={scalarBytes}");
+                    if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm-SharedMem] Scalar alloca {key}: offset={_sharedMemorySize - scalarBytes}, size={scalarBytes}");
                 }
             }
         }
@@ -2090,12 +2101,12 @@ namespace SpawnDev.ILGPU.Wasm.Backend
 
                     if (matchedKey != null && _sharedAllocaOffsets.TryGetValue(matchedKey, out offset))
                     {
-                        WasmBackend.Log($"[Wasm-SharedMem] Alloca {key}: fallback match to {matchedKey} (type={allocaElemType}, size={allocaArrayLen})");
+                        if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm-SharedMem] Alloca {key}: fallback match to {matchedKey} (type={allocaElemType}, size={allocaArrayLen})");
                     }
                     else
                     {
                         // No match found — emit base alloca as a safety fallback
-                        WasmBackend.Log($"[Wasm-SharedMem] WARNING: Alloca {key} (type={allocaElemType}, size={allocaArrayLen}) has no matching shared entry");
+                        if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm-SharedMem] WARNING: Alloca {key} (type={allocaElemType}, size={allocaArrayLen}) has no matching shared entry");
                         base.GenerateCode(value);
                         return;
                     }
@@ -2128,7 +2139,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                         Code.Add(WasmOpCodes.I32Add);
                     }
                     WasmModuleBuilder.EmitLocalSet(Code, localTarget);
-                    WasmBackend.Log($"[Wasm-Alloca] Local alloca: key={key}, size={allocSize}, scratchOffset={baseOff}");
+                    if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm-Alloca] Local alloca: key={key}, size={allocSize}, scratchOffset={baseOff}");
                     return;
                 }
             }
@@ -2142,7 +2153,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 Code.Add(WasmOpCodes.I32Add);
             }
             WasmModuleBuilder.EmitLocalSet(Code, target);
-            WasmBackend.Log($"[Wasm-SharedMem] Alloca {key}: sharedMemBase + {offset}");
+            if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm-SharedMem] Alloca {key}: sharedMemBase + {offset}");
         }
 
         #endregion
@@ -2269,7 +2280,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             EmitBarrier(barrier2);
 
             _broadcastCounter++;
-            WasmBackend.Log($"[Wasm-Broadcast] Broadcast #{_broadcastCounter - 1}: slot offset={broadcastSlotOffset}, barriers={barrier1},{barrier2}");
+            if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm-Broadcast] Broadcast #{_broadcastCounter - 1}: slot offset={broadcastSlotOffset}, barriers={barrier1},{barrier2}");
         }
 
         public override void GenerateCode(MemoryBarrier barrier)
@@ -2444,7 +2455,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             WasmModuleBuilder.EmitU32Leb128(Code, 0x03); // atomic.fence
             Code.Add(0x00);
 
-            WasmBackend.Log($"[Wasm-Barrier] Emitted generation barrier #{barrierIdx} at byteOffset={byteOffset}");
+            if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm-Barrier] Emitted generation barrier #{barrierIdx} at byteOffset={byteOffset}");
         }
 
         #endregion

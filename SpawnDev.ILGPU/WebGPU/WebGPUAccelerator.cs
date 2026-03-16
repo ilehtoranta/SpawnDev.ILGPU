@@ -563,9 +563,9 @@ namespace SpawnDev.ILGPU.WebGPU
 
             if ((WebGPUBackend.DiagnosticFlags & WGSLDiagnostics.Dispatch) != 0)
             {
-                Console.WriteLine($"\n[WebGPU] ---- WGSL for dispatch ----");
-                Console.WriteLine(compiledKernel.WGSLSource);
-                Console.WriteLine("[WebGPU] ----------------------------\n");
+                WebGPUBackend.Log($"\n[WebGPU] ---- WGSL for dispatch ----");
+                WebGPUBackend.Log(compiledKernel.WGSLSource);
+                WebGPUBackend.Log("[WebGPU] ----------------------------\n");
             }
 
             // Build override constants for dynamic shared memory
@@ -642,12 +642,13 @@ namespace SpawnDev.ILGPU.WebGPU
                         // the kernel was loaded without KernelSpecialization matching the
                         // dispatch's GroupDim. Adding KernelSpecialization to the LoadKernel
                         // call eliminates the need for runtime WGSL patching.
-                        WebGPUBackend.Diag(WGSLDiagnostics.Dispatch,
-                            $"[WebGPU] WARNING: Runtime @workgroup_size patching: " +
-                            $"compiled=({compiledX},{compiledY},{compiledZ}), " +
-                            $"dispatch=({reqX},{reqY},{reqZ}). " +
-                            $"Kernel: {compiledKernel.EntryPoint?.Name ?? "unknown"}. " +
-                            $"Consider adding KernelSpecialization to LoadKernel.");
+                        if (WebGPUBackend.VerboseLogging)
+                            WebGPUBackend.Log(
+                                $"[WebGPU] WARNING: Runtime @workgroup_size patching: " +
+                                $"compiled=({compiledX},{compiledY},{compiledZ}), " +
+                                $"dispatch=({reqX},{reqY},{reqZ}). " +
+                                $"Kernel: {compiledKernel.EntryPoint?.Name ?? "unknown"}. " +
+                                $"Consider adding KernelSpecialization to LoadKernel.");
 
                         wgslSource = wgslSource.Replace(
                             wgMatch.Value,
@@ -1267,7 +1268,7 @@ namespace SpawnDev.ILGPU.WebGPU
                     if (WebGPUBackend.VerboseLogging)
                     {
                         var kernelName = compiledKernel.Name ?? "unknown";
-                        Console.WriteLine($"[WebGPU-BindGroup] Trimming entries from {entries.Count} to {expectedCount} for kernel '{kernelName}' (HasScalarPacking={compiledKernel.HasScalarPacking})");
+                        WebGPUBackend.Log($"[WebGPU-BindGroup] Trimming entries from {entries.Count} to {expectedCount} for kernel '{kernelName}' (HasScalarPacking={compiledKernel.HasScalarPacking})");
                     }
                     while (entries.Count > expectedCount)
                         entries.RemoveAt(entries.Count - 1);
@@ -1335,7 +1336,7 @@ namespace SpawnDev.ILGPU.WebGPU
                 else if (dimension is LongIndex2D l2) { workX = (uint)Math.Ceiling(l2.X / 8.0); workY = (uint)Math.Ceiling(l2.Y / 8.0); }
                 else if (dimension is LongIndex3D l3) { workX = (uint)Math.Ceiling(l3.X / 4.0); workY = (uint)Math.Ceiling(l3.Y / 4.0); workZ = (uint)Math.Ceiling(l3.Z / 4.0); }
 
-                WebGPUBackend.Diag(WGSLDiagnostics.Dispatch, $"[WebGPU] Dispatching: ({workX}, {workY}, {workZ})");
+                if (WebGPUBackend.VerboseLogging) WebGPUBackend.Log($"[WebGPU] Dispatching: ({workX}, {workY}, {workZ})");
 
                 // Use the stream's shared encoder for batched submission
                 var webGpuStream = stream as WebGPUStream ?? (WebGPUStream)webGpuAccel.DefaultStream;

@@ -165,22 +165,12 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         public static bool EnableWGSLValidation { get; set; } = true;
 
         /// <summary>
-        /// Logs a diagnostic message if the specified category is enabled.
+        /// Writes a message to the console. Caller MUST check <see cref="VerboseLogging"/>
+        /// or <see cref="DiagnosticFlags"/> BEFORE constructing the message string
+        /// to avoid allocating interpolated strings when logging is disabled.
         /// </summary>
-        public static void Diag(WGSLDiagnostics category, string message)
-        {
-            if ((DiagnosticFlags & category) != 0)
-                Console.WriteLine(message);
-        }
-
-        /// <summary>
-        /// Logs a message to the console if any diagnostic flag is set.
-        /// </summary>
-        public static void Log(string message)
-        {
-            if (DiagnosticFlags != WGSLDiagnostics.None)
-                Console.WriteLine(message);
-        }
+        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
+        public static void Log(string message) => Console.WriteLine(message);
 
         // Pre-compiled patterns for WGSL validation
         private static readonly System.Text.RegularExpressions.Regex s_fnNamePattern =
@@ -264,7 +254,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 foreach (var e in errors)
                     sb.Append($"\n  - {e}");
                 var message = sb.ToString();
-                Diag(WGSLDiagnostics.Compilation, $"[WGSLValidation] {message}");
+                if (VerboseLogging) Log($"[WGSLValidation] {message}");
                 throw new InvalidOperationException(message);
             }
         }
@@ -419,7 +409,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
                     var newContainer = createMethod.Invoke(null, null);
                     containers.SetValue(newContainer, webGpuIndex);
-                    WebGPUBackend.Log("WebGPU: Initialized BackendContainer for WebGPU.");
+                    if (VerboseLogging) Log("WebGPU: Initialized BackendContainer for WebGPU.");
                 }
                 else
                 {
@@ -430,7 +420,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     var matchers = matchersField.GetValue(container);
                     if (matchers == null)
                     {
-                        WebGPUBackend.Log("WebGPU: BackendContainer found but uninitialized. Re-initializing.");
+                        if (VerboseLogging) Log("WebGPU: BackendContainer found but uninitialized. Re-initializing.");
                         var createMethod = containerType.GetMethod("Create", BindingFlags.Static | BindingFlags.Public);
                         var newContainer = createMethod.Invoke(null, null);
                         containers.SetValue(newContainer, webGpuIndex);
@@ -447,7 +437,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         {
             if (method == null)
             {
-                WebGPUBackend.Log("WebGPU: Skipping invalid intrinsic method (null)");
+                if (VerboseLogging) Log("WebGPU: Skipping invalid intrinsic method (null)");
                 return;
             }
             if (VerboseLogging) Log($"WebGPU: Registering Intrinsic: {method.DeclaringType.Name}.{method.Name}");
@@ -602,11 +592,11 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 {
                     RegAll(xmathType, "Rsqrt", WGSLCodeGenerator.GenerateRsqrt);
                     RegAll(xmathType, "Rcp", WGSLCodeGenerator.GenerateRcp);
-                    WebGPUBackend.Log("WebGPU: Registered XMath intrinsics (Rsqrt, Rcp)");
+                    if (VerboseLogging) Log("WebGPU: Registered XMath intrinsics (Rsqrt, Rcp)");
                 }
                 else
                 {
-                    WebGPUBackend.Log("WebGPU: XMath type not found - ILGPU.Algorithms may not be loaded");
+                    if (VerboseLogging) Log("WebGPU: XMath type not found - ILGPU.Algorithms may not be loaded");
                 }
             }
             catch (Exception ex)
@@ -633,17 +623,17 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     if (groupReduce != null)
                     {
                         RegisterIntrinsic(groupReduce, WGSLCodeGenerator.GenerateGroupReduce);
-                        WebGPUBackend.Log("WebGPU: Registered GroupExtensions.Reduce intrinsic");
+                        if (VerboseLogging) Log("WebGPU: Registered GroupExtensions.Reduce intrinsic");
                     }
                     if (groupAllReduce != null)
                     {
                         RegisterIntrinsic(groupAllReduce, WGSLCodeGenerator.GenerateGroupReduce);
-                        WebGPUBackend.Log("WebGPU: Registered GroupExtensions.AllReduce intrinsic");
+                        if (VerboseLogging) Log("WebGPU: Registered GroupExtensions.AllReduce intrinsic");
                     }
                 }
                 else
                 {
-                    WebGPUBackend.Log("WebGPU: GroupExtensions type not found - ILGPU.Algorithms may not be loaded");
+                    if (VerboseLogging) Log("WebGPU: GroupExtensions type not found - ILGPU.Algorithms may not be loaded");
                 }
 
                 if (warpExtType != null)
@@ -654,17 +644,17 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     if (warpReduce != null)
                     {
                         RegisterIntrinsic(warpReduce, WGSLCodeGenerator.GenerateWarpReduce);
-                        WebGPUBackend.Log("WebGPU: Registered WarpExtensions.Reduce intrinsic");
+                        if (VerboseLogging) Log("WebGPU: Registered WarpExtensions.Reduce intrinsic");
                     }
                     if (warpAllReduce != null)
                     {
                         RegisterIntrinsic(warpAllReduce, WGSLCodeGenerator.GenerateWarpReduce);
-                        WebGPUBackend.Log("WebGPU: Registered WarpExtensions.AllReduce intrinsic");
+                        if (VerboseLogging) Log("WebGPU: Registered WarpExtensions.AllReduce intrinsic");
                     }
                 }
                 else
                 {
-                    WebGPUBackend.Log("WebGPU: WarpExtensions type not found - ILGPU.Algorithms may not be loaded");
+                    if (VerboseLogging) Log("WebGPU: WarpExtensions type not found - ILGPU.Algorithms may not be loaded");
                 }
 
                 // Also register the IL-level implementations that ILGPU inlines when compiling
@@ -682,12 +672,12 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     if (ilGroupReduce != null)
                     {
                         RegisterIntrinsic(ilGroupReduce, WGSLCodeGenerator.GenerateGroupAllReduce);
-                        WebGPUBackend.Log("WebGPU: Registered ILGroupExtensions.Reduce intrinsic");
+                        if (VerboseLogging) Log("WebGPU: Registered ILGroupExtensions.Reduce intrinsic");
                     }
                     if (ilGroupAllReduce != null)
                     {
                         RegisterIntrinsic(ilGroupAllReduce, WGSLCodeGenerator.GenerateGroupAllReduce);
-                        WebGPUBackend.Log("WebGPU: Registered ILGroupExtensions.AllReduce intrinsic");
+                        if (VerboseLogging) Log("WebGPU: Registered ILGroupExtensions.AllReduce intrinsic");
                     }
                 }
 
@@ -699,12 +689,12 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     if (ilWarpReduce != null)
                     {
                         RegisterIntrinsic(ilWarpReduce, WGSLCodeGenerator.GenerateWarpReduce);
-                        WebGPUBackend.Log("WebGPU: Registered ILWarpExtensions.Reduce intrinsic");
+                        if (VerboseLogging) Log("WebGPU: Registered ILWarpExtensions.Reduce intrinsic");
                     }
                     if (ilWarpAllReduce != null)
                     {
                         RegisterIntrinsic(ilWarpAllReduce, WGSLCodeGenerator.GenerateWarpReduce);
-                        WebGPUBackend.Log("WebGPU: Registered ILWarpExtensions.AllReduce intrinsic");
+                        if (VerboseLogging) Log("WebGPU: Registered ILWarpExtensions.AllReduce intrinsic");
                     }
                 }
 
@@ -716,12 +706,12 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     if (ptxWarpReduce != null)
                     {
                         RegisterIntrinsic(ptxWarpReduce, WGSLCodeGenerator.GenerateWarpReduce);
-                        WebGPUBackend.Log("WebGPU: Registered PTXWarpExtensions.Reduce intrinsic");
+                        if (VerboseLogging) Log("WebGPU: Registered PTXWarpExtensions.Reduce intrinsic");
                     }
                     if (ptxWarpAllReduce != null)
                     {
                         RegisterIntrinsic(ptxWarpAllReduce, WGSLCodeGenerator.GenerateWarpReduce);
-                        WebGPUBackend.Log("WebGPU: Registered PTXWarpExtensions.AllReduce intrinsic");
+                        if (VerboseLogging) Log("WebGPU: Registered PTXWarpExtensions.AllReduce intrinsic");
                     }
                 }
 
@@ -948,11 +938,11 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 catch { /* best-effort dump */ }
             }
 
-            Diag(WGSLDiagnostics.Compilation, $"--- GENERATED WGSL ({methodName}) ---");
-            if ((DiagnosticFlags & WGSLDiagnostics.Compilation) != 0)
+            if (VerboseLogging)
             {
-                Console.WriteLine(wgslSource);
-                Console.WriteLine("-----------------------");
+                Log($"--- GENERATED WGSL ({methodName}) ---");
+                Log(wgslSource);
+                Log("-----------------------");
             }
 
             return new WebGPUCompiledKernel(

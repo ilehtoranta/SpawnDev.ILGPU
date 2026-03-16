@@ -68,7 +68,8 @@ namespace SpawnDev.ILGPU.Wasm.Algorithms
                     IntrinsicBindingFlags);
                 if (sourceMethod == null)
                 {
-                    Console.WriteLine($"[WasmAlg] ERROR: Source method '{sourceType.Name}.{name}' not found!");
+                    if (Backend.WasmBackend.VerboseLogging)
+                        Backend.WasmBackend.Log($"[WasmAlg] ERROR: Source method '{sourceType.Name}.{name}' not found!");
                     return;
                 }
                 var targetMethod = targetType.GetMethod(
@@ -76,7 +77,8 @@ namespace SpawnDev.ILGPU.Wasm.Algorithms
                     BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static | BindingFlags.Instance);
                 if (targetMethod == null)
                 {
-                    Console.WriteLine($"[WasmAlg] ERROR: Target method '{targetType.Name}.{name}' not found!");
+                    if (Backend.WasmBackend.VerboseLogging)
+                        Backend.WasmBackend.Log($"[WasmAlg] ERROR: Target method '{targetType.Name}.{name}' not found!");
                     return;
                 }
                 manager.RegisterMethod(
@@ -88,7 +90,8 @@ namespace SpawnDev.ILGPU.Wasm.Algorithms
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"[WasmAlg] EXCEPTION registering {name}: {ex}");
+                if (Backend.WasmBackend.VerboseLogging)
+                    Backend.WasmBackend.Log($"[WasmAlg] EXCEPTION registering {name}: {ex}");
             }
         }
 

@@ -232,14 +232,13 @@ namespace SpawnDev.ILGPU.WebGPU
             try
             {
                 var message = e.Error?.Message ?? "Unknown GPU error";
-                Console.WriteLine($"[WebGPU ERROR] {message}");
+                if (WebGPUBackend.VerboseLogging)
+                    WebGPUBackend.Log($"[WebGPU ERROR] {message}");
 
-                bool isShaderError = message.Contains("unresolved") || message.Contains("parsing") || message.Contains("WGSL")
-                    || message.Contains("binding") || message.Contains("BindGroup");
-                if (_lastCompiledWGSL != null && (isShaderError || WebGPUBackend.VerboseLogging))
+                if (WebGPUBackend.VerboseLogging && _lastCompiledWGSL != null)
                 {
-                    Console.Error.WriteLine($"[WebGPU ERROR] WGSL source ({_lastCompiledWGSL.Length} chars):");
-                    Console.Error.WriteLine(_lastCompiledWGSL);
+                    WebGPUBackend.Log($"[WebGPU ERROR] WGSL source ({_lastCompiledWGSL.Length} chars):");
+                    WebGPUBackend.Log(_lastCompiledWGSL);
                 }
 
                 // Capture non-benign errors for propagation via ThrowIfGpuErrors()
@@ -279,7 +278,8 @@ namespace SpawnDev.ILGPU.WebGPU
                     return;
 
                 IsDeviceLost = true;
-                Console.Error.WriteLine($"[WebGPU] Device lost: reason={reason}, message={message}");
+                if (WebGPUBackend.VerboseLogging)
+                    WebGPUBackend.Log($"[WebGPU] Device lost: reason={reason}, message={message}");
                 DeviceLost?.Invoke(reason, message);
             }
             catch

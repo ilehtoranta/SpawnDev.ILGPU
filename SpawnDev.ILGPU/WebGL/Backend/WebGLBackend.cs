@@ -49,13 +49,12 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         public static bool EnableShaderCaching { get; set; } = true;
 
         /// <summary>
-        /// Logs a message to the console if VerboseLogging is enabled.
+        /// Writes a message to the console.
+        /// Caller MUST check <see cref="VerboseLogging"/> BEFORE constructing the message string
+        /// to avoid allocating interpolated strings when logging is disabled.
         /// </summary>
-        public static void Log(string message)
-        {
-            if (VerboseLogging)
-                Console.WriteLine(message);
-        }
+        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
+        public static void Log(string message) => Console.WriteLine(message);
 
         #region Instance
 
@@ -145,7 +144,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
 
                     if (webGlIndex >= containers.Length)
                     {
-                        Log($"WebGL: Resizing IntrinsicManager containers from {containers.Length} to {webGlIndex + 1}");
+                        if (VerboseLogging) Log($"WebGL: Resizing IntrinsicManager containers from {containers.Length} to {webGlIndex + 1}");
                         var newContainers = Array.CreateInstance(containerType, webGlIndex + 1);
                         Array.Copy(containers, newContainers, containers.Length);
                         containers = newContainers;
@@ -154,7 +153,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
 
                     var newContainer = createMethod.Invoke(null, null);
                     containers.SetValue(newContainer, webGlIndex);
-                    Log("WebGL: Initialized BackendContainer for WebGL.");
+                    if (VerboseLogging) Log("WebGL: Initialized BackendContainer for WebGL.");
                 }
                 else
                 {
@@ -164,7 +163,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                     var matchers = matchersField.GetValue(container);
                     if (matchers == null)
                     {
-                        Log("WebGL: BackendContainer found but uninitialized. Re-initializing.");
+                        if (VerboseLogging) Log("WebGL: BackendContainer found but uninitialized. Re-initializing.");
                         var createMethod = containerType.GetMethod("Create", BindingFlags.Static | BindingFlags.Public);
                         var newContainer = createMethod.Invoke(null, null);
                         containers.SetValue(newContainer, webGlIndex);
@@ -173,7 +172,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             }
             catch (Exception ex)
             {
-                Log($"WebGL: Error fixing IntrinsicManager: {ex}");
+                if (VerboseLogging) Log($"WebGL: Error fixing IntrinsicManager: {ex}");
             }
         }
 
@@ -181,10 +180,10 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         {
             if (method == null)
             {
-                Log("WebGL: Skipping invalid intrinsic method (null)");
+                if (VerboseLogging) Log("WebGL: Skipping invalid intrinsic method (null)");
                 return;
             }
-            Log($"WebGL: Registering Intrinsic: {method.DeclaringType.Name}.{method.Name}");
+            if (VerboseLogging) Log($"WebGL: Registering Intrinsic: {method.DeclaringType.Name}.{method.Name}");
             GetIntrinsicManager(Context).RegisterMethod(
                 method,
                 new WebGLIntrinsic(
@@ -204,13 +203,13 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 RegisterIntrinsic(method, handler);
             }
             if (!found)
-                Log($"WebGL: Intrinsic not found: {type.Name}.{methodName}");
+                if (VerboseLogging) Log($"WebGL: Intrinsic not found: {type.Name}.{methodName}");
         }
 
         private void RegisterRedirect(MethodInfo original, MethodInfo target)
         {
             if (original == null || target == null) return;
-            Log($"WebGL: Redirecting {original.DeclaringType.Name}.{original.Name} -> {target.DeclaringType.Name}.{target.Name}");
+            if (VerboseLogging) Log($"WebGL: Redirecting {original.DeclaringType.Name}.{original.Name} -> {target.DeclaringType.Name}.{target.Name}");
             GetIntrinsicManager(Context).RegisterMethod(
                 original,
                 new WebGLIntrinsic(
@@ -255,13 +254,13 @@ namespace SpawnDev.ILGPU.WebGL.Backend
 
                     if (wrapper != null)
                     {
-                        Log($"WebGL: Mapping {type.Name}.{name}({string.Join(",", pTypes.Select(pt => pt.Name))}) to {t.Name}.{name}");
+                        if (VerboseLogging) Log($"WebGL: Mapping {type.Name}.{name}({string.Join(",", pTypes.Select(pt => pt.Name))}) to {t.Name}.{name}");
                         Reg(target, wrapper, handler);
                     }
                     else
                     {
                         var pTypeNames = string.Join(", ", pTypes.Select(pt => pt.Name));
-                        Log($"WebGL: Missing wrapper for {type.Name}.{name}({pTypeNames})");
+                        if (VerboseLogging) Log($"WebGL: Missing wrapper for {type.Name}.{name}({pTypeNames})");
                     }
                 }
             }
@@ -305,12 +304,12 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 {
                     RegAll(xmathType, "Rsqrt", GLSLCodeGenerator.GenerateRsqrt);
                     RegAll(xmathType, "Rcp", GLSLCodeGenerator.GenerateRcp);
-                    Log("WebGL: Registered XMath intrinsics (Rsqrt, Rcp)");
+                    if (VerboseLogging) Log("WebGL: Registered XMath intrinsics (Rsqrt, Rcp)");
                 }
             }
             catch (Exception ex)
             {
-                Log($"WebGL: Error registering XMath intrinsics: {ex.Message}");
+                if (VerboseLogging) Log($"WebGL: Error registering XMath intrinsics: {ex.Message}");
             }
         }
 

@@ -204,8 +204,6 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                 }
             }
 
-            Console.WriteLine("Scan group boundary values:\n" + details);
-
             if (errors > 0)
                 throw new Exception($"GlobalInclusiveScan n={n}: {errors}/{n} wrong values. " +
                     $"First error at [{firstErrorIdx}].\n" +
@@ -333,8 +331,6 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                 if (violations > 0 && firstFailure == null)
                     firstFailure = $"First failure at n={n}: {violations} order violations out of {n} elements";
             }
-
-            Console.WriteLine("RadixSort Threshold Probe Results:\n" + results);
 
             if (firstFailure != null)
                 throw new Exception($"RadixSortThresholdProbe: {firstFailure}\n\nFull results:\n{results}");
@@ -977,7 +973,6 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                     $"ScanBroadcastIsolation: {errors}/{numGroups} wrong left boundaries.\n" +
                     $"Bug is in pass 2 (group scan + broadcast).\n{details}");
 
-            Console.WriteLine("ScanBroadcastIsolation: All 16 left boundaries correct — bug is in pass 1.");
         });
 
         /// <summary>
@@ -1016,10 +1011,6 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                     errors++;
                 }
             }
-
-            Console.WriteLine("AllReduce per group results:");
-            for (int g = 0; g < 16; g++)
-                Console.WriteLine($"  Group {g}: {result[g]} (expected {256 * (g + 1)})");
 
             if (errors > 0)
                 throw new Exception(
@@ -1131,8 +1122,6 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                     boundaryDetails += $"  Group {grp} [{i}]: got={result[i]}, expected={rSum}, diff={result[i] - rSum}\n";
                 }
             }
-            Console.WriteLine("DualScan group boundaries:\n" + boundaryDetails);
-
             if (errors > 0)
                 throw new Exception(
                     $"DualScanKernel: {errors}/{n} wrong values.\n" +
@@ -1223,8 +1212,6 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                     boundaryDetails += $"  Group {grp} [{i}]: got={result[i]}, expected={rSum}, diff={result[i] - rSum}\n";
                 }
             }
-            Console.WriteLine("TwoPassScan group boundaries:\n" + boundaryDetails);
-
             if (errors > 0)
                 throw new Exception(
                     $"TwoPassScanSimulation: {errors}/{n} wrong values.\n" +
