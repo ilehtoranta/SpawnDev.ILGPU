@@ -406,9 +406,12 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 // of representation (even constant-folded expressions). Replace with
                 // -2147483647 which is semantically equivalent for bounds checks.
                 .Replace("int(-2147483648)", "int(-2147483647)");
-            Log("--- GENERATED GLSL ---");
-            Log(glslSource);
-            Log("-----------------------");
+            if (VerboseLogging)
+            {
+                Log("--- GENERATED GLSL ---");
+                Log(glslSource);
+                Log("-----------------------");
+            }
             return new WebGLCompiledKernel(
                 Context,
                 entryPoint,
