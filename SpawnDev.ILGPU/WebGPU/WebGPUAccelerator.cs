@@ -1288,6 +1288,49 @@ namespace SpawnDev.ILGPU.WebGPU
                         if (WebGPUBackend.VerboseLogging) WebGPUBackend.Log($"  entries[{ei}]: binding={entries[ei].Binding}");
                 }
 
+                // ── WebGPU aliasing check ──────────────────────────────────
+                // WebGPU forbids binding the same buffer region to multiple
+                // read_write storage bindings in the same dispatch. This happens
+                // when the caller passes the same ArrayView as two different
+                // kernel parameters. Detect and throw a clear error instead of
+                // silently producing zeros.
+                {
+                    var entryArr = entries;
+                    for (int ei = 0; ei < entryArr.Count; ei++)
+                    {
+                        var bindA = entryArr[ei].Resource?.Value as GPUBufferBinding;
+                        if (bindA == null) continue;
+
+                        for (int ej = ei + 1; ej < entryArr.Count; ej++)
+                        {
+                            var bindB = entryArr[ej].Resource?.Value as GPUBufferBinding;
+                            if (bindB == null) continue;
+
+                            // Same underlying GPU buffer?
+                            if (bindA.Buffer == null || bindB.Buffer == null) continue;
+                            if (!ReferenceEquals(bindA.Buffer, bindB.Buffer)) continue;
+
+                            // Check for overlapping ranges
+                            ulong startA = bindA.Offset ?? 0;
+                            ulong endA = startA + (bindA.Size ?? 0);
+                            ulong startB = bindB.Offset ?? 0;
+                            ulong endB = startB + (bindB.Size ?? 0);
+
+                            if (startA < endB && startB < endA)
+                            {
+                                var kernelName = compiledKernel.Name ?? "unknown";
+                                throw new InvalidOperationException(
+                                    $"[WebGPU] Storage buffer aliasing detected in kernel '{kernelName}': " +
+                                    $"binding {entryArr[ei].Binding} and binding {entryArr[ej].Binding} " +
+                                    $"reference the same GPU buffer with overlapping ranges " +
+                                    $"([{startA}..{endA}) and [{startB}..{endB})). " +
+                                    $"WebGPU forbids binding the same buffer to multiple read_write storage slots. " +
+                                    $"Use separate buffers for each kernel parameter.");
+                            }
+                        }
+                    }
+                }
+
                 var bindGroupDesc = new GPUBindGroupDescriptor
                 {
                     Layout = shader.BindGroupLayout!,
