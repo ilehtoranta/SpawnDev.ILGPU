@@ -1,17 +1,17 @@
 using global::ILGPU;
 using global::ILGPU.Runtime;
+using SpawnDev.BlazorJS.JSObjects;
 using SpawnDev.ILGPU.WebGPU.Backend;
 using System.Runtime.InteropServices;
 
 namespace SpawnDev.ILGPU.WebGPU
 {
     /// <summary>
-    /// Extension methods for ILGPU buffer types to support async readback in WebGPU.
-    /// Routes through to WebGPUBuffer's CopyToHostAsync which uses a cached staging buffer.
+    /// Extension methods for ILGPU buffer types to support WebGPU-specific operations:
+    /// async readback, native buffer access, and GPU→GPU copy.
     /// </summary>
     public static class WebGPUBufferExtensions
     {
-
         /// <summary>
         /// Copies a sub-range of data from the GPU buffer back to the host asynchronously.
         /// Allocates and returns a new T[] array of the specified length.
@@ -36,7 +36,7 @@ namespace SpawnDev.ILGPU.WebGPU
         /// <param name="count">Number of elements to copy. If null, copies as many as will fit in destination.</param>
         public static async Task CopyToHostAsync<T>(this MemoryBuffer1D<T, Stride1D.Dense> buffer, T[] destination, long sourceOffset = 0, long? count = null) where T : unmanaged
         {
-            var webGpuBuffer = GetWebGPUBuffer((MemoryBuffer)buffer);
+            var webGpuBuffer = buffer.GetWebGPUMemoryBuffer();
             var elementSize = Marshal.SizeOf<T>();
             var copyCount = count ?? Math.Min(destination.Length, buffer.Length - sourceOffset);
             // NativeBuffer is WebGPUBuffer<byte>, use generic overload to reinterpret as T
@@ -44,14 +44,42 @@ namespace SpawnDev.ILGPU.WebGPU
         }
 
         /// <summary>
-        /// Gets the underlying WebGPUMemoryBuffer from an ILGPU MemoryBuffer.
+        /// Gets the underlying WebGPUMemoryBuffer from an ILGPU MemoryBuffer1D.
+        /// Provides access to NativeBuffer and other WebGPU-specific functionality.
         /// </summary>
-        private static WebGPUMemoryBuffer GetWebGPUBuffer(MemoryBuffer buffer)
+        public static WebGPUMemoryBuffer GetWebGPUMemoryBuffer<T>(this MemoryBuffer1D<T, Stride1D.Dense> buffer) where T : unmanaged
+            => GetWebGPUMemoryBuffer((MemoryBuffer)buffer);
+
+        /// <summary>
+        /// Gets the underlying WebGPUMemoryBuffer from an ILGPU MemoryBuffer.
+        /// Provides access to NativeBuffer and other WebGPU-specific functionality.
+        /// </summary>
+        public static WebGPUMemoryBuffer GetWebGPUMemoryBuffer(this MemoryBuffer buffer)
         {
             var iView = (IArrayView)buffer;
             if (iView.Buffer is WebGPUMemoryBuffer webGpuBuffer)
                 return webGpuBuffer;
-            throw new InvalidOperationException("CopyToHostAsync is only supported for WebGPU-backed buffers. The buffer must be allocated on a WebGPUAccelerator.");
+            throw new InvalidOperationException("Only supported for WebGPU-backed buffers. The buffer must be allocated on a WebGPUAccelerator.");
+        }
+
+        /// <summary>
+        /// Gets the native WebGPU GPUBuffer from an ILGPU MemoryBuffer1D.
+        /// Shortcut for buffer.GetWebGPUMemoryBuffer().NativeBuffer.NativeBuffer.
+        /// Returns null if the buffer is not WebGPU-backed.
+        /// </summary>
+        public static GPUBuffer? GetGPUBuffer<T>(this MemoryBuffer1D<T, Stride1D.Dense> buffer) where T : unmanaged
+            => GetGPUBuffer((MemoryBuffer)buffer);
+
+        /// <summary>
+        /// Gets the native WebGPU GPUBuffer from an ILGPU MemoryBuffer.
+        /// Returns null if the buffer is not WebGPU-backed.
+        /// </summary>
+        public static GPUBuffer? GetGPUBuffer(this MemoryBuffer buffer)
+        {
+            var iView = (IArrayView)buffer;
+            if (iView.Buffer is WebGPUMemoryBuffer webGpuMem)
+                return webGpuMem.NativeBuffer?.NativeBuffer;
+            return null;
         }
     }
 }
