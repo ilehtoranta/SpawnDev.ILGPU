@@ -56,8 +56,20 @@ namespace ILGPU.Runtime
                         {
                             throw new NotSupportedException(
                                 $"Captured variable '{field.Name}' of type " +
-                                $"'{ft}' contains GPU pointers. Pass it as " +
-                                $"an explicit kernel parameter instead.");
+                                $"'{ft.Name}' contains GPU buffer pointers " +
+                                $"and cannot be captured in a lambda kernel. " +
+                                $"Pass it as an explicit kernel parameter " +
+                                $"instead:\n\n" +
+                                $"  // Instead of capturing '{field.Name}':\n" +
+                                $"  //   var kernel = accelerator" +
+                                $".LoadAutoGroupedStreamKernel<Index1D, " +
+                                $"ArrayView<T>>(\n" +
+                                $"  //       (index, buf) => {{ buf[index] = " +
+                                $"{field.Name}[index]; }});\n" +
+                                $"  // Pass it as a parameter:\n" +
+                                $"  //   var kernel = accelerator" +
+                                $".LoadAutoGroupedStreamKernel<Index1D, " +
+                                $"ArrayView<T>, ArrayView<T>>(MyKernel);");
                         }
                     }
                 }
