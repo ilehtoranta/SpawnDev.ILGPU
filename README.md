@@ -7,9 +7,13 @@ Write parallel compute code in C# and let the library pick the best available ba
 
 > **Your existing ILGPU kernels run in the browser with zero changes to the kernel code — and the same code runs on desktop too.**
 
-## What's New in 4.3.0
+## What's New in 4.4.0
 
-- **Capturing lambda kernels** — Write GPU kernels as C# lambdas that capture local variables. Captured scalar values (`int`, `float`, `long`, etc.) are automatically passed to the GPU at dispatch time. Works on all 6 backends (WebGPU, WebGL, Wasm, CUDA, OpenCL, CPU). [ILGPU#463](https://github.com/m4rs-mt/ILGPU/issues/463)
+Two long-requested features that make ILGPU feel more like idiomatic C#. Both work on all 6 backends. ([ILGPU#463](https://github.com/m4rs-mt/ILGPU/issues/463))
+
+### Capturing Lambda Kernels
+
+Write GPU kernels as C# lambdas that capture local variables. Captured scalar values are automatically passed to the GPU at dispatch time — no boilerplate, no separate static methods.
 
 ```csharp
 int multiplier = 5;
@@ -18,6 +22,36 @@ var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<float>>(
     (index, buf) => { buf[index] = index * multiplier + offset; });
 kernel((Index1D)length, buffer.View);
 ```
+
+Captures are read from the closure at each dispatch, matching C# semantics. Supported capture types: `int`, `float`, `long`, `double`, and other scalar value types.
+
+### DelegateSpecialization — Higher-Order GPU Kernels
+
+Write one kernel that accepts different operations as parameters. The delegate is resolved at dispatch time and its body is inlined directly into the kernel via compile-time specialization — no function pointers, no overhead.
+
+```csharp
+// One kernel, many operations
+static void MapKernel(Index1D index, ArrayView<int> buf,
+    DelegateSpecialization<Func<int, int>> transform)
+{
+    buf[index] = transform.Value(buf[index]);
+}
+
+// Define operations as static methods
+static int Negate(int x) => -x;
+static int DoubleIt(int x) => x * 2;
+static int Square(int x) => x * x;
+
+// Load once, dispatch with different operations
+var kernel = accelerator.LoadAutoGroupedStreamKernel<
+    Index1D, ArrayView<int>, DelegateSpecialization<Func<int, int>>>(MapKernel);
+
+kernel(size, buffer, new DelegateSpecialization<Func<int, int>>(Negate));
+kernel(size, buffer, new DelegateSpecialization<Func<int, int>>(DoubleIt));
+kernel(size, buffer, new DelegateSpecialization<Func<int, int>>(Square));
+```
+
+Each unique target method produces a specialized kernel compilation, cached automatically. The delegate never reaches the GPU — it's fully resolved and inlined at compile time.
 
 ## What's New in 4.0.0
 
@@ -121,7 +155,8 @@ SpawnDev.ILGPU bundles ILGPU's native backends, so the same NuGet package works 
 
 ## Features
 
-- **Lambda kernels** — Write kernels as capturing C# lambdas — captured scalar values are automatically passed to the GPU. No boilerplate, all 6 backends
+- **Lambda kernels** — Write kernels as capturing C# lambdas — captured scalar values are automatically passed to the GPU at dispatch time. No boilerplate, all 6 backends
+- **Higher-order kernels** — `DelegateSpecialization<Func<T,R>>` lets you pass operations as kernel parameters. The delegate is resolved and inlined at compile time — one kernel, many behaviors
 - **Cross-platform** — Same kernel code runs in browser (WebGPU, WebGL, Wasm) and desktop (Cuda, OpenCL, CPU) from one NuGet package
 - **Automatic backend selection** — `CreatePreferredAcceleratorAsync()` picks the best backend on any platform (browser or desktop)
 - **Unified async API** — `SynchronizeAsync()` and `CopyToHostAsync()` work everywhere, falling back to synchronous calls on desktop
@@ -348,6 +383,8 @@ dotnet run --project SpawnDev.ILGPU.Demo
 | **Special Values** | NaN, Infinity detection | ✅ |
 | **Backend Selection** | Auto-discovery, priority, cross-backend kernel execution | ✅ |
 | **GpuMatrix4x4** | Identity, translation, LookAt transforms across all backends | ✅ |
+| **Lambda Kernels** | Capturing lambdas with scalar captures, multi-field, ArrayView rejection | ✅ |
+| **DelegateSpecialization** | Static method targets, cache validation, multi-target, rejection | ✅ |
 
 ## Browser Requirements
 

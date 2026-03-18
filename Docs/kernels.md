@@ -4,7 +4,7 @@ A kernel is a function that runs in parallel across many threads. SpawnDev.ILGPU
 
 ## Kernel Basics
 
-A kernel is always a **static void** method. The first parameter is an **index type** that identifies which thread is running. Think of it as the body of a massively parallel `for` loop:
+A kernel is typically a **static void** method. The first parameter is an **index type** that identifies which thread is running. Think of it as the body of a massively parallel `for` loop:
 
 ```csharp
 // This kernel runs once per element — each thread gets a unique index
@@ -16,13 +16,51 @@ static void MyKernel(Index1D index, ArrayView<float> data, float multiplier)
 
 When you launch this kernel with 1000 elements, 1000 threads execute simultaneously, each with a different `index` value from 0 to 999.
 
+### Lambda Kernels
+
+You can also write kernels as C# lambdas that capture local variables. Captured scalar values (`int`, `float`, `long`, etc.) are automatically passed to the GPU at dispatch time:
+
+```csharp
+int multiplier = 5;
+float offset = 0.5f;
+var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<float>>(
+    (index, buf) => { buf[index] = index * multiplier + offset; });
+kernel((Index1D)length, buffer.View);
+```
+
+> **Note:** Only scalar value types can be captured. `ArrayView` captures are not supported — pass them as explicit kernel parameters instead.
+
+### Higher-Order Kernels with DelegateSpecialization
+
+`DelegateSpecialization<T>` lets you write one kernel that accepts different operations as parameters. The delegate is resolved at dispatch time and inlined at compile time — the GPU never sees a function pointer:
+
+```csharp
+static int Negate(int x) => -x;
+static int Square(int x) => x * x;
+
+static void MapKernel(Index1D index, ArrayView<int> buf,
+    DelegateSpecialization<Func<int, int>> transform)
+{
+    buf[index] = transform.Value(buf[index]);
+}
+
+var kernel = accelerator.LoadAutoGroupedStreamKernel<
+    Index1D, ArrayView<int>, DelegateSpecialization<Func<int, int>>>(MapKernel);
+
+// Same kernel, different operations
+kernel(size, buffer, new DelegateSpecialization<Func<int, int>>(Negate));
+kernel(size, buffer, new DelegateSpecialization<Func<int, int>>(Square));
+```
+
+Each unique target method produces a cached specialized kernel compilation. Target methods must be `static`.
+
 ## Kernel Rules
 
 These rules apply to all kernel code — they come from ILGPU's design and the constraints of GPU execution:
 
 | Rule | Details |
 |------|---------|
-| Must be `static` | Instance methods are not supported |
+| Must be `static` (or a lambda) | Instance methods are not supported (except capturing lambdas) |
 | Must return `void` | Kernels don't return values — use output buffers |
 | First parameter is the index | `Index1D`, `Index2D`, or `Index3D` |
 | Value types only | No classes, no `string`, no reference types |
