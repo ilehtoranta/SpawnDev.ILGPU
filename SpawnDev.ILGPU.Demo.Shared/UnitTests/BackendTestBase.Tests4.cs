@@ -76,6 +76,20 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             output[idx] = sum;
         }
 
+        // --- Double-Nested Loop Test (should work) ---
+        static void DoubleNestedLoopKernel(Index1D idx, ArrayView<float> output, int outerCount, int innerCount)
+        {
+            float sum = 0f;
+            for (int a = 0; a < outerCount; a++)
+            {
+                for (int b = 0; b < innerCount; b++)
+                {
+                    sum += (a + 1) * (b + 1);
+                }
+            }
+            output[idx] = sum;
+        }
+
         // --- Prefix Sum using Shared Memory ---
         static void PrefixSumKernel(ArrayView<int> data)
         {
@@ -395,6 +409,31 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             for (int i = 0; i < count; i++)
                 if (MathF.Abs(result[i] - expectedValue) > 0.01f)
                     throw new Exception($"Triple nested loop failed at {i}: expected={expectedValue}, got={result[i]}");
+        });
+
+        [TestMethod]
+        public async Task DoubleNestedLoopTest() => await RunTest(async accelerator =>
+        {
+            int count = 64;
+            int outerCount = 8;
+            int innerCount = 3;
+
+            // Expected: sum(a=0..7)(a+1) * sum(b=0..2)(b+1) = 36 * 6 = 216
+            float expectedValue = 0;
+            for (int a = 0; a < outerCount; a++)
+                for (int b = 0; b < innerCount; b++)
+                    expectedValue += (a + 1) * (b + 1);
+
+            using var output = accelerator.Allocate1D<float>(count);
+
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<float>, int, int>(DoubleNestedLoopKernel);
+            kernel((Index1D)count, output.View, outerCount, innerCount);
+            await accelerator.SynchronizeAsync();
+
+            var result = await output.CopyToHostAsync<float>();
+            for (int i = 0; i < count; i++)
+                if (MathF.Abs(result[i] - expectedValue) > 0.01f)
+                    throw new Exception($"Double nested loop failed at {i}: expected={expectedValue}, got={result[i]}");
         });
 
         [TestMethod]
