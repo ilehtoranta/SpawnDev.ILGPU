@@ -4035,15 +4035,21 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         /// loop construct. If we mark them visited here, the post-loop code (conditionals, stores)
         /// will never be generated, causing the "grey screen" bug.
         /// </summary>
-        private void PushPhiValuesTransitive(BasicBlock exitTarget, BasicBlock sourceBlock, 
+        private void PushPhiValuesTransitive(BasicBlock exitTarget, BasicBlock sourceBlock,
             Loops<ReversePostOrder, Forwards>.Node currentLoop, HashSet<BasicBlock> visited)
         {
-            // Push any PHIs in the immediate exit target 
+            // Push any PHIs in the immediate exit target
             PushPhiValues(exitTarget, sourceBlock);
 
             // Follow the chain of unconditional branches through intermediate blocks.
             // Only push PHI values — do NOT emit code or mark blocks as visited.
             // The post-loop blocks will be emitted naturally after the loop construct.
+            //
+            // IMPORTANT: Stop when we reach a block outside the current loop's PARENT.
+            // For nested loops, the break clause must NOT push PHI values for ancestor
+            // loop headers — those PHIs reference increment variables that haven't been
+            // computed yet (they're in code blocks after the child loop). The ancestor
+            // PHIs will be pushed by the natural code flow after the loop construct.
             var current = exitTarget;
             int maxDepth = 8; // Safety limit
             for (int depth = 0; depth < maxDepth; depth++)
@@ -4051,6 +4057,10 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 if (current.Terminator is global::ILGPU.IR.Values.UnconditionalBranch uBranch)
                 {
                     var nextBlock = uBranch.Target;
+                    // Stop if nextBlock is outside the current loop — its PHIs belong
+                    // to an ancestor loop and will be handled by post-loop code emission.
+                    if (!currentLoop.Contains(nextBlock))
+                        break;
                     PushPhiValues(nextBlock, current);
                     current = nextBlock;
                 }
