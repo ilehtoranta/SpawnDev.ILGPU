@@ -53,11 +53,33 @@ namespace ILGPU.Runtime
                 newParamTypes.Add(originalParams[i].ParameterType);
             }
 
-            // Create a dynamic assembly + type + method
+            // Create a dynamic assembly with IgnoresAccessChecksTo
+            // so the synthetic method can call private/internal targets.
             var asmName = new AssemblyName("ILGPUDelegateSpec_" +
                 originalMethod.Name + "_" + Guid.NewGuid().ToString("N")[..8]);
+
+            // Collect all assemblies we need access to
+            var accessAssemblies = new HashSet<string>();
+            accessAssemblies.Add(
+                originalMethod.DeclaringType!.Assembly.GetName().Name!);
+            foreach (var target in targetMethods.Values)
+                accessAssemblies.Add(
+                    target.DeclaringType!.Assembly.GetName().Name!);
+
+            // Build assembly with IgnoresAccessChecksTo attributes
+            var customAttrs = new List<CustomAttributeBuilder>();
+            var ignoreAttrCtor = GetOrCreateIgnoresAccessChecksCtor();
+            if (ignoreAttrCtor != null)
+            {
+                foreach (var asm in accessAssemblies)
+                    customAttrs.Add(new CustomAttributeBuilder(
+                        ignoreAttrCtor, new object[] { asm }));
+            }
+
             var asmBuilder = AssemblyBuilder.DefineDynamicAssembly(
-                asmName, AssemblyBuilderAccess.Run);
+                asmName, AssemblyBuilderAccess.Run,
+                customAttrs);
+
             var modBuilder = asmBuilder.DefineDynamicModule(asmName.Name!);
             var typeBuilder = modBuilder.DefineType(
                 "DelegateSpecKernel",
@@ -459,6 +481,65 @@ namespace ILGPU.Runtime
                     il.Emit(opcode);
                     break;
             }
+        }
+        private static ConstructorInfo? _ignoresAccessCtor;
+        private static bool _ignoresAccessCtorResolved;
+
+        /// <summary>
+        /// Gets the IgnoresAccessChecksToAttribute constructor, creating
+        /// it in a helper assembly if it doesn't exist in the runtime.
+        /// </summary>
+        private static ConstructorInfo? GetOrCreateIgnoresAccessChecksCtor()
+        {
+            if (_ignoresAccessCtorResolved)
+                return _ignoresAccessCtor;
+
+            _ignoresAccessCtorResolved = true;
+
+            // Try the runtime's built-in version first
+            var attrType = Type.GetType(
+                "System.Runtime.CompilerServices" +
+                ".IgnoresAccessChecksToAttribute");
+            if (attrType != null)
+            {
+                _ignoresAccessCtor = attrType.GetConstructor(
+                    new[] { typeof(string) });
+                if (_ignoresAccessCtor != null) return _ignoresAccessCtor;
+            }
+
+            // Create a helper assembly with the attribute type
+            try
+            {
+                var helperAsm = AssemblyBuilder.DefineDynamicAssembly(
+                    new AssemblyName("ILGPUIgnoresAccessHelper"),
+                    AssemblyBuilderAccess.Run);
+                var helperMod = helperAsm.DefineDynamicModule(
+                    "ILGPUIgnoresAccessHelper");
+                var attrBuilder = helperMod.DefineType(
+                    "System.Runtime.CompilerServices" +
+                    ".IgnoresAccessChecksToAttribute",
+                    TypeAttributes.Public | TypeAttributes.Class,
+                    typeof(Attribute));
+                attrBuilder.DefineField("AssemblyName", typeof(string),
+                    FieldAttributes.Public);
+                var ctorBuilder = attrBuilder.DefineConstructor(
+                    MethodAttributes.Public,
+                    CallingConventions.Standard,
+                    new[] { typeof(string) });
+                var ctorIl = ctorBuilder.GetILGenerator();
+                ctorIl.Emit(OpCodes.Ldarg_0);
+                ctorIl.Emit(OpCodes.Call,
+                    typeof(Attribute).GetConstructor(
+                        BindingFlags.NonPublic | BindingFlags.Instance,
+                        null, Type.EmptyTypes, null)!);
+                ctorIl.Emit(OpCodes.Ret);
+                var bakedAttr = attrBuilder.CreateType()!;
+                _ignoresAccessCtor = bakedAttr.GetConstructor(
+                    new[] { typeof(string) });
+            }
+            catch { /* Fallback: no visibility bypass */ }
+
+            return _ignoresAccessCtor;
         }
     }
 }

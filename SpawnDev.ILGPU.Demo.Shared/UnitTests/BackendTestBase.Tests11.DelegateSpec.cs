@@ -7,12 +7,12 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
     // Part 11b: DelegateSpecialization tests (Feature 2)
     public abstract partial class BackendTestBase
     {
-        // Target methods for delegate specialization (public for cross-assembly access)
-        public static int Negate(int x) => -x;
-        public static int DoubleIt(int x) => x * 2;
+        // Target methods for delegate specialization
+        static int Negate(int x) => -x;
+        static int DoubleIt(int x) => x * 2;
 
-        // Kernel that uses DelegateSpecialization (public for cross-assembly access)
-        public static void MapKernel(
+        // Kernel that uses DelegateSpecialization
+        static void MapKernel(
             Index1D index,
             ArrayView<int> buf,
             DelegateSpecialization<Func<int, int>> transform)
