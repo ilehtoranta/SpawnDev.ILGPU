@@ -1182,7 +1182,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 else if (ExitsLoopTransitively(ub.Target, loop))
                 {
                     // Exit the loop — trace through intermediate blocks first
-                    EmitBreakWithIntermediateCode(ub.Target, current);
+                    EmitBreakWithIntermediateCode(ub.Target, current, loop);
                 }
                 else
                 {
@@ -1221,7 +1221,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 AppendLine($"if (!{cond}) {{");
                 PushIndent();
                 PushPhiValues(falseTarget, source);
-                EmitBreakWithIntermediateCode(falseTarget, source);
+                EmitBreakWithIntermediateCode(falseTarget, source, loop);
                 PopIndent();
                 AppendLine("}");
                 PushPhiValues(trueTarget, source);
@@ -1233,7 +1233,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 AppendLine($"if ({cond}) {{");
                 PushIndent();
                 PushPhiValues(trueTarget, source);
-                EmitBreakWithIntermediateCode(trueTarget, source);
+                EmitBreakWithIntermediateCode(trueTarget, source, loop);
                 PopIndent();
                 AppendLine("}");
                 PushPhiValues(falseTarget, source);
@@ -1252,7 +1252,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 AppendLine("}");
                 PushPhiValues(falseTarget, source);
                 if (falseIsExit)
-                    EmitBreakWithIntermediateCode(falseTarget, source);
+                    EmitBreakWithIntermediateCode(falseTarget, source, loop);
                 else
                     GenerateLoopBody(falseTarget, loop, outerStop);
                 return;
@@ -1267,7 +1267,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 AppendLine("}");
                 PushPhiValues(trueTarget, source);
                 if (trueIsExit)
-                    EmitBreakWithIntermediateCode(trueTarget, source);
+                    EmitBreakWithIntermediateCode(trueTarget, source, loop);
                 else
                     GenerateLoopBody(trueTarget, loop, outerStop);
                 return;
@@ -1279,7 +1279,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 AppendLine($"if ({cond}) {{");
                 PushIndent();
                 PushPhiValues(trueTarget, source);
-                EmitBreakWithIntermediateCode(trueTarget, source);
+                EmitBreakWithIntermediateCode(trueTarget, source, loop);
                 PopIndent();
                 AppendLine("}");
                 PushPhiValues(falseTarget, source);
@@ -1291,7 +1291,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 AppendLine($"if (!{cond}) {{");
                 PushIndent();
                 PushPhiValues(falseTarget, source);
-                EmitBreakWithIntermediateCode(falseTarget, source);
+                EmitBreakWithIntermediateCode(falseTarget, source, loop);
                 PopIndent();
                 AppendLine("}");
                 PushPhiValues(trueTarget, source);
@@ -1440,15 +1440,23 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         /// CRITICAL: Does NOT add intermediate blocks to _visitedBlocks — they may need
         /// to be re-entered by the post-loop code generator.
         /// </summary>
-        private void EmitBreakWithIntermediateCode(BasicBlock exitTarget, BasicBlock sourceBlock)
+        private void EmitBreakWithIntermediateCode(BasicBlock exitTarget, BasicBlock sourceBlock,
+            Loops<ReversePostOrder, Forwards>.Node? currentLoop = null)
         {
-            // Trace through intermediate blocks that have unconditional branches
+            // Trace through intermediate blocks that have unconditional branches.
+            // IMPORTANT: Stop when we reach a block outside the current loop — its PHIs
+            // belong to an ancestor loop and will be handled by post-loop code emission.
+            // Without this check, nested loops push PHI values for ancestor loop counters
+            // that reference increment variables not yet computed (triple-nested loop bug).
             var current = exitTarget;
             int maxDepth = 8; // Safety limit
             for (int depth = 0; depth < maxDepth; depth++)
             {
                 if (current.Terminator is UnconditionalBranch uBranch)
                 {
+                    // Stop if next block is outside current loop
+                    if (currentLoop != null && !currentLoop.Contains(uBranch.Target))
+                        break;
                     // Emit this intermediate block's code (assignments like hitT = t)
                     GenerateBlockCode(current);
                     // Push PHI values to the next block
