@@ -2756,15 +2756,45 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         /// True 2D/3D kernels (Index2D, Index3D, etc.) use actual multi-dimensional grids
         /// and should NOT be linearized.
         /// </summary>
+        private bool? _shouldLinearizeGridX;
+
+        /// <summary>
+        /// Determines whether Grid.IdxX should use linearized 2D→1D mapping.
+        /// Returns false for explicitly 2D/3D index types AND for LoadStreamKernel
+        /// kernels that access Grid.IdxY or Grid.IdxZ (indicating true multi-dimensional
+        /// grid semantics, not a 1D fallback split).
+        /// </summary>
         private bool ShouldLinearizeGridX()
         {
-            return EntryPoint.IndexType switch
+            if (_shouldLinearizeGridX.HasValue)
+                return _shouldLinearizeGridX.Value;
+
+            _shouldLinearizeGridX = EntryPoint.IndexType switch
             {
                 IndexType.Index2D => false,
                 IndexType.Index3D => false,
-                // LongIndex2D/3D could be added here if they exist
-                _ => true, // Index1D, LongIndex1D, explicitly grouped (IndexType.None)
+                _ => !KernelUsesMultiDimensionalGrid(), // Check IR for Grid.IdxY/IdxZ usage
             };
+            return _shouldLinearizeGridX.Value;
+        }
+
+        /// <summary>
+        /// Scans the kernel IR to check if Grid.IdxY or Grid.IdxZ is accessed.
+        /// If so, the kernel uses true multi-dimensional grid semantics and
+        /// Grid.IdxX should NOT be linearized.
+        /// </summary>
+        private bool KernelUsesMultiDimensionalGrid()
+        {
+            foreach (var block in Method.Blocks)
+            {
+                foreach (var entry in block)
+                {
+                    if (entry.Value is GridIndexValue gridIdx &&
+                        gridIdx.Dimension != DeviceConstantDimension3D.X)
+                        return true;
+                }
+            }
+            return false;
         }
 
         /// <summary>
