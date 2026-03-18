@@ -44,6 +44,18 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                 data[globalIndex] = globalIndex + constant;
         }
 
+        // --- 2D Grid Dispatch (batched kernel using Grid.IdxY for batch) ---
+        static void Batched2DGridKernel(ArrayView<int> output, int cols)
+        {
+            int tileIdx = Grid.IdxX;
+            int batch = Grid.IdxY;
+            int localIdx = Group.IdxX;
+
+            int col = tileIdx * Group.DimX + localIdx;
+            if (col < cols)
+                output[batch * cols + col] = batch * 1000 + col;
+        }
+
         // --- Prefix Sum using Shared Memory ---
         static void PrefixSumKernel(ArrayView<int> data)
         {
@@ -293,6 +305,41 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             for (int i = 0; i < len; i++)
                 if (result[i] != i + 100)
                     throw new Exception($"Explicit group kernel failed at {i}. Expected {i + 100}, got {result[i]}");
+        });
+
+        /// <summary>
+        /// Regression test for 2D grid dispatch on WebGPU.
+        /// LoadStreamKernel with KernelConfig(Index2D gridDim, Index2D groupDim)
+        /// must correctly map Grid.IdxX and Grid.IdxY to workgroup_id.x and .y
+        /// respectively — NOT linearize Grid.IdxX when Grid.IdxY is also used.
+        /// </summary>
+        [TestMethod]
+        public async Task Batched2DGridDispatchTest() => await RunTest(async accelerator =>
+        {
+            int batches = 4;
+            int cols = 100;
+            int groupSize = 32;
+            int numGroups = (cols + groupSize - 1) / groupSize; // 4 groups
+            int total = batches * cols;
+
+            using var buf = accelerator.Allocate1D<int>(total);
+            buf.MemSetToZero();
+
+            var kernel = accelerator.LoadStreamKernel<ArrayView<int>, int>(Batched2DGridKernel);
+            var gridDim = new Index2D(numGroups, batches);
+            var groupDim = new Index2D(groupSize, 1);
+            kernel(new KernelConfig(gridDim, groupDim), buf.View, cols);
+            await accelerator.SynchronizeAsync();
+
+            var result = await buf.CopyToHostAsync<int>();
+            for (int b = 0; b < batches; b++)
+                for (int c = 0; c < cols; c++)
+                {
+                    int expected = b * 1000 + c;
+                    int actual = result[b * cols + c];
+                    if (actual != expected)
+                        throw new Exception($"2D grid dispatch failed at batch={b}, col={c}: expected={expected}, got={actual}");
+                }
         });
 
         [TestMethod]
