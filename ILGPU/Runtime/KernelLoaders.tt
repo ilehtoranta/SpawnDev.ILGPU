@@ -393,6 +393,10 @@ namespace ILGPU.Runtime
                 return CapturingLambdaHelper
                     .LoadAutoGroupedStreamKernel<TIndex, <#= delegateParams.TypeParams #>>(
                         accelerator, action);
+            // Check if any type parameter is a DelegateSpecialization<T>
+            if (DelegateSpecializationRouter.TryRoute<TIndex, <#= delegateParams.TypeParams #>>(
+                    accelerator, action, out var dsResult))
+                return dsResult!;
             var baseKernel = accelerator.LoadAutoGroupedKernel<TIndex, <#= delegateParams.TypeParams #>>(action);
             return (TIndex index, <#= delegateParams.DefaultStreamLambdaParams #>) =>
                 baseKernel(accelerator.DefaultStream, index, <#= delegateParams.DefaultStreamArgs #>);
