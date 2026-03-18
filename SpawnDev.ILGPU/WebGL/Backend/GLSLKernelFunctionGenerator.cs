@@ -1159,6 +1159,16 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         private void GenerateLoopBody(BasicBlock current, Loops<ReversePostOrder, Forwards>.Node loop, BasicBlock? outerStop)
         {
             if (current == null || _visitedBlocks.Contains(current)) return;
+
+            // Check if this block is a NESTED loop header (different from current loop)
+            var nestedLoop = FindLoopForHeader(current);
+            if (nestedLoop != null && nestedLoop != loop)
+            {
+                // Delegate to GenerateStructuredCode which emits the nested for() construct
+                GenerateStructuredCode(current, outerStop);
+                return;
+            }
+
             _visitedBlocks.Add(current);
 
             // Emit the block's values
