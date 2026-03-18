@@ -158,7 +158,8 @@ namespace ILGPU.Runtime
                             calledMethod.DeclaringType.GetGenericTypeDefinition() ==
                                 typeof(DelegateSpecialization<>))
                         {
-                            // Skip get_Value() — the delegate is never loaded
+                            // Skip get_Value() — delegate is resolved
+                            // at dispatch time, not in the kernel IL.
                             continue;
                         }
                     }

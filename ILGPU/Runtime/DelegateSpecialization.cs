@@ -67,16 +67,15 @@ namespace ILGPU.Runtime
             _delegate = @delegate
                 ?? throw new ArgumentNullException(nameof(@delegate));
 
-            // Validate: must be static or non-capturing lambda
+            // Validate: must be a static method
             var method = @delegate.Method;
-            if (!method.IsStatic && !method.IsNotCapturingLambda())
+            if (!method.IsStatic)
             {
                 throw new NotSupportedException(
-                    "Only static methods and non-capturing lambdas can " +
-                    "be used as DelegateSpecialization targets. " +
-                    "Capturing lambdas and instance methods are not " +
-                    "supported because their target must be resolvable " +
-                    "at compile time.");
+                    "Only static methods can be used as " +
+                    "DelegateSpecialization targets. Use a static " +
+                    "method instead of a lambda expression. " +
+                    "Example: static int Negate(int x) => -x;");
             }
 
             // Reject multicast delegates
