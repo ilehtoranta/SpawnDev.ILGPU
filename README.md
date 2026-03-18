@@ -7,6 +7,18 @@ Write parallel compute code in C# and let the library pick the best available ba
 
 > **Your existing ILGPU kernels run in the browser with zero changes to the kernel code — and the same code runs on desktop too.**
 
+## What's New in 4.3.0
+
+- **Capturing lambda kernels** — Write GPU kernels as C# lambdas that capture local variables. Captured scalar values (`int`, `float`, `long`, etc.) are automatically passed to the GPU at dispatch time. Works on all 6 backends (WebGPU, WebGL, Wasm, CUDA, OpenCL, CPU). [ILGPU#463](https://github.com/m4rs-mt/ILGPU/issues/463)
+
+```csharp
+int multiplier = 5;
+float offset = 0.5f;
+var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<float>>(
+    (index, buf) => { buf[index] = index * multiplier + offset; });
+kernel((Index1D)length, buffer.View);
+```
+
 ## What's New in 4.0.0
 
 - **Wasm RadixSort** — ILGPU's RadixSort algorithm now works on the Wasm backend with full multi-worker parallelism. Fixed 7 codegen and dispatch bugs including struct-with-view serialization, view field mapping, local alloca addressing, and barrier synchronization
@@ -109,6 +121,7 @@ SpawnDev.ILGPU bundles ILGPU's native backends, so the same NuGet package works 
 
 ## Features
 
+- **Lambda kernels** — Write kernels as capturing C# lambdas — captured scalar values are automatically passed to the GPU. No boilerplate, all 6 backends
 - **Cross-platform** — Same kernel code runs in browser (WebGPU, WebGL, Wasm) and desktop (Cuda, OpenCL, CPU) from one NuGet package
 - **Automatic backend selection** — `CreatePreferredAcceleratorAsync()` picks the best backend on any platform (browser or desktop)
 - **Unified async API** — `SynchronizeAsync()` and `CopyToHostAsync()` work everywhere, falling back to synchronous calls on desktop

@@ -134,6 +134,28 @@ namespace ILGPU.Util
             type.IsSubclassOf(typeof(Delegate)) || type == typeof(Delegate);
 
         /// <summary>
+        /// Returns true if the given type is a
+        /// <see cref="Runtime.DelegateSpecialization{TDelegate}"/> type.
+        /// </summary>
+        /// <param name="type">The source type.</param>
+        /// <returns>True, if the type is a delegate specialization.</returns>
+        public static bool IsDelegateSpecializedType(this Type type) =>
+            type.IsGenericType
+            && type.GetGenericTypeDefinition() ==
+                typeof(Runtime.DelegateSpecialization<>);
+
+        /// <summary>
+        /// Gets the delegate type argument from a
+        /// <see cref="Runtime.DelegateSpecialization{TDelegate}"/> type.
+        /// </summary>
+        /// <param name="type">The source type.</param>
+        /// <returns>The delegate type, or null if not a delegate specialization.</returns>
+        public static Type? GetDelegateSpecializationType(this Type type) =>
+            type.IsDelegateSpecializedType()
+                ? type.GetGenericArguments()[0]
+                : null;
+
+        /// <summary>
         /// Resolves the delegate invocation method of the given type.
         /// </summary>
         /// <param name="type">The source type.</param>
