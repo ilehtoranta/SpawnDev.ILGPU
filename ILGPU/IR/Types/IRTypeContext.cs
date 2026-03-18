@@ -404,6 +404,19 @@ namespace ILGPU.IR.Types
             }
             else if (type.IsClass)
             {
+                // Allow compiler-generated display classes (capturing lambdas)
+                // to be treated as struct types in the IR
+                if (type.IsDefined(
+                    typeof(System.Runtime.CompilerServices.CompilerGeneratedAttribute),
+                    false))
+                {
+                    PrepareDisplayClassStructureType(
+                        type, addressSpace, out var displayBuilder);
+                    return Map(
+                        type,
+                        addressSpace,
+                        UnifyType(displayBuilder.Seal()));
+                }
                 throw new NotSupportedException(
                     string.Format(
                         ErrorMessages.NotSupportedClassType,
@@ -445,6 +458,70 @@ namespace ILGPU.IR.Types
                 this,
                 typeInfo.NumFlattendedFields,
                 typeInfo.Size);
+            foreach (var field in typeInfo.Fields)
+                builder.Add(CreateType_Sync(field.FieldType, addressSpace));
+        }
+
+        /// <summary>
+        /// Creates a structure type from a compiler-generated display class
+        /// (capturing lambda closure). The display class is a reference type but
+        /// its instance fields are mapped to a value-type StructureType in the IR.
+        /// </summary>
+        /// <param name="type">The display class type.</param>
+        /// <param name="addressSpace">The address space for pointer types.</param>
+        /// <param name="builder">Filled in with the structure builder.</param>
+        private void PrepareDisplayClassStructureType(
+            Type type,
+            MemoryAddressSpace addressSpace,
+            out StructureType.Builder builder)
+        {
+            var typeInfo = GetTypeInfo(type);
+
+            // Validate captured field types
+            foreach (var field in typeInfo.Fields)
+            {
+                // Reject nested closures (display class capturing another display class)
+                if (field.FieldType.IsClass
+                    && field.FieldType.IsDefined(
+                        typeof(System.Runtime.CompilerServices
+                            .CompilerGeneratedAttribute), false))
+                {
+                    throw new NotSupportedException(
+                        $"Nested closures are not supported in lambda kernels. " +
+                        $"Field '{field.Name}' captures an outer scope.");
+                }
+
+                // Reject reference type captures
+                if (field.FieldType.IsClass)
+                {
+                    throw new NotSupportedException(
+                        $"Captured variable '{field.Name}' of type " +
+                        $"'{field.FieldType}' is a reference type. Only value " +
+                        $"type captures are supported in lambda kernels.");
+                }
+
+                // Reject ArrayView captures for now — the nested struct
+                // layout causes type conversion issues in the backend.
+                // TODO: Support ArrayView captures by flattening the view
+                // fields into the captures struct.
+                if (field.FieldType.IsArrayViewType(out _))
+                {
+                    throw new NotSupportedException(
+                        $"Captured variable '{field.Name}' of type " +
+                        $"'{field.FieldType}' is an ArrayView. ArrayView " +
+                        $"captures are not yet supported in lambda kernels. " +
+                        $"Pass the ArrayView as an explicit kernel parameter " +
+                        $"instead.");
+                }
+            }
+
+            // Size is 0 for display classes (reference types don't have
+            // StructLayoutAttribute). The IR StructureType computes size
+            // from field types.
+            builder = new StructureType.Builder(
+                this,
+                typeInfo.NumFlattendedFields,
+                0);
             foreach (var field in typeInfo.Fields)
                 builder.Add(CreateType_Sync(field.FieldType, addressSpace));
         }

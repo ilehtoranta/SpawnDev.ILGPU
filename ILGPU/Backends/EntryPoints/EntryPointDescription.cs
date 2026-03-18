@@ -88,7 +88,12 @@ namespace ILGPU.Backends.EntryPoints
             parameters ??= methodSource.GetParameters();
 
             KernelIndexParameterOffset = IndexType == IndexType.KernelConfig ? 0 : 1;
-            int maxNumParameters = parameters.Length - KernelIndexParameterOffset;
+            // For capturing lambdas, append the display class type
+            // (captures struct) as an extra parameter after the declared ones.
+            bool isCapturing = methodSource.IsCapturingLambda();
+            int extraParams = isCapturing ? 1 : 0;
+            int maxNumParameters = parameters.Length - KernelIndexParameterOffset
+                + extraParams;
             var parameterTypes = ImmutableArray.CreateBuilder<Type>(maxNumParameters);
             for (int i = KernelIndexParameterOffset, e = parameters.Length; i < e; ++i)
             {
@@ -100,6 +105,36 @@ namespace ILGPU.Backends.EntryPoints
                         type));
                 }
                 parameterTypes.Add(type);
+            }
+            if (isCapturing)
+            {
+                // Validate captured field types before compilation
+                var capturedFields = methodSource.GetCapturedFields();
+                foreach (var field in capturedFields)
+                {
+                    if (field.FieldType.IsClass)
+                        throw new NotSupportedException(
+                            $"Captured variable '{field.Name}' of type " +
+                            $"'{field.FieldType}' is a reference type. " +
+                            $"Only value type captures are supported.");
+                    // Check for all ArrayView variants
+                    if (field.FieldType.IsArrayViewType(out _)
+                        || (field.FieldType.IsGenericType
+                            && field.FieldType.FullName != null
+                            && field.FieldType.FullName.StartsWith(
+                                "ILGPU.ArrayView")))
+                        throw new NotSupportedException(
+                            $"Captured variable '{field.Name}' of type " +
+                            $"'{field.FieldType}' is an ArrayView. Pass " +
+                            $"it as an explicit kernel parameter instead.");
+                    if (field.FieldType.IsDefined(
+                        typeof(System.Runtime.CompilerServices
+                            .CompilerGeneratedAttribute), false))
+                        throw new NotSupportedException(
+                            "Nested closures are not supported.");
+                }
+                // The display class type is appended as the last parameter.
+                parameterTypes.Add(methodSource.DeclaringType!);
             }
             Parameters = new ParameterCollection(parameterTypes.MoveToImmutable());
 
@@ -157,7 +192,8 @@ namespace ILGPU.Backends.EntryPoints
                 throw new NotSupportedException(
                     ErrorMessages.InvalidEntryPointWithoutDotNetMethod);
             }
-            if (!MethodSource.IsStatic && !MethodSource.IsNotCapturingLambda())
+            if (!MethodSource.IsStatic && !MethodSource.IsNotCapturingLambda()
+                && !MethodSource.IsCapturingLambda())
             {
                 throw new NotSupportedException(
                     ErrorMessages.InvalidEntryPointInstanceKernelMethod);

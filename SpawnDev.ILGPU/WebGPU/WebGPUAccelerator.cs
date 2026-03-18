@@ -1016,6 +1016,35 @@ namespace SpawnDev.ILGPU.WebGPU
                             if (WebGPUBackend.VerboseLogging)
                                 if (WebGPUBackend.VerboseLogging) WebGPUBackend.Log($"[WebGPU-Debug] Arg {i}: Struct scalar {argType.Name}, Size={structSize} bytes");
                         }
+                        else if (arg != null && arg.GetType().IsDefined(
+                            typeof(System.Runtime.CompilerServices.CompilerGeneratedAttribute), false))
+                        {
+                            // Capturing lambda display class — flatten fields
+                            // like a struct for GPU buffer binding
+                            var fields = arg.GetType().GetFields(
+                                System.Reflection.BindingFlags.Instance |
+                                System.Reflection.BindingFlags.Public |
+                                System.Reflection.BindingFlags.NonPublic);
+                            int totalSize = 0;
+                            foreach (var f in fields)
+                                totalSize += global::ILGPU.Interop.SizeOf(f.FieldType);
+                            int paddedSize = (int)WebGPUAlignment.AlignTo4(totalSize);
+                            byte[] bytes = new byte[paddedSize];
+                            int offset = 0;
+                            foreach (var f in fields)
+                            {
+                                var val = f.GetValue(arg)!;
+                                int fieldSize = global::ILGPU.Interop.SizeOf(f.FieldType);
+                                var fieldBytes = new byte[fieldSize];
+                                GetCopyStructMethod(f.FieldType).Invoke(
+                                    null, new object[] { val, fieldBytes });
+                                Array.Copy(fieldBytes, 0, bytes, offset, fieldSize);
+                                offset += fieldSize;
+                            }
+                            device.Queue.WriteBuffer(uBuffer, 0, bytes);
+                            if (WebGPUBackend.VerboseLogging)
+                                WebGPUBackend.Log($"[WebGPU-Debug] Arg {i}: Display class captures, Size={totalSize} bytes");
+                        }
                         else throw new NotSupportedException($"Unsupported non-packed non-view argument type: {arg?.GetType()}");
 
                         resource = new GPUBufferBinding { Buffer = uBuffer, Offset = 0, Size = (ulong)size };
@@ -1171,16 +1200,41 @@ namespace SpawnDev.ILGPU.WebGPU
                             if (byteOffset + 8 < packedData.Length)
                                 BitConverter.GetBytes(idx3.Z).CopyTo(packedData, byteOffset + 8);
                         }
-                        else if (arg != null && arg.GetType().IsValueType)
+                        else if (arg != null && (arg.GetType().IsValueType
+                            || arg.GetType().IsDefined(typeof(System.Runtime.CompilerServices.CompilerGeneratedAttribute), false)))
                         {
-                            // Fallback for any other value type: serialize struct bytes directly
-                            int structSize = global::ILGPU.Interop.SizeOf(arg.GetType());
-                            byte[] bytes = new byte[structSize];
-                            GetCopyStructMethod(arg.GetType()).Invoke(null, new object[] { arg, bytes });
-                            int copyLen = Math.Min(structSize, packedData.Length - byteOffset);
-                            Array.Copy(bytes, 0, packedData, byteOffset, copyLen);
-                            if (WebGPUBackend.VerboseLogging)
-                                if (WebGPUBackend.VerboseLogging) WebGPUBackend.Log($"[WebGPU-Debug] Packed fallback struct {arg.GetType().Name}, {structSize} bytes at offset {byteOffset}");
+                            // Fallback for value types and capturing lambda display classes:
+                            // serialize field bytes directly
+                            if (arg.GetType().IsValueType)
+                            {
+                                int structSize = global::ILGPU.Interop.SizeOf(arg.GetType());
+                                byte[] bytes = new byte[structSize];
+                                GetCopyStructMethod(arg.GetType()).Invoke(null, new object[] { arg, bytes });
+                                int copyLen = Math.Min(structSize, packedData.Length - byteOffset);
+                                Array.Copy(bytes, 0, packedData, byteOffset, copyLen);
+                            }
+                            else
+                            {
+                                // Display class: flatten instance fields
+                                var fields = arg.GetType().GetFields(
+                                    System.Reflection.BindingFlags.Instance |
+                                    System.Reflection.BindingFlags.Public |
+                                    System.Reflection.BindingFlags.NonPublic);
+                                int localOffset = byteOffset;
+                                foreach (var f in fields)
+                                {
+                                    var val = f.GetValue(arg)!;
+                                    int fieldSize = global::ILGPU.Interop.SizeOf(f.FieldType);
+                                    var fieldBytes = new byte[fieldSize];
+                                    GetCopyStructMethod(f.FieldType).Invoke(
+                                        null, new object[] { val, fieldBytes });
+                                    int copyLen = Math.Min(fieldSize,
+                                        packedData.Length - localOffset);
+                                    Array.Copy(fieldBytes, 0, packedData,
+                                        localOffset, copyLen);
+                                    localOffset += fieldSize;
+                                }
+                            }
                         }
                         else if (arg != null)
                             throw new NotSupportedException($"Unsupported packed scalar type: {arg.GetType()}");

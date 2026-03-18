@@ -781,6 +781,59 @@ namespace SpawnDev.ILGPU.WebGL
                                 value
                             });
                         }
+                        else if (arg != null && arg.GetType().IsDefined(
+                            typeof(System.Runtime.CompilerServices.CompilerGeneratedAttribute), false))
+                        {
+                            // Display class (capturing lambda captures).
+                            // Extract field values and pass as scalar/struct
+                            // depending on field count.
+                            var captFields = arg.GetType().GetFields(
+                                System.Reflection.BindingFlags.Instance |
+                                System.Reflection.BindingFlags.Public |
+                                System.Reflection.BindingFlags.NonPublic);
+                            if (captFields.Length == 1
+                                && captFields[0].FieldType.IsPrimitive)
+                            {
+                                // Single primitive capture: IR collapses
+                                // to a scalar. Pass as scalar uniform.
+                                var fieldVal = captFields[0].GetValue(arg);
+                                string st = fieldVal switch
+                                {
+                                    int => "int",
+                                    uint => "uint",
+                                    float => "float",
+                                    _ => "int"
+                                };
+                                object vl = fieldVal switch
+                                {
+                                    int iv => iv,
+                                    uint uv => uv,
+                                    float fvl => fvl,
+                                    double dvl => (float)dvl,
+                                    bool bvl => bvl ? 1 : 0,
+                                    _ => fieldVal ?? 0
+                                };
+                                jsParams.Add(new
+                                {
+                                    kind = "scalar",
+                                    paramIndex = glslParamIndex,
+                                    scalarType = st,
+                                    value = vl
+                                });
+                            }
+                            else
+                            {
+                                // Multi-field capture: IR keeps as struct.
+                                var flatFields = new List<object>();
+                                FlattenStructFieldsForUniform(arg, "", flatFields);
+                                jsParams.Add(new
+                                {
+                                    kind = "struct",
+                                    paramIndex = glslParamIndex,
+                                    fields = flatFields.ToArray()
+                                });
+                            }
+                        }
                         else if (arg != null && arg.GetType().IsValueType && !arg.GetType().IsEnum)
                         {
                             var flatFields = new List<object>();

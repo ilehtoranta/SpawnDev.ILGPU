@@ -9,7 +9,9 @@
 // Source License. See LICENSE.txt for details.
 // ---------------------------------------------------------------------------------------
 
+using System;
 using System.Reflection;
+using System.Runtime.CompilerServices;
 
 namespace ILGPU.Util
 {
@@ -20,7 +22,8 @@ namespace ILGPU.Util
     {
         /// <summary>
         /// Returns a parameter offset of 1 for instance methods and 0 for static
-        /// methods.
+        /// methods. Capturing lambdas return 0 because arg 0 (this) is handled
+        /// as a captures struct value, not skipped.
         /// </summary>
         /// <param name="method">The method to compute the parameter offset for.</param>
         /// <returns>
@@ -71,6 +74,50 @@ namespace ILGPU.Util
                     BindingFlags.Instance |
                     BindingFlags.NonPublic |
                     BindingFlags.Public).Length == 0;
+        }
+
+        /// <summary>
+        /// Returns true if the method is an instance method on a compiler-generated
+        /// display class with captured fields (a capturing lambda).
+        /// </summary>
+        /// <param name="method">The method to check.</param>
+        /// <returns>True, if the method is a capturing lambda.</returns>
+        public static bool IsCapturingLambda(this MethodBase method)
+        {
+            if (method.IsStatic)
+                return false;
+
+            var declaringType = method.DeclaringType;
+            if (declaringType == null || !declaringType.IsClass)
+                return false;
+
+            // Check for CompilerGenerated attribute (C# display classes)
+            if (!declaringType.IsDefined(typeof(CompilerGeneratedAttribute), false))
+                return false;
+
+            // Must have instance fields (the captured variables)
+            var fields = declaringType.GetFields(
+                BindingFlags.Instance |
+                BindingFlags.NonPublic |
+                BindingFlags.Public);
+            return fields.Length > 0;
+        }
+
+        /// <summary>
+        /// Returns the captured fields of a capturing lambda's display class,
+        /// sorted by metadata token for deterministic ordering.
+        /// </summary>
+        /// <param name="method">The capturing lambda method.</param>
+        /// <returns>The captured fields sorted by metadata token.</returns>
+        public static FieldInfo[] GetCapturedFields(this MethodBase method)
+        {
+            var fields = method.DeclaringType!.GetFields(
+                BindingFlags.Instance |
+                BindingFlags.NonPublic |
+                BindingFlags.Public);
+            Array.Sort(fields, (a, b) =>
+                a.MetadataToken.CompareTo(b.MetadataToken));
+            return fields;
         }
     }
 }

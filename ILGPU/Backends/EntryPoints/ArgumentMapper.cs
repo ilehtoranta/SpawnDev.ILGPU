@@ -581,7 +581,9 @@ namespace ILGPU.Backends.EntryPoints
                 return structType;
 
             var nestedTypes = InlineList<Type>.Create(sourceFields.Length);
-            bool requireCustomType = false;
+            // Force custom type for reference types (display classes) since
+            // they can't be used as value types directly
+            bool requireCustomType = !structType.IsValueType;
             for (int i = 0, e = sourceFields.Length; i < e; ++i)
             {
                 var sourceFieldType = sourceFields[i].FieldType;
@@ -639,8 +641,22 @@ namespace ILGPU.Backends.EntryPoints
                 throw new NotSupportedException(
                     ErrorMessages.NotSupportedByRefKernelParameters);
             }
-            else if (type.IsArray || type.IsClass)
+            else if (type.IsArray)
             {
+                throw new NotSupportedException(string.Format(
+                    ErrorMessages.NotSupportedClassType,
+                    type));
+            }
+            else if (type.IsClass)
+            {
+                // Allow compiler-generated display classes (capturing lambda
+                // captures) to be mapped as struct types
+                if (type.IsDefined(
+                    typeof(System.Runtime.CompilerServices
+                        .CompilerGeneratedAttribute), false))
+                {
+                    return RegisterTypeMapping(type, MapStructType(type));
+                }
                 throw new NotSupportedException(string.Format(
                     ErrorMessages.NotSupportedClassType,
                     type));

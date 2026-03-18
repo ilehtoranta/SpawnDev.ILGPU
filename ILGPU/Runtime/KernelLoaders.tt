@@ -32,6 +32,7 @@
         TypeParamDocumentation = string.Join("        /// ", from rangeIdx in range select
             $"<typeparam name=\"T{rangeIdx}\">Parameter type of parameter {rangeIdx}.</typeparam>{Environment.NewLine}"),
     }; #>
+using ILGPU.Util;
 using System;
 using System.Runtime.CompilerServices;
 
@@ -388,6 +389,10 @@ namespace ILGPU.Runtime
             where TIndex : struct, IIndex
             <#= delegateParams.TypeRestrictions #>
         {
+            if (action.Method.IsCapturingLambda())
+                return CapturingLambdaHelper
+                    .LoadAutoGroupedStreamKernel<TIndex, <#= delegateParams.TypeParams #>>(
+                        accelerator, action);
             var baseKernel = accelerator.LoadAutoGroupedKernel<TIndex, <#= delegateParams.TypeParams #>>(action);
             return (TIndex index, <#= delegateParams.DefaultStreamLambdaParams #>) =>
                 baseKernel(accelerator.DefaultStream, index, <#= delegateParams.DefaultStreamArgs #>);

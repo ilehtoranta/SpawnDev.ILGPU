@@ -82,7 +82,15 @@ namespace ILGPU.Frontend
         private void SetupVariables()
         {
             var builder = EntryBlock.Builder;
-            LambdaArgumentOffset = Method.IsNotCapturingLambda() ? 1 : 0;
+            // For non-capturing lambdas: skip 'this' entirely (offset=1)
+            // For capturing lambdas: process arg 0 as captures struct
+            //   (offset=0). GetParameterOffset() returns 1 so declared
+            //   params map to VariableRef(1, 2, ...) and VariableRef(0)
+            //   is reserved for the captures struct.
+            // For static methods: no 'this' (offset=0)
+            bool isCapturingLambda = Method.IsCapturingLambda();
+            LambdaArgumentOffset =
+                Method.IsNotCapturingLambda() ? 1 : 0;
 
             // Check for SSA variables
             for (int i = 0, e = DisassembledMethod.Count; i < e; ++i)
@@ -103,10 +111,12 @@ namespace ILGPU.Frontend
                 }
             }
 
-            // Initialize params
-            if (!Method.IsStatic && !Method.IsNotCapturingLambda())
+            // Initialize params — regular instance methods get a 'this' pointer
+            if (!Method.IsStatic && !Method.IsNotCapturingLambda()
+                && !isCapturingLambda)
             {
-                var declaringType = builder.CreateType(Method.DeclaringType.AsNotNull());
+                var declaringType = builder.CreateType(
+                    Method.DeclaringType.AsNotNull());
                 declaringType = builder.CreatePointerType(
                     declaringType,
                     MemoryAddressSpace.Generic);
@@ -117,6 +127,7 @@ namespace ILGPU.Frontend
                 variableTypes[paramRef] = (declaringType, ConvertFlags.None);
             }
 
+            // Add the method's declared parameters
             var methodParameters = Method.GetParameters();
             var parameterOffset = Method.GetParameterOffset();
             for (int i = 0, e = methodParameters.Length; i < e; ++i)
@@ -142,6 +153,22 @@ namespace ILGPU.Frontend
                 variableTypes[argRef] = (
                     paramType,
                     parameter.ParameterType.ToTargetUnsignedFlags());
+            }
+
+            // For capturing lambdas: add the captures struct as the LAST
+            // IR parameter (after declared params). This keeps the index
+            // parameter at IR position 0 so KernelParamOffset works
+            // correctly. The struct is mapped to VariableRef(0, Argument)
+            // so that ldarg.0 in the IL loads it for field access.
+            if (isCapturingLambda)
+            {
+                var captureType = builder.CreateType(
+                    Method.DeclaringType.AsNotNull());
+                var capturesParam = MethodBuilder.AddParameter(
+                    captureType, "captures");
+                var paramRef = new VariableRef(0, VariableRefType.Argument);
+                EntryBlock.SetValue(paramRef, capturesParam);
+                variableTypes[paramRef] = (captureType, ConvertFlags.None);
             }
 
             // Initialize locals

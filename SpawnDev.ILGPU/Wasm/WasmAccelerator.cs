@@ -378,8 +378,9 @@ namespace SpawnDev.ILGPU.Wasm
                     {
                         // Check if this is a struct with embedded views — decompose it
                         bool decomposed = false;
-                        if (args[i] != null && args[i].GetType().IsValueType
+                        if (args[i] != null && ((args[i].GetType().IsValueType
                             && !args[i].GetType().IsPrimitive && !args[i].GetType().IsEnum)
+                            || args[i].GetType().IsDefined(typeof(System.Runtime.CompilerServices.CompilerGeneratedAttribute), false)))
                         {
                             var structFields = args[i].GetType().GetFields(
                                 BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
@@ -573,7 +574,9 @@ namespace SpawnDev.ILGPU.Wasm
                         else if (value is double dv) flatArgs.Add(dv.ToString("G17"));
                         else if (value is long lv) flatArgs.Add($"{lv}n"); // BigInt for i64
                         else if (value is ulong ulv) flatArgs.Add($"{ulv}n"); // BigInt for i64
-                        else if (value != null && value.GetType().IsValueType && !value.GetType().IsPrimitive && !value.GetType().IsEnum)
+                        else if (value != null && !value.GetType().IsPrimitive && !value.GetType().IsEnum
+                            && (value.GetType().IsValueType
+                                || value.GetType().IsDefined(typeof(System.Runtime.CompilerServices.CompilerGeneratedAttribute), false)))
                         {
                             // Check if the IR treats this as a scalar (e.g., SpecializedValue<int>
                             // is a struct wrapping an int, but the IR lowers it to PrimitiveType).
@@ -672,10 +675,10 @@ namespace SpawnDev.ILGPU.Wasm
                                     }
                                 }
                             }
-                            else
+                            else if (value.GetType().IsValueType)
                             {
                                 // Fallback: use Unsafe.Write (CLR layout).
-                                // This works for structs WITHOUT views.
+                                // This works for VALUE TYPE structs WITHOUT views.
                                 structSize = global::ILGPU.Interop.SizeOf(value.GetType());
                                 bytes = new byte[structSize];
                                 var handle = System.Runtime.InteropServices.GCHandle.Alloc(bytes, System.Runtime.InteropServices.GCHandleType.Pinned);
@@ -699,6 +702,29 @@ namespace SpawnDev.ILGPU.Wasm
                                     }
                                 }
                                 finally { handle.Free(); }
+                            }
+                            else
+                            {
+                                // Reference type (display class): flatten
+                                // fields via reflection and serialize each
+                                // primitive to scratch.
+                                var captureValues = new List<object>();
+                                FlattenCLRStruct(value, captureValues);
+                                structSize = 0;
+                                foreach (var cv in captureValues)
+                                {
+                                    if (cv is long || cv is double) structSize += 8;
+                                    else structSize += 4;
+                                }
+                                bytes = new byte[structSize];
+                                int off = 0;
+                                foreach (var cv in captureValues)
+                                {
+                                    WritePrimitiveToBytes(bytes, off, cv,
+                                        0x7F /* i32 default */, 4);
+                                    if (cv is long || cv is double) off += 8;
+                                    else off += 4;
+                                }
                             }
 
                             // Align to 4 bytes within scratch

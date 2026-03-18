@@ -12,7 +12,9 @@
 using ILGPU.Backends.EntryPoints;
 using ILGPU.Runtime.CPU;
 using ILGPU.Util;
+using System;
 using System.Collections.Immutable;
+using System.Reflection;
 using System.Reflection.Emit;
 
 namespace ILGPU.Backends.IL
@@ -47,9 +49,42 @@ namespace ILGPU.Backends.IL
             in ILLocal index,
             ImmutableArray<ILLocal> locals)
         {
-            // Load placeholder 'this' argument to satisfy IL evaluation stack
-            if (entryPoint.MethodInfo.IsNotCapturingLambda())
+            bool isCapturing = entryPoint.MethodInfo.IsCapturingLambda();
+
+            if (isCapturing)
+            {
+                // For capturing lambdas, create a display class instance
+                // and populate its fields from the captures struct (last local).
+                var displayClassType = entryPoint.MethodInfo.DeclaringType!;
+                var ctor = displayClassType.GetConstructor(
+                    BindingFlags.Instance | BindingFlags.Public
+                        | BindingFlags.NonPublic,
+                    null, Type.EmptyTypes, null)!;
+                emitter.EmitNewObject(ctor);
+
+                // Copy fields from the captures struct to the display class.
+                // The captures struct is the last local (it's the last
+                // parameter in the EntryPoint).
+                var capturedFields = entryPoint.MethodInfo.GetCapturedFields();
+                var capturesLocal = locals[^1];
+                var mappedCaptureType = capturesLocal.VariableType;
+                var mappedFields = mappedCaptureType.GetFields(
+                    BindingFlags.Public | BindingFlags.Instance);
+                for (int i = 0; i < capturedFields.Length
+                    && i < mappedFields.Length; i++)
+                {
+                    emitter.Emit(OpCodes.Dup);
+                    emitter.Emit(LocalOperation.Load, capturesLocal);
+                    emitter.Emit(OpCodes.Ldfld, mappedFields[i]);
+                    emitter.Emit(OpCodes.Stfld, capturedFields[i]);
+                }
+                // Display class instance is now on the stack as 'this'
+            }
+            else if (entryPoint.MethodInfo.IsNotCapturingLambda())
+            {
+                // Load placeholder 'this' argument
                 emitter.Emit(OpCodes.Ldnull);
+            }
 
             if (entryPoint.IsImplicitlyGrouped)
             {
@@ -57,9 +92,11 @@ namespace ILGPU.Backends.IL
                 emitter.Emit(LocalOperation.Load, index);
             }
 
-            // Load kernel arguments
-            foreach (var local in locals)
-                emitter.Emit(LocalOperation.Load, local);
+            // Load kernel arguments (skip captures struct for capturing
+            // lambdas — it was already consumed above)
+            int localCount = isCapturing ? locals.Length - 1 : locals.Length;
+            for (int i = 0; i < localCount; i++)
+                emitter.Emit(LocalOperation.Load, locals[i]);
 
             // Invoke kernel
             emitter.EmitCall(entryPoint.MethodInfo);

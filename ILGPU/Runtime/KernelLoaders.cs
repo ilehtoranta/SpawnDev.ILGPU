@@ -20,6 +20,7 @@
 // Source License. See LICENSE.txt for details.
 // ---------------------------------------------------------------------------------------
 
+using ILGPU.Util;
 using System;
 using System.Runtime.CompilerServices;
 
@@ -387,6 +388,10 @@ namespace ILGPU.Runtime
             where TIndex : struct, IIndex
             where T1 : struct
         {
+            if (action.Method.IsCapturingLambda())
+                return CapturingLambdaHelper
+                    .LoadAutoGroupedStreamKernel<TIndex, T1>(
+                        accelerator, action);
             var baseKernel = accelerator.LoadAutoGroupedKernel<TIndex, T1>(action);
             return (TIndex index, T1 param1) =>
                 baseKernel(accelerator.DefaultStream, index, param1);
@@ -784,6 +789,10 @@ namespace ILGPU.Runtime
             where TIndex : struct, IIndex
             where T1 : struct where T2 : struct
         {
+            if (action.Method.IsCapturingLambda())
+                return CapturingLambdaHelper
+                    .LoadAutoGroupedStreamKernel<TIndex, T1, T2>(
+                        accelerator, action);
             var baseKernel = accelerator.LoadAutoGroupedKernel<TIndex, T1, T2>(action);
             return (TIndex index, T1 param1, T2 param2) =>
                 baseKernel(accelerator.DefaultStream, index, param1, param2);
@@ -1197,6 +1206,10 @@ namespace ILGPU.Runtime
             where TIndex : struct, IIndex
             where T1 : struct where T2 : struct where T3 : struct
         {
+            if (action.Method.IsCapturingLambda())
+                return CapturingLambdaHelper
+                    .LoadAutoGroupedStreamKernel<TIndex, T1, T2, T3>(
+                        accelerator, action);
             var baseKernel = accelerator.LoadAutoGroupedKernel<TIndex, T1, T2, T3>(action);
             return (TIndex index, T1 param1, T2 param2, T3 param3) =>
                 baseKernel(accelerator.DefaultStream, index, param1, param2, param3);
@@ -1626,6 +1639,10 @@ namespace ILGPU.Runtime
             where TIndex : struct, IIndex
             where T1 : struct where T2 : struct where T3 : struct where T4 : struct
         {
+            if (action.Method.IsCapturingLambda())
+                return CapturingLambdaHelper
+                    .LoadAutoGroupedStreamKernel<TIndex, T1, T2, T3, T4>(
+                        accelerator, action);
             var baseKernel = accelerator.LoadAutoGroupedKernel<TIndex, T1, T2, T3, T4>(action);
             return (TIndex index, T1 param1, T2 param2, T3 param3, T4 param4) =>
                 baseKernel(accelerator.DefaultStream, index, param1, param2, param3, param4);
@@ -2071,6 +2088,10 @@ namespace ILGPU.Runtime
             where TIndex : struct, IIndex
             where T1 : struct where T2 : struct where T3 : struct where T4 : struct where T5 : struct
         {
+            if (action.Method.IsCapturingLambda())
+                return CapturingLambdaHelper
+                    .LoadAutoGroupedStreamKernel<TIndex, T1, T2, T3, T4, T5>(
+                        accelerator, action);
             var baseKernel = accelerator.LoadAutoGroupedKernel<TIndex, T1, T2, T3, T4, T5>(action);
             return (TIndex index, T1 param1, T2 param2, T3 param3, T4 param4, T5 param5) =>
                 baseKernel(accelerator.DefaultStream, index, param1, param2, param3, param4, param5);
@@ -2532,6 +2553,10 @@ namespace ILGPU.Runtime
             where TIndex : struct, IIndex
             where T1 : struct where T2 : struct where T3 : struct where T4 : struct where T5 : struct where T6 : struct
         {
+            if (action.Method.IsCapturingLambda())
+                return CapturingLambdaHelper
+                    .LoadAutoGroupedStreamKernel<TIndex, T1, T2, T3, T4, T5, T6>(
+                        accelerator, action);
             var baseKernel = accelerator.LoadAutoGroupedKernel<TIndex, T1, T2, T3, T4, T5, T6>(action);
             return (TIndex index, T1 param1, T2 param2, T3 param3, T4 param4, T5 param5, T6 param6) =>
                 baseKernel(accelerator.DefaultStream, index, param1, param2, param3, param4, param5, param6);
@@ -3009,6 +3034,10 @@ namespace ILGPU.Runtime
             where TIndex : struct, IIndex
             where T1 : struct where T2 : struct where T3 : struct where T4 : struct where T5 : struct where T6 : struct where T7 : struct
         {
+            if (action.Method.IsCapturingLambda())
+                return CapturingLambdaHelper
+                    .LoadAutoGroupedStreamKernel<TIndex, T1, T2, T3, T4, T5, T6, T7>(
+                        accelerator, action);
             var baseKernel = accelerator.LoadAutoGroupedKernel<TIndex, T1, T2, T3, T4, T5, T6, T7>(action);
             return (TIndex index, T1 param1, T2 param2, T3 param3, T4 param4, T5 param5, T6 param6, T7 param7) =>
                 baseKernel(accelerator.DefaultStream, index, param1, param2, param3, param4, param5, param6, param7);
@@ -3502,6 +3531,10 @@ namespace ILGPU.Runtime
             where TIndex : struct, IIndex
             where T1 : struct where T2 : struct where T3 : struct where T4 : struct where T5 : struct where T6 : struct where T7 : struct where T8 : struct
         {
+            if (action.Method.IsCapturingLambda())
+                return CapturingLambdaHelper
+                    .LoadAutoGroupedStreamKernel<TIndex, T1, T2, T3, T4, T5, T6, T7, T8>(
+                        accelerator, action);
             var baseKernel = accelerator.LoadAutoGroupedKernel<TIndex, T1, T2, T3, T4, T5, T6, T7, T8>(action);
             return (TIndex index, T1 param1, T2 param2, T3 param3, T4 param4, T5 param5, T6 param6, T7 param7, T8 param8) =>
                 baseKernel(accelerator.DefaultStream, index, param1, param2, param3, param4, param5, param6, param7, param8);
@@ -4011,6 +4044,10 @@ namespace ILGPU.Runtime
             where TIndex : struct, IIndex
             where T1 : struct where T2 : struct where T3 : struct where T4 : struct where T5 : struct where T6 : struct where T7 : struct where T8 : struct where T9 : struct
         {
+            if (action.Method.IsCapturingLambda())
+                return CapturingLambdaHelper
+                    .LoadAutoGroupedStreamKernel<TIndex, T1, T2, T3, T4, T5, T6, T7, T8, T9>(
+                        accelerator, action);
             var baseKernel = accelerator.LoadAutoGroupedKernel<TIndex, T1, T2, T3, T4, T5, T6, T7, T8, T9>(action);
             return (TIndex index, T1 param1, T2 param2, T3 param3, T4 param4, T5 param5, T6 param6, T7 param7, T8 param8, T9 param9) =>
                 baseKernel(accelerator.DefaultStream, index, param1, param2, param3, param4, param5, param6, param7, param8, param9);
@@ -4536,6 +4573,10 @@ namespace ILGPU.Runtime
             where TIndex : struct, IIndex
             where T1 : struct where T2 : struct where T3 : struct where T4 : struct where T5 : struct where T6 : struct where T7 : struct where T8 : struct where T9 : struct where T10 : struct
         {
+            if (action.Method.IsCapturingLambda())
+                return CapturingLambdaHelper
+                    .LoadAutoGroupedStreamKernel<TIndex, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10>(
+                        accelerator, action);
             var baseKernel = accelerator.LoadAutoGroupedKernel<TIndex, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10>(action);
             return (TIndex index, T1 param1, T2 param2, T3 param3, T4 param4, T5 param5, T6 param6, T7 param7, T8 param8, T9 param9, T10 param10) =>
                 baseKernel(accelerator.DefaultStream, index, param1, param2, param3, param4, param5, param6, param7, param8, param9, param10);
@@ -5077,6 +5118,10 @@ namespace ILGPU.Runtime
             where TIndex : struct, IIndex
             where T1 : struct where T2 : struct where T3 : struct where T4 : struct where T5 : struct where T6 : struct where T7 : struct where T8 : struct where T9 : struct where T10 : struct where T11 : struct
         {
+            if (action.Method.IsCapturingLambda())
+                return CapturingLambdaHelper
+                    .LoadAutoGroupedStreamKernel<TIndex, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11>(
+                        accelerator, action);
             var baseKernel = accelerator.LoadAutoGroupedKernel<TIndex, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11>(action);
             return (TIndex index, T1 param1, T2 param2, T3 param3, T4 param4, T5 param5, T6 param6, T7 param7, T8 param8, T9 param9, T10 param10, T11 param11) =>
                 baseKernel(accelerator.DefaultStream, index, param1, param2, param3, param4, param5, param6, param7, param8, param9, param10, param11);
@@ -5634,6 +5679,10 @@ namespace ILGPU.Runtime
             where TIndex : struct, IIndex
             where T1 : struct where T2 : struct where T3 : struct where T4 : struct where T5 : struct where T6 : struct where T7 : struct where T8 : struct where T9 : struct where T10 : struct where T11 : struct where T12 : struct
         {
+            if (action.Method.IsCapturingLambda())
+                return CapturingLambdaHelper
+                    .LoadAutoGroupedStreamKernel<TIndex, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12>(
+                        accelerator, action);
             var baseKernel = accelerator.LoadAutoGroupedKernel<TIndex, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12>(action);
             return (TIndex index, T1 param1, T2 param2, T3 param3, T4 param4, T5 param5, T6 param6, T7 param7, T8 param8, T9 param9, T10 param10, T11 param11, T12 param12) =>
                 baseKernel(accelerator.DefaultStream, index, param1, param2, param3, param4, param5, param6, param7, param8, param9, param10, param11, param12);
@@ -6207,6 +6256,10 @@ namespace ILGPU.Runtime
             where TIndex : struct, IIndex
             where T1 : struct where T2 : struct where T3 : struct where T4 : struct where T5 : struct where T6 : struct where T7 : struct where T8 : struct where T9 : struct where T10 : struct where T11 : struct where T12 : struct where T13 : struct
         {
+            if (action.Method.IsCapturingLambda())
+                return CapturingLambdaHelper
+                    .LoadAutoGroupedStreamKernel<TIndex, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13>(
+                        accelerator, action);
             var baseKernel = accelerator.LoadAutoGroupedKernel<TIndex, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13>(action);
             return (TIndex index, T1 param1, T2 param2, T3 param3, T4 param4, T5 param5, T6 param6, T7 param7, T8 param8, T9 param9, T10 param10, T11 param11, T12 param12, T13 param13) =>
                 baseKernel(accelerator.DefaultStream, index, param1, param2, param3, param4, param5, param6, param7, param8, param9, param10, param11, param12, param13);
@@ -6796,6 +6849,10 @@ namespace ILGPU.Runtime
             where TIndex : struct, IIndex
             where T1 : struct where T2 : struct where T3 : struct where T4 : struct where T5 : struct where T6 : struct where T7 : struct where T8 : struct where T9 : struct where T10 : struct where T11 : struct where T12 : struct where T13 : struct where T14 : struct
         {
+            if (action.Method.IsCapturingLambda())
+                return CapturingLambdaHelper
+                    .LoadAutoGroupedStreamKernel<TIndex, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14>(
+                        accelerator, action);
             var baseKernel = accelerator.LoadAutoGroupedKernel<TIndex, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14>(action);
             return (TIndex index, T1 param1, T2 param2, T3 param3, T4 param4, T5 param5, T6 param6, T7 param7, T8 param8, T9 param9, T10 param10, T11 param11, T12 param12, T13 param13, T14 param14) =>
                 baseKernel(accelerator.DefaultStream, index, param1, param2, param3, param4, param5, param6, param7, param8, param9, param10, param11, param12, param13, param14);
