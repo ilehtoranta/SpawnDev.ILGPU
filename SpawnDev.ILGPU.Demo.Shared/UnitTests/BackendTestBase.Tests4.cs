@@ -56,6 +56,26 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                 output[batch * cols + col] = batch * 1000 + col;
         }
 
+        // --- Triple-Nested Loop Test (Conv2D-style pattern) ---
+        // This kernel does a simplified 3x3 convolution pattern with triple-nested loops.
+        // On WebGPU, triple-nested loops can produce wrong WGSL codegen.
+        static void TripleNestedLoopKernel(Index1D idx, ArrayView<float> input, ArrayView<float> output, int channels, int kSize)
+        {
+            float sum = 0f;
+            for (int c = 0; c < channels; c++)
+            {
+                for (int ky = 0; ky < kSize; ky++)
+                {
+                    for (int kx = 0; kx < kSize; kx++)
+                    {
+                        // Simple accumulation: sum += (c + 1) * (ky + 1) * (kx + 1)
+                        sum += (c + 1) * (ky + 1) * (kx + 1);
+                    }
+                }
+            }
+            output[idx] = sum;
+        }
+
         // --- Prefix Sum using Shared Memory ---
         static void PrefixSumKernel(ArrayView<int> data)
         {
@@ -340,6 +360,41 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                     if (actual != expected)
                         throw new Exception($"2D grid dispatch failed at batch={b}, col={c}: expected={expected}, got={actual}");
                 }
+        });
+
+        /// <summary>
+        /// Regression test for triple-nested loops in WebGPU WGSL codegen.
+        /// Triple-nested for(c){for(ky){for(kx)}} generates incorrect WGSL
+        /// that truncates inner loop iterations. This is the Conv2D pattern.
+        /// </summary>
+        [TestMethod]
+        public async Task TripleNestedLoopTest() => await RunTest(async accelerator =>
+        {
+            int count = 64;
+            int channels = 8;
+            int kSize = 3;
+
+            // CPU reference: sum = sum over c,ky,kx of (c+1)*(ky+1)*(kx+1)
+            // = (sum c+1 for c=0..7) * (sum ky+1 for ky=0..2) * (sum kx+1 for kx=0..2)
+            // = (1+2+3+4+5+6+7+8) * (1+2+3) * (1+2+3) = 36 * 6 * 6 = 1296
+            float expectedValue = 0;
+            for (int c = 0; c < channels; c++)
+                for (int ky = 0; ky < kSize; ky++)
+                    for (int kx = 0; kx < kSize; kx++)
+                        expectedValue += (c + 1) * (ky + 1) * (kx + 1);
+
+            using var input = accelerator.Allocate1D<float>(count);
+            using var output = accelerator.Allocate1D<float>(count);
+            input.MemSetToZero();
+
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<float>, ArrayView<float>, int, int>(TripleNestedLoopKernel);
+            kernel((Index1D)count, input.View, output.View, channels, kSize);
+            await accelerator.SynchronizeAsync();
+
+            var result = await output.CopyToHostAsync<float>();
+            for (int i = 0; i < count; i++)
+                if (MathF.Abs(result[i] - expectedValue) > 0.01f)
+                    throw new Exception($"Triple nested loop failed at {i}: expected={expectedValue}, got={result[i]}");
         });
 
         [TestMethod]
