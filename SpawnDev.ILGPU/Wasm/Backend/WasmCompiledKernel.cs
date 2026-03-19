@@ -59,6 +59,12 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         public int ScratchPerThread { get; }
 
         /// <summary>
+        /// Number of phases for fiber-based dispatch. 1 = no barriers (single phase).
+        /// N+1 for N barriers — the kernel is called once per phase per fiber.
+        /// </summary>
+        public int PhaseCount { get; }
+
+        /// <summary>
         /// Creates a new compiled Wasm kernel.
         /// </summary>
         public WasmCompiledKernel(
@@ -71,7 +77,8 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             int barrierCount = 0,
             bool hasBarriers = false,
             int dynamicSharedElementSize = 0,
-            int scratchPerThread = 0)
+            int scratchPerThread = 0,
+            int phaseCount = 1)
             : base(context, entryPoint, null)
         {
             WasmBinary = wasmBinary;
@@ -82,6 +89,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             HasBarriers = hasBarriers;
             DynamicSharedElementSize = dynamicSharedElementSize;
             ScratchPerThread = scratchPerThread;
+            PhaseCount = phaseCount;
         }
     }
 

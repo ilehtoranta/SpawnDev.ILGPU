@@ -64,6 +64,18 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             public int ScratchPerThread { get; set; }
 
             /// <summary>
+            /// Number of phases for fiber dispatch (1 = no barriers, N+1 for N barriers).
+            /// Set to 1 when helpers have internal barriers (can't use fiber dispatch).
+            /// </summary>
+            public int PhaseCount { get; set; } = 1;
+
+            /// <summary>
+            /// Whether any helper function has internal barriers.
+            /// When true, fiber dispatch is disabled (helpers can't be phase-split yet).
+            /// </summary>
+            public bool HelpersHaveBarriers { get; set; }
+
+            /// <summary>
             /// Helper function methods and their allocas, keyed by Method.
             /// Populated during compilation so the kernel generator can inline them.
             /// </summary>

@@ -448,9 +448,12 @@ namespace SpawnDev.ILGPU.Wasm
                 // Barrier slots region: each barrier = 8 bytes (arrival counter i32 + sense flag i32)
                 int barrierBase = (afterShared + 3) & ~3; // 4-byte align
                 int barrierSize = compiledKernel.BarrierCount * 8;
-                // Add 4 bytes for inter-group fence slot (used by multi-group barrier dispatch)
+                // Add 16 bytes for two inter-worker barriers (phase + group).
+                // Each barrier = 2 × i32 (counter + generation).
+                // Phase barrier: syncs workers between phases within a group.
+                // Group barrier: syncs workers between group iterations.
                 int fenceSlot = barrierBase + barrierSize;
-                int totalWithBarriers = fenceSlot + 4;
+                int totalWithBarriers = fenceSlot + 16;
 
                 if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm] Memory layout: buffers={totalMemoryBytes}, scratch={scratchBase}, sharedMem={sharedMemBase}({sharedMemSize}), barrier={barrierBase}({barrierSize}), hasBarriers={compiledKernel.HasBarriers}, groupSize={groupSize}");
 
@@ -818,11 +821,14 @@ namespace SpawnDev.ILGPU.Wasm
             bool hasBarriers = compiledKernel.HasBarriers;
 
             int workerCount;
+            int phaseCount = compiledKernel.PhaseCount;
             if (hasBarriers)
             {
-                // For barrier kernels: need exactly groupSize workers
-                // (one per thread in the group), processing groups sequentially
-                workerCount = groupSize;
+                // Fiber dispatch: use hardwareConcurrency workers, each running
+                // groupSize/workerCount fibers sequentially per phase.
+                // All barrier kernels (including those with helper barriers) use this path.
+                workerCount = Math.Min(groupSize, _workerCount);
+                if (workerCount < 1) workerCount = 1;
             }
             else
             {
@@ -839,7 +845,7 @@ namespace SpawnDev.ILGPU.Wasm
                 gridDimX, gridDimY, scratchBase, scratchPerThread,
                 sharedMemBase, barrierBase, fenceSlot,
                 groupSize, numGroups, hasBarriers, argStr,
-                dynamicSharedElements);
+                dynamicSharedElements, workerCount, phaseCount);
 
             // Lazily initialize the worker pool, or grow it if needed
             if (_workerPool == null)
@@ -917,10 +923,12 @@ namespace SpawnDev.ILGPU.Wasm
                     worker.OnMessage += msgHandler;
                     worker.OnError += errHandler;
 
-                    // Send thread ID + shared data to worker.
-                    // Only include wasmBytes on first dispatch to this worker;
-                    // the bootstrap caches the compiled module.
-                    // Always include memory since each dispatch creates a new WebAssembly.Memory.
+                    // Send fiber range to worker.
+                    // Fiber dispatch: each worker handles a contiguous range of threads.
+                    int fibersPerWorker = (groupSize + workerCount - 1) / workerCount;
+                    int threadStart = w * fibersPerWorker;
+                    int threadEnd = Math.Min(threadStart + fibersPerWorker, groupSize);
+
                     var workerId = worker.JSRef!.GetHashCode();
                     if (_initializedWorkers.Add(workerId))
                     {
@@ -929,7 +937,8 @@ namespace SpawnDev.ILGPU.Wasm
                             script = workerScript,
                             wasmBytes = wasmBytes,
                             memory = wasmMemory,
-                            threadId = w,
+                            threadStart,
+                            threadEnd,
                         });
                     }
                     else
@@ -938,7 +947,8 @@ namespace SpawnDev.ILGPU.Wasm
                         {
                             script = workerScript,
                             memory = wasmMemory,
-                            threadId = w,
+                            threadStart,
+                            threadEnd,
                         });
                     }
 
@@ -1071,7 +1081,9 @@ namespace SpawnDev.ILGPU.Wasm
             int sharedMemBase, int barrierBase, int fenceSlot,
             int groupSize, int numGroups, bool hasBarriers,
             string argStr,
-            int dynamicSharedLength = 0)
+            int dynamicSharedLength = 0,
+            int workerCount = 1,
+            int phaseCount = 1)
         {
             // Produces an async function body string that is sent as the 'script' field
             // in the message to the pool worker's async bootstrap.
@@ -1083,33 +1095,58 @@ namespace SpawnDev.ILGPU.Wasm
 
             if (hasBarriers)
             {
-                // Barrier kernel: multi-worker dispatch.
-                // Each worker is one thread within the workgroup.
-                // Workers iterate over all groups, synchronizing at barriers within each call.
-                // Between group iterations, use Atomics.store as a memory fence to ensure
-                // all workers' writes from the previous group are visible before the next
-                // group reads them (SharedArrayBuffer cross-agent visibility requires this).
-                sb.AppendLine("    const threadId = d.threadId;");
+                // Fiber dispatch: each worker runs multiple fibers (threads) per phase.
+                // N workers × M fibers each. The kernel returns i32: 0=done, 1=yielded.
+                // Workers loop until all fibers return 0 (complete).
+                sb.AppendLine("    const threadStart = d.threadStart;");
+                sb.AppendLine("    const threadEnd = d.threadEnd;");
                 sb.AppendLine($"    const groupSize = {groupSize};");
                 sb.AppendLine($"    const numGroups = {numGroups};");
+                sb.AppendLine($"    const workerCount = {workerCount};");
                 sb.AppendLine($"    const scratchPerThread = {scratchPerThread};");
-                sb.AppendLine($"    const myScratch = {scratchBase} + threadId * scratchPerThread;");
-                sb.AppendLine($"    const _fence = new Int32Array(d.memory.buffer, {fenceSlot}, 1);");
+                sb.AppendLine($"    const _phaseBarrier = new Int32Array(d.memory.buffer, {fenceSlot}, 2);");
+                sb.AppendLine($"    const _groupBarrier = new Int32Array(d.memory.buffer, {fenceSlot} + 8, 2);");
                 sb.AppendLine();
                 sb.AppendLine("    for (let g = 0; g < numGroups; g++) {");
-                sb.AppendLine("      const globalIdx = g * groupSize + threadId;");
-                sb.Append($"      kernel(globalIdx, {gridDimX}, {gridDimY}, myScratch, {groupSize}, threadId, {sharedMemBase}, {barrierBase}, {dynamicSharedLength}");
+                sb.AppendLine("      let phase = 0;");
+                sb.AppendLine("      while (phase < 10000) {");
+                sb.AppendLine("        let anyYielded = false;");
+                sb.AppendLine("        for (let tid = threadStart; tid < threadEnd; tid++) {");
+                sb.AppendLine("          const globalIdx = g * groupSize + tid;");
+                sb.AppendLine($"          const myScratch = {scratchBase} + tid * scratchPerThread;");
+                sb.Append($"          const r = kernel(globalIdx, {gridDimX}, {gridDimY}, myScratch, {groupSize}, tid, {sharedMemBase}, {barrierBase}, {dynamicSharedLength}, phase");
                 if (argStr.Length > 0)
                 {
                     sb.Append(", ");
                     sb.Append(argStr);
                 }
                 sb.AppendLine(");");
-                // Memory fence between groups: atomic store to barrier region forces
-                // all prior non-atomic writes to be visible to other workers.
-                // Uses the barrier region (already allocated, 4-byte aligned) as the fence target.
-                sb.AppendLine("      Atomics.store(_fence, 0, g);");
-                sb.AppendLine("      Atomics.load(_fence, 0);");
+                sb.AppendLine("          if (r === 1) anyYielded = true;");
+                sb.AppendLine("        }");
+                sb.AppendLine("        if (!anyYielded) break;");
+                sb.AppendLine("        if (phase >= 9999) { self.postMessage({ done: false, error: 'Phase limit exceeded (10000) - kernel never completed. Fiber dispatch bug.' }); return; }");
+                // Cross-worker barrier between phases
+                sb.AppendLine("        const arrived = Atomics.add(_phaseBarrier, 0, 1) + 1;");
+                sb.AppendLine("        if (arrived === workerCount) {");
+                sb.AppendLine("          Atomics.store(_phaseBarrier, 0, 0);");
+                sb.AppendLine("          Atomics.add(_phaseBarrier, 1, 1);");
+                sb.AppendLine("          Atomics.notify(_phaseBarrier, 1);");
+                sb.AppendLine("        } else {");
+                sb.AppendLine("          const gen = Atomics.load(_phaseBarrier, 1);");
+                sb.AppendLine("          Atomics.wait(_phaseBarrier, 1, gen);");
+                sb.AppendLine("        }");
+                sb.AppendLine("        phase++;");
+                sb.AppendLine("      }");
+                // Cross-group barrier
+                sb.AppendLine("      const gArrived = Atomics.add(_groupBarrier, 0, 1) + 1;");
+                sb.AppendLine("      if (gArrived === workerCount) {");
+                sb.AppendLine("        Atomics.store(_groupBarrier, 0, 0);");
+                sb.AppendLine("        Atomics.add(_groupBarrier, 1, 1);");
+                sb.AppendLine("        Atomics.notify(_groupBarrier, 1);");
+                sb.AppendLine("      } else {");
+                sb.AppendLine("        const gGen = Atomics.load(_groupBarrier, 1);");
+                sb.AppendLine("        Atomics.wait(_groupBarrier, 1, gGen);");
+                sb.AppendLine("      }");
                 sb.AppendLine("    }");
             }
             else
@@ -1120,7 +1157,7 @@ namespace SpawnDev.ILGPU.Wasm
                 sb.AppendLine();
                 sb.AppendLine("    for (let i = startIdx; i < endIdx; i++) {");
                 // For non-barrier kernels: pass groupSize so Grid.IdxX/Y can decompose correctly
-                sb.Append($"      kernel(i, {gridDimX}, {gridDimY}, {scratchBase}, {groupSize}, i % {groupSize}, 0, 0, 0");
+                sb.Append($"      kernel(i, {gridDimX}, {gridDimY}, {scratchBase}, {groupSize}, i % {groupSize}, 0, 0, 0, 0");
                 if (argStr.Length > 0)
                 {
                     sb.Append(", ");

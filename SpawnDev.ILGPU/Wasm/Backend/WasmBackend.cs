@@ -445,9 +445,11 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             // Pass math imports to the code generator
             kernelGen.MathImports = mathImports;
 
-            // Add function type for the kernel (void return)
+            // Add function type for the kernel.
+            // Phase-mode kernels return i32 (0=done, 1=yielded at barrier).
+            // Non-phase-mode kernels also return i32 for signature consistency (always returns 0).
             var paramTypes = kernelGen.GetParamTypes();
-            int typeIdx = moduleBuilder.AddFuncType(paramTypes, Array.Empty<byte>());
+            int typeIdx = moduleBuilder.AddFuncType(paramTypes, new byte[] { WasmOpCodes.I32 });
 
             // Add kernel function (index = importFuncCount + 0)
             int funcIdx = moduleBuilder.AddFunction(typeIdx);
@@ -472,8 +474,12 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                     kernelGen.SharedMemorySizeValue,
                     mathImports);
 
-                // Add helper function type
-                int helperTypeIdx = moduleBuilder.AddFuncType(result.ParamTypes, result.ResultTypes);
+                // Add helper function type.
+                // Helpers with barriers return i32 (yielded flag) in phase mode.
+                var helperResultTypes = result.BarrierCount > 0
+                    ? new byte[] { WasmOpCodes.I32 }
+                    : result.ResultTypes;
+                int helperTypeIdx = moduleBuilder.AddFuncType(result.ParamTypes, helperResultTypes);
 
                 // Add helper function (index must match pre-assigned index)
                 int helperFuncIdx = moduleBuilder.AddFunction(helperTypeIdx);
@@ -534,7 +540,8 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 data.BarrierCount,
                 data.HasBarriers,
                 data.DynamicSharedElementSize,
-                data.ScratchPerThread);
+                data.ScratchPerThread,
+                data.PhaseCount);
         }
 
         #endregion

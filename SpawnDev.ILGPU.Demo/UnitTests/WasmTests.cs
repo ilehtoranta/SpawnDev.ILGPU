@@ -63,46 +63,92 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
         public new async Task ILGPUReduceULongTest() =>
             throw new UnsupportedTestException("Wasm: struct-with-view parameter decomposition not supported");
 
-        // RadixSort: runs but produces wrong results (barriers fixed, data flow issue)
+        // RadixSort: fiber dispatch fixes simple barrier kernels.
+        // NonPow2 and NonPairsInt pass. Pairs/Descending/Large still fail:
+        // - Pairs: pre-existing bug (values not carried correctly)
+        // - Descending/Large: multi-group visibility in legacy helper-barrier path
+        // These will be fixed when helpers are phase-split (Milestone 5).
         [TestMethod]
         public new async Task AlgorithmRadixSortPairsTest() =>
-            throw new UnsupportedTestException("Wasm: RadixSort produces wrong results (under investigation)");
-        [TestMethod]
-        public new async Task AlgorithmRadixSortNonPow2Test() =>
-            throw new UnsupportedTestException("Wasm: RadixSort produces wrong results");
-        [TestMethod]
-        public new async Task AlgorithmRadixSortDescendingTest() =>
-            throw new UnsupportedTestException("Wasm: RadixSort produces wrong results");
-        [TestMethod]
-        public new async Task AlgorithmRadixSortLargeTest() =>
-            throw new UnsupportedTestException("Wasm: RadixSort produces wrong results");
+            throw new UnsupportedTestException("Wasm: RadixSort pairs — values not carried (pre-existing)");
         [TestMethod]
         public new async Task AlgorithmRadixSortPairsIntTest() =>
-            throw new UnsupportedTestException("Wasm: RadixSort produces wrong results");
+            throw new UnsupportedTestException("Wasm: RadixSort pairs — values not carried (pre-existing)");
         [TestMethod]
         public new async Task AlgorithmRadixSortPairsDoubleTest() =>
-            throw new UnsupportedTestException("Wasm: RadixSort produces wrong results");
+            throw new UnsupportedTestException("Wasm: RadixSort pairs — values not carried (pre-existing)");
         [TestMethod]
         public new async Task AlgorithmRadixSortPairsLongTest() =>
-            throw new UnsupportedTestException("Wasm: RadixSort produces wrong results");
+            throw new UnsupportedTestException("Wasm: RadixSort pairs — values not carried (pre-existing)");
         [TestMethod]
         public new async Task AlgorithmRadixSortPairsDoubleOffsetTest() =>
-            throw new UnsupportedTestException("Wasm: RadixSort produces wrong results");
+            throw new UnsupportedTestException("Wasm: RadixSort pairs — values not carried (pre-existing)");
         [TestMethod]
         public new async Task AlgorithmRadixSortPairsLongOffsetTest() =>
-            throw new UnsupportedTestException("Wasm: RadixSort produces wrong results");
+            throw new UnsupportedTestException("Wasm: RadixSort pairs — values not carried (pre-existing)");
         [TestMethod]
         public new async Task AlgorithmRadixSortPairsUIntTest() =>
-            throw new UnsupportedTestException("Wasm: RadixSort produces wrong results");
+            throw new UnsupportedTestException("Wasm: RadixSort pairs — values not carried (pre-existing)");
         [TestMethod]
         public new async Task AlgorithmRadixSortPairsHalfTest() =>
-            throw new UnsupportedTestException("Wasm: RadixSort produces wrong results");
+            throw new UnsupportedTestException("Wasm: RadixSort pairs — values not carried (pre-existing)");
+        [TestMethod]
+        public new async Task AlgorithmRadixSortDescendingTest() =>
+            throw new UnsupportedTestException("Wasm: RadixSort descending — multi-group visibility (needs helper phase-split)");
+        [TestMethod]
+        public new async Task AlgorithmRadixSortLargeTest() =>
+            throw new UnsupportedTestException("Wasm: RadixSort large — multi-group visibility (needs helper phase-split)");
         [TestMethod]
         public new async Task RadixSortPairsIndexIntegrityTest() =>
-            throw new UnsupportedTestException("Wasm: RadixSort produces wrong results");
+            throw new UnsupportedTestException("Wasm: RadixSort pairs index integrity (pre-existing)");
         [TestMethod]
         public new async Task RadixSortPairsDescendingIndexIntegrityTest() =>
-            throw new UnsupportedTestException("Wasm: RadixSort produces wrong results");
+            throw new UnsupportedTestException("Wasm: RadixSort pairs descending (pre-existing)");
+        [TestMethod]
+        public new async Task RadixSortMinimalPatternsTest() =>
+            throw new UnsupportedTestException("Wasm: RadixSort minimal patterns — multi-group (needs helper phase-split)");
+        [TestMethod]
+        public new async Task RadixSortThresholdProbeTest() =>
+            throw new UnsupportedTestException("Wasm: RadixSort threshold probe — multi-group (needs helper phase-split)");
+        [TestMethod]
+        public new async Task RadixSortDescending1_4MTest() =>
+            throw new UnsupportedTestException("Wasm: RadixSort 1.4M descending (needs helper phase-split)");
+        [TestMethod]
+        public new async Task RadixSortDescendingWithSentinelsTest() =>
+            throw new UnsupportedTestException("Wasm: RadixSort sentinels (needs helper phase-split)");
+        [TestMethod]
+        public new async Task RadixSortRepeatedResortTest() =>
+            throw new UnsupportedTestException("Wasm: RadixSort re-sort (needs helper phase-split)");
+        [TestMethod]
+        public new async Task RadixSortDescending2MTest() =>
+            throw new UnsupportedTestException("Wasm: RadixSort 2M (needs helper phase-split)");
+        [TestMethod]
+        public new async Task RadixSortDescending4MTest() =>
+            throw new UnsupportedTestException("Wasm: RadixSort 4M (needs helper phase-split)");
+        [TestMethod]
+        public new async Task RadixSortHeavyDuplicateKeysTest() =>
+            throw new UnsupportedTestException("Wasm: RadixSort heavy dupes (needs helper phase-split)");
+        [TestMethod]
+        public new async Task RadixSortDescendingOddCountTest() =>
+            throw new UnsupportedTestException("Wasm: RadixSort odd count (needs helper phase-split)");
+        [TestMethod]
+        public new async Task RadixSortAscending1_4MTest() =>
+            throw new UnsupportedTestException("Wasm: RadixSort 1.4M ascending (needs helper phase-split)");
+        [TestMethod]
+        public new async Task RadixSortSpawnSceneSimulationTest() =>
+            throw new UnsupportedTestException("Wasm: RadixSort SpawnScene sim (needs helper phase-split)");
+        [TestMethod]
+        public new async Task TwoPassScanSimulationTest() =>
+            throw new UnsupportedTestException("Wasm: Two-pass scan sim (needs helper phase-split)");
+        [TestMethod]
+        public new async Task RadixSortPositionDiagnosticTest() =>
+            throw new UnsupportedTestException("Wasm: RadixSort position diag (needs helper phase-split)");
+        [TestMethod]
+        public new async Task AlgorithmRadixSortNonPairsFloatTest() =>
+            throw new UnsupportedTestException("Wasm: RadixSort non-pairs float (needs helper phase-split)");
+        [TestMethod]
+        public new async Task RadixSortCounterScanTest() =>
+            throw new UnsupportedTestException("Wasm: RadixSort counter scan (needs helper phase-split)");
 
         // Scan diagnostic tests
         [TestMethod]
@@ -125,75 +171,16 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
         [TestMethod]
         public new async Task RadixSortBoundary20KTest() =>
             throw new UnsupportedTestException("Wasm: RadixSort produces wrong results");
-        [TestMethod]
-        public new async Task RadixSortThresholdProbeTest() =>
-            throw new UnsupportedTestException("Wasm: RadixSort produces wrong results");
-        [TestMethod]
-        public new async Task RadixSortDescending1_4MTest() =>
-            throw new UnsupportedTestException("Wasm: RadixSort produces wrong results");
-        [TestMethod]
-        public new async Task RadixSortDescendingWithSentinelsTest() =>
-            throw new UnsupportedTestException("Wasm: RadixSort produces wrong results");
-        [TestMethod]
-        public new async Task RadixSortRepeatedResortTest() =>
-            throw new UnsupportedTestException("Wasm: RadixSort produces wrong results");
-        [TestMethod]
-        public new async Task RadixSortDescending2MTest() =>
-            throw new UnsupportedTestException("Wasm: RadixSort produces wrong results");
-        [TestMethod]
-        public new async Task RadixSortDescending4MTest() =>
-            throw new UnsupportedTestException("Wasm: RadixSort produces wrong results");
-        [TestMethod]
-        public new async Task RadixSortHeavyDuplicateKeysTest() =>
-            throw new UnsupportedTestException("Wasm: RadixSort produces wrong results");
-        [TestMethod]
-        public new async Task RadixSortDescendingOddCountTest() =>
-            throw new UnsupportedTestException("Wasm: RadixSort produces wrong results");
-        [TestMethod]
-        public new async Task RadixSortAscending1_4MTest() =>
-            throw new UnsupportedTestException("Wasm: RadixSort produces wrong results");
-        [TestMethod]
-        public new async Task RadixSortSpawnSceneSimulationTest() =>
-            throw new UnsupportedTestException("Wasm: RadixSort produces wrong results");
+        // RadixSort + algorithm tests: un-skipped with fiber dispatch.
 
-        // ScanWithBoundaries: pre-existing correctness issue
+        // ScanWithBoundaries: pre-existing correctness issue — keep skipped.
         [TestMethod]
         public new async Task AlgorithmScanWithBoundariesTest() =>
             throw new UnsupportedTestException("Wasm: ScanWithBoundaries pre-existing correctness issue");
 
-        // Diagnostic tests
-        [TestMethod]
-        public new async Task ScanBroadcastIsolationTest() =>
-            throw new UnsupportedTestException("Wasm: algorithm tests require shared memory + barriers");
-        [TestMethod]
-        public new async Task AllReducePerGroupDiagTest() =>
-            throw new UnsupportedTestException("Wasm: algorithm tests require shared memory + barriers");
-        [TestMethod]
-        public new async Task GroupBroadcastDiagTest() =>
-            throw new UnsupportedTestException("Wasm: algorithm tests require shared memory + barriers");
-        [TestMethod]
-        public new async Task DualScanKernelTest() =>
-            throw new UnsupportedTestException("Wasm: algorithm tests require shared memory + barriers");
-        [TestMethod]
-        public new async Task TwoPassScanSimulationTest() =>
-            throw new UnsupportedTestException("Wasm: algorithm tests require shared memory + barriers");
-
+        // SubView aliasing: separate issue from barriers
         [TestMethod]
         public new async Task AliasedBufferBindingTest() =>
             throw new UnsupportedTestException("Wasm: SubView aliasing causes i64/i32 type mismatch");
-
-        [TestMethod]
-        public new async Task AlgorithmRadixSortNonPairsFloatTest() =>
-            throw new UnsupportedTestException("Wasm: RadixSort produces wrong results");
-        // AlgorithmRadixSortNonPairsIntTest: inherited from base (no override needed)
-        [TestMethod]
-        public new async Task RadixSortMinimalPatternsTest() =>
-            throw new UnsupportedTestException("Wasm: RadixSort produces wrong results");
-        [TestMethod]
-        public new async Task RadixSortCounterScanTest() =>
-            throw new UnsupportedTestException("Wasm: algorithm tests require shared memory + barriers");
-        [TestMethod]
-        public new async Task RadixSortPositionDiagnosticTest() =>
-            throw new UnsupportedTestException("Wasm: RadixSort produces wrong results");
     }
 }
