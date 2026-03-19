@@ -1654,8 +1654,15 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         /// Recursively generates structured WGSL code for an inlined helper block.
         /// This mirrors the kernel's GenerateStructuredCode pattern.
         /// </summary>
+        /// <summary>
+        /// Stack of loop exit targets. When inside a loop, any unconditional branch
+        /// to the loop's exit block should emit "break;" instead of recursing.
+        /// Pushed when entering a loop header, popped when exiting.
+        /// </summary>
+        private readonly Stack<BasicBlock> _loopExitStack = new();
+
         private void InlineStructuredBlock(
-            BasicBlock current, 
+            BasicBlock current,
             BasicBlock? stop,
             global::ILGPU.IR.Analyses.Dominators<global::ILGPU.IR.Analyses.ControlFlowDirection.Backwards> postDom,
             HashSet<BasicBlock> visited,
@@ -1700,9 +1707,23 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             else if (terminator is UnconditionalBranch ub)
             {
                 PushPhiValues(ub);
-                
-                // Check if this is a back-edge (target already visited = loop)
-                if (visited.Contains(ub.Target))
+
+                // Check if this branch exits a loop (targets a loop exit block).
+                // This handles "break from inside if-block within a loop" — the PHI
+                // values were pushed above, now we need to emit the actual "break;".
+                bool isLoopExit = _loopExitStack.Count > 0 && _loopExitStack.Contains(ub.Target);
+
+                if (isLoopExit)
+                {
+                    // Branch exits the enclosing loop — emit break
+                    AppendLine("break;");
+                    if (isLoopHeader)
+                    {
+                        PopIndent();
+                        AppendLine("}");
+                    }
+                }
+                else if (visited.Contains(ub.Target))
                 {
                     // Back-edge: continue the loop (implicit in WGSL loop)
                     AppendLine("// loop continue (back-edge)");
@@ -1774,12 +1795,17 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     // Emit phi values for loop body
                     PushPhiValues(ifb, bodyTarget);
                     
+                    // Track loop exit so inner unconditional branches to it emit "break;"
+                    _loopExitStack.Push(exitTarget);
+
                     // Emit loop body (recurse into body target, stop at this loop header)
                     if (!visited.Contains(bodyTarget))
                     {
                         InlineStructuredBlock(bodyTarget, current, postDom, visited, loopHeaders, resultVar);
                     }
-                    
+
+                    _loopExitStack.Pop();
+
                     // Close the loop
                     PopIndent();
                     AppendLine("}"); // end loop { }
@@ -2331,6 +2357,13 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             Builder.Append(fullOutput);
             // NOTE: The enable subgroups placeholder is resolved in WebGPUBackend.CreateKernel()
             // because the header is written to the upstream builder, not this.Builder.
+
+            // Diagnostic WGSL dump (enable when debugging specific kernels)
+            // if (_kernelMethodName.Contains("SomeKernel"))
+            // {
+            //     var escaped = fullOutput.Replace("\\", "\\\\").Replace("\"", "\\\"").Replace("\r", "").Replace("\n", "\\n");
+            //     Console.WriteLine($"WGSL_DUMP[{_kernelMethodName}|loops={_loops.Count}]:{escaped}:END_WGSL_DUMP");
+            // }
         }
         private string GetPrefix(Value value)
         {
@@ -5488,8 +5521,25 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             if (!currentLoop.Contains(startBlock))
             {
                 // startBlock IS the exit — no intermediate blocks.
-                // Use transitive push for the exit chain.
-                PushPhiValuesTransitive(startBlock, sourceBlock, currentLoop, visited);
+                // Push PHIs in the exit block from the source block.
+                PushPhiValues(startBlock, sourceBlock);
+
+                // Follow the exit chain transitively. The exit block may be a
+                // pass-through (no PHIs, just an unconditional branch) that leads
+                // to a MERGE block where the actual PHIs live. This happens when
+                // a loop has multiple exit paths (header normal exit + body break)
+                // that converge at a common merge point.
+                var exitChain = startBlock;
+                int maxChain = 8;
+                for (int depth = 0; depth < maxChain; depth++)
+                {
+                    if (exitChain.Terminator is global::ILGPU.IR.Values.UnconditionalBranch exitUB)
+                    {
+                        PushPhiValues(exitUB.Target, exitChain);
+                        exitChain = exitUB.Target;
+                    }
+                    else break;
+                }
                 return;
             }
 

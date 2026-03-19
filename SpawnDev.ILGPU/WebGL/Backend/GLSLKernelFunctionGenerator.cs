@@ -1460,13 +1460,20 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             // that reference increment variables not yet computed (triple-nested loop bug).
             var current = exitTarget;
             int maxDepth = 8; // Safety limit
+            bool reachedExit = false;
             for (int depth = 0; depth < maxDepth; depth++)
             {
                 if (current.Terminator is UnconditionalBranch uBranch)
                 {
                     // Stop if next block is outside current loop
                     if (currentLoop != null && !currentLoop.Contains(uBranch.Target))
+                    {
+                        reachedExit = true;
+                        // Push PHIs at the boundary before stopping
+                        PushPhiValues(uBranch.Target, current);
+                        current = uBranch.Target;
                         break;
+                    }
                     // Emit this intermediate block's code (assignments like hitT = t)
                     GenerateBlockCode(current);
                     // Push PHI values to the next block
@@ -1478,6 +1485,39 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                     break; // Not an unconditional branch, stop tracing
                 }
             }
+
+            // Follow the exit chain OUTSIDE the loop to find merge-point PHIs.
+            // When a loop has multiple exit paths (header normal exit + body break),
+            // they converge at a merge block whose PHIs need values from ALL exits.
+            // The exit block may be a pass-through (no PHIs) that chains to the merge.
+            if (reachedExit)
+            {
+                for (int depth = 0; depth < maxDepth; depth++)
+                {
+                    if (current.Terminator is UnconditionalBranch exitUB)
+                    {
+                        PushPhiValues(exitUB.Target, current);
+                        current = exitUB.Target;
+                    }
+                    else break;
+                }
+            }
+            else if (currentLoop != null && !currentLoop.Contains(current))
+            {
+                // exitTarget was already outside the loop (direct exit, no intermediates).
+                // Push PHIs at the exit target from the source, then follow the chain.
+                PushPhiValues(current, sourceBlock);
+                for (int depth = 0; depth < maxDepth; depth++)
+                {
+                    if (current.Terminator is UnconditionalBranch exitUB)
+                    {
+                        PushPhiValues(exitUB.Target, current);
+                        current = exitUB.Target;
+                    }
+                    else break;
+                }
+            }
+
             AppendLine("break;");
         }
 
