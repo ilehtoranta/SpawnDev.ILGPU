@@ -1661,6 +1661,14 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         /// </summary>
         private readonly Stack<BasicBlock> _loopExitStack = new();
 
+        /// <summary>
+        /// The current loop's header exit target. Set by GenerateLoopConstruct so that
+        /// EmitIntermediateBlocksToExit can distinguish body-break-specific blocks from
+        /// the shared merge block. Body-break exit chain blocks whose code is NOT the
+        /// header exit target get emitted inside the break scope and marked visited.
+        /// </summary>
+        private BasicBlock? _currentLoopHeaderExitTarget;
+
         private void InlineStructuredBlock(
             BasicBlock current,
             BasicBlock? stop,
@@ -5096,18 +5104,21 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 {
                     // Entering a loop — emit a WGSL loop {} construct
                     visited.Add(block);
-                    GenerateLoopConstruct(block, loopNode, stopBlock, pd, visited);
+                    var headerExitBlock = GenerateLoopConstruct(block, loopNode, stopBlock, pd, visited);
 
-                    // After the loop, continue with the exit block.
-                    // DEBUG IL FIX: The loop's break paths already pushed PHI values
-                    // for all post-loop blocks via EmitIntermediateBlocksToExit /
-                    // PushPhiValuesTransitive. Skip through any exit chain blocks
-                    // that are just pass-through (UnconditionalBranch only) since
-                    // re-processing them would call PushPhiValues again and overwrite
-                    // the break-path values with stale "normal exit" values.
-                    if (loopNode.Exits.Length > 0)
+                    // After the loop, continue with the header's exit target.
+                    // IMPORTANT: Use the header's exit target (returned by GenerateLoopConstruct),
+                    // NOT loopNode.Exits[0]. The Exits array may contain body-break-specific
+                    // intermediate blocks (e.g., blocks with `flagged = true` assignments) that
+                    // should NOT be emitted after the loop — their code belongs exclusively to
+                    // the body break path and was already handled inside the loop construct.
+                    // Using the header's exit target ensures we start from the correct post-loop
+                    // continuation point (typically the merge block shared by all exit paths).
+                    if (headerExitBlock != null || loopNode.Exits.Length > 0)
                     {
-                        block = loopNode.Exits[0];
+                        // Prefer the header's exit target; fall back to Exits[0] for
+                        // unconditional-branch headers or other edge cases.
+                        block = headerExitBlock ?? loopNode.Exits[0];
                         if (WebGPU.Backend.WebGPUBackend.VerboseLogging && _isScanKernel)
                             WebGPUBackend.Log($"[CODEGEN] Post-loop exit: start=B{block.Id} stopBlock=B{stopBlock?.Id}");
                         // Skip pass-through blocks in the exit chain, but never
@@ -5520,9 +5531,24 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         {
             if (!currentLoop.Contains(startBlock))
             {
-                // startBlock IS the exit — no intermediate blocks.
-                // Push PHIs in the exit block from the source block.
+                // startBlock IS outside the loop — it's in the exit chain.
+                // Push PHIs from the source block into this block.
                 PushPhiValues(startBlock, sourceBlock);
+
+                // FIX: If this block is NOT the header's exit target (i.e., it's a
+                // body-break-specific intermediate block), emit its code inside the
+                // break scope and mark it visited. This ensures assignments like
+                // `flagged = true` execute only when the break is taken, not
+                // unconditionally after the loop.
+                // If this IS the header's exit target, skip — it's the shared merge
+                // block that should be emitted naturally after the loop.
+                if (_currentLoopHeaderExitTarget != null
+                    && startBlock != _currentLoopHeaderExitTarget
+                    && HasNonPhiInstructions(startBlock))
+                {
+                    GenerateBasicBlockCode(startBlock);
+                    visited.Add(startBlock);
+                }
 
                 // Follow the exit chain transitively to find merge-point PHIs.
                 // The exit block may be a pass-through (no PHIs) that leads to a
@@ -5594,7 +5620,13 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         /// The loop header block is emitted first, followed by a break condition check,
         /// then the loop body blocks. This ensures barriers are in uniform control flow.
         /// </summary>
-        private void GenerateLoopConstruct(
+        /// <summary>
+        /// Returns the header's exit target block (the first block outside the loop
+        /// that the header's normal exit leads to). The caller should use this for
+        /// post-loop continuation instead of loopNode.Exits[0], which may point to
+        /// a body-break-specific intermediate block.
+        /// </summary>
+        private BasicBlock? GenerateLoopConstruct(
             BasicBlock headerBlock,
             Loops<ReversePostOrder, Forwards>.Node loopNode,
             BasicBlock? outerStopBlock,
@@ -5794,6 +5826,9 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             // Emit the header block's body (instructions)
             GenerateBasicBlockCode(headerBlock);
 
+            // Track the header's exit target for post-loop continuation.
+            BasicBlock? headerExitTarget = null;
+
             if (terminator is global::ILGPU.IR.Values.IfBranch headerBranch)
             {
                 var trueTarget = headerBranch.TrueTarget;
@@ -5802,6 +5837,12 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 // DEBUG IL FIX: Use transitive exit detection for loop headers too.
                 bool trueIsExit = ExitsLoopTransitively(trueTarget, loopNode, out var trueHeaderExit);
                 bool falseIsExit = ExitsLoopTransitively(falseTarget, loopNode, out var falseHeaderExit);
+
+                // The header's exit target is the first block outside the loop
+                // that the header's normal exit leads to. Used for post-loop
+                // continuation (not body-break-specific intermediate blocks).
+                headerExitTarget = trueIsExit ? trueTarget : (falseIsExit ? falseTarget : null);
+                _currentLoopHeaderExitTarget = headerExitTarget;
 
                 // ─── Uniform break emission ─────────────────────────────────
                 // If the break condition uses a non-uniform counter, emit a
@@ -5967,6 +6008,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
             PopIndent();
             AppendLine("}");
+            _currentLoopHeaderExitTarget = null;
+            return headerExitTarget;
         }
 
 
