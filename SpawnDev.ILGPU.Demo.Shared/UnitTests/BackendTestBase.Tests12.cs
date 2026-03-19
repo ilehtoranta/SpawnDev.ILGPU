@@ -1,6 +1,5 @@
 using ILGPU;
 using ILGPU.Runtime;
-using SpawnDev.ILGPU.WebGPU.Backend;
 using SpawnDev.UnitTesting;
 
 namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
@@ -237,35 +236,107 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             AssertCloseF(expected, actual, 1e-6f, "NestedBreakBool_ReflectMode");
         });
 
+        // NestedBreakBool_DumpWGSL removed — diagnostic test that intentionally throws.
+        // The WGSL dump was used to diagnose bug #3/#4 which are now fixed.
+
+        // ═══════════════════════════════════════════════════════════
+        //  Test: Sequential loops — loop 1 computes a value, loop 2 uses it.
+        //  This is the pattern used by LayerNorm and RMSNorm.
+        //  Isolates whether the GLSL codegen handles passing values
+        //  between sequential for-loops in the same kernel.
+        // ═══════════════════════════════════════════════════════════
+
+        private static void SequentialLoopsKernel(Index1D row,
+            ArrayView1D<float, Stride1D.Dense> input,
+            ArrayView1D<float, Stride1D.Dense> output,
+            int C)
+        {
+            int offset = row * C;
+            // Loop 1: compute mean
+            float sum = 0f;
+            for (int i = 0; i < C; i++)
+                sum += input[offset + i];
+            float mean = sum / C;
+
+            // Loop 2: compute variance using mean from loop 1
+            float varSum = 0f;
+            for (int i = 0; i < C; i++)
+            {
+                float d = input[offset + i] - mean;
+                varSum += d * d;
+            }
+            float invStd = 1f / MathF.Sqrt(varSum / C + 1e-6f);
+
+            // Loop 3: normalize
+            for (int i = 0; i < C; i++)
+                output[offset + i] = (input[offset + i] - mean) * invStd;
+        }
+
         [TestMethod]
-        public async Task NestedBreakBool_DumpWGSL() => await RunTest(async accelerator =>
+        public async Task SequentialLoops_SmallTest() => await RunTest(async accelerator =>
         {
             var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D,
                 ArrayView1D<float, Stride1D.Dense>,
-                ArrayView1D<int, Stride1D.Dense>>(NestedBreakBoolKernel);
+                ArrayView1D<float, Stride1D.Dense>,
+                int>(SequentialLoopsKernel);
 
-            // Run trivially to force compilation
-            var paramsData = new int[] { 1, 0, 10 };
-            using var paramsBuf = accelerator.Allocate1D(paramsData);
-            using var outBuf = accelerator.Allocate1D<float>(1);
-            kernel(1, outBuf.View, paramsBuf.View);
-            await accelerator.SynchronizeAsync();
+            int rows = 2, C = 4;
+            var input = new float[] { 1, 2, 3, 4, 5, 6, 7, 8 };
 
-            // Get the WGSL from the registry
-            string? wgsl = null;
-            foreach (var kvp in WebGPUBackend.WGSLRegistry)
+            // CPU reference
+            var expected = new float[rows * C];
+            for (int r = 0; r < rows; r++)
             {
-                if (kvp.Key.Contains("NestedBreakBool", StringComparison.OrdinalIgnoreCase))
-                    wgsl = kvp.Value.Source;
+                float s = 0;
+                for (int i = 0; i < C; i++) s += input[r * C + i];
+                float m = s / C;
+                float vs = 0;
+                for (int i = 0; i < C; i++) { float d = input[r * C + i] - m; vs += d * d; }
+                float inv = 1f / MathF.Sqrt(vs / C + 1e-6f);
+                for (int i = 0; i < C; i++) expected[r * C + i] = (input[r * C + i] - m) * inv;
             }
-            if (wgsl == null)
-                wgsl = WebGPUBackend.LastGeneratedWGSL ?? "No WGSL found";
 
-            // Extract just the fn main body
-            int mainIdx = wgsl.IndexOf("fn main(");
-            if (mainIdx >= 0) wgsl = wgsl.Substring(mainIdx);
+            using var inBuf = accelerator.Allocate1D(input);
+            using var outBuf = accelerator.Allocate1D<float>(rows * C);
+            kernel(rows, inBuf.View, outBuf.View, C);
+            await accelerator.SynchronizeAsync();
+            var actual = await outBuf.CopyToHostAsync<float>();
+            AssertCloseF(expected, actual, 1e-3f, "SequentialLoops_Small");
+        });
 
-            throw new Exception($"WGSL ({wgsl.Length} chars):\n{wgsl}");
+        // SequentialLoops_DumpGLSL removed — diagnostic test used to debug WebGL TF limitation.
+
+        [TestMethod]
+        public async Task SequentialLoops_LargerTest() => await RunTest(async accelerator =>
+        {
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D,
+                ArrayView1D<float, Stride1D.Dense>,
+                ArrayView1D<float, Stride1D.Dense>,
+                int>(SequentialLoopsKernel);
+
+            int rows = 4, C = 64;
+            var rng = new Random(42);
+            var input = new float[rows * C];
+            for (int i = 0; i < input.Length; i++) input[i] = (float)(rng.NextDouble() * 2 - 1);
+
+            var expected = new float[rows * C];
+            for (int r = 0; r < rows; r++)
+            {
+                float s = 0;
+                for (int i = 0; i < C; i++) s += input[r * C + i];
+                float m = s / C;
+                float vs = 0;
+                for (int i = 0; i < C; i++) { float d = input[r * C + i] - m; vs += d * d; }
+                float inv = 1f / MathF.Sqrt(vs / C + 1e-6f);
+                for (int i = 0; i < C; i++) expected[r * C + i] = (input[r * C + i] - m) * inv;
+            }
+
+            using var inBuf = accelerator.Allocate1D(input);
+            using var outBuf = accelerator.Allocate1D<float>(rows * C);
+            kernel(rows, inBuf.View, outBuf.View, C);
+            await accelerator.SynchronizeAsync();
+            var actual = await outBuf.CopyToHostAsync<float>();
+            AssertCloseF(expected, actual, 1e-2f, "SequentialLoops_Larger");
         });
     }
 }

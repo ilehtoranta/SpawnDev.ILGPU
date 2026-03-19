@@ -66,6 +66,11 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         private Loops<ReversePostOrder, Forwards> _loops;
         private HashSet<BasicBlock> _visitedBlocks = new();
         private readonly Stack<BasicBlock> _activeLoopHeaders = new();
+        /// <summary>
+        /// The current loop's header exit target. Used by EmitBreakWithIntermediateCode
+        /// to distinguish body-break-specific blocks from the shared merge block.
+        /// </summary>
+        private BasicBlock? _glslHeaderExitTarget;
         private int _loopCounter = 0;
 
         // Parameter binding info for runtime
@@ -1093,6 +1098,19 @@ namespace SpawnDev.ILGPU.WebGL.Backend
 
                 _activeLoopHeaders.Push(current);
 
+                // Detect the header's exit target before entering the loop body.
+                // This is the first block outside the loop that the header's normal
+                // exit leads to — used for post-loop continuation.
+                BasicBlock? headerExitTarget = null;
+                if (current.Terminator is IfBranch headerBranch)
+                {
+                    if (!loop.Contains(headerBranch.TrueTarget) || ExitsLoopTransitively(headerBranch.TrueTarget, loop))
+                        headerExitTarget = headerBranch.TrueTarget;
+                    else if (!loop.Contains(headerBranch.FalseTarget) || ExitsLoopTransitively(headerBranch.FalseTarget, loop))
+                        headerExitTarget = headerBranch.FalseTarget;
+                }
+                _glslHeaderExitTarget = headerExitTarget;
+
                 // Remove current from visited so we can re-enter it for the loop body
                 _visitedBlocks.Remove(current);
 
@@ -1100,18 +1118,22 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 GenerateLoopBody(current, loop, stop);
 
                 _activeLoopHeaders.Pop();
+                _glslHeaderExitTarget = null;
 
                 PopIndent();
                 AppendLine("}");
 
-                // Continue with exit blocks after the loop
-                // DEBUG IL FIX: Skip through pure pass-through exit blocks
-                // (only PHI values + unconditional branch) since the loop's break
-                // paths already pushed their PHI values. Re-processing would call
-                // PushPhiValues again and overwrite break-path values.
-                foreach (var exit in loop.Exits)
+                // Continue with exit blocks after the loop.
+                // Use the header's exit target for continuation instead of iterating
+                // all loop.Exits — avoids processing body-break-specific intermediate
+                // blocks (whose code was emitted inside the break scope).
+                BasicBlock? postLoopBlock = headerExitTarget;
+                if (postLoopBlock == null && loop.Exits.Length > 0)
+                    postLoopBlock = loop.Exits[0]; // Fallback
+
+                if (postLoopBlock != null)
                 {
-                    var exitBlock = exit;
+                    var exitBlock = postLoopBlock;
                     // Skip pass-through blocks
                     int skipLimit = 10;
                     while (exitBlock != null && exitBlock != stop
@@ -1132,7 +1154,6 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                     if (exitBlock != null && exitBlock != stop && !_visitedBlocks.Contains(exitBlock))
                     {
                         GenerateStructuredCode(exitBlock, stop);
-                        break; // Only one exit continuation in structured flow
                     }
                 }
                 return;
@@ -1319,6 +1340,23 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             var merge = _postDominators?.GetImmediateDominator(source);
             bool mergeInLoop = merge != null && loop.Contains(merge);
 
+            // FIX: When the post-dominator is outside the loop (due to a break-exit
+            // path from one branch), find the in-loop merge by checking which target
+            // reaches the header through a UB chain (it's the continuation block).
+            if (!mergeInLoop && merge != null)
+            {
+                BasicBlock? inLoopMerge = null;
+                if (loop.Contains(trueTarget) && ReachesHeaderThroughUBChain(trueTarget, loop))
+                    inLoopMerge = trueTarget;
+                else if (loop.Contains(falseTarget) && ReachesHeaderThroughUBChain(falseTarget, loop))
+                    inLoopMerge = falseTarget;
+                if (inLoopMerge != null)
+                {
+                    merge = inLoopMerge;
+                    mergeInLoop = true;
+                }
+            }
+
             // Note: We intentionally do NOT temporarily mark the merge as visited.
             // The merge block may be needed as a continuation target by nested
             // branches (e.g., the merge for an outer if/else might be the PHI
@@ -1493,6 +1531,19 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             // need to reach the post-loop merge block.
             if (currentLoop != null)
             {
+                // FIX: If the current block is outside the loop and is NOT the header's
+                // exit target, it's a body-break-specific intermediate block (e.g.,
+                // contains `flagged = true`). Emit its code inside the break scope
+                // and mark visited so it's not re-emitted after the loop.
+                if (!currentLoop.Contains(current)
+                    && _glslHeaderExitTarget != null
+                    && current != _glslHeaderExitTarget
+                    && HasNonPhiInstructions(current))
+                {
+                    GenerateBlockCode(current);
+                    _visitedBlocks.Add(current);
+                }
+
                 // Push PHIs through the exit chain (outside the loop)
                 // Stop at parent loop headers to avoid overwriting their PHIs
                 var exitChain = current;
@@ -1567,6 +1618,29 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         /// Pure pass-through blocks can be skipped in post-loop exit chain processing
         /// since their PHI values were already handled by the loop's break paths.
         /// </summary>
+        /// <summary>
+        /// Check if a block reaches a loop header through an unconditional branch chain.
+        /// Used to identify the loop's continuation block (back-edge source).
+        /// </summary>
+        private static bool ReachesHeaderThroughUBChain(BasicBlock block, Loops<ReversePostOrder, Forwards>.Node loop)
+        {
+            var current = block;
+            for (int i = 0; i < 10; i++)
+            {
+                if (current.Terminator is UnconditionalBranch ub)
+                {
+                    foreach (var header in loop.Headers)
+                    {
+                        if (ub.Target == header) return true;
+                    }
+                    if (!loop.Contains(ub.Target)) return false;
+                    current = ub.Target;
+                }
+                else return false;
+            }
+            return false;
+        }
+
         private static bool HasNonPhiInstructions(BasicBlock block)
         {
             foreach (var value in block)

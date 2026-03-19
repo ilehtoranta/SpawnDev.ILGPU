@@ -725,6 +725,17 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
         public new async Task SharedMemMultiGroupTest() =>
             throw new UnsupportedTestException("WebGL: no shared memory in vertex shaders");
 
+        // --- Sequential loops (per-row kernels) — unsupported on WebGL TF pipeline ---
+        // WebGL Transform Feedback captures one output per vertex. Per-row kernels
+        // that write C elements in a loop only output the last iteration's value.
+        // See PLANS.md #6.
+        [TestMethod]
+        public new async Task SequentialLoops_SmallTest() =>
+            throw new UnsupportedTestException("WebGL: per-row kernels with inner write loops unsupported (TF limitation)");
+        [TestMethod]
+        public new async Task SequentialLoops_LargerTest() =>
+            throw new UnsupportedTestException("WebGL: per-row kernels with inner write loops unsupported (TF limitation)");
+
         // ====================================================================
         // Boids Pipeline Diagnostic Tests
         // These run sub-components of the Boids3D demo in isolation to pinpoint

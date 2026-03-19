@@ -30,10 +30,6 @@ namespace SpawnDev.ILGPU.WebGPU
             var queue = accelerator.NativeAccelerator.Queue;
             if (queue != null)
             {
-                // Yield to browser event loop before waiting. In Blazor WASM (single-threaded),
-                // the GPU completion callback needs the event loop to fire. Without yielding,
-                // OnSubmittedWorkDone's Promise can deadlock after heavy compute workloads.
-                await Task.Yield();
                 await queue.OnSubmittedWorkDone();
             }
         }
