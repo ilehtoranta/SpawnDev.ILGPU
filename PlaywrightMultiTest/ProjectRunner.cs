@@ -192,7 +192,7 @@ namespace PlaywrightMultiTest
                         {
                             var text = msg.Text;
                             // Only log messages related to WGSL dumps or errors
-                            if (text.Contains("WGSL") || text.Contains("@compute") || text.Contains("@workgroup_size") || text.Contains("WGSL_DUMP") || msg.Type == "error")
+                            if (text.Contains("WGSL") || text.Contains("@compute") || text.Contains("@workgroup_size") || text.Contains("WGSL_DUMP") || text.Contains("GLSL_DUMP") || msg.Type == "error")
                             {
                                 try
                                 {

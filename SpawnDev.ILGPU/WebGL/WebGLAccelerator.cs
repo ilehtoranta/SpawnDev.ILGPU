@@ -456,12 +456,17 @@ namespace SpawnDev.ILGPU.WebGL
             int totalVertices = 1;
             int dimX = 1, dimY = 1, dimZ = 1;
 
+            int groupDimX = 1, gridDimX = 1, gridDimY = 1;
+
             if (dimension is KernelConfig config)
             {
                 dimX = config.GridDim.X * config.GroupDim.X;
                 dimY = config.GridDim.Y * config.GroupDim.Y;
                 dimZ = config.GridDim.Z * config.GroupDim.Z;
                 totalVertices = dimX * dimY * dimZ;
+                groupDimX = config.GroupDim.X;
+                gridDimX = config.GridDim.X;
+                gridDimY = config.GridDim.Y;
             }
             else if (dimension is Index1D i1) { dimX = i1.X; totalVertices = dimX; }
             else if (dimension is Index2D i2) { dimX = i2.X; dimY = i2.Y; totalVertices = dimX * dimY; }
@@ -498,6 +503,9 @@ namespace SpawnDev.ILGPU.WebGL
                 dimX,
                 dimY,
                 dimZ,
+                groupDimX,
+                gridDimX,
+                gridDimY,
                 @params = jsParams.ToArray(),
                 strides = strideMap,
                 outputs = outputs.ToArray()

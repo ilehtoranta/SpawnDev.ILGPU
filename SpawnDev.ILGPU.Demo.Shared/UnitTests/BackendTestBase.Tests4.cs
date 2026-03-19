@@ -350,6 +350,11 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
         [TestMethod]
         public async Task Batched2DGridDispatchTest() => await RunTest(async accelerator =>
         {
+            // WebGL uses vertex shaders for compute — LoadStreamKernel with KernelConfig
+            // and explicit Grid.IdxX/Y is not fully supported on WebGL yet.
+            if (accelerator.AcceleratorType == AcceleratorType.WebGL)
+                throw new UnsupportedTestException("WebGL does not support LoadStreamKernel with 2D grid dispatch (no native workgroup support)");
+
             int batches = 4;
             int cols = 100;
             int groupSize = 32;

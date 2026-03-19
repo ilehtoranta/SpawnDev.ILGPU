@@ -449,6 +449,12 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 Builder.AppendLine("uniform highp int u_dimHeight; // grid Y dimension");
             }
 
+            // Emit grid/group dimension uniforms for kernels using Grid.Idx/Group.Idx
+            // These are always available — set by the WebGL dispatch code
+            Builder.AppendLine("uniform highp int u_groupDimX; // threads per workgroup (X)");
+            Builder.AppendLine("uniform highp int u_gridDimX; // number of workgroups (X)");
+            Builder.AppendLine("uniform highp int u_gridDimY; // number of workgroups (Y)");
+
             foreach (var param in Method.Parameters)
             {
                 if (param.Index < paramOffset) continue;
@@ -816,8 +822,8 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                     break;
             }
 
-            // Bind the implicit index parameter
-            if (Method.Parameters.Count > 0)
+            // Bind the implicit index parameter (only for auto-grouped kernels, not LoadStreamKernel)
+            if (Method.Parameters.Count > 0 && EntryPoint.IndexType != IndexType.None)
             {
                 var indexParam = Method.Parameters[0];
                 string idxType = EntryPoint.IndexType switch
@@ -1460,20 +1466,13 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             // that reference increment variables not yet computed (triple-nested loop bug).
             var current = exitTarget;
             int maxDepth = 8; // Safety limit
-            bool reachedExit = false;
             for (int depth = 0; depth < maxDepth; depth++)
             {
                 if (current.Terminator is UnconditionalBranch uBranch)
                 {
                     // Stop if next block is outside current loop
                     if (currentLoop != null && !currentLoop.Contains(uBranch.Target))
-                    {
-                        reachedExit = true;
-                        // Push PHIs at the boundary before stopping
-                        PushPhiValues(uBranch.Target, current);
-                        current = uBranch.Target;
                         break;
-                    }
                     // Emit this intermediate block's code (assignments like hitT = t)
                     GenerateBlockCode(current);
                     // Push PHI values to the next block
@@ -1490,35 +1489,42 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             // When a loop has multiple exit paths (header normal exit + body break),
             // they converge at a merge block whose PHIs need values from ALL exits.
             // The exit block may be a pass-through (no PHIs) that chains to the merge.
-            if (reachedExit)
+            // This handles the LoopBreakAssignment pattern where break-path assignments
+            // need to reach the post-loop merge block.
+            if (currentLoop != null)
             {
+                // Push PHIs through the exit chain (outside the loop)
+                // Stop at parent loop headers to avoid overwriting their PHIs
+                var exitChain = current;
                 for (int depth = 0; depth < maxDepth; depth++)
                 {
-                    if (current.Terminator is UnconditionalBranch exitUB)
+                    if (exitChain.Terminator is UnconditionalBranch exitUB)
                     {
-                        PushPhiValues(exitUB.Target, current);
-                        current = exitUB.Target;
-                    }
-                    else break;
-                }
-            }
-            else if (currentLoop != null && !currentLoop.Contains(current))
-            {
-                // exitTarget was already outside the loop (direct exit, no intermediates).
-                // Push PHIs at the exit target from the source, then follow the chain.
-                PushPhiValues(current, sourceBlock);
-                for (int depth = 0; depth < maxDepth; depth++)
-                {
-                    if (current.Terminator is UnconditionalBranch exitUB)
-                    {
-                        PushPhiValues(exitUB.Target, current);
-                        current = exitUB.Target;
+                        var next = exitUB.Target;
+                        if (IsBlockLoopHeader(next)) break;
+                        // Only push if we're outside the loop (don't re-push inside)
+                        if (!currentLoop.Contains(exitChain))
+                        {
+                            PushPhiValues(next, exitChain);
+                        }
+                        exitChain = next;
                     }
                     else break;
                 }
             }
 
             AppendLine("break;");
+        }
+
+        /// <summary>
+        /// Checks if a block is a loop header for any loop in the kernel.
+        /// </summary>
+        private bool IsBlockLoopHeader(BasicBlock block)
+        {
+            foreach (var loop in _loops)
+                foreach (var header in loop.Headers)
+                    if (header == block) return true;
+            return false;
         }
 
         /// <summary>
@@ -2540,6 +2546,61 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             if (value is LoadElementAddress lea) return ResolveToParameter(lea.Source);
             if (value is LoadFieldAddress lfa) return ResolveToParameter(lfa.Source);
             return null;
+        }
+
+        #endregion
+
+        #region Grid/Group Index Support
+
+        // WebGL has no native workgroups — we emulate using uniforms set at dispatch time.
+        // u_groupDimX = threads per workgroup (X), u_gridDimX = number of workgroups (X/Y)
+        // linearGridIdx = gl_VertexID / u_groupDimX
+        // Grid.IdxX = linearGridIdx % u_gridDimX
+        // Grid.IdxY = linearGridIdx / u_gridDimX
+        // Group.IdxX = gl_VertexID % u_groupDimX
+
+        public override void GenerateCode(GridIndexValue value)
+        {
+            var target = Load(value);
+            Declare(target);
+            if (value.Dimension == DeviceConstantDimension3D.X)
+                AppendLine($"{target} = (gl_VertexID / u_groupDimX) % u_gridDimX;");
+            else if (value.Dimension == DeviceConstantDimension3D.Y)
+                AppendLine($"{target} = (gl_VertexID / u_groupDimX) / u_gridDimX;");
+            else
+                AppendLine($"{target} = ((gl_VertexID / u_groupDimX) / u_gridDimX) / u_gridDimY;");
+        }
+
+        public override void GenerateCode(GroupIndexValue value)
+        {
+            var target = Load(value);
+            Declare(target);
+            if (value.Dimension == DeviceConstantDimension3D.X)
+                AppendLine($"{target} = gl_VertexID % u_groupDimX;");
+            else
+                AppendLine($"{target} = 0; // WebGL only supports 1D groups");
+        }
+
+        public override void GenerateCode(GroupDimensionValue value)
+        {
+            var target = Load(value);
+            Declare(target);
+            if (value.Dimension == DeviceConstantDimension3D.X)
+                AppendLine($"{target} = u_groupDimX;");
+            else
+                AppendLine($"{target} = 1; // WebGL only supports 1D groups");
+        }
+
+        public override void GenerateCode(GridDimensionValue value)
+        {
+            var target = Load(value);
+            Declare(target);
+            if (value.Dimension == DeviceConstantDimension3D.X)
+                AppendLine($"{target} = u_gridDimX;");
+            else if (value.Dimension == DeviceConstantDimension3D.Y)
+                AppendLine($"{target} = u_gridDimY;");
+            else
+                AppendLine($"{target} = 1;");
         }
 
         #endregion

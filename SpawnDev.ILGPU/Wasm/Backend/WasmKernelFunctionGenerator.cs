@@ -1898,10 +1898,43 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         public override void GenerateCode(GridIndexValue value)
         {
             var target = AllocateLocal(value);
-            // gridIndex = globalIdx / groupDimX (which group this thread belongs to)
-            WasmModuleBuilder.EmitLocalGet(Code, _globalIdxLocal);
-            WasmModuleBuilder.EmitLocalGet(Code, _groupDimXLocal);
-            Code.Add(WasmOpCodes.I32DivU);
+            // linearGridIdx = globalIdx / groupDimX
+            // For 2D/3D grids, decompose into X/Y/Z using gridDimX = dimX / groupDimX
+            if (value.Dimension == DeviceConstantDimension3D.X)
+            {
+                // Grid.IdxX = linearGridIdx % gridDimX = (globalIdx / groupDimX) % (dimX / groupDimX)
+                WasmModuleBuilder.EmitLocalGet(Code, _globalIdxLocal);
+                WasmModuleBuilder.EmitLocalGet(Code, _groupDimXLocal);
+                Code.Add(WasmOpCodes.I32DivU); // linearGridIdx
+                WasmModuleBuilder.EmitLocalGet(Code, _dimXLocal);
+                WasmModuleBuilder.EmitLocalGet(Code, _groupDimXLocal);
+                Code.Add(WasmOpCodes.I32DivU); // gridDimX
+                Code.Add(WasmOpCodes.I32RemU); // linearGridIdx % gridDimX
+            }
+            else if (value.Dimension == DeviceConstantDimension3D.Y)
+            {
+                // Grid.IdxY = linearGridIdx / gridDimX = (globalIdx / groupDimX) / (dimX / groupDimX)
+                WasmModuleBuilder.EmitLocalGet(Code, _globalIdxLocal);
+                WasmModuleBuilder.EmitLocalGet(Code, _groupDimXLocal);
+                Code.Add(WasmOpCodes.I32DivU); // linearGridIdx
+                WasmModuleBuilder.EmitLocalGet(Code, _dimXLocal);
+                WasmModuleBuilder.EmitLocalGet(Code, _groupDimXLocal);
+                Code.Add(WasmOpCodes.I32DivU); // gridDimX
+                Code.Add(WasmOpCodes.I32DivU); // linearGridIdx / gridDimX
+            }
+            else // Z
+            {
+                // Grid.IdxZ = linearGridIdx / (gridDimX * gridDimY)
+                WasmModuleBuilder.EmitLocalGet(Code, _globalIdxLocal);
+                WasmModuleBuilder.EmitLocalGet(Code, _groupDimXLocal);
+                Code.Add(WasmOpCodes.I32DivU); // linearGridIdx
+                WasmModuleBuilder.EmitLocalGet(Code, _dimXLocal);
+                WasmModuleBuilder.EmitLocalGet(Code, _groupDimXLocal);
+                Code.Add(WasmOpCodes.I32DivU); // gridDimX
+                WasmModuleBuilder.EmitLocalGet(Code, _dimYLocal);
+                Code.Add(WasmOpCodes.I32Mul); // gridDimX * dimY
+                Code.Add(WasmOpCodes.I32DivU);
+            }
             WasmModuleBuilder.EmitLocalSet(Code, target);
         }
 

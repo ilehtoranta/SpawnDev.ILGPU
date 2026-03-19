@@ -5524,17 +5524,30 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 // Push PHIs in the exit block from the source block.
                 PushPhiValues(startBlock, sourceBlock);
 
-                // Follow the exit chain transitively. The exit block may be a
-                // pass-through (no PHIs, just an unconditional branch) that leads
-                // to a MERGE block where the actual PHIs live. This happens when
-                // a loop has multiple exit paths (header normal exit + body break)
-                // that converge at a common merge point.
+                // Follow the exit chain transitively to find merge-point PHIs.
+                // The exit block may be a pass-through (no PHIs) that leads to a
+                // MERGE block where the actual PHIs live (multiple exit paths converge).
+                // IMPORTANT: Stop at loop headers of parent loops — pushing PHIs there
+                // would overwrite parent loop counter values (triple-nested loop regression).
                 var exitChain = startBlock;
                 int maxChain = 8;
                 for (int depth = 0; depth < maxChain; depth++)
                 {
                     if (exitChain.Terminator is global::ILGPU.IR.Values.UnconditionalBranch exitUB)
                     {
+                        // Stop if the next block is a loop header — it belongs to a
+                        // parent loop whose PHIs will be handled by its own code generation.
+                        bool isParentLoopHeader = false;
+                        foreach (var loop in _loops)
+                        {
+                            foreach (var header in loop.Headers)
+                            {
+                                if (header == exitUB.Target) { isParentLoopHeader = true; break; }
+                            }
+                            if (isParentLoopHeader) break;
+                        }
+                        if (isParentLoopHeader) break;
+
                         PushPhiValues(exitUB.Target, exitChain);
                         exitChain = exitUB.Target;
                     }

@@ -1119,8 +1119,8 @@ namespace SpawnDev.ILGPU.Wasm
                 sb.AppendLine("    const endIdx = d.endIdx;");
                 sb.AppendLine();
                 sb.AppendLine("    for (let i = startIdx; i < endIdx; i++) {");
-                // For non-barrier kernels: groupDimX=gridDimX (one big group), threadIdX=i, sharedMemBase=0, barrierBase=0
-                sb.Append($"      kernel(i, {gridDimX}, {gridDimY}, {scratchBase}, {gridDimX}, i, 0, 0, 0");
+                // For non-barrier kernels: pass groupSize so Grid.IdxX/Y can decompose correctly
+                sb.Append($"      kernel(i, {gridDimX}, {gridDimY}, {scratchBase}, {groupSize}, i % {groupSize}, 0, 0, 0");
                 if (argStr.Length > 0)
                 {
                     sb.Append(", ");
