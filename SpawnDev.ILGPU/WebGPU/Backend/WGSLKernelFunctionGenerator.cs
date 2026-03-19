@@ -5270,8 +5270,21 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     if (currentLoop != null && mergeNode != null && !currentLoop.Contains(mergeNode))
                     {
                         if (WebGPU.Backend.WebGPUBackend.VerboseLogging && _isScanKernel)
-                            WebGPUBackend.Log($"[CODEGEN] CLAMP mergeNode B{mergeNode.Id} (outside loop) → stopBlock B{stopBlock?.Id}");
-                        mergeNode = stopBlock;
+                            WebGPUBackend.Log($"[CODEGEN] CLAMP mergeNode B{mergeNode.Id} (outside loop) → searching for in-loop merge");
+
+                        // FIX: When the post-dominator is outside the loop (due to a break-exit
+                        // path), find the actual in-loop convergence point. If one branch target
+                        // is a back-edge block (reaches the loop header through a UB chain),
+                        // it's the in-loop merge — both branches converge there before back-edging.
+                        // Without this, the continuation code (sum += val; i++) gets placed inside
+                        // one branch and the other branch's non-exit paths can't reach it.
+                        BasicBlock? inLoopMerge = null;
+                        if (currentLoop.Contains(trueTarget) && ReachesHeaderThroughUBChain(trueTarget, currentLoop))
+                            inLoopMerge = trueTarget;
+                        else if (currentLoop.Contains(falseTarget) && ReachesHeaderThroughUBChain(falseTarget, currentLoop))
+                            inLoopMerge = falseTarget;
+
+                        mergeNode = inLoopMerge ?? stopBlock;
                     }
 
                     if (WebGPU.Backend.WebGPUBackend.VerboseLogging && _isScanKernel)
@@ -5447,6 +5460,30 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         /// skipped in post-loop exit chain processing since their PHI values were already
         /// handled by the loop's break paths.
         /// </summary>
+        /// <summary>
+        /// Check if a block reaches a loop header through an unconditional branch chain.
+        /// This identifies blocks that are the loop's natural continuation point (back-edge
+        /// source), which serves as the in-loop merge point for if-else blocks.
+        /// </summary>
+        private static bool ReachesHeaderThroughUBChain(BasicBlock block, Loops<ReversePostOrder, Forwards>.Node loop)
+        {
+            var current = block;
+            for (int i = 0; i < 10; i++)
+            {
+                if (current.Terminator is global::ILGPU.IR.Values.UnconditionalBranch ub)
+                {
+                    foreach (var header in loop.Headers)
+                    {
+                        if (ub.Target == header) return true;
+                    }
+                    if (!loop.Contains(ub.Target)) return false;
+                    current = ub.Target;
+                }
+                else return false; // IfBranch or other — not a simple back-edge chain
+            }
+            return false;
+        }
+
         private static bool HasNonPhiInstructions(BasicBlock block)
         {
             foreach (var value in block)
