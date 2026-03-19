@@ -193,6 +193,12 @@ namespace SpawnDev.ILGPU.WebGPU
             _submitArray[0] = commandBuffer;
             Accelerator.Queue?.Submit(_submitArray);
 
+            // Yield to browser event loop before MapAsync. In Blazor WASM (single-threaded),
+            // heavy GPU work submitted via Queue.Submit() needs the event loop to process
+            // completion callbacks. Without yielding, MapAsync's Promise can deadlock when
+            // prior GPU work (100+ compute dispatches) hasn't signaled completion yet.
+            await Task.Yield();
+
             // Map, read into caller's destination array, unmap
             await _cachedStagingBuffer.MapAsync(GPUMapMode.Read);
             var mappedRange = _cachedStagingBuffer.GetMappedRange();
@@ -257,6 +263,9 @@ namespace SpawnDev.ILGPU.WebGPU
             using var commandBuffer = encoder.Finish();
             _submitArray[0] = commandBuffer;
             Accelerator.Queue?.Submit(_submitArray);
+
+            // Yield to browser event loop before MapAsync (see comment in first overload)
+            await Task.Yield();
 
             // Map, read into caller's destination array, unmap
             await _cachedStagingBuffer.MapAsync(GPUMapMode.Read);

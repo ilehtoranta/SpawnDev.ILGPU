@@ -29,6 +29,25 @@ Transpiles ILGPU IR → WGSL shaders. Dispatches via `WebGPUAccelerator`.
 - Library inclusion controlled by `SetEmulationFlags()` scanning kernel + helper IR.
 - Per-function trimming via `GetMinimalEmulationLibrary()` BFS dependency graph.
 
+## Command Batching & Synchronization
+
+**WebGPUStream batches compute passes into one command encoder.** `Synchronize()` = `Flush()` = finishes the encoder and submits to the GPU queue. This is NON-BLOCKING — it submits but does NOT wait for completion.
+
+**`SynchronizeAsync()`** calls `FlushPendingCommands()` then `queue.OnSubmittedWorkDone()` — this DOES wait. But `OnSubmittedWorkDone` can deadlock in Blazor WASM if too much GPU work is queued (100+ compute passes → Chrome GPU watchdog timeout).
+
+**Rule: Flush periodically for large workloads.** If dispatching many kernels (>50), call `Synchronize()` every 16-32 dispatches to submit smaller batches. This prevents the GPU command buffer from growing too large. Example:
+```csharp
+for (int i = 0; i < 112; i++) {
+    accelerator.LaunchKernel(...);
+    if (i % 16 == 0) accelerator.Synchronize(); // Flush batch
+}
+// Final flush + async wait
+accelerator.Synchronize();
+await accelerator.SynchronizeAsync(); // Safe — only waits for last small batch
+```
+
+**`CopyToHostAsync` internally:** FlushPendingCommands → CopyBufferToBuffer → Submit → `MapAsync(Read)`. The `MapAsync` waits for the copy to finish, which is queued behind all prior work. If prior work is large, `MapAsync` may timeout.
+
 ## Diagnostics
 - `WebGPUBackend.WGSLDumpPath` — dump shaders to files (desktop only)
 - `WebGPUBackend.WGSLRegistry` — named registry of compiled shaders
