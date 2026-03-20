@@ -67,14 +67,7 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
         // Simple scan tests pass. Multi-helper-call kernels (RadixSort scatter)
         // have a phase count mismatch — the kernel yields more than expected.
         // TODO: Fix yield count for kernels with multiple helper calls.
-        // RadixSort int sort: wrong output for n=32 and n=100K.
-        // Float sort (n=137) passes. Int ExtractRadixBits specialization issue.
-        [TestMethod]
-        public new async Task AlgorithmRadixSortNonPairsIntTest() =>
-            throw new UnsupportedTestException("Wasm: RadixSort int sort produces wrong positions");
-        [TestMethod]
-        public new async Task RadixSort100KBenchmarkTest() =>
-            throw new UnsupportedTestException("Wasm: RadixSort int sort produces wrong positions (100K)");
+        // RadixSort: internal loop for kernels with own barriers
         [TestMethod]
         public new async Task AlgorithmRadixSortPairsTest() =>
             throw new UnsupportedTestException("Wasm: RadixSort pairs — values not carried (pre-existing)");

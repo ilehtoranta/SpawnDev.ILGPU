@@ -993,21 +993,23 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             // Barrier: 1. Broadcast: 2.
             // MethodCall to barrier-helper: helperBarrierCount continuation blocks
             // (each helper yield becomes a kernel yield with its own continuation).
-            int totalBarriers = 0;
+            // Two-pass counting: first count direct barriers, then decide whether to
+            // include helper barriers (only for kernels with no own barriers).
+            int directBarriers = 0;
+            int helperBarriers = 0;
             foreach (var block in blocks)
             {
                 foreach (var entry in block)
                 {
                     if (entry.Value is global::ILGPU.IR.Values.Barrier)
-                        totalBarriers += 1;
+                        directBarriers += 1;
                     else if (entry.Value is global::ILGPU.IR.Values.Broadcast)
-                        totalBarriers += 2; // before + after barriers
+                        directBarriers += 2; // before + after barriers
                     else if (!_isHelperFunction && entry.Value is MethodCall mc1)
                     {
-                        // Try direct lookup first, then name-based fallback
                         if (_generatorArgs.HelperBarrierCounts.TryGetValue(mc1.Target, out int hbc1) && hbc1 > 0)
                         {
-                            totalBarriers += hbc1;
+                            helperBarriers += hbc1;
                             if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm-BarrierScan] Found helper '{mc1.Target.Name}' with {hbc1} barriers (direct)");
                         }
                         else
@@ -1017,7 +1019,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                             {
                                 if (kv.Key.Name == mc1.Target.Name && kv.Value > 0)
                                 {
-                                    totalBarriers += kv.Value;
+                                    helperBarriers += kv.Value;
                                     if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm-BarrierScan] Found helper '{mc1.Target.Name}' with {kv.Value} barriers (name fallback)");
                                     found = true; break;
                                 }
@@ -1027,7 +1029,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                                 int computed = ComputeEffectiveBarrierCount(mc1.Target);
                                 if (computed > 0)
                                 {
-                                    totalBarriers += computed;
+                                    helperBarriers += computed;
                                     if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm-BarrierScan] Computed {computed} barriers for '{mc1.Target.Name}' (not in HelperBarrierCounts)");
                                 }
                             }
@@ -1035,6 +1037,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                     }
                 }
             }
+            int totalBarriers = directBarriers + helperBarriers;
             int expandedBlockCount = _blockCount + totalBarriers;
 
             // Build block map: assign state machine indices to each IR block.
@@ -1050,6 +1053,8 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                     else if (entry.Value is global::ILGPU.IR.Values.Broadcast) count += 2;
                     else if (!_isHelperFunction && entry.Value is MethodCall mc2)
                     {
+                        // Only count helper barriers for yield-per-phase (no own barriers).
+                        // Kernels with own barriers use internal loop (no continuation blocks).
                         bool found2 = false;
                         if (_generatorArgs.HelperBarrierCounts.TryGetValue(mc2.Target, out int hbc2) && hbc2 > 0)
                         { count += hbc2; found2 = true; }
@@ -1061,8 +1066,6 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                                 { count += kv.Value; found2 = true; break; }
                             }
                         }
-                        // Note: unregistered methods with barriers (like inlined helpers)
-                        // are not counted here. Their barriers are in the calling method's IR.
                     }
                 }
                 _blockMap[block] = smIndex;
@@ -2068,8 +2071,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
 
                 if (_phaseMode && helperBarrierCount > 0)
                 {
-                    // Phase mode: helper has barriers and may yield multiple times.
-                    // CRITICAL: We must NOT loop helper phases within a single kernel call.
+                    // Phase mode: yield-per-phase for ALL helper calls.
                     // Each helper phase must run across ALL threads before any thread advances
                     // to the next phase (barrier semantics). So when the helper yields, the
                     // kernel must also yield back to the worker script.
@@ -2180,6 +2182,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                     if (_generatorArgs.HelperScratchEstimates.TryGetValue(targetMethod, out int helperScratch))
                         _helperScratchCumulativeOffset += (helperScratch + 7) & ~7;
                 }
+                // (internal loop path removed — using yield-per-phase exclusively)
                 else
                 {
                     // Non-phase or no helper barriers: single call
