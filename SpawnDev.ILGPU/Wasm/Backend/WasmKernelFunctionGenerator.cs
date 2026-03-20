@@ -1428,17 +1428,11 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         {
             // For struct types, copy the struct data from the source address to a
             // scratch slot. This creates a snapshot — the copy is independent of
-            // later writes to the source memory (critical for in-place RadixSort
-            // pre-sort where view[pos] = value overwrites the source array).
-            // The scratch offset is safe because GenerateStateMachineCode already
-            // set _scratchNextOffset past phase state + helper scratch before IR visiting.
+            // later writes to the source memory (critical for in-place pre-sort).
             if (value.Type is StructureType structType)
             {
                 int structSize = structType.Size;
                 int alignedSize = (structSize + 7) & ~7;
-
-                // Each unique Load IR node gets its own scratch slot (SSA-keyed).
-                // In loops, the same node reuses the same slot each iteration.
                 string valueKey = GetValueKey(value);
                 if (!_structLoadSlots.TryGetValue(valueKey, out int scratchOffset))
                 {
@@ -1446,18 +1440,14 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                     _scratchNextOffset += alignedSize;
                     _structLoadSlots[valueKey] = scratchOffset;
                 }
-
                 var target = AllocateLocal(value, WasmOpCodes.I32);
                 var source = value.Source.Resolve();
-
-                // Copy field by field from source to scratch
                 for (int i = 0; i < structType.NumFields; i++)
                 {
                     var fieldAccess = new FieldAccess(i);
                     int byteOffset = structType.GetOffset(fieldAccess);
                     var fieldType = structType.Fields[i];
                     byte fieldWasmType = GetWasmTypeFromIR(fieldType);
-
                     byte loadOp, storeOp;
                     uint align;
                     switch (fieldWasmType)
@@ -1467,12 +1457,9 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                         case WasmOpCodes.F64: loadOp = WasmOpCodes.F64Load; storeOp = WasmOpCodes.F64Store; align = 3; break;
                         default: loadOp = WasmOpCodes.I32Load; storeOp = WasmOpCodes.I32Store; align = 2; break;
                     }
-
-                    // dst = scratchBase + scratchOffset + byteOffset
                     WasmModuleBuilder.EmitLocalGet(Code, _scratchBaseLocal);
                     WasmModuleBuilder.EmitI32Const(Code, scratchOffset + byteOffset);
                     Code.Add(WasmOpCodes.I32Add);
-                    // src = source + byteOffset
                     EmitGetLocal(source);
                     if (byteOffset > 0)
                     {
@@ -1482,8 +1469,6 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                     WasmModuleBuilder.EmitLoad(Code, loadOp, align, 0);
                     WasmModuleBuilder.EmitStore(Code, storeOp, align, 0);
                 }
-
-                // Return scratch address as the struct's snapshot location
                 WasmModuleBuilder.EmitLocalGet(Code, _scratchBaseLocal);
                 WasmModuleBuilder.EmitI32Const(Code, scratchOffset);
                 Code.Add(WasmOpCodes.I32Add);

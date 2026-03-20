@@ -434,15 +434,12 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
                 throw new Exception($"GatherOnly FAIL: raw=[{rawStr}], key0={key0}, val0={val0}, expected key0=4, val0=40");
         });
 
-        // Minimal pairs sort: 4 elements, FAILS — keys=[0,0,0,0] values=[0,0,0,0].
-        // GatherOnly passes (struct write to cast buffer works).
-        // The 96-dispatch pipeline (32 bit passes × 3) corrupts struct data somewhere.
-        // Needs WAT disassembly of compiled RadixSortKernel1<RadixSortPair<float,int>>.
-        // [TestMethod] — DISABLED until pairs sort is fixed
+        // Minimal pairs sort with dispatch logging
+        [TestMethod]
         public async Task WasmMinimalPairsSortDiagTest() => await RunTest(async accelerator =>
         {
             int n = 4;
-            var keys = new float[] { 4f, 3f, 2f, 1f }; // reverse order
+            var keys = new float[] { 4f, 3f, 2f, 1f };
             var values = new int[] { 40, 30, 20, 10 };
 
             using var keysBuf = accelerator.Allocate1D(keys);
@@ -451,23 +448,42 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
                 global::ILGPU.Algorithms.RadixSortOperations.AscendingFloat>(n);
             using var tempBuf = accelerator.Allocate1D<int>(tempSize);
 
+            // Enable dispatch logging
+            SpawnDev.ILGPU.Wasm.Backend.WasmBackend.VerboseLogging = false;
+            SpawnDev.ILGPU.Wasm.WasmAccelerator._dispatchCount = 0;
+            SpawnDev.ILGPU.Wasm.WasmAccelerator._dispatchLog = "";
+
             var radixSort = accelerator.CreateRadixSortPairs<float, Stride1D.Dense, int, Stride1D.Dense,
                 global::ILGPU.Algorithms.RadixSortOperations.AscendingFloat>();
             radixSort(accelerator.DefaultStream, keysBuf.View, valuesBuf.View, tempBuf.View.AsContiguous());
             await accelerator.SynchronizeAsync();
 
+            int dispCount = SpawnDev.ILGPU.Wasm.WasmAccelerator._dispatchCount;
+            string dispLog = SpawnDev.ILGPU.Wasm.WasmAccelerator._dispatchLog ?? "(none)";
+
             var sortedKeys = await keysBuf.CopyToHostAsync<float>();
             var sortedValues = await valuesBuf.CopyToHostAsync<int>();
+            // Also read raw temp buffer to see pairs data
+            var rawTemp = await tempBuf.CopyToHostAsync<int>();
+            string rawFirst8 = string.Join(",", rawTemp.Take(8));
 
             string keysStr = string.Join(",", sortedKeys);
             string valsStr = string.Join(",", sortedValues);
-            // Expected: keys=[1,2,3,4], values=[10,20,30,40]
+
+            // Capture kernel compilation info
+            var kernelInfos = SpawnDev.ILGPU.Wasm.Backend.WasmBackend.AllKernelInfos;
+            string kiStr = kernelInfos != null ? string.Join(" | ", kernelInfos.TakeLast(10)) : "(null)";
+
             for (int i = 0; i < n; i++)
             {
                 float expectedKey = (float)(i + 1);
                 int expectedVal = (i + 1) * 10;
                 if (MathF.Abs(sortedKeys[i] - expectedKey) > 0.001f || sortedValues[i] != expectedVal)
-                    throw new Exception($"MinimalPairsSort FAIL: keys=[{keysStr}] values=[{valsStr}] expected keys=[1,2,3,4] values=[10,20,30,40]");
+                {
+                    string implDbg = SpawnDev.ILGPU.Wasm.WasmAccelerator._lastImplicitIndexDebug ?? "";
+                    string structDbg = SpawnDev.ILGPU.Wasm.WasmAccelerator._lastStructSerialDebug ?? "";
+                    throw new Exception($"MinimalPairsSort FAIL: keys=[{keysStr}] values=[{valsStr}] dispatches={dispCount} temp0-7=[{rawFirst8}] impl={implDbg.Substring(0, Math.Min(300, implDbg.Length))} struct={structDbg.Substring(0, Math.Min(200, structDbg.Length))}");
+                }
             }
         });
 
