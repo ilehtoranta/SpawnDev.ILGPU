@@ -608,6 +608,9 @@ namespace SpawnDev.ILGPU.Wasm.Backend
     {
         public WasmCapabilityContext() : base()
         {
+            // Half (Float16) is emulated via f32 promotion in the Wasm codegen.
+            // BasicValueType.Float16 maps to WasmOpCodes.F32 with 2-byte element size.
+            Float16 = true;
         }
     }
 }

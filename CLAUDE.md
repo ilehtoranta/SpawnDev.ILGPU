@@ -44,7 +44,7 @@ Detailed constraints live in each directory's own `CLAUDE.md`. Read the relevant
 
 Tests in `SpawnDev.ILGPU.Demo.Shared/UnitTests/BackendTestBase*.cs` (~211 tests, Tests1-10). Backend-specific classes inherit and override unsupported tests. See `PlaywrightMultiTest/CLAUDE.md` for running tests.
 
-**Current results (March 2026):** Wasm: 179 pass / 0 fail / 55 skip. All RadixSort, scan, barrier, and sort tests pass after the fiber refactor.
+**Current results (March 2026):** Wasm: 192 pass / 0 fail / 42 skip. Struct/scratch overlap fix enabled ILGPUReduce (int, float, double, long). Multi-pass scan routing enabled GlobalInclusiveScan (256/320/8000/4160). Float16 capability enabled 2 Half tests. Remaining 42 skips: 3 hardware-impossible + 39 fixable TODO.
 
 ## Debugging Pipeline — ShaderDebugService
 

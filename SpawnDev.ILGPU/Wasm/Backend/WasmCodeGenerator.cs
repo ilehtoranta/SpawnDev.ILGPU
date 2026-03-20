@@ -890,42 +890,52 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             var leftActualType = GetLocalType(leftLocalIdx);
             var rightActualType = GetLocalType(rightLocalIdx);
 
+            bool isUnsigned = value.IsUnsignedOrUnordered;
+            byte extendOp = isUnsigned ? WasmOpCodes.I64ExtendI32U : WasmOpCodes.I64ExtendI32S;
+
             EmitGetLocalByIndex(leftLocalIdx);
             if (srcType == WasmOpCodes.I64 && leftActualType == WasmOpCodes.I32)
-                Code.Add(WasmOpCodes.I64ExtendI32S);
+                Code.Add(extendOp);
             EmitGetLocalByIndex(rightLocalIdx);
             if (srcType == WasmOpCodes.I64 && rightActualType == WasmOpCodes.I32)
-                Code.Add(WasmOpCodes.I64ExtendI32S);
-
-            byte opcode = (srcType, value.Kind) switch
+                Code.Add(extendOp);
+            byte opcode = (srcType, value.Kind, isUnsigned) switch
             {
-                (WasmOpCodes.I32, CompareKind.Equal) => WasmOpCodes.I32Eq,
-                (WasmOpCodes.I32, CompareKind.NotEqual) => WasmOpCodes.I32Ne,
-                (WasmOpCodes.I32, CompareKind.LessThan) => WasmOpCodes.I32LtS,
-                (WasmOpCodes.I32, CompareKind.LessEqual) => WasmOpCodes.I32LeS,
-                (WasmOpCodes.I32, CompareKind.GreaterThan) => WasmOpCodes.I32GtS,
-                (WasmOpCodes.I32, CompareKind.GreaterEqual) => WasmOpCodes.I32GeS,
+                (WasmOpCodes.I32, CompareKind.Equal, _) => WasmOpCodes.I32Eq,
+                (WasmOpCodes.I32, CompareKind.NotEqual, _) => WasmOpCodes.I32Ne,
+                (WasmOpCodes.I32, CompareKind.LessThan, false) => WasmOpCodes.I32LtS,
+                (WasmOpCodes.I32, CompareKind.LessThan, true) => WasmOpCodes.I32LtU,
+                (WasmOpCodes.I32, CompareKind.LessEqual, false) => WasmOpCodes.I32LeS,
+                (WasmOpCodes.I32, CompareKind.LessEqual, true) => WasmOpCodes.I32LeU,
+                (WasmOpCodes.I32, CompareKind.GreaterThan, false) => WasmOpCodes.I32GtS,
+                (WasmOpCodes.I32, CompareKind.GreaterThan, true) => WasmOpCodes.I32GtU,
+                (WasmOpCodes.I32, CompareKind.GreaterEqual, false) => WasmOpCodes.I32GeS,
+                (WasmOpCodes.I32, CompareKind.GreaterEqual, true) => WasmOpCodes.I32GeU,
 
-                (WasmOpCodes.I64, CompareKind.Equal) => WasmOpCodes.I64Eq,
-                (WasmOpCodes.I64, CompareKind.NotEqual) => WasmOpCodes.I64Ne,
-                (WasmOpCodes.I64, CompareKind.LessThan) => WasmOpCodes.I64LtS,
-                (WasmOpCodes.I64, CompareKind.LessEqual) => WasmOpCodes.I64LeS,
-                (WasmOpCodes.I64, CompareKind.GreaterThan) => WasmOpCodes.I64GtS,
-                (WasmOpCodes.I64, CompareKind.GreaterEqual) => WasmOpCodes.I64GeS,
+                (WasmOpCodes.I64, CompareKind.Equal, _) => WasmOpCodes.I64Eq,
+                (WasmOpCodes.I64, CompareKind.NotEqual, _) => WasmOpCodes.I64Ne,
+                (WasmOpCodes.I64, CompareKind.LessThan, false) => WasmOpCodes.I64LtS,
+                (WasmOpCodes.I64, CompareKind.LessThan, true) => WasmOpCodes.I64LtU,
+                (WasmOpCodes.I64, CompareKind.LessEqual, false) => WasmOpCodes.I64LeS,
+                (WasmOpCodes.I64, CompareKind.LessEqual, true) => WasmOpCodes.I64LeU,
+                (WasmOpCodes.I64, CompareKind.GreaterThan, false) => WasmOpCodes.I64GtS,
+                (WasmOpCodes.I64, CompareKind.GreaterThan, true) => WasmOpCodes.I64GtU,
+                (WasmOpCodes.I64, CompareKind.GreaterEqual, false) => WasmOpCodes.I64GeS,
+                (WasmOpCodes.I64, CompareKind.GreaterEqual, true) => WasmOpCodes.I64GeU,
 
-                (WasmOpCodes.F32, CompareKind.Equal) => WasmOpCodes.F32Eq,
-                (WasmOpCodes.F32, CompareKind.NotEqual) => WasmOpCodes.F32Ne,
-                (WasmOpCodes.F32, CompareKind.LessThan) => WasmOpCodes.F32Lt,
-                (WasmOpCodes.F32, CompareKind.LessEqual) => WasmOpCodes.F32Le,
-                (WasmOpCodes.F32, CompareKind.GreaterThan) => WasmOpCodes.F32Gt,
-                (WasmOpCodes.F32, CompareKind.GreaterEqual) => WasmOpCodes.F32Ge,
+                (WasmOpCodes.F32, CompareKind.Equal, _) => WasmOpCodes.F32Eq,
+                (WasmOpCodes.F32, CompareKind.NotEqual, _) => WasmOpCodes.F32Ne,
+                (WasmOpCodes.F32, CompareKind.LessThan, _) => WasmOpCodes.F32Lt,
+                (WasmOpCodes.F32, CompareKind.LessEqual, _) => WasmOpCodes.F32Le,
+                (WasmOpCodes.F32, CompareKind.GreaterThan, _) => WasmOpCodes.F32Gt,
+                (WasmOpCodes.F32, CompareKind.GreaterEqual, _) => WasmOpCodes.F32Ge,
 
-                (WasmOpCodes.F64, CompareKind.Equal) => WasmOpCodes.F64Eq,
-                (WasmOpCodes.F64, CompareKind.NotEqual) => WasmOpCodes.F64Ne,
-                (WasmOpCodes.F64, CompareKind.LessThan) => WasmOpCodes.F64Lt,
-                (WasmOpCodes.F64, CompareKind.LessEqual) => WasmOpCodes.F64Le,
-                (WasmOpCodes.F64, CompareKind.GreaterThan) => WasmOpCodes.F64Gt,
-                (WasmOpCodes.F64, CompareKind.GreaterEqual) => WasmOpCodes.F64Ge,
+                (WasmOpCodes.F64, CompareKind.Equal, _) => WasmOpCodes.F64Eq,
+                (WasmOpCodes.F64, CompareKind.NotEqual, _) => WasmOpCodes.F64Ne,
+                (WasmOpCodes.F64, CompareKind.LessThan, _) => WasmOpCodes.F64Lt,
+                (WasmOpCodes.F64, CompareKind.LessEqual, _) => WasmOpCodes.F64Le,
+                (WasmOpCodes.F64, CompareKind.GreaterThan, _) => WasmOpCodes.F64Gt,
+                (WasmOpCodes.F64, CompareKind.GreaterEqual, _) => WasmOpCodes.F64Ge,
 
                 _ => WasmOpCodes.I32Eq // fallback
             };
@@ -1350,9 +1360,19 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             byte loadOp = wasmType == WasmOpCodes.I64 ? WasmOpCodes.I64AtomicLoad : WasmOpCodes.I32AtomicLoad;
             byte cmpxchgOp = wasmType == WasmOpCodes.I64 ? WasmOpCodes.I64AtomicRmwCmpxchg : WasmOpCodes.I32AtomicRmwCmpxchg;
             byte eqOp = wasmType == WasmOpCodes.I64 ? WasmOpCodes.I64Eq : WasmOpCodes.I32Eq;
-            byte cmpOp = atomic.Kind == AtomicKind.Min
-                ? (wasmType == WasmOpCodes.I64 ? WasmOpCodes.I64LtS : WasmOpCodes.I32LtS)
-                : (wasmType == WasmOpCodes.I64 ? WasmOpCodes.I64GtS : WasmOpCodes.I32GtS);
+            bool isUnsigned = atomic.IsUnsigned;
+            byte cmpOp = (atomic.Kind, wasmType, isUnsigned) switch
+            {
+                (AtomicKind.Min, WasmOpCodes.I32, false) => WasmOpCodes.I32LtS,
+                (AtomicKind.Min, WasmOpCodes.I32, true) => WasmOpCodes.I32LtU,
+                (AtomicKind.Min, WasmOpCodes.I64, false) => WasmOpCodes.I64LtS,
+                (AtomicKind.Min, WasmOpCodes.I64, true) => WasmOpCodes.I64LtU,
+                (AtomicKind.Max, WasmOpCodes.I32, false) => WasmOpCodes.I32GtS,
+                (AtomicKind.Max, WasmOpCodes.I32, true) => WasmOpCodes.I32GtU,
+                (AtomicKind.Max, WasmOpCodes.I64, false) => WasmOpCodes.I64GtS,
+                (AtomicKind.Max, WasmOpCodes.I64, true) => WasmOpCodes.I64GtU,
+                _ => WasmOpCodes.I32LtS // fallback
+            };
 
             var newVal = AllocateNewLocal(wasmType);
             var casResult = AllocateNewLocal(wasmType);

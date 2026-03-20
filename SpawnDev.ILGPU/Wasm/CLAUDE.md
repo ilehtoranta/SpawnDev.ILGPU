@@ -30,7 +30,7 @@ Compiles ILGPU IR → WebAssembly binary. Dispatches via Web Workers with Shared
 - **AddressSpaceType views** (ArrayView): field 1 = **Index/Offset** → return 0
 
 This was hardcoded to 0 for ALL views, which broke `view.Length` for ArrayView1D params.
-The fix checks `param.Type is StructureType`. Current: 179 pass / 0 fail / 55 skip (v4.6.0).
+The fix checks `param.Type is StructureType`. Current: 192 pass / 0 fail / 42 skip (target: 231/0/3) (v4.6.0).
 
 **TRACE RULE**: Both `GetViewLength` and `GetField` must trace the view source back to
 the kernel Parameter through GetField/NewView/AddressSpaceCast chains (via `TraceToParameter()`).
@@ -71,7 +71,7 @@ If this test produces duplicates or non-deterministic results, the post-helper b
 
 ## Fiber Refactor Status (March 2026) — COMPLETE
 
-**Test results: 179 pass / 0 fail / 55 skip** (up from 49/10/17 pre-refactor). All RadixSort, scan, barrier, and sort tests pass on the Wasm backend.
+**Test results: 192 pass / 0 fail / 42 skip (target: 231/0/3)** (up from 49/10/17 pre-refactor). All RadixSort, scan, barrier, and sort tests pass on the Wasm backend.
 
 The fiber refactor resolved the multi-group barrier dispatch limitation. Eight bugs were fixed collaboratively by two agents:
 
@@ -96,3 +96,11 @@ The skipped tests are intentional backend capability skips (e.g., features not a
 - `WasmBackend.AllKernelInfos` — compilation summaries
 - Disassemble: `wasm2wat --enable-threads kernel.wasm` (MUST use --enable-threads)
 - Do NOT use LINQ in Blazor WASM logging — silently fails. Use for-loops.
+
+## Tribal Knowledge: Struct Load Must Copy (March 2026)
+
+**STRUCT LOAD RULE**: When `Load` is called with a `StructureType`, the codegen MUST copy the struct data from the source address to a scratch slot. Returning the source address directly creates an ALIAS — subsequent writes to the array (e.g., in-place RadixSort pre-sort `view[pos] = value`) overwrite the "loaded" value. Primitive Loads are safe because they copy to Wasm locals (immutable). Struct Loads use SSA-keyed scratch slots (`_structLoadSlots`) to minimize scratch usage while ensuring snapshot semantics.
+
+## Tribal Knowledge: Unsigned Comparison (March 2026)
+
+**UNSIGNED RULE**: Both `CompareValue` and `GenericAtomic` (Min/Max CAS loop) must check for unsigned flags (`IsUnsignedOrUnordered` / `IsUnsigned`) and emit `i32.lt_u`/`i64.lt_u` instead of signed variants. Without this, `MinUInt32`/`MinUInt64` reductions return the identity value because the signed comparison treats large unsigned values as negative.

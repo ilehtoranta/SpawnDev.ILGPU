@@ -163,9 +163,15 @@ namespace ILGPU.Algorithms
             return accelerator.AcceleratorType switch
             {
                 AcceleratorType.CPU => 1,
+                // Wasm hybrid scan: uses single-group for small data (RadixSort
+                // histograms), multi-pass for large data. The multi-pass scan's
+                // TempViewManager needs gridDim+1 elements, but RadixSort pre-
+                // allocates based on this value. Keep it at the multi-pass formula
+                // so there's enough temp for either path. The formula is small
+                // (typically ~131 ints ≈ 524 bytes).
                 AcceleratorType.Wasm => Interop.ComputeRelativeSizeOf<int, T>(
                     accelerator.MaxNumGroupsExtent.Item1 + 1)
-                    + 2 * 63, // multi-pass scan (same as WebGPU)
+                    + 2 * 63,
                 // Single-pass scan: CreateSinglePassScan makes 2 Allocate() calls
                 // (Allocate<T>, Allocate<int>). Each adds up to 63 ints of 256-byte padding.
                 AcceleratorType.Cuda => ComputeNumIntElementsForSinglePassScan<T>()
@@ -1224,6 +1230,47 @@ namespace ILGPU.Algorithms
             };
         }
 
+        /// <summary>
+        /// Creates a hybrid Wasm scan that uses single-group for small data
+        /// (≤ groupSize elements, 1 dispatch) and multi-pass for large data
+        /// (multiple groups, 3 dispatches). Multi-pass kernels are compiled
+        /// lazily on first use to prevent OOM from upfront compilation of
+        /// unused kernel modules (e.g., RadixSort only scans small histograms).
+        /// </summary>
+        private static Scan<T, TStrideIn, TStrideOut> CreateWasmHybridScan<
+            T,
+            TStrideIn,
+            TStrideOut,
+            TScanOperation>(
+            Accelerator accelerator,
+            ScanKind kind)
+            where T : unmanaged
+            where TStrideIn : struct, IStride1D
+            where TStrideOut : struct, IStride1D
+            where TScanOperation : struct, IScanReduceOperation<T>
+        {
+            var singleGroupScan = CreateSingleGroupScan<
+                T, TStrideIn, TStrideOut, TScanOperation>(accelerator, kind);
+            Scan<T, TStrideIn, TStrideOut>? multiPassScan = null;
+
+            int maxGroupSize = accelerator.MaxNumThreadsPerGroup;
+
+            return (stream, input, output, temp) =>
+            {
+                if (input.Length <= maxGroupSize)
+                {
+                    singleGroupScan(stream, input, output, temp);
+                }
+                else
+                {
+                    multiPassScan ??= CreateWebGPUMultiPassScan<
+                        T, TStrideIn, TStrideOut, TScanOperation>(
+                        accelerator, kind);
+                    multiPassScan(stream, input, output, temp);
+                }
+            };
+        }
+
         #endregion
 
         #region Scan
@@ -1257,12 +1304,11 @@ namespace ILGPU.Algorithms
                     CreateSingleGroupScan<T, TStrideIn, TStrideOut, TScanOperation>(
                         accelerator,
                         kind),
-                // Wasm: use WebGPU multi-pass scan (KernelSpecialization + 2-pass with fence).
-                // The scan kernels use GroupExtensions.InclusiveScan which routes to
-                // WasmGroupExtensions (shared memory + barriers), fully supported by
-                // the fiber-based phase dispatch.
+                // Wasm: hybrid scan — single-group for small data (fast, 1 dispatch),
+                // multi-pass for large data (multi-group, 3 dispatches). This prevents
+                // OOM from RadixSort's internal histogram scans creating extra dispatches.
                 AcceleratorType.Wasm =>
-                    CreateWebGPUMultiPassScan<T, TStrideIn, TStrideOut, TScanOperation>(
+                    CreateWasmHybridScan<T, TStrideIn, TStrideOut, TScanOperation>(
                         accelerator,
                         kind),
                 AcceleratorType.OpenCL =>

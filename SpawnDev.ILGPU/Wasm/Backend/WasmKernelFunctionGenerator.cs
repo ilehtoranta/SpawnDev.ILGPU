@@ -85,6 +85,13 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         private int _scratchNextOffset = 0;
 
         /// <summary>
+        /// Tracks scratch offsets for struct Load copies. Each unique struct Load IR
+        /// value gets its own scratch slot (keyed by value ID). Slots are reused across
+        /// loop iterations since SSA values don't outlive their scope.
+        /// </summary>
+        private readonly Dictionary<string, int> _structLoadSlots = new();
+
+        /// <summary>
         /// The index type of the kernel (Index1D, Index2D, Index3D).
         /// </summary>
         private IndexType _indexType = IndexType.Index1D;
@@ -1419,14 +1426,74 @@ namespace SpawnDev.ILGPU.Wasm.Backend
 
         public override void GenerateCode(Load value)
         {
-            // For struct types, the "value" is a memory address (i32 byte offset).
-            // Don't actually load from memory — just pass through the address.
-            // GetField will do the actual typed loads from memory at the correct offsets.
-            if (value.Type is StructureType)
+            // For struct types, copy the struct data from the source address to a
+            // scratch slot. This creates a snapshot — the loaded value is independent
+            // of later writes to the original memory (critical for in-place RadixSort
+            // pre-sort where view[pos] = value overwrites the source array while other
+            // threads still reference their loaded values).
+            // Uses a single reusable scratch region sized to the largest struct loaded,
+            // with per-Load offsets to allow multiple live struct values.
+            if (value.Type is StructureType structType)
             {
+                int structSize = structType.Size;
+                int alignedSize = (structSize + 3) & ~3;
+
+                // Track struct copy slots: each Load gets its own slot within scratch
+                // to allow multiple live struct values (e.g., both key and value reads).
+                // Use a monotonic counter — slots are reused across loop iterations
+                // since SSA values don't outlive their definition scope.
+                if (!_structLoadSlots.TryGetValue(GetValueKey(value), out int scratchOffset))
+                {
+                    scratchOffset = _scratchNextOffset;
+                    _scratchNextOffset += alignedSize;
+                    _structLoadSlots[GetValueKey(value)] = scratchOffset;
+                }
+
                 var target = AllocateLocal(value, WasmOpCodes.I32);
                 var source = value.Source.Resolve();
-                EmitGetLocal(source);
+
+                // Copy field by field from source to scratch
+                for (int i = 0; i < structType.NumFields; i++)
+                {
+                    var fieldAccess = new FieldAccess(i);
+                    int byteOffset = structType.GetOffset(fieldAccess);
+                    var fieldType = structType.Fields[i];
+                    byte fieldWasmType = GetWasmTypeFromIR(fieldType);
+
+                    byte loadOp, storeOp;
+                    uint align;
+                    switch (fieldWasmType)
+                    {
+                        case WasmOpCodes.I64:
+                            loadOp = WasmOpCodes.I64Load; storeOp = WasmOpCodes.I64Store; align = 3; break;
+                        case WasmOpCodes.F32:
+                            loadOp = WasmOpCodes.F32Load; storeOp = WasmOpCodes.F32Store; align = 2; break;
+                        case WasmOpCodes.F64:
+                            loadOp = WasmOpCodes.F64Load; storeOp = WasmOpCodes.F64Store; align = 3; break;
+                        default:
+                            loadOp = WasmOpCodes.I32Load; storeOp = WasmOpCodes.I32Store; align = 2; break;
+                    }
+
+                    // dst = scratchBase + scratchOffset + byteOffset
+                    WasmModuleBuilder.EmitLocalGet(Code, _scratchBaseLocal);
+                    WasmModuleBuilder.EmitI32Const(Code, scratchOffset + byteOffset);
+                    Code.Add(WasmOpCodes.I32Add);
+
+                    // src = source + byteOffset
+                    EmitGetLocal(source);
+                    if (byteOffset > 0)
+                    {
+                        WasmModuleBuilder.EmitI32Const(Code, byteOffset);
+                        Code.Add(WasmOpCodes.I32Add);
+                    }
+                    WasmModuleBuilder.EmitLoad(Code, loadOp, align, 0);
+                    WasmModuleBuilder.EmitStore(Code, storeOp, align, 0);
+                }
+
+                // Return scratch address as the struct's location
+                WasmModuleBuilder.EmitLocalGet(Code, _scratchBaseLocal);
+                WasmModuleBuilder.EmitI32Const(Code, scratchOffset);
+                Code.Add(WasmOpCodes.I32Add);
                 WasmModuleBuilder.EmitLocalSet(Code, target);
                 return;
             }

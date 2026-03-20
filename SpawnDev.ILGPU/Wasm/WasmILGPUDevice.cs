@@ -62,10 +62,13 @@ namespace SpawnDev.ILGPU.Wasm
             HardwareConcurrency = GetHardwareConcurrency();
             Name = $"WebAssembly Compute ({HardwareConcurrency} cores)";
             WarpSize = 1;
-            MaxGroupSize = new Index3D(64, 1, 1);
-            MaxNumThreadsPerGroup = 64;
+            // 256 threads/group enables single-group for most algorithm kernels
+            // (RadixSort up to 256 elements, DualScan, etc.) while keeping the
+            // fiber dispatch overhead manageable (threads run sequentially per phase).
+            MaxGroupSize = new Index3D(256, 1, 1);
+            MaxNumThreadsPerGroup = 256;
             NumMultiprocessors = HardwareConcurrency;
-            MaxNumThreadsPerMultiprocessor = 64;
+            MaxNumThreadsPerMultiprocessor = 256;
             MaxGridSize = new Index3D(int.MaxValue, 1, 1);
             MemorySize = 2L * 1024 * 1024 * 1024;
             MaxSharedMemoryPerGroup = 65536;
