@@ -40,6 +40,16 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
             public DiagPair(float k, int v) { Key = k; Value = v; }
         }
 
+        // Kernel: write struct from separate key+value arrays
+        static void DiagPairWriteKernel(
+            Index1D index,
+            ArrayView<float> keys,
+            ArrayView<int> values,
+            ArrayView<DiagPair> output)
+        {
+            output[index] = new DiagPair(keys[index], values[index]);
+        }
+
         // Kernel: load struct from source, write to shuffled position
         static void StructShuffleKernel(
             Index1D index,
@@ -225,6 +235,101 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
             }
         });
 
+        // Combined: Predicate + histogram + ExclusiveScan + struct store (mimics RadixSortKernel1)
+        static void StructRadixMimicKernel(
+            Index1D index,
+            ArrayView<DiagPair> view,
+            ArrayView<int> debugOut,
+            int dataLength)
+        {
+            var scanMemory = SharedMemory.Allocate<int>(1024);
+
+            bool inRange = Group.IdxX < dataLength;
+
+            // Default + conditional load (like RadixSort)
+            DiagPair value = new DiagPair(0f, 0);
+            if (inRange)
+                value = view[Group.IdxX];
+
+            // Extract "bucket" from key (simple: just 0 or 1 based on key > 4)
+            int bucket = value.Key > 4f ? 1 : 0;
+
+            // Build histogram in shared memory (2 buckets)
+            scanMemory[Group.IdxX] = 0;
+            scanMemory[Group.IdxX + Group.DimX] = 0;
+            if (inRange)
+                scanMemory[Group.IdxX + Group.DimX * bucket] = 1;
+            Group.Barrier();
+
+            // ExclusiveScan on bucket 0
+            int scan0 = GroupExtensions.ExclusiveScan<int,
+                global::ILGPU.Algorithms.ScanReduceOperations.AddInt32>(
+                scanMemory[Group.IdxX]);
+            // ExclusiveScan on bucket 1
+            int scan1 = GroupExtensions.ExclusiveScan<int,
+                global::ILGPU.Algorithms.ScanReduceOperations.AddInt32>(
+                scanMemory[Group.IdxX + Group.DimX]);
+            Group.Barrier();
+
+            // Compute position
+            int pos = bucket == 0 ? scan0 : scan1;
+            // Offset bucket 1 by bucket 0 count
+            if (bucket == 1 && Group.IdxX == Group.DimX - 1)
+            {
+                // Last thread's scan0 + (its own contribution) = total bucket 0 count
+            }
+
+            // Just write struct to the same position for now (identity)
+            if (inRange)
+                view[Group.IdxX] = value;
+
+            // Debug: write key as int
+            if (Group.IdxX < debugOut.Length)
+                debugOut[Group.IdxX] = (int)value.Key;
+        }
+
+        [TestMethod]
+        public async Task WasmStructRadixMimicDiagTest() => await RunTest(async accelerator =>
+        {
+            int n = 8;
+            var pairs = new DiagPair[n];
+            for (int i = 0; i < n; i++)
+                pairs[i] = new DiagPair((float)(i + 1), i * 10);
+
+            using var srcBuf = accelerator.Allocate1D(pairs);
+            using var debugBuf = accelerator.Allocate1D<int>(n);
+
+            var kernel = accelerator.LoadStreamKernel<
+                Index1D, ArrayView<DiagPair>, ArrayView<int>, int>(StructRadixMimicKernel);
+            kernel(new KernelConfig(1, n), (Index1D)n, srcBuf.View.AsContiguous(), debugBuf.View, n);
+            await accelerator.SynchronizeAsync();
+
+            var debug = await debugBuf.CopyToHostAsync<int>();
+            // Check debug output — should be key values as ints: 1,2,3,...,8
+            string debugStr = string.Join(",", debug);
+            for (int i = 0; i < n; i++)
+            {
+                int expected = i + 1;
+                if (debug[i] != expected)
+                    throw new Exception($"StructRadixMimic debug at [{i}]: expected={expected}, got={debug[i]}, all=[{debugStr}]");
+            }
+
+            // Also verify structs survived the round-trip
+            using var keyBuf = accelerator.Allocate1D<float>(n);
+            var extractKernel = accelerator.LoadAutoGroupedStreamKernel<
+                Index1D, ArrayView<DiagPair>, ArrayView<float>>(StructExtractKeyKernel);
+            extractKernel(n, srcBuf.View.AsContiguous(), keyBuf.View);
+            await accelerator.SynchronizeAsync();
+
+            var keys = await keyBuf.CopyToHostAsync<float>();
+            for (int i = 0; i < n; i++)
+            {
+                float expected = (float)(i + 1);
+                if (MathF.Abs(keys[i] - expected) > 0.001f)
+                    throw new Exception($"StructRadixMimic key at [{i}]: expected={expected}, got={keys[i]}, debug=[{debugStr}]");
+            }
+        });
+
         [TestMethod]
         public async Task WasmStructScanShuffleDiagTest() => await RunTest(async accelerator =>
         {
@@ -296,6 +401,75 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
         // but pairs sort still produces wrong results. Needs WAT disassembly
         // of Gather/Sort/Scatter kernels with ShaderDebugService. (14 tests)
         // ═══════════════════════════════════════════════════════════════
+
+        // Gather-only test: create pairs from keys+values, read back via int view
+        [TestMethod]
+        public async Task WasmGatherOnlyDiagTest() => await RunTest(async accelerator =>
+        {
+            int n = 4;
+            var keys = new float[] { 4f, 3f, 2f, 1f };
+            var values = new int[] { 40, 30, 20, 10 };
+
+            using var keysBuf = accelerator.Allocate1D(keys);
+            using var valuesBuf = accelerator.Allocate1D(values);
+            // Allocate as int buffer, cast to pairs (same as RadixSort does)
+            using var pairsBuf = accelerator.Allocate1D<int>(n * 2); // 4 pairs × 8 bytes = 32 bytes = 8 ints
+
+            // Use our DiagPair write kernel to populate (simulates Gather)
+            var writeKernel = accelerator.LoadAutoGroupedStreamKernel<
+                Index1D, ArrayView<float>, ArrayView<int>, ArrayView<DiagPair>>(DiagPairWriteKernel);
+            writeKernel(n, keysBuf.View, valuesBuf.View, pairsBuf.View.AsContiguous().Cast<DiagPair>().SubView(0, n));
+            await accelerator.SynchronizeAsync();
+
+            // Read back as raw ints to see what's actually in the buffer
+            var rawInts = await pairsBuf.CopyToHostAsync<int>();
+            // pairs[0] = DiagPair(4f, 40) → ints: [float_bits(4.0), 40]
+            // pairs[1] = DiagPair(3f, 30) → ints: [float_bits(3.0), 30]
+            string rawStr = string.Join(",", rawInts);
+
+            // Verify: first pair should have key=4.0f (bits=0x40800000=1082130432) and value=40
+            float key0 = BitConverter.Int32BitsToSingle(rawInts[0]);
+            int val0 = rawInts[1];
+            if (MathF.Abs(key0 - 4f) > 0.001f || val0 != 40)
+                throw new Exception($"GatherOnly FAIL: raw=[{rawStr}], key0={key0}, val0={val0}, expected key0=4, val0=40");
+        });
+
+        // Minimal pairs sort: 4 elements, FAILS — keys=[0,0,0,0] values=[0,0,0,0].
+        // GatherOnly passes (struct write to cast buffer works).
+        // The 96-dispatch pipeline (32 bit passes × 3) corrupts struct data somewhere.
+        // Needs WAT disassembly of compiled RadixSortKernel1<RadixSortPair<float,int>>.
+        // [TestMethod] — DISABLED until pairs sort is fixed
+        public async Task WasmMinimalPairsSortDiagTest() => await RunTest(async accelerator =>
+        {
+            int n = 4;
+            var keys = new float[] { 4f, 3f, 2f, 1f }; // reverse order
+            var values = new int[] { 40, 30, 20, 10 };
+
+            using var keysBuf = accelerator.Allocate1D(keys);
+            using var valuesBuf = accelerator.Allocate1D(values);
+            var tempSize = accelerator.ComputeRadixSortPairsTempStorageSize<float, int,
+                global::ILGPU.Algorithms.RadixSortOperations.AscendingFloat>(n);
+            using var tempBuf = accelerator.Allocate1D<int>(tempSize);
+
+            var radixSort = accelerator.CreateRadixSortPairs<float, Stride1D.Dense, int, Stride1D.Dense,
+                global::ILGPU.Algorithms.RadixSortOperations.AscendingFloat>();
+            radixSort(accelerator.DefaultStream, keysBuf.View, valuesBuf.View, tempBuf.View.AsContiguous());
+            await accelerator.SynchronizeAsync();
+
+            var sortedKeys = await keysBuf.CopyToHostAsync<float>();
+            var sortedValues = await valuesBuf.CopyToHostAsync<int>();
+
+            string keysStr = string.Join(",", sortedKeys);
+            string valsStr = string.Join(",", sortedValues);
+            // Expected: keys=[1,2,3,4], values=[10,20,30,40]
+            for (int i = 0; i < n; i++)
+            {
+                float expectedKey = (float)(i + 1);
+                int expectedVal = (i + 1) * 10;
+                if (MathF.Abs(sortedKeys[i] - expectedKey) > 0.001f || sortedValues[i] != expectedVal)
+                    throw new Exception($"MinimalPairsSort FAIL: keys=[{keysStr}] values=[{valsStr}] expected keys=[1,2,3,4] values=[10,20,30,40]");
+            }
+        });
 
         [TestMethod]
         public new async Task AlgorithmRadixSortPairsTest() =>
