@@ -163,6 +163,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         /// The worker script calls the kernel once per phase per fiber.
         /// </summary>
         private bool _phaseMode = false;
+        private bool _needsSyncYields = false;
 
         /// <summary>
         /// Counter for barrier synchronization points in the kernel.
@@ -997,6 +998,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             // include helper barriers (only for kernels with no own barriers).
             int directBarriers = 0;
             int helperBarriers = 0;
+            int helperCallCount = 0; // number of barrier-helper MethodCalls
             foreach (var block in blocks)
             {
                 foreach (var entry in block)
@@ -1009,8 +1011,10 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                     {
                         if (_generatorArgs.HelperBarrierCounts.TryGetValue(mc1.Target, out int hbc1) && hbc1 > 0)
                         {
-                            helperBarriers += hbc1;
-                            if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm-BarrierScan] Found helper '{mc1.Target.Name}' with {hbc1} barriers (direct)");
+                            helperCallCount++;
+                            // helperBarrierCount yields + 1 sync yield after done = hbc1 + 1
+                            helperBarriers += hbc1 + 1;
+                            if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm-BarrierScan] Found helper '{mc1.Target.Name}' with {hbc1} barriers + 1 sync (direct)");
                         }
                         else
                         {
@@ -1019,8 +1023,9 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                             {
                                 if (kv.Key.Name == mc1.Target.Name && kv.Value > 0)
                                 {
-                                    helperBarriers += kv.Value;
-                                    if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm-BarrierScan] Found helper '{mc1.Target.Name}' with {kv.Value} barriers (name fallback)");
+                                    helperCallCount++;
+                                    helperBarriers += kv.Value + 1; // +1 for sync yield
+                                    if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm-BarrierScan] Found helper '{mc1.Target.Name}' with {kv.Value} barriers + 1 sync (name fallback)");
                                     found = true; break;
                                 }
                             }
@@ -1037,6 +1042,12 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                     }
                 }
             }
+            // Sync yields are only needed when there are 2+ barrier-helper calls
+            // (to prevent shared memory stomping between sequential calls).
+            // With 1 call, no sync yield needed — remove the extra counts.
+            _needsSyncYields = helperCallCount > 1;
+            if (!_needsSyncYields && helperCallCount == 1)
+                helperBarriers -= 1; // undo the +1 sync yield added during scan
             int totalBarriers = directBarriers + helperBarriers;
             int expandedBlockCount = _blockCount + totalBarriers;
 
@@ -1055,15 +1066,17 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                     {
                         // Only count helper barriers for yield-per-phase (no own barriers).
                         // Kernels with own barriers use internal loop (no continuation blocks).
+                        // Each helper call: N yield blocks + (1 sync yield if needsSyncYields)
+                        int syncExtra = _needsSyncYields ? 1 : 0;
                         bool found2 = false;
                         if (_generatorArgs.HelperBarrierCounts.TryGetValue(mc2.Target, out int hbc2) && hbc2 > 0)
-                        { count += hbc2; found2 = true; }
+                        { count += hbc2 + syncExtra; found2 = true; }
                         if (!found2)
                         {
                             foreach (var kv in _generatorArgs.HelperBarrierCounts)
                             {
                                 if (kv.Key.Name == mc2.Target.Name && kv.Value > 0)
-                                { count += kv.Value; found2 = true; break; }
+                                { count += kv.Value + syncExtra; found2 = true; break; }
                             }
                         }
                     }
@@ -1078,7 +1091,8 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             // Phase mode: enable when ANY barriers exist (own or via helpers).
             bool anyHelperHasBarriers = _generatorArgs.HelperBarrierCounts.Values.Any(c => c > 0);
             _phaseMode = totalBarriers > 0 || anyHelperHasBarriers || _generatorArgs.PhaseCount > 1;
-            if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm-Phase] totalBarriers={totalBarriers}, phaseMode={_phaseMode}, blockCount={_blockCount}, expandedBlockCount={expandedBlockCount}");
+            // TEMP: always log for debugging barrier count mismatch
+            WasmBackend.Log($"[Wasm-Phase] totalBarriers={totalBarriers} (direct={directBarriers} helper={helperBarriers} calls={helperCallCount} sync={_needsSyncYields}), phaseMode={_phaseMode}, blockCount={_blockCount}, expandedBlockCount={expandedBlockCount}");
             // Reserve first 4 bytes of scratch for yield flag (Option E).
             // Phase state starts after, 8-byte aligned.
             int reservedForYieldFlag = _phaseMode ? 4 : 0;
@@ -2052,18 +2066,36 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             }
             if (foundHelper)
             {
-                // Multi-block helper: emit function call
+                // Multi-block helper: emit function call.
+                // Look up barrier count — use same key that found the function index.
+                // The HelperBarrierCounts and HelperFunctionIndices are populated from the
+                // same HelperMethods keys, so if one found a match, the other should too.
                 int helperBarrierCount = 0;
                 if (!_generatorArgs.HelperBarrierCounts.TryGetValue(targetMethod, out helperBarrierCount))
                 {
+                    // Name-based fallback: try exact name, then base name (before _NNN suffix)
                     foreach (var kv in _generatorArgs.HelperBarrierCounts)
                     {
                         if (kv.Key.Name == targetMethod.Name)
                         { helperBarrierCount = kv.Value; break; }
                     }
+                    // If still not found, try matching by base name (strip numeric suffix)
+                    if (helperBarrierCount == 0)
+                    {
+                        var baseName = System.Text.RegularExpressions.Regex.Replace(
+                            targetMethod.Name, @"_\d+$", "");
+                        foreach (var kv in _generatorArgs.HelperBarrierCounts)
+                        {
+                            var kvBaseName = System.Text.RegularExpressions.Regex.Replace(
+                                kv.Key.Name, @"_\d+$", "");
+                            if (kvBaseName == baseName)
+                            { helperBarrierCount = kv.Value; break; }
+                        }
+                    }
                 }
 
-                if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm-Call] Calling helper '{targetMethod.Name}' funcIdx={helperFuncIdx}, barriers={helperBarrierCount}, barrierOffset={_barrierCounter}, phaseMode={_phaseMode}, isStateMachine={_isStateMachine}");
+                // TEMP diagnostic: always log helper call info to debug barrier count lookup
+                WasmBackend.Log($"[Wasm-Call] helper='{targetMethod.Name}' funcIdx={helperFuncIdx}, barriers={helperBarrierCount}, phaseMode={_phaseMode}, keys=[{string.Join(",", _generatorArgs.HelperBarrierCounts.Select(kv => $"'{kv.Key.Name}'={kv.Value}"))}]");
 
                 // No barrier reset needed — generation-counting barriers require no
                 // per-call reset. The generation counter monotonically increases, so
@@ -2173,8 +2205,30 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                             // Reset helperPhaseLocal for any future calls
                             WasmModuleBuilder.EmitI32Const(Code, 0);
                             WasmModuleBuilder.EmitLocalSet(Code, helperPhaseLocal);
-                            // Don't emit End here — the current block stays open for
-                            // any remaining IR code and the terminator.
+
+                            // Sync yield: only needed when 2+ barrier-helper calls exist.
+                            // Ensures ALL threads read the current scan's results before the
+                            // next call overwrites the shared helper memory.
+                            if (_needsSyncYields)
+                            {
+                                int syncContinuation = _currentBlockEmitIndex + 1;
+                                EmitSaveAllLocals();
+                                WasmModuleBuilder.EmitI32Const(Code, syncContinuation);
+                                WasmModuleBuilder.EmitLocalSet(Code, _stateLocal);
+                                int stateOffset2 = GetLocalSpillOffset(_stateLocal);
+                                WasmModuleBuilder.EmitLocalGet(Code, _scratchBaseLocal);
+                                WasmModuleBuilder.EmitI32Const(Code, stateOffset2);
+                                Code.Add(WasmOpCodes.I32Add);
+                                WasmModuleBuilder.EmitLocalGet(Code, _stateLocal);
+                                WasmModuleBuilder.EmitStore(Code, WasmOpCodes.I32Store, 2, 0);
+                                WasmModuleBuilder.EmitI32Const(Code, 1);
+                                WasmModuleBuilder.EmitLocalSet(Code, _yieldedLocal);
+                                uint syncExitDepth = (uint)(_blockCount - _currentBlockEmitIndex);
+                                Code.Add(WasmOpCodes.Br);
+                                WasmModuleBuilder.EmitU32Leb128(Code, syncExitDepth);
+                                Code.Add(WasmOpCodes.End);
+                                _currentBlockEmitIndex = syncContinuation;
+                            }
                         }
                     }
 
