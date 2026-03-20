@@ -182,9 +182,27 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         private int _phaseStateOffset = 0;
 
         /// <summary>
+        /// Cumulative scratch offset for helper calls. Each helper with barriers
+        /// gets its own region AFTER the kernel's state + previous helpers' state.
+        /// </summary>
+        private int _helperScratchCumulativeOffset = 0;
+
+        /// <summary>
+        /// Helper scratch base locals and their cumulative offsets.
+        /// Populated during codegen, used in prologue generation to set the values.
+        /// </summary>
+        private readonly List<(uint localIdx, int cumulativeOffset)> _helperScratchBaseLocals = new();
+
+        /// <summary>
         /// Total bytes allocated for shared memory in this kernel.
         /// </summary>
         private int _sharedMemorySize = 0;
+
+        /// <summary>
+        /// Tracks which helpers have had their shared allocations set up,
+        /// to avoid inflating _sharedMemorySize with duplicate allocations.
+        /// </summary>
+        private readonly HashSet<Method> _setupSharedHelpers = new();
 
         /// <summary>
         /// Maps Alloca IR values to their byte offsets within the shared memory region.
@@ -258,6 +276,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             public byte[] Code { get; set; } = Array.Empty<byte>();
             public int BarrierCount { get; set; }
             public int SharedMemorySize { get; set; }
+            public int ScratchPerThread { get; set; }
         }
 
         /// <summary>
@@ -314,17 +333,22 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 GenerateStateMachineCode(blocks);
             }
 
-            // After the state machine, push the return value onto the stack
-            // (Wasm returns the value on the stack when the function ends)
-            if (_helperResultType.HasValue)
+            // After the state machine, push the return value onto the stack.
+            // In phase mode: state machine already pushes _yieldedLocal (i32).
+            // Don't push the original return value — it would double-push.
+            if (!_phaseMode && _helperResultType.HasValue)
             {
                 WasmModuleBuilder.EmitLocalGet(Code, _helperResultLocal);
             }
 
             // Determine result types
-            byte[] resultTypes = _helperResultType.HasValue
-                ? new[] { _helperResultType.Value }
-                : Array.Empty<byte>();
+            // Option E: helpers always return their natural result type.
+            // The yield flag is communicated via scratch[0], not the return value.
+            byte[] resultTypes;
+            if (_helperResultType.HasValue)
+                resultTypes = new[] { _helperResultType.Value };
+            else
+                resultTypes = Array.Empty<byte>();
 
             return new HelperFunctionResult
             {
@@ -334,6 +358,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 Code = Code.ToArray(),
                 BarrierCount = _barrierCounter,
                 SharedMemorySize = _sharedMemorySize,
+                ScratchPerThread = (_scratchNextOffset + 7) & ~7,
             };
         }
 
@@ -776,10 +801,29 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 // - Contains barriers directly or in sub-helpers (sense locals must be
                 //   isolated per call to prevent stale sense values when called
                 //   multiple times in a loop)
+                if (WasmBackend.VerboseLogging)
+                {
+                    var irTypes = new List<string>();
+                    foreach (var b in kvp.Key.Blocks)
+                        foreach (var e in b)
+                            irTypes.Add(e.Value.GetType().Name);
+                    WasmBackend.Log($"[Wasm-HelperCheck] '{kvp.Key.Name}' blocks={kvp.Key.Blocks.Count}, effectiveBarriers={barrierCount}, promoted={kvp.Key.Blocks.Count > 1 || barrierCount > 0}, irTypes=[{string.Join(",", irTypes)}]");
+                }
                 if (kvp.Key.Blocks.Count > 1 || barrierCount > 0)
                 {
                     _generatorArgs.HelperFunctionIndices[kvp.Key] = nextHelperFuncIdx++;
                     _generatorArgs.HelperBarrierCounts[kvp.Key] = barrierCount;
+
+                    // Estimate helper's scratch size for kernel-side offset computation.
+                    // Actual size is computed during helper codegen, but we need an estimate
+                    // now so the kernel can give each helper its own scratch region.
+                    // Count IR values as proxy for locals (each local ≤ 8 bytes), add overhead.
+                    int irValueCount = 0;
+                    foreach (var block in kvp.Key.Blocks)
+                        irValueCount += block.Count;
+                    // Conservative: 11 params + irValues locals, 8 bytes each, + 8 yield flag + alignment
+                    int estimatedHelperScratch = ((11 + irValueCount) * 8 + 8 + 7) & ~7;
+                    _generatorArgs.HelperScratchEstimates[kvp.Key] = estimatedHelperScratch;
                     _generatorArgs.HelperFunctionOrder.Add(kvp.Key);
                     string reason = kvp.Key.Blocks.Count > 1 ? "multi-block" : "has-barriers";
                     if (WasmBackend.VerboseLogging) WasmBackend.Log($"Wasm: Helper '{kvp.Key.Name}' promoted ({reason}): funcIdx={_generatorArgs.HelperFunctionIndices[kvp.Key]}, barriers={barrierCount}, blocks={kvp.Key.Blocks.Count}");
@@ -814,7 +858,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                         count += 2;
                     else if (value is global::ILGPU.IR.Values.MethodCall call)
                     {
-                        // Recursively count barriers in sub-helpers
+                        // Recursively count barriers in registered sub-helpers only.
                         if (_generatorArgs.HelperMethods.ContainsKey(call.Target))
                             count += ComputeEffectiveBarrierCount(call.Target, visited);
                     }
@@ -842,23 +886,49 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             var blocks = Method.Blocks;
             _blockCount = blocks.Count;
 
+            // Check if single-block kernel has barriers — if so, force state machine
+            // so phase-split dispatch works (single-block + barrier + fiber dispatch
+            // would deadlock with memory.atomic.wait32).
+            // Also check for MethodCalls to helpers that have barriers — these need
+            // phase mode for the helper call loop even though no Barrier IR node exists
+            // in the kernel's own block.
+            bool singleBlockHasBarriers = false;
             if (_blockCount == 1)
             {
-                // Single block: no state machine needed
+                foreach (var entry in blocks.First())
+                {
+                    if (entry.Value is global::ILGPU.IR.Values.Barrier || entry.Value is global::ILGPU.IR.Values.Broadcast)
+                    { singleBlockHasBarriers = true; break; }
+                    if (entry.Value is MethodCall mc)
+                    {
+                        bool hasHelperBarriers = _generatorArgs.HelperBarrierCounts.TryGetValue(mc.Target, out int hbc) && hbc > 0;
+                        if (!hasHelperBarriers)
+                        {
+                            foreach (var kv in _generatorArgs.HelperBarrierCounts)
+                                if (kv.Key.Name == mc.Target.Name && kv.Value > 0)
+                                { hasHelperBarriers = true; break; }
+                        }
+                        if (hasHelperBarriers)
+                        { singleBlockHasBarriers = true; break; }
+                    }
+                }
+            }
+
+            if (_blockCount == 1 && !singleBlockHasBarriers)
+            {
+                // Single block without barriers: no state machine needed
                 _isStateMachine = false;
                 var singleBlock = blocks.First();
                 foreach (var value in singleBlock)
                     GenerateCodeFor(value);
                 if (singleBlock.Terminator != null)
                     GenerateCodeFor(singleBlock.Terminator);
-                // Ensure i32 return value for the function (0 = done)
-                // The ReturnTerminator already pushes 0 + return, but as a
-                // safety net for implicit function end:
+                // i32 return value (0 = done)
                 WasmModuleBuilder.EmitI32Const(Code, 0);
             }
             else
             {
-                // Multi-block: state machine
+                // Multi-block OR single-block-with-barriers: use state machine
                 GenerateStateMachineCode(blocks);
             }
 
@@ -869,9 +939,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             _generatorArgs.BarrierCount = _barrierCounter;
             _generatorArgs.HasBarriers = _hasBarriers;
             _generatorArgs.SharedMemorySize = _sharedMemorySize;
-            // Record scratch bytes used per thread. For barrier kernels, each worker needs
-            // its own scratch region to avoid races on StructureValue/Alloca memory.
-            _generatorArgs.ScratchPerThread = (_scratchNextOffset + 7) & ~7; // 8-byte aligned
+            _generatorArgs.ScratchPerThread = (_scratchNextOffset + 7) & ~7;
 
             // NOTE: Barrier sense flag reset for multi-group dispatch is handled in the
             // JavaScript worker loop (BuildWasmWorkerScript) to avoid generating
@@ -920,45 +988,98 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             // locals and returns. The next phase call restores locals and the br_table
             // dispatches to the continuation block.
 
-            // Scan for barrier positions: which IR blocks have barriers, and at what value index?
-            var barrierPositions = new Dictionary<BasicBlock, List<int>>(); // block → list of value indices that are barriers
+            // Pre-count ALL barrier emissions across all IR blocks.
+            // Each EmitBarrier call = 1 continuation block needed in the state machine.
+            // Barrier: 1. Broadcast: 2.
+            // MethodCall to barrier-helper: helperBarrierCount continuation blocks
+            // (each helper yield becomes a kernel yield with its own continuation).
+            int totalBarriers = 0;
             foreach (var block in blocks)
             {
-                int valueIdx = 0;
-                foreach (var value in block)
+                foreach (var entry in block)
                 {
-                    if (value is global::ILGPU.IR.Values.Barrier)
+                    if (entry.Value is global::ILGPU.IR.Values.Barrier)
+                        totalBarriers += 1;
+                    else if (entry.Value is global::ILGPU.IR.Values.Broadcast)
+                        totalBarriers += 2; // before + after barriers
+                    else if (!_isHelperFunction && entry.Value is MethodCall mc1)
                     {
-                        if (!barrierPositions.ContainsKey(block))
-                            barrierPositions[block] = new List<int>();
-                        barrierPositions[block].Add(valueIdx);
+                        // Try direct lookup first, then name-based fallback
+                        if (_generatorArgs.HelperBarrierCounts.TryGetValue(mc1.Target, out int hbc1) && hbc1 > 0)
+                        {
+                            totalBarriers += hbc1;
+                            if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm-BarrierScan] Found helper '{mc1.Target.Name}' with {hbc1} barriers (direct)");
+                        }
+                        else
+                        {
+                            bool found = false;
+                            foreach (var kv in _generatorArgs.HelperBarrierCounts)
+                            {
+                                if (kv.Key.Name == mc1.Target.Name && kv.Value > 0)
+                                {
+                                    totalBarriers += kv.Value;
+                                    if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm-BarrierScan] Found helper '{mc1.Target.Name}' with {kv.Value} barriers (name fallback)");
+                                    found = true; break;
+                                }
+                            }
+                            if (!found && false) // disabled — was causing regressions
+                            {
+                                int computed = ComputeEffectiveBarrierCount(mc1.Target);
+                                if (computed > 0)
+                                {
+                                    totalBarriers += computed;
+                                    if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm-BarrierScan] Computed {computed} barriers for '{mc1.Target.Name}' (not in HelperBarrierCounts)");
+                                }
+                            }
+                        }
                     }
-                    valueIdx++;
                 }
             }
-
-            // Compute total state machine block count (IR blocks + continuation blocks for barriers)
-            int totalBarriers = barrierPositions.Values.Sum(list => list.Count);
             int expandedBlockCount = _blockCount + totalBarriers;
 
-            // Build block map: assign state machine indices to each IR block and barrier continuation
+            // Build block map: assign state machine indices to each IR block.
+            // Both kernels and helpers use dynamic block splitting — barriers create
+            // continuation blocks that the br_table dispatches to on re-entry.
             int smIndex = 0;
             foreach (var block in blocks)
             {
+                int count = 0;
+                foreach (var entry in block)
+                {
+                    if (entry.Value is global::ILGPU.IR.Values.Barrier) count += 1;
+                    else if (entry.Value is global::ILGPU.IR.Values.Broadcast) count += 2;
+                    else if (!_isHelperFunction && entry.Value is MethodCall mc2)
+                    {
+                        bool found2 = false;
+                        if (_generatorArgs.HelperBarrierCounts.TryGetValue(mc2.Target, out int hbc2) && hbc2 > 0)
+                        { count += hbc2; found2 = true; }
+                        if (!found2)
+                        {
+                            foreach (var kv in _generatorArgs.HelperBarrierCounts)
+                            {
+                                if (kv.Key.Name == mc2.Target.Name && kv.Value > 0)
+                                { count += kv.Value; found2 = true; break; }
+                            }
+                        }
+                        // Note: unregistered methods with barriers (like inlined helpers)
+                        // are not counted here. Their barriers are in the calling method's IR.
+                    }
+                }
                 _blockMap[block] = smIndex;
-                smIndex++;
-                if (barrierPositions.TryGetValue(block, out var barrierList))
-                    smIndex += barrierList.Count; // reserve extra slots for continuations
+                smIndex += 1 + count;
             }
 
-            // Override _blockCount with expanded count for br_table sizing
+            // Expand _blockCount for both kernels and helpers.
             _blockCount = expandedBlockCount;
 
-            // Phase mode: enable fiber-based dispatch for ALL barrier kernels.
-            // Helpers with barriers also use phase mode — their barriers set _yieldedLocal
-            // and return, propagating back to the kernel which also returns yielded.
-            _phaseMode = totalBarriers > 0;
-            _phaseStateOffset = (_scratchNextOffset + 7) & ~7; // 8-byte align
+            // Phase mode: enable when ANY barriers exist (own or via helpers).
+            bool anyHelperHasBarriers = _generatorArgs.HelperBarrierCounts.Values.Any(c => c > 0);
+            _phaseMode = totalBarriers > 0 || anyHelperHasBarriers || _generatorArgs.PhaseCount > 1;
+            if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm-Phase] totalBarriers={totalBarriers}, phaseMode={_phaseMode}, blockCount={_blockCount}, expandedBlockCount={expandedBlockCount}");
+            // Reserve first 4 bytes of scratch for yield flag (Option E).
+            // Phase state starts after, 8-byte aligned.
+            int reservedForYieldFlag = _phaseMode ? 4 : 0;
+            _phaseStateOffset = ((_scratchNextOffset + reservedForYieldFlag) + 7) & ~7; // 8-byte align
 
             if (WasmBackend.VerboseLogging)
             {
@@ -976,21 +1097,9 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             WasmModuleBuilder.EmitI32Const(Code, 0);
             WasmModuleBuilder.EmitLocalSet(Code, _stateLocal);
 
-            // Phase entry: if phaseId > 0, restore all locals from scratch
-            if (_phaseMode)
-            {
-                WasmModuleBuilder.EmitLocalGet(Code, _phaseParamLocal);
-                WasmModuleBuilder.EmitI32Const(Code, 0);
-                Code.Add(WasmOpCodes.I32GtS);
-                Code.Add(WasmOpCodes.If);
-                Code.Add(WasmOpCodes.Void);
-                EmitRestoreAllLocals();
-                // Reset yielded flag — it was restored as 1 from previous phase,
-                // but this phase hasn't yielded yet
-                WasmModuleBuilder.EmitI32Const(Code, 0);
-                WasmModuleBuilder.EmitLocalSet(Code, _yieldedLocal);
-                Code.Add(WasmOpCodes.End); // end if
-            }
+            // Phase entry code will be generated AFTER all IR visiting,
+            // when all locals are known. For now, record the insertion point.
+            int phaseEntryInsertPoint = Code.Count;
 
             // block $exit (void — return value tracked via _yieldedLocal)
             Code.Add(WasmOpCodes.Block);
@@ -1015,106 +1124,81 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 WasmModuleBuilder.EmitU32Leb128(Code, (uint)i);
             WasmModuleBuilder.EmitU32Leb128(Code, (uint)(_blockCount + 1)); // default: br $exit
 
-            // === Phase 3: Emit code for each block, splitting at barriers ===
+            // === Phase 3: Emit code for each block ===
+            // Barriers are handled dynamically by EmitBarrier which inserts block
+            // splits (End + continuation block) on the fly.
             int currentSmIndex = 0;
             foreach (var block in blocks)
             {
                 // End the innermost remaining block — br_table lands here
                 Code.Add(WasmOpCodes.End);
-                _currentBlockEmitIndex = currentSmIndex;
+                _currentBlockEmitIndex = _blockMap[block];
+                currentSmIndex = _blockMap[block];
 
-                if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm-SM] SM block {currentSmIndex} (IR block {_blockMap[block]}): {block}");
+                if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm-SM] SM block {_currentBlockEmitIndex}: {block}");
 
-                if (barrierPositions.TryGetValue(block, out var barriers))
-                {
-                    // This block has barriers — emit with splits
-                    int barrierListIdx = 0;
-                    int valueIdx = 0;
-                    foreach (var value in block)
-                    {
-                        if (barrierListIdx < barriers.Count && valueIdx == barriers[barrierListIdx])
-                        {
-                            // === BARRIER POINT: save locals + set state to continuation + br $exit ===
-                            int continuationSmIndex = currentSmIndex + 1;
+                // Emit all values (EmitBarrier handles splits dynamically)
+                foreach (var entry in block)
+                    GenerateCodeFor(entry);
 
-                            if (_phaseMode)
-                            {
-                                // Save all locals to scratch
-                                EmitSaveAllLocals();
+                // Handle terminator
+                if (block.Terminator != null)
+                    GenerateCodeFor(block.Terminator);
 
-                                // Set _stateLocal to the continuation block
-                                WasmModuleBuilder.EmitI32Const(Code, continuationSmIndex);
-                                WasmModuleBuilder.EmitLocalSet(Code, _stateLocal);
-
-                                // Include _stateLocal in the save (it's a local too, already saved by EmitSaveAllLocals)
-                                // Actually, _stateLocal IS one of the locals saved by EmitSaveAllLocals.
-                                // But we just SET it AFTER the save. We need to re-save it.
-                                // Simplest: save _stateLocal explicitly after setting it.
-                                {
-                                    int stateLocalOffset = GetLocalSpillOffset(_stateLocal);
-                                    WasmModuleBuilder.EmitLocalGet(Code, _scratchBaseLocal);
-                                    WasmModuleBuilder.EmitI32Const(Code, stateLocalOffset);
-                                    Code.Add(WasmOpCodes.I32Add);
-                                    WasmModuleBuilder.EmitLocalGet(Code, _stateLocal);
-                                    WasmModuleBuilder.EmitStore(Code, WasmOpCodes.I32Store, 2, 0);
-                                }
-
-                                // Set yielded flag and break to $exit
-                                WasmModuleBuilder.EmitI32Const(Code, 1);
-                                WasmModuleBuilder.EmitLocalSet(Code, _yieldedLocal);
-                                // br depth to $exit: skip remaining blocks + $loop
-                                uint exitDepth = (uint)(_blockCount - currentSmIndex);
-                                Code.Add(WasmOpCodes.Br);
-                                WasmModuleBuilder.EmitU32Leb128(Code, exitDepth);
-                            }
-                            else
-                            {
-                                // Non-phase mode (shouldn't happen since barriers enable phase mode)
-                                // Fall back to original barrier implementation
-                                EmitBarrier(barrierListIdx);
-                            }
-
-                            // === Start continuation block ===
-                            currentSmIndex++;
-                            _currentBlockEmitIndex = currentSmIndex;
-                            Code.Add(WasmOpCodes.End); // end the pre-barrier block
-
-                            if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm-SM] SM block {currentSmIndex} (continuation after barrier {barrierListIdx})");
-
-                            barrierListIdx++;
-                            // DON'T emit the barrier value itself (we handled it above)
-                        }
-                        else
-                        {
-                            // Normal value — emit as usual
-                            GenerateCodeFor(value);
-                        }
-                        valueIdx++;
-                    }
-
-                    // Handle terminator (after all values including split continuations)
-                    if (block.Terminator != null)
-                        GenerateCodeFor(block.Terminator);
-                }
-                else
-                {
-                    // No barriers in this block — emit normally
-                    foreach (var value in block)
-                        GenerateCodeFor(value);
-
-                    if (block.Terminator != null)
-                        GenerateCodeFor(block.Terminator);
-                }
-
-                currentSmIndex++;
+                // Advance past any continuation blocks this block created
+                currentSmIndex = _currentBlockEmitIndex + 1;
             }
 
             // end $loop
             Code.Add(WasmOpCodes.End);
 
-            // end $exit — return _yieldedLocal (0=done, 1=yielded)
+            // end $exit
             Code.Add(WasmOpCodes.End);
-            WasmModuleBuilder.EmitLocalGet(Code, _yieldedLocal);
+
+            // Phase mode: persist completion state to scratch so that re-entry
+            // on future phases dispatches to the default exit (returns 0).
+            // ONLY run when the kernel actually completed (yieldedLocal == 0).
+            // When yielding (yieldedLocal == 1), br $exit jumps here too — must NOT overwrite.
+            if (_phaseMode)
+            {
+                WasmModuleBuilder.EmitLocalGet(Code, _yieldedLocal);
+                WasmModuleBuilder.EmitI32Const(Code, 0);
+                Code.Add(WasmOpCodes.I32Eq);
+                Code.Add(WasmOpCodes.If);
+                Code.Add(WasmOpCodes.Void);
+                {
+                    // Save _stateLocal = _blockCount (past all br_table entries → default → exit)
+                    WasmModuleBuilder.EmitI32Const(Code, _blockCount);
+                    WasmModuleBuilder.EmitLocalSet(Code, _stateLocal);
+                    int stateOffset = GetLocalSpillOffset(_stateLocal);
+                    WasmModuleBuilder.EmitLocalGet(Code, _scratchBaseLocal);
+                    WasmModuleBuilder.EmitI32Const(Code, stateOffset);
+                    Code.Add(WasmOpCodes.I32Add);
+                    WasmModuleBuilder.EmitLocalGet(Code, _stateLocal);
+                    WasmModuleBuilder.EmitStore(Code, WasmOpCodes.I32Store, 2, 0);
+                    // Also persist _yieldedLocal = 0 so re-entry returns 0
+                    int yieldedOffset = GetLocalSpillOffset(_yieldedLocal);
+                    WasmModuleBuilder.EmitLocalGet(Code, _scratchBaseLocal);
+                    WasmModuleBuilder.EmitI32Const(Code, yieldedOffset);
+                    Code.Add(WasmOpCodes.I32Add);
+                    WasmModuleBuilder.EmitLocalGet(Code, _yieldedLocal);
+                    WasmModuleBuilder.EmitStore(Code, WasmOpCodes.I32Store, 2, 0);
+                }
+                Code.Add(WasmOpCodes.End); // end if
+            }
+
+            // Push return value
+            if (_isHelperFunction && _phaseMode && _helperResultType.HasValue)
+            {
+                // Option E: helper returns actual result (yield flag is in scratch[0])
+                WasmModuleBuilder.EmitLocalGet(Code, _helperResultLocal);
+            }
+            else if (_phaseMode || (!_isHelperFunction))
+            {
+                // Kernel always returns i32 (_yieldedLocal)
+                WasmModuleBuilder.EmitLocalGet(Code, _yieldedLocal);
+            }
+            // Helpers not in phase mode: return value handled by GenerateAsHelper
 
             // Propagate phase info
             if (_phaseMode)
@@ -1122,9 +1206,47 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 // Extend scratch to include phase state
                 int stateSize = ComputePhaseStateSize();
                 _scratchNextOffset = _phaseStateOffset + stateSize;
+
+                // NOW generate the phase entry prologue (all locals are known).
+                // This code restores locals from scratch when phaseId > 0.
+                var prologueCode = new List<byte>();
+                WasmModuleBuilder.EmitLocalGet(prologueCode, _phaseParamLocal);
+                WasmModuleBuilder.EmitI32Const(prologueCode, 0);
+                prologueCode.Add(WasmOpCodes.I32GtS);
+                prologueCode.Add(WasmOpCodes.If);
+                prologueCode.Add(WasmOpCodes.Void);
+                // Emit restore inline into prologueCode
+                EmitRestoreAllLocalsTo(prologueCode);
+                // Reset yielded flag
+                WasmModuleBuilder.EmitI32Const(prologueCode, 0);
+                WasmModuleBuilder.EmitLocalSet(prologueCode, _yieldedLocal);
+                prologueCode.Add(WasmOpCodes.End); // end if
+
+                // Set helper scratch base locals (runs on every phase, not just restore).
+                // Each helper gets scratchBase + _scratchNextOffset + cumulativeOffset.
+                foreach (var (localIdx, cumOffset) in _helperScratchBaseLocals)
+                {
+                    int offset = ((_scratchNextOffset + cumOffset) + 7) & ~7; // 8-byte align
+                    WasmModuleBuilder.EmitLocalGet(prologueCode, _scratchBaseLocal);
+                    WasmModuleBuilder.EmitI32Const(prologueCode, offset);
+                    prologueCode.Add(WasmOpCodes.I32Add);
+                    WasmModuleBuilder.EmitLocalSet(prologueCode, localIdx);
+                }
+
+                // Insert prologue at the recorded position
+                Code.InsertRange(phaseEntryInsertPoint, prologueCode);
             }
-            // Always set PhaseCount (1 for non-phase, >1 for phase mode)
-            _generatorArgs.PhaseCount = _phaseMode ? (totalBarriers + 1) : 1;
+            // Set PhaseCount only for the kernel (not helpers — helpers don't drive dispatch).
+            if (!_isHelperFunction)
+                _generatorArgs.PhaseCount = _phaseMode ? (totalBarriers + 1) : 1;
+
+            // Record scratch bytes used per thread. Set AFTER phase state and helper
+            // scratch regions are finalized so the size includes everything.
+            // _scratchNextOffset now includes: alloca + yield flag + phase state + helper scratch.
+            // Extend _scratchNextOffset to include helper scratch regions.
+            // Line 939 (after GenerateStateMachineCode returns) will use this to set
+            // ScratchPerThread, ensuring it includes phase state + helper scratch.
+            _scratchNextOffset += _helperScratchCumulativeOffset;
         }
 
         /// <summary>
@@ -1160,6 +1282,15 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             {
                 EmitGetLocal(returnTerminator.ReturnValue.Resolve());
                 WasmModuleBuilder.EmitLocalSet(Code, _helperResultLocal);
+
+                // In phase mode (Option E): write yield flag 0 (done) to scratch[0].
+                // The function returns the actual result via _helperResultLocal.
+                if (_phaseMode)
+                {
+                    WasmModuleBuilder.EmitLocalGet(Code, _scratchBaseLocal);
+                    WasmModuleBuilder.EmitI32Const(Code, 0); // done flag
+                    WasmModuleBuilder.EmitStore(Code, WasmOpCodes.I32Store, 2, 0);
+                }
             }
 
             if (_isStateMachine)
@@ -1168,13 +1299,17 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 // $loop will re-dispatch via br_table which hits the default target → $exit.
                 WasmModuleBuilder.EmitI32Const(Code, _blockCount); // out-of-range state
                 WasmModuleBuilder.EmitLocalSet(Code, _stateLocal);
+                // Note: state is NOT persisted to scratch here. The Return's state
+                // (= _blockCount = out-of-range) ensures the current phase exits cleanly.
+                // On any subsequent re-entry, the prologue restores the LAST YIELD's state,
+                // but _yieldedLocal is reset to 0, so the kernel exits via the normal path.
                 Code.Add(WasmOpCodes.Br);
                 WasmModuleBuilder.EmitU32Leb128(Code, GetBrDepthToLoop());
             }
             else
             {
-                // Non-state-machine kernel: return 0 (done)
-                if (!_isHelperFunction)
+                // Non-state-machine: push i32 return for kernel (always) and helpers in phase mode
+                if (!_isHelperFunction || _phaseMode)
                     WasmModuleBuilder.EmitI32Const(Code, 0);
                 Code.Add(WasmOpCodes.Return);
             }
@@ -1876,9 +2011,22 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             }
 
             // Set up the helper's shared memory allocations (needed for both paths
-            // so that the kernel's _sharedMemorySize accounts for the helper's allocas)
-            SetupSharedAllocations(helperAllocas.SharedAllocations, isDynamic: false);
-            SetupSharedAllocations(helperAllocas.DynamicSharedAllocations, isDynamic: true);
+            // so that the kernel's _sharedMemorySize accounts for the helper's allocas).
+            // Only set up ONCE per unique helper — multiple calls to the same helper
+            // share the same shared memory region.
+            bool alreadySetup = _setupSharedHelpers.Contains(targetMethod);
+            if (!alreadySetup)
+            {
+                // Also check by name (generic specializations may differ by reference)
+                foreach (var m in _setupSharedHelpers)
+                    if (m.Name == targetMethod.Name) { alreadySetup = true; break; }
+            }
+            if (!alreadySetup)
+            {
+                _setupSharedHelpers.Add(targetMethod);
+                SetupSharedAllocations(helperAllocas.SharedAllocations, isDynamic: false);
+                SetupSharedAllocations(helperAllocas.DynamicSharedAllocations, isDynamic: true);
+            }
 
             // Allocate result local if non-void
             uint? resultLocal = null;
@@ -1887,92 +2035,179 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 resultLocal = AllocateLocal(methodCall, GetWasmType(methodCall));
             }
 
-            // Check if this is a multi-block helper with a pre-assigned function index
-            if (_generatorArgs.HelperFunctionIndices.TryGetValue(targetMethod, out int helperFuncIdx))
+            // Check if this is a multi-block helper with a pre-assigned function index.
+            // Try direct reference lookup first, then name-based fallback
+            // (generic specializations may create different Method instances).
+            bool foundHelper = _generatorArgs.HelperFunctionIndices.TryGetValue(targetMethod, out int helperFuncIdx);
+            if (!foundHelper)
+            {
+                foreach (var kv in _generatorArgs.HelperFunctionIndices)
+                {
+                    if (kv.Key.Name == targetMethod.Name)
+                    { helperFuncIdx = kv.Value; foundHelper = true; break; }
+                }
+            }
+            if (foundHelper)
             {
                 // Multi-block helper: emit function call
-                int helperBarrierCount = _generatorArgs.HelperBarrierCounts[targetMethod];
+                int helperBarrierCount = 0;
+                if (!_generatorArgs.HelperBarrierCounts.TryGetValue(targetMethod, out helperBarrierCount))
+                {
+                    foreach (var kv in _generatorArgs.HelperBarrierCounts)
+                    {
+                        if (kv.Key.Name == targetMethod.Name)
+                        { helperBarrierCount = kv.Value; break; }
+                    }
+                }
 
-                if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm-Call] Calling helper '{targetMethod.Name}' funcIdx={helperFuncIdx}, barriers={helperBarrierCount}, barrierOffset={_barrierCounter}");
+                if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm-Call] Calling helper '{targetMethod.Name}' funcIdx={helperFuncIdx}, barriers={helperBarrierCount}, barrierOffset={_barrierCounter}, phaseMode={_phaseMode}, isStateMachine={_isStateMachine}");
 
                 // No barrier reset needed — generation-counting barriers require no
                 // per-call reset. The generation counter monotonically increases, so
                 // fresh function locals always read the correct current generation.
 
-                // Push context params (same order as the helper's fixed params)
-                WasmModuleBuilder.EmitLocalGet(Code, _globalIdxLocal);
-                WasmModuleBuilder.EmitLocalGet(Code, _dimXLocal);
-                WasmModuleBuilder.EmitLocalGet(Code, _dimYLocal);
-                WasmModuleBuilder.EmitLocalGet(Code, _scratchBaseLocal);
-                WasmModuleBuilder.EmitLocalGet(Code, _groupDimXLocal);
-                WasmModuleBuilder.EmitLocalGet(Code, _threadIdXLocal);
-                WasmModuleBuilder.EmitLocalGet(Code, _sharedMemBaseLocal);
-
-                // Adjusted barrier base: offset by current barrier counter
-                WasmModuleBuilder.EmitLocalGet(Code, _barrierBaseLocal);
-                if (_barrierCounter > 0)
-                {
-                    WasmModuleBuilder.EmitI32Const(Code, _barrierCounter * 8);
-                    Code.Add(WasmOpCodes.I32Add);
-                }
-
-                WasmModuleBuilder.EmitLocalGet(Code, _dynamicSharedLengthLocal);
-                WasmModuleBuilder.EmitLocalGet(Code, _phaseParamLocal);
-
-                // Push the helper's IR arguments
-                for (int i = 0; i < targetMethod.Parameters.Count && i < methodCall.Nodes.Length; i++)
-                {
-                    EmitGetLocal(methodCall.Nodes[i].Resolve());
-                }
-
-                // Emit call instruction — helper returns i32 (0=done, 1=yielded)
-                WasmModuleBuilder.EmitCall(Code, (uint)helperFuncIdx);
-
                 if (_phaseMode && helperBarrierCount > 0)
                 {
-                    // Phase mode: check if helper yielded. If so, propagate yield.
-                    // The helper's return value is on the stack (i32: 0=done, 1=yielded).
-                    // If helper returned 1 (yielded), we also need to save kernel locals
-                    // and return 1 to the worker script.
-                    var helperResult = AllocateNewLocal(WasmOpCodes.I32);
-                    WasmModuleBuilder.EmitLocalSet(Code, helperResult);
-                    WasmModuleBuilder.EmitLocalGet(Code, helperResult);
-                    WasmModuleBuilder.EmitI32Const(Code, 1);
-                    Code.Add(WasmOpCodes.I32Eq);
-                    Code.Add(WasmOpCodes.If);
-                    Code.Add(WasmOpCodes.Void);
-                    // Helper yielded — save our state and yield too
-                    EmitSaveAllLocals();
-                    WasmModuleBuilder.EmitI32Const(Code, 1);
-                    WasmModuleBuilder.EmitLocalSet(Code, _yieldedLocal);
-                    // br to $exit
-                    uint exitDepth2 = (uint)(_blockCount - _currentBlockEmitIndex);
-                    Code.Add(WasmOpCodes.Br);
-                    WasmModuleBuilder.EmitU32Leb128(Code, exitDepth2);
-                    Code.Add(WasmOpCodes.End); // end if
+                    // Phase mode: helper has barriers and may yield multiple times.
+                    // CRITICAL: We must NOT loop helper phases within a single kernel call.
+                    // Each helper phase must run across ALL threads before any thread advances
+                    // to the next phase (barrier semantics). So when the helper yields, the
+                    // kernel must also yield back to the worker script.
+                    //
+                    // Each helper barrier becomes a kernel yield point. For a helper with N
+                    // barriers, we emit N yield points. Each yield point:
+                    // 1. Calls helper with helperPhaseLocal
+                    // 2. If helper yielded (returned 1): increment helperPhaseLocal, save
+                    //    kernel state, yield kernel to worker
+                    // 3. If helper done (returned 0): continue to next instruction
+                    //
+                    // The yield uses the same dynamic block splitting as EmitBarrier:
+                    // save locals, set _stateLocal to continuation, br $exit.
+                    // On re-entry, br_table dispatches back here to call the helper again.
 
-                    // Helper completed — pop result if non-void
-                    // (The helper stored its actual result in scratch before returning 0.
-                    // Actually, for void helpers this is fine. For non-void helpers,
-                    // the helper returns i32 (yielded flag), not the original result.
-                    // We need a different mechanism for non-void helpers with barriers.
-                    // For now: non-void helpers with barriers are rare — ExclusiveScan
-                    // returns void. Handle this case later if needed.)
-                    if (resultLocal.HasValue)
+                    var helperPhaseLocal = AllocateNewLocal(WasmOpCodes.I32);
+
+                    // Allocate a local for this helper's scratch base address.
+                    // Value is set in the prologue (after all locals are known) as:
+                    // scratchBase + kernelFinalScratchEnd + cumulativeHelperOffset
+                    var helperScratchBaseLocal = AllocateNewLocal(WasmOpCodes.I32);
+                    int helperCumulativeForThisCall = _helperScratchCumulativeOffset;
+                    // Record for prologue generation
+                    _helperScratchBaseLocals.Add((helperScratchBaseLocal, helperCumulativeForThisCall));
+
+                    // N barriers in helper = N+1 phases (N yields + 1 completion)
+                    int helperPhaseCount = helperBarrierCount + 1;
+                    for (int hb = 0; hb < helperPhaseCount; hb++)
                     {
-                        // TODO: non-void helper return with phase mode
-                        // For now, set result to 0 (placeholder)
-                        WasmModuleBuilder.EmitI32Const(Code, 0);
-                        WasmModuleBuilder.EmitLocalSet(Code, resultLocal.Value);
+                        // Push helper arguments
+                        WasmModuleBuilder.EmitLocalGet(Code, _globalIdxLocal);
+                        WasmModuleBuilder.EmitLocalGet(Code, _dimXLocal);
+                        WasmModuleBuilder.EmitLocalGet(Code, _dimYLocal);
+                        // Helper scratch base: computed in prologue as
+                        // scratchBase + kernelFinalScratchEnd + cumulativeOffset
+                        WasmModuleBuilder.EmitLocalGet(Code, helperScratchBaseLocal);
+                        WasmModuleBuilder.EmitLocalGet(Code, _groupDimXLocal);
+                        WasmModuleBuilder.EmitLocalGet(Code, _threadIdXLocal);
+                        WasmModuleBuilder.EmitLocalGet(Code, _sharedMemBaseLocal);
+                        WasmModuleBuilder.EmitLocalGet(Code, _barrierBaseLocal);
+                        if (_barrierCounter > 0)
+                        {
+                            WasmModuleBuilder.EmitI32Const(Code, _barrierCounter * 8);
+                            Code.Add(WasmOpCodes.I32Add);
+                        }
+                        WasmModuleBuilder.EmitLocalGet(Code, _dynamicSharedLengthLocal);
+                        WasmModuleBuilder.EmitLocalGet(Code, helperPhaseLocal);
+                        for (int i = 0; i < targetMethod.Parameters.Count && i < methodCall.Nodes.Length; i++)
+                            EmitGetLocal(methodCall.Nodes[i].Resolve());
+
+                        WasmModuleBuilder.EmitCall(Code, (uint)helperFuncIdx);
+
+                        // Option E: helper returns actual result. Store it.
+                        // Yield flag is in scratch[0].
+                        if (resultLocal.HasValue)
+                            WasmModuleBuilder.EmitLocalSet(Code, resultLocal.Value);
+                        else
+                            Code.Add(WasmOpCodes.Drop);
+
+                        if (hb < helperPhaseCount - 1)
+                        {
+                            // Intermediate phase: helper yielded.
+                            // Increment helperPhaseLocal and yield kernel.
+                            WasmModuleBuilder.EmitLocalGet(Code, helperPhaseLocal);
+                            WasmModuleBuilder.EmitI32Const(Code, 1);
+                            Code.Add(WasmOpCodes.I32Add);
+                            WasmModuleBuilder.EmitLocalSet(Code, helperPhaseLocal);
+
+                            // Yield kernel — same pattern as EmitBarrier
+                            int continuationIndex = _currentBlockEmitIndex + 1;
+
+                            EmitSaveAllLocals();
+
+                            WasmModuleBuilder.EmitI32Const(Code, continuationIndex);
+                            WasmModuleBuilder.EmitLocalSet(Code, _stateLocal);
+                            {
+                                int stateOffset = GetLocalSpillOffset(_stateLocal);
+                                WasmModuleBuilder.EmitLocalGet(Code, _scratchBaseLocal);
+                                WasmModuleBuilder.EmitI32Const(Code, stateOffset);
+                                Code.Add(WasmOpCodes.I32Add);
+                                WasmModuleBuilder.EmitLocalGet(Code, _stateLocal);
+                                WasmModuleBuilder.EmitStore(Code, WasmOpCodes.I32Store, 2, 0);
+                            }
+
+                            WasmModuleBuilder.EmitI32Const(Code, 1);
+                            WasmModuleBuilder.EmitLocalSet(Code, _yieldedLocal);
+
+                            uint exitDepth = (uint)(_blockCount - _currentBlockEmitIndex);
+                            Code.Add(WasmOpCodes.Br);
+                            WasmModuleBuilder.EmitU32Leb128(Code, exitDepth);
+
+                            // Close current block, open continuation
+                            Code.Add(WasmOpCodes.End);
+                            _currentBlockEmitIndex = continuationIndex;
+                        }
+                        else
+                        {
+                            // Final phase: helper is done. resultLocal has the valid result.
+                            // Reset helperPhaseLocal for any future calls
+                            WasmModuleBuilder.EmitI32Const(Code, 0);
+                            WasmModuleBuilder.EmitLocalSet(Code, helperPhaseLocal);
+                            // Don't emit End here — the current block stays open for
+                            // any remaining IR code and the terminator.
+                        }
                     }
+
+                    // Advance cumulative scratch offset for next helper call (8-byte aligned)
+                    if (_generatorArgs.HelperScratchEstimates.TryGetValue(targetMethod, out int helperScratch))
+                        _helperScratchCumulativeOffset += (helperScratch + 7) & ~7;
                 }
                 else
                 {
-                    // Non-phase mode or no barriers: pop result normally
-                    if (resultLocal.HasValue)
+                    // Non-phase or no helper barriers: single call
+                    // Push context params
+                    WasmModuleBuilder.EmitLocalGet(Code, _globalIdxLocal);
+                    WasmModuleBuilder.EmitLocalGet(Code, _dimXLocal);
+                    WasmModuleBuilder.EmitLocalGet(Code, _dimYLocal);
+                    WasmModuleBuilder.EmitLocalGet(Code, _scratchBaseLocal);
+                    WasmModuleBuilder.EmitLocalGet(Code, _groupDimXLocal);
+                    WasmModuleBuilder.EmitLocalGet(Code, _threadIdXLocal);
+                    WasmModuleBuilder.EmitLocalGet(Code, _sharedMemBaseLocal);
+                    WasmModuleBuilder.EmitLocalGet(Code, _barrierBaseLocal);
+                    if (_barrierCounter > 0)
                     {
-                        WasmModuleBuilder.EmitLocalSet(Code, resultLocal.Value);
+                        WasmModuleBuilder.EmitI32Const(Code, _barrierCounter * 8);
+                        Code.Add(WasmOpCodes.I32Add);
                     }
+                    WasmModuleBuilder.EmitLocalGet(Code, _dynamicSharedLengthLocal);
+                    WasmModuleBuilder.EmitLocalGet(Code, _phaseParamLocal);
+                    for (int i = 0; i < targetMethod.Parameters.Count && i < methodCall.Nodes.Length; i++)
+                        EmitGetLocal(methodCall.Nodes[i].Resolve());
+
+                    WasmModuleBuilder.EmitCall(Code, (uint)helperFuncIdx);
+
+                    if (_phaseMode)
+                        Code.Add(WasmOpCodes.Drop); // helper returns i32 in phase mode
+                    else if (resultLocal.HasValue)
+                        WasmModuleBuilder.EmitLocalSet(Code, resultLocal.Value);
                 }
 
                 // Advance barrier counter for subsequent barriers/calls
@@ -1981,9 +2216,14 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 {
                     _hasBarriers = true;
 
-                    // In phase mode, the post-helper barrier is a phase boundary
-                    // (all threads sync between helper call and next kernel code)
-                    EmitBarrier(_barrierCounter);
+                    if (!_phaseMode)
+                    {
+                        // Non-phase mode: emit traditional post-helper barrier
+                        EmitBarrier(_barrierCounter);
+                    }
+                    // In phase mode: skip post-helper barrier — the fiber dispatch
+                    // runs all fibers sequentially per phase, providing implicit sync.
+                    // The helper's own barriers handle intra-helper sync via phase yields.
                     _barrierCounter++;
                 }
 
@@ -2294,6 +2534,10 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             {
                 var key = GetValueKey(allocaInfo.Alloca);
 
+                // Skip if already registered — prevents shared memory inflation
+                // when the same helper is called multiple times.
+                if (_sharedAllocaOffsets.ContainsKey(key))
+                    continue;
 
                 int elemSize = 4; // default i32
                 string elemTypeStr = "i32";
@@ -2577,7 +2821,6 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 // Value to store
                 WasmModuleBuilder.EmitLocalGet(Code, localIdx);
 
-                // Store based on type
                 switch (type)
                 {
                     case WasmOpCodes.I32:
@@ -2604,7 +2847,9 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         /// Emits code to restore all non-parameter locals from per-thread scratch memory.
         /// Used at phase entry (phaseId > 0) to restore state from previous phase.
         /// </summary>
-        private void EmitRestoreAllLocals()
+        private void EmitRestoreAllLocals() => EmitRestoreAllLocalsTo(Code);
+
+        private void EmitRestoreAllLocalsTo(List<byte> target)
         {
             int offset = _phaseStateOffset;
             for (int i = 0; i < _locals.Count; i++)
@@ -2613,33 +2858,33 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 byte type = _locals[i].Type;
 
                 // Address = scratchBase + offset
-                WasmModuleBuilder.EmitLocalGet(Code, _scratchBaseLocal);
-                WasmModuleBuilder.EmitI32Const(Code, offset);
-                Code.Add(WasmOpCodes.I32Add);
+                WasmModuleBuilder.EmitLocalGet(target, _scratchBaseLocal);
+                WasmModuleBuilder.EmitI32Const(target, offset);
+                target.Add(WasmOpCodes.I32Add);
 
                 // Load based on type
                 switch (type)
                 {
                     case WasmOpCodes.I32:
-                        WasmModuleBuilder.EmitLoad(Code, WasmOpCodes.I32Load, 2, 0);
+                        WasmModuleBuilder.EmitLoad(target, WasmOpCodes.I32Load, 2, 0);
                         offset += 4;
                         break;
                     case WasmOpCodes.I64:
-                        WasmModuleBuilder.EmitLoad(Code, WasmOpCodes.I64Load, 3, 0);
+                        WasmModuleBuilder.EmitLoad(target, WasmOpCodes.I64Load, 3, 0);
                         offset += 8;
                         break;
                     case WasmOpCodes.F32:
-                        WasmModuleBuilder.EmitLoad(Code, WasmOpCodes.F32Load, 2, 0);
+                        WasmModuleBuilder.EmitLoad(target, WasmOpCodes.F32Load, 2, 0);
                         offset += 4;
                         break;
                     case WasmOpCodes.F64:
-                        WasmModuleBuilder.EmitLoad(Code, WasmOpCodes.F64Load, 3, 0);
+                        WasmModuleBuilder.EmitLoad(target, WasmOpCodes.F64Load, 3, 0);
                         offset += 8;
                         break;
                 }
 
                 // Set the local
-                WasmModuleBuilder.EmitLocalSet(Code, localIdx);
+                WasmModuleBuilder.EmitLocalSet(target, localIdx);
             }
         }
 
@@ -2711,63 +2956,52 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         {
             if (_phaseMode)
             {
-                // Phase mode: save all locals to scratch, then return.
-                // The worker script handles synchronization between phases.
-                // The next phase call will restore locals and continue.
+                // Phase mode: check if this is the barrier we should yield at.
+                // _barrierCounter tracks which barrier we're at. _phaseParamLocal
+                // indicates which phase we're running. If phase == barrierIndex,
+                // this is the yield point. Otherwise, skip (re-execution is safe
+                // because locals are restored and execution is sequential).
+                //
+                // For the KERNEL (not helper), we use dynamic block splitting
+                // which is more efficient. For HELPERS, we use this skip approach
+                // because dynamic block splitting conflicts with if/else nesting.
 
-                // First, set _stateLocal to the NEXT block index so that when
-                // the next phase restores locals and enters the state machine loop,
-                // the br_table dispatches to the correct continuation block.
-                // The next block is _currentBlockEmitIndex + 1 (or the block after
-                // the barrier in the current block's control flow). For now, we use
-                // the current block index — the barrier is at the END of a block's
-                // barrier section, and the code after it in the same block will
-                // continue when the state machine re-enters this block.
-                // Actually, the barrier is typically INSIDE a block, and control
-                // continues at the next instruction after the barrier in the SAME block.
-                // So we set _stateLocal = _currentBlockEmitIndex to re-enter the
-                // same block. But we need the code AFTER the barrier to run, not
-                // the code before it. This requires the phase-aware code to skip
-                // past the barrier point.
-                //
-                // Simplest approach: use the existing state machine. The state stays
-                // at the current block. When the next phase restores and loops, the
-                // br_table dispatches to this block. But all the code in the block
-                // will re-execute (including code before the barrier). This is wrong.
-                //
-                // Better approach: create a NEW block index for the continuation after
-                // the barrier. But this requires restructuring the block map.
-                //
-                // PRAGMATIC approach for now: treat the barrier as a phase boundary.
-                // The worker script tracks which phase we're on. The kernel receives
-                // a phaseId parameter. At the start of the kernel, if phaseId > 0,
-                // we skip to the right point. Since all locals are restored, and the
-                // state machine state is restored, the br_table will dispatch to the
-                // right block. For code within a block after a barrier, we need the
-                // barrier to be at a block boundary. In the ILGPU IR, barriers ARE
-                // at block boundaries (the Barrier instruction is a terminator-like
-                // instruction that the IR places at specific points). Let me verify
-                // this by checking if barriers always appear at the end of a block.
-                //
-                // For now: save state, br to $exit (return from function).
-                // The _stateLocal already points to the current block. The next
-                // phase will re-enter at this block, but the barrier code itself
-                // won't re-execute because in phase mode, EmitBarrier checks the
-                // phaseId and skips the save+return if it's not the matching phase.
+                {
+                    // Dynamic block splitting (used for both kernel and helper):
+                    int continuationIndex = _currentBlockEmitIndex + 1;
 
-                // Save all locals to scratch
-                EmitSaveAllLocals();
+                    EmitSaveAllLocals();
 
-                // Break to $exit — returns from the kernel function.
-                // br depth to $exit = _blockCount - _currentBlockEmitIndex - 1 + 1 (for $loop) + 1 (for $exit block itself)
-                // Actually, from inside a block's code section, the nesting is:
-                // $exit -> $loop -> block[N-1] -> ... -> block[currentIdx+1]
-                // We need to break to $exit, which is the outermost block.
-                WasmModuleBuilder.EmitI32Const(Code, 1);
-                WasmModuleBuilder.EmitLocalSet(Code, _yieldedLocal);
-                uint exitDepth = (uint)(_blockCount - _currentBlockEmitIndex);
-                Code.Add(WasmOpCodes.Br);
-                WasmModuleBuilder.EmitU32Leb128(Code, exitDepth);
+                    WasmModuleBuilder.EmitI32Const(Code, continuationIndex);
+                    WasmModuleBuilder.EmitLocalSet(Code, _stateLocal);
+
+                    {
+                        int stateOffset = GetLocalSpillOffset(_stateLocal);
+                        WasmModuleBuilder.EmitLocalGet(Code, _scratchBaseLocal);
+                        WasmModuleBuilder.EmitI32Const(Code, stateOffset);
+                        Code.Add(WasmOpCodes.I32Add);
+                        WasmModuleBuilder.EmitLocalGet(Code, _stateLocal);
+                        WasmModuleBuilder.EmitStore(Code, WasmOpCodes.I32Store, 2, 0);
+                    }
+
+                    WasmModuleBuilder.EmitI32Const(Code, 1);
+                    WasmModuleBuilder.EmitLocalSet(Code, _yieldedLocal);
+
+                    // Option E: helpers write yield flag to scratch[0]
+                    if (_isHelperFunction)
+                    {
+                        WasmModuleBuilder.EmitLocalGet(Code, _scratchBaseLocal);
+                        WasmModuleBuilder.EmitI32Const(Code, 1); // yielded
+                        WasmModuleBuilder.EmitStore(Code, WasmOpCodes.I32Store, 2, 0);
+                    }
+
+                    uint exitDepth = (uint)(_blockCount - _currentBlockEmitIndex);
+                    Code.Add(WasmOpCodes.Br);
+                    WasmModuleBuilder.EmitU32Leb128(Code, exitDepth);
+
+                    Code.Add(WasmOpCodes.End);
+                    _currentBlockEmitIndex = continuationIndex;
+                }
 
                 return; // Don't emit the wait32 barrier code
             }

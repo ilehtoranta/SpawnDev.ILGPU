@@ -44,6 +44,45 @@ Detailed constraints live in each directory's own `CLAUDE.md`. Read the relevant
 
 Tests in `SpawnDev.ILGPU.Demo.Shared/UnitTests/BackendTestBase*.cs` (~211 tests, Tests1-10). Backend-specific classes inherit and override unsupported tests. See `PlaywrightMultiTest/CLAUDE.md` for running tests.
 
+## Debugging Pipeline — ShaderDebugService
+
+Every kernel compilation auto-dumps generated code to a local folder via `ShaderDebugService` (registered in the demo's `Program.cs`). **Use this — do NOT ask TJ to manually run tests or capture output.**
+
+### Setup
+1. Run the demo, go to `/tests`
+2. Click **"Set Debug Folder"** → pick a local folder (e.g., `_debugdump`)
+3. Folder persists in IndexedDB across sessions — set once, works forever
+
+### What Auto-Dumps (organized by backend)
+```
+debugfolder/
+├── _DEBUG_README.md
+├── latest.json                         ← live test results (updated each test)
+├── test-run-YYYY-MM-DD_HH-mm-ss.json  ← permanent test run history
+├── wgsl/                               ← WebGPU shaders with metadata headers
+│   └── NNN_KernelName.wgsl
+├── glsl/                               ← WebGL shaders with metadata headers
+│   └── NNN_KernelName.glsl
+└── wasm/                               ← Wasm binaries + compilation info
+    ├── NNN_KernelName.wasm             ← disassemble: wasm2wat --enable-threads
+    └── NNN_KernelName.txt              ← params, locals, barriers, shared mem size
+```
+
+### How to Use
+- **Find a kernel:** Grep the `.txt` files for `hasBarriers=True`, `helpers=1`, etc.
+- **Disassemble Wasm:** `wasm2wat --enable-threads NNN_kernel.wasm > kernel.wat`
+- **Read WGSL/GLSL:** Files include metadata headers (kernel name, workgroup size, shared mem, bindings, timestamp)
+- **Track test results:** `latest.json` updates after every test. Compare `test-run-*.json` across runs.
+- **The files are on disk.** Do NOT ask TJ to capture output or run tests manually. Read the dump folder.
+
+### Test Results (live via latest.json)
+`UnitTestsView` writes results to the same debug folder via the `ResultsDirectory` parameter. **`latest.json` is overwritten after EVERY test completion** — it contains the full test suite state in real-time: pass/fail/skip/pending counts and per-test details (class, method, result, error, duration, stack trace). A timestamped `test-run-*.json` is written when the full run finishes.
+
+**During test runs, read `latest.json` to see results as they happen.** Don't wait for the run to finish. Parse it with `node -e` to find failures:
+```bash
+node -e "const d=JSON.parse(require('fs').readFileSync('path/to/latest.json','utf8')); console.log('Pass:',d.passed,'Fail:',d.failed,'Skip:',d.skipped,'Pending:',d.pending); d.tests.filter(t=>t.result==='Error').forEach(t=>console.log('FAIL:',t.className+'.'+t.method,'-',(t.error||'?').substring(0,200)));"
+```
+
 ## Engineering Philosophy
 
 - **Correctness is non-negotiable. Performance is a close second.** Kernels dispatch thousands of times/sec.

@@ -28,6 +28,8 @@ namespace SpawnDev.ILGPU.WebGL
     {
         /// <summary>Last GLSL source dispatched to the worker. Captured for diagnostics.</summary>
         public static string? LastGeneratedGLSL { get; private set; }
+        /// <summary>Callback invoked whenever a GLSL shader is compiled.</summary>
+        public static Action<string, string>? OnShaderCompiled { get; set; }
 
         /// <summary>
         /// True if the WebGL context has been lost (driver crash, GPU reset, etc.).
@@ -234,6 +236,7 @@ namespace SpawnDev.ILGPU.WebGL
         protected override WebGLKernel CreateKernel(WebGLCompiledKernel compiledKernel)
         {
             LastGeneratedGLSL = compiledKernel.GLSLSource;
+            try { OnShaderCompiled?.Invoke("glsl_kernel", compiledKernel.GLSLSource); } catch { }
             return new WebGLKernel(this, compiledKernel, null);
         }
 
@@ -241,6 +244,7 @@ namespace SpawnDev.ILGPU.WebGL
         protected override WebGLKernel CreateKernel(WebGLCompiledKernel compiledKernel, MethodInfo launcher)
         {
             LastGeneratedGLSL = compiledKernel.GLSLSource;
+            try { OnShaderCompiled?.Invoke("glsl_kernel", compiledKernel.GLSLSource); } catch { }
             return new WebGLKernel(this, compiledKernel, launcher);
         }
 

@@ -157,6 +157,13 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         public static string? WGSLDumpPath { get; set; }
 
         /// <summary>
+        /// Callback invoked whenever a WGSL shader is compiled.
+        /// Parameters: (kernelName, wgslSource, entry).
+        /// Set by ShaderDebugService to auto-dump shaders to a user-selected folder.
+        /// </summary>
+        public static Action<string, string, WGSLEntry>? OnShaderCompiled { get; set; }
+
+        /// <summary>
         /// When true, runs structural validation on generated WGSL before caching.
         /// Catches codegen bugs early (missing entry point, undeclared shared memory,
         /// undefined emulation functions, workgroup_size inconsistencies).
@@ -937,6 +944,9 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 }
                 catch { /* best-effort dump */ }
             }
+
+            // Fire callback for browser shader debug (ShaderDebugService)
+            try { OnShaderCompiled?.Invoke(methodName, wgslSource, WGSLRegistry[methodName]); } catch { }
 
             if (VerboseLogging)
             {

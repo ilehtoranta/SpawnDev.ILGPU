@@ -827,8 +827,11 @@ namespace SpawnDev.ILGPU.Wasm
                 // Fiber dispatch: use hardwareConcurrency workers, each running
                 // groupSize/workerCount fibers sequentially per phase.
                 // All barrier kernels (including those with helper barriers) use this path.
-                workerCount = Math.Min(groupSize, _workerCount);
-                if (workerCount < 1) workerCount = 1;
+                // Single worker for now — cross-worker Atomics.wait barrier
+                // deadlocks in browser workers. The fiber dispatch is correct
+                // but the inter-worker sync needs investigation.
+                // TODO: Fix cross-worker barrier to use multiple workers.
+                workerCount = 1;
             }
             else
             {
@@ -837,7 +840,17 @@ namespace SpawnDev.ILGPU.Wasm
                 if (workerCount > totalItems) workerCount = Math.Max(1, totalItems);
             }
 
-            if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm] Dispatching to {workerCount} worker(s), {totalItems} items, hasBarriers={hasBarriers}, groupSize={groupSize}, numGroups={numGroups}");
+            if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm] Dispatch: workers={workerCount}, items={totalItems}, barriers={hasBarriers}, gs={groupSize}, ng={numGroups}, phases={phaseCount}");
+
+            // Dump barrier kernel binary for debugging (console capture by PlaywrightMultiTest)
+            if (hasBarriers)
+            {
+                Console.WriteLine($"[Wasm_DUMP_START] dispatch={_dispatchCount} size={wasmBytes.Length} phases={phaseCount} spt={scratchPerThread} shm={sharedMemBase} bar={barrierBase}");
+                var b64 = Convert.ToBase64String(wasmBytes);
+                for (int ci = 0; ci < b64.Length; ci += 1000)
+                    Console.WriteLine($"[Wasm_DUMP] {b64.Substring(ci, Math.Min(1000, b64.Length - ci))}");
+                Console.WriteLine("[Wasm_DUMP_END]");
+            }
 
             // Build the worker script
             string argStr = string.Join(", ", flatArgs);
@@ -1109,31 +1122,42 @@ namespace SpawnDev.ILGPU.Wasm
                 sb.AppendLine();
                 sb.AppendLine("    for (let g = 0; g < numGroups; g++) {");
                 sb.AppendLine("      let phase = 0;");
-                sb.AppendLine("      while (phase < 10000) {");
+                sb.AppendLine("      let _phaseTrace = '';");
+                sb.AppendLine("      while (true) {");
                 sb.AppendLine("        let anyYielded = false;");
+                sb.AppendLine("        let _yieldCount = 0;");
                 sb.AppendLine("        for (let tid = threadStart; tid < threadEnd; tid++) {");
                 sb.AppendLine("          const globalIdx = g * groupSize + tid;");
                 sb.AppendLine($"          const myScratch = {scratchBase} + tid * scratchPerThread;");
-                sb.Append($"          const r = kernel(globalIdx, {gridDimX}, {gridDimY}, myScratch, {groupSize}, tid, {sharedMemBase}, {barrierBase}, {dynamicSharedLength}, phase");
+                sb.AppendLine("          let r;");
+                sb.AppendLine("          try {");
+                sb.Append($"            r = kernel(globalIdx, {gridDimX}, {gridDimY}, myScratch, {groupSize}, tid, {sharedMemBase}, {barrierBase}, {dynamicSharedLength}, phase");
                 if (argStr.Length > 0)
                 {
                     sb.Append(", ");
                     sb.Append(argStr);
                 }
                 sb.AppendLine(");");
-                sb.AppendLine("          if (r === 1) anyYielded = true;");
+                sb.AppendLine("          } catch(e) { self.postMessage({ done: false, error: 'Kernel trap: ' + e.message + ' g=' + g + ' tid=' + tid + ' phase=' + phase + ' spt=' + scratchPerThread + ' trace:' + _phaseTrace }); return; }");
+                sb.AppendLine("          if (r === 1) { anyYielded = true; _yieldCount++; } else if (phase >= 10) { _phaseTrace += 'DONE:t' + tid + ' '; }");
                 sb.AppendLine("        }");
+                sb.AppendLine("        if (phase >= 10) _phaseTrace += 'p' + phase + ':' + _yieldCount + '/' + (threadEnd-threadStart) + ' ';");
                 sb.AppendLine("        if (!anyYielded) break;");
-                sb.AppendLine("        if (phase >= 9999) { self.postMessage({ done: false, error: 'Phase limit exceeded (10000) - kernel never completed. Fiber dispatch bug.' }); return; }");
+                sb.AppendLine("        if (phase >= 50) { self.postMessage({ done: false, error: 'Phase limit 50. trace: ' + _phaseTrace }); return; }");
                 // Cross-worker barrier between phases
-                sb.AppendLine("        const arrived = Atomics.add(_phaseBarrier, 0, 1) + 1;");
-                sb.AppendLine("        if (arrived === workerCount) {");
-                sb.AppendLine("          Atomics.store(_phaseBarrier, 0, 0);");
-                sb.AppendLine("          Atomics.add(_phaseBarrier, 1, 1);");
-                sb.AppendLine("          Atomics.notify(_phaseBarrier, 1);");
-                sb.AppendLine("        } else {");
-                sb.AppendLine("          const gen = Atomics.load(_phaseBarrier, 1);");
-                sb.AppendLine("          Atomics.wait(_phaseBarrier, 1, gen);");
+                // Phase barrier: only needed with multiple workers
+                sb.AppendLine("        if (workerCount > 1) {");
+                sb.AppendLine("          const arrived = Atomics.add(_phaseBarrier, 0, 1) + 1;");
+                sb.AppendLine("          if (arrived === workerCount) {");
+                sb.AppendLine("            Atomics.store(_phaseBarrier, 0, 0);");
+                sb.AppendLine("            Atomics.add(_phaseBarrier, 1, 1);");
+                sb.AppendLine("            Atomics.notify(_phaseBarrier, 1, workerCount);");
+                sb.AppendLine("          } else {");
+                sb.AppendLine("            const gen = Atomics.load(_phaseBarrier, 1);");
+                sb.AppendLine("            while (Atomics.load(_phaseBarrier, 1) === gen) {");
+                sb.AppendLine("              Atomics.wait(_phaseBarrier, 1, gen, 1);");
+                sb.AppendLine("            }");
+                sb.AppendLine("          }");
                 sb.AppendLine("        }");
                 sb.AppendLine("        phase++;");
                 sb.AppendLine("      }");
@@ -1142,10 +1166,12 @@ namespace SpawnDev.ILGPU.Wasm
                 sb.AppendLine("      if (gArrived === workerCount) {");
                 sb.AppendLine("        Atomics.store(_groupBarrier, 0, 0);");
                 sb.AppendLine("        Atomics.add(_groupBarrier, 1, 1);");
-                sb.AppendLine("        Atomics.notify(_groupBarrier, 1);");
+                sb.AppendLine("        Atomics.notify(_groupBarrier, 1, workerCount);");
                 sb.AppendLine("      } else {");
                 sb.AppendLine("        const gGen = Atomics.load(_groupBarrier, 1);");
-                sb.AppendLine("        Atomics.wait(_groupBarrier, 1, gGen);");
+                sb.AppendLine("        while (Atomics.load(_groupBarrier, 1) === gGen) {");
+                sb.AppendLine("          Atomics.wait(_groupBarrier, 1, gGen, 1);");
+                sb.AppendLine("        }");
                 sb.AppendLine("      }");
                 sb.AppendLine("    }");
             }

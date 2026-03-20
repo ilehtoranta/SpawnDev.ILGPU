@@ -95,6 +95,12 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             public Dictionary<Method, int> HelperBarrierCounts { get; } = new();
 
             /// <summary>
+            /// Estimated scratch size per helper (bytes). Used by kernel to offset
+            /// scratch for each helper call so they don't overlap.
+            /// </summary>
+            public Dictionary<Method, int> HelperScratchEstimates { get; } = new();
+
+            /// <summary>
             /// Ordered list of multi-block helper methods, for deterministic
             /// function index assignment and module emission order.
             /// </summary>

@@ -58,6 +58,9 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         /// <summary>Diagnostic: all compiled Wasm binaries (for capturing multi-kernel compilations like RadixSort).</summary>
         public static List<byte[]> AllWasmBinaries = new();
 
+        /// <summary>Callback invoked whenever a Wasm kernel is compiled. Parameters: (kernelName, wasmBinary, info).</summary>
+        public static Action<string, byte[], string>? OnKernelCompiled { get; set; }
+
         /// <summary>
         /// Circular buffer of recent log messages for diagnostics.
         /// Always captures the last N messages regardless of VerboseLogging.
@@ -475,10 +478,9 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                     mathImports);
 
                 // Add helper function type.
-                // Helpers with barriers return i32 (yielded flag) in phase mode.
-                var helperResultTypes = result.BarrierCount > 0
-                    ? new byte[] { WasmOpCodes.I32 }
-                    : result.ResultTypes;
+                // Option E: helpers always return their natural result type.
+                // The yield flag is communicated via scratch[0], not the return value.
+                var helperResultTypes = result.ResultTypes;
                 int helperTypeIdx = moduleBuilder.AddFuncType(result.ParamTypes, helperResultTypes);
 
                 // Add helper function (index must match pre-assigned index)
@@ -497,7 +499,12 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 if (result.SharedMemorySize > maxSharedMemorySize)
                     maxSharedMemorySize = result.SharedMemorySize;
 
-                if (VerboseLogging) Log($"Wasm: Helper '{helperMethod.Name}' generated: funcIdx={helperFuncIdx}, params={result.ParamTypes.Length}, locals={result.Locals.Count}, code={result.Code.Length}b, barriers={result.BarrierCount}, sharedMem={result.SharedMemorySize}");
+                // Helper scratch is already included in ScratchPerThread via the kernel's
+                // _helperScratchCumulativeOffset (extended into _scratchNextOffset).
+                // Just ensure alignment.
+                data.ScratchPerThread = (data.ScratchPerThread + 7) & ~7;
+
+                Log($"[Wasm-Helper] '{helperMethod.Name}' funcIdx={helperFuncIdx}, params={result.ParamTypes.Length}, locals={result.Locals.Count}, code={result.Code.Length}b, barriers={result.BarrierCount}, resultTypes=[{string.Join(",", helperResultTypes.Select(t => $"0x{t:X2}"))}], phaseMode={data.PhaseCount > 1}");
             }
 
             // Update shared memory size to account for helper Broadcast slots
@@ -505,6 +512,8 @@ namespace SpawnDev.ILGPU.Wasm.Backend
 
             // Emit binary
             var wasmBinary = moduleBuilder.Emit();
+
+            // TEMP: removed debug dump
 
             // Dump Wasm binary to file for debugging (desktop only)
             if (WasmDumpPath != null && !OperatingSystem.IsBrowser())
@@ -519,7 +528,8 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             }
 
             // Record compilation info for diagnostics
-            var info = $"Kernel params={paramTypes.Length} (userParams={data.ParamInfos.Count}), locals={kernelGen._locals.Count}, code={kernelGen.Code.Count}b, helpers={data.HelperFunctionOrder.Count}, sharedMem={data.SharedMemorySize}, barriers={data.BarrierCount}, hasBarriers={data.HasBarriers}, dynSharedElemSize={data.DynamicSharedElementSize}";
+            var info = $"Kernel params={paramTypes.Length} (userParams={data.ParamInfos.Count}), locals={kernelGen._locals.Count}, code={kernelGen.Code.Count}b, helpers={data.HelperFunctionOrder.Count}, sharedMem={data.SharedMemorySize}, barriers={data.BarrierCount}, hasBarriers={data.HasBarriers}, dynSharedElemSize={data.DynamicSharedElementSize}, scratchPerThread={data.ScratchPerThread}";
+            if (VerboseLogging) Log($"[Wasm-Final] spt={data.ScratchPerThread} barriers={data.BarrierCount} phases={data.PhaseCount} helpers={data.HelperFunctionOrder.Count}");
             if (VerboseLogging)
             {
                 Log($"--- GENERATED WASM BINARY ({wasmBinary.Length} bytes) ---");
@@ -529,6 +539,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             AllKernelInfos.Add(info);
             LastWasmBinary = wasmBinary;
             AllWasmBinaries.Add(wasmBinary);
+            try { OnKernelCompiled?.Invoke($"kernel_{AllWasmBinaries.Count}", wasmBinary, info); } catch { }
 
             return new WasmCompiledKernel(
                 Context,
