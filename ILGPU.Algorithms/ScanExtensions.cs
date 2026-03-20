@@ -1191,7 +1191,11 @@ namespace ILGPU.Algorithms
                         offsetView,
                         numIterationsPerGroup);
 
-                    // Fence between scan passes
+                    // Fence between scan passes — ensures pass1 output is visible
+                    // to pass2. On Wasm, dispatches are serialized (async, one at a
+                    // time) so the fence is unnecessary and CopyFrom would fail
+                    // (NativePtr is only valid during dispatch).
+                    if (accelerator.AcceleratorType != AcceleratorType.Wasm)
                     {
                         using var resultBuffer = accelerator.Allocate1D<T>(tempView.Length);
                         resultBuffer.View.CopyFrom(stream, tempView);

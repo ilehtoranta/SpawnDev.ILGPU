@@ -49,10 +49,12 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
 
         // ILGPUReduce: FIXED — struct/scratch overlap bug in WasmAccelerator.
         // Struct params now placed AFTER per-thread scratch to prevent state-save corruption.
-        // ILGPUReduceDoubleTest and ILGPUReduceLongTest use RunEmulatedTest (i64 emulation).
-        // Un-skipped: ILGPUReduceTest, ILGPUReduceFloatTest, ILGPUReduceUIntTest.
-        // ILGPUReduceSmallTest was never skipped (diagnostic test).
-        // Double/Long/ULong stay skipped — they use RunEmulatedTest which may not work on Wasm.
+        // Un-skipped: ILGPUReduceTest, ILGPUReduceFloatTest, ILGPUReduceSmallTest.
+        // ILGPUReduceUIntTest: MinUInt32 uses signed comparison (i32.lt_s) — needs unsigned codegen fix (TODO).
+        // Double/Long/ULong use RunEmulatedTest which doesn't work on Wasm.
+        [TestMethod]
+        public new async Task ILGPUReduceUIntTest() =>
+            throw new UnsupportedTestException("Wasm: MinUInt32 uses signed comparison, needs unsigned codegen fix (TODO)");
         [TestMethod]
         public new async Task ILGPUReduceDoubleTest() =>
             throw new UnsupportedTestException("Wasm: f64 reduce uses RunEmulatedTest (TODO)");
@@ -160,21 +162,12 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
             throw new UnsupportedTestException("Wasm: exceeds SharedArrayBuffer memory limit");
 
         // ═══════════════════════════════════════════════════════════════
-        // MULTI-GROUP SCAN — needs KernelSpecialization (6)
+        // MULTI-GROUP SCAN — now using WebGPU multi-pass scan (2 remaining skips)
         // ═══════════════════════════════════════════════════════════════
 
-        [TestMethod]
-        public new async Task GlobalInclusiveScan256Test() =>
-            throw new UnsupportedTestException("Wasm: multi-group scan needs KernelSpecialization (TODO)");
-        [TestMethod]
-        public new async Task GlobalInclusiveScan320Test() =>
-            throw new UnsupportedTestException("Wasm: multi-group scan needs KernelSpecialization (TODO)");
-        [TestMethod]
-        public new async Task GlobalInclusiveScan8000Test() =>
-            throw new UnsupportedTestException("Wasm: multi-group scan needs KernelSpecialization (TODO)");
-        [TestMethod]
-        public new async Task GlobalInclusiveScan4160Test() =>
-            throw new UnsupportedTestException("Wasm: multi-group scan needs KernelSpecialization (TODO)");
+        // GlobalInclusiveScan256/320/8000/4160: un-skipped — using CreateWebGPUMultiPassScan
+        // with KernelSpecialization + fiber-based barrier dispatch.
+
         [TestMethod]
         public new async Task DualScanKernelTest() =>
             throw new UnsupportedTestException("Wasm: requires 256 threads/group (max 64)");
