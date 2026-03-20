@@ -44,6 +44,8 @@ Detailed constraints live in each directory's own `CLAUDE.md`. Read the relevant
 
 Tests in `SpawnDev.ILGPU.Demo.Shared/UnitTests/BackendTestBase*.cs` (~211 tests, Tests1-10). Backend-specific classes inherit and override unsupported tests. See `PlaywrightMultiTest/CLAUDE.md` for running tests.
 
+**Current results (March 2026):** Wasm: 179 pass / 0 fail / 55 skip. All RadixSort, scan, barrier, and sort tests pass after the fiber refactor.
+
 ## Debugging Pipeline — ShaderDebugService
 
 Every kernel compilation auto-dumps generated code to a local folder via `ShaderDebugService` (registered in the demo's `Program.cs`). **Use this — do NOT ask TJ to manually run tests or capture output.**

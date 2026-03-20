@@ -502,9 +502,10 @@ namespace SpawnDev.ILGPU.Wasm
                 }
 
                 // Zero out shared memory and barrier regions to prevent stale data.
-                // Buffer regions are not zeroed — they are overwritten by the copy-in below
-                // or by kernel output. This saves significant time for large output buffers.
-                int zeroStart = sharedMemBase;
+                // Zero scratch + shared + barrier regions to prevent stale data from
+                // previous dispatches affecting the current dispatch (phase state, shared
+                // memory, barrier counters). Buffer regions are overwritten by copy-in.
+                int zeroStart = scratchBase;
                 int zeroEnd = totalWithBarriers;
                 if (zeroEnd > zeroStart)
                 {

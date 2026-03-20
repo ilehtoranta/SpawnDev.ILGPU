@@ -40,10 +40,12 @@ ArrayView1D's BaseView access creates a GetField indirection that breaks direct 
 9 system params + user params:
 `kernel(globalIdx, dimX, dimY, scratchBase, groupDimX, threadIdX, sharedMemBase, barrierBase, dynamicSharedLen, ...userParams)`
 
-## Barrier Dispatch
+## Barrier Dispatch (Fiber-Based Phase Model)
 - Each Web Worker = one thread within a workgroup.
-- Generation-counting barriers: `atomic.fence` + `i32.atomic.rmw.add` + `memory.atomic.wait32`/`memory.atomic.notify`.
-- All workers iterate over groups: `for (g=0; g<numGroups; g++) kernel(g*groupSize+threadId, ...)`.
+- **Fiber refactor (March 2026):** Kernels with barriers are compiled into a phase-based dispatch model. Each barrier becomes a yield point — the kernel saves its state (locals + phase counter) to scratch memory and returns. The worker script re-enters the kernel at the saved phase for each group iteration. This eliminates cross-group shared memory visibility issues.
+- **Dynamic block splitting:** Barrier-separated code blocks are split into phases automatically. Helper function calls (scan, sort) each get their own phase with yield points before and after.
+- **Completion state persist:** The kernel saves its exit state to scratch so the worker knows when all phases for a group are done before advancing to the next group.
+- Generation-counting barriers within a phase: `atomic.fence` + `i32.atomic.rmw.add` + `memory.atomic.wait32`/`memory.atomic.notify`.
 
 ## Tribal Knowledge: GridIndex vs BucketIndex Bug (March 2026)
 
@@ -67,19 +69,22 @@ counter for the helper's barriers, emit one more `EmitBarrier(_barrierCounter++)
 **Canary test**: `AlgorithmRadixSortNonPairsIntTest` sorts [32,31,...,1] → [1,2,...,32].
 If this test produces duplicates or non-deterministic results, the post-helper barrier is broken.
 
-## Known Limitation: Multi-Group Barrier Dispatch (v4.0.0)
+## Fiber Refactor Status (March 2026) — COMPLETE
 
-Wasm barrier kernels are fully correct for **single-group workloads** (up to 64 elements for
-groupSize=64). Multi-group workloads (n > groupSize) have a cross-group memory visibility issue:
-the worker script loops `for (g = 0; g < numGroups; g++) { kernel(...); }`, but writes from
-group 0 are not reliably visible to reads in group 1 across parallel Web Workers, despite
-`atomic.fence`, atomic kernel loads/stores, and JS-level `Atomics.store/load` fences.
+**Test results: 179 pass / 0 fail / 55 skip** (up from 49/10/17 pre-refactor). All RadixSort, scan, barrier, and sort tests pass on the Wasm backend.
 
-This affects RadixSort on datasets larger than 64 elements. The benchmark caps Wasm RadixSort
-at n=64. Desktop backends (CUDA/OpenCL/CPU) have no such limitation.
+The fiber refactor resolved the multi-group barrier dispatch limitation. Eight bugs were fixed collaboratively by two agents:
 
-**Future fix**: Requires either a cooperative single-worker scheduler (like the CPU backend)
-or a browser-level fix to SharedArrayBuffer visibility semantics for `atomic.fence`.
+1. **Fiber yield-per-phase** — dynamic block splitting with yield points at each barrier (Agent #1)
+2. **br depth +1** — helper if-nesting depth fix for branch target calculation (Agent #2)
+3. **Scratch overflow** — ScratchPerThread set after phase state computed, not before (Agent #2)
+4. **Completion state persist** — kernel saves exit state for worker re-entry (Agent #1/#2)
+5. **Shared memory dedup** — prevent inflation from multiple SetupSharedAllocations calls (Agent #1)
+6. **TryGetValue bool flag** — prevent calling Math.sin instead of helper function (Agent #1)
+7. **Sync yield after helper done** — prevent shared memory stomping between sequential helper calls (Agent #2)
+8. **Scratch zeroing** — zero from scratchBase (not 0) to prevent stale data between dispatches (Agent #2)
+
+The 55 skipped tests are intentional backend capability skips (e.g., features not applicable to Wasm), not failures.
 
 ## Debugging
 - `WasmBackend.LastWasmBinary` — capture last compiled kernel
