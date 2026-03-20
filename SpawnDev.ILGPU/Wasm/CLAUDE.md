@@ -30,7 +30,7 @@ Compiles ILGPU IR → WebAssembly binary. Dispatches via Web Workers with Shared
 - **AddressSpaceType views** (ArrayView): field 1 = **Index/Offset** → return 0
 
 This was hardcoded to 0 for ALL views, which broke `view.Length` for ArrayView1D params.
-The fix checks `param.Type is StructureType`. 152 existing tests pass with this change.
+The fix checks `param.Type is StructureType`. Current: 179 pass / 0 fail / 55 skip (v4.6.0).
 
 **TRACE RULE**: Both `GetViewLength` and `GetField` must trace the view source back to
 the kernel Parameter through GetField/NewView/AddressSpaceCast chains (via `TraceToParameter()`).

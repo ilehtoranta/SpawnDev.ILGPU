@@ -71,7 +71,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
 
             /// <summary>
             /// Whether any helper function has internal barriers.
-            /// When true, fiber dispatch is disabled (helpers can't be phase-split yet).
+            /// When true, fiber-based phase dispatch is used for helper calls.
             /// </summary>
             public bool HelpersHaveBarriers { get; set; }
 

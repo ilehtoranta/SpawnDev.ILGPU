@@ -173,7 +173,7 @@ scan(stream, input.View, output.View, tempView);
 
 | Algorithm | WebGPU | WebGL | Wasm |
 |-----------|--------|-------|------|
-| RadixSort | ✅ | ❌ | ❌ (excluded) |
+| RadixSort | ✅ | ❌ | ✅ |
 | Scan | ✅ | ❌ | ✅ |
 | Reduce | ✅ | ❌ | ✅ |
 | Histogram | ✅ | ❌ | ✅ |

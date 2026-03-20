@@ -1091,8 +1091,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             // Phase mode: enable when ANY barriers exist (own or via helpers).
             bool anyHelperHasBarriers = _generatorArgs.HelperBarrierCounts.Values.Any(c => c > 0);
             _phaseMode = totalBarriers > 0 || anyHelperHasBarriers || _generatorArgs.PhaseCount > 1;
-            // TEMP: always log for debugging barrier count mismatch
-            WasmBackend.Log($"[Wasm-Phase] totalBarriers={totalBarriers} (direct={directBarriers} helper={helperBarriers} calls={helperCallCount} sync={_needsSyncYields}), phaseMode={_phaseMode}, blockCount={_blockCount}, expandedBlockCount={expandedBlockCount}");
+            if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm-Phase] totalBarriers={totalBarriers} (direct={directBarriers} helper={helperBarriers} calls={helperCallCount} sync={_needsSyncYields}), phaseMode={_phaseMode}, blockCount={_blockCount}, expandedBlockCount={expandedBlockCount}");
             // Reserve first 4 bytes of scratch for yield flag (Option E).
             // Phase state starts after, 8-byte aligned.
             int reservedForYieldFlag = _phaseMode ? 4 : 0;
@@ -2094,8 +2093,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                     }
                 }
 
-                // TEMP diagnostic: always log helper call info to debug barrier count lookup
-                WasmBackend.Log($"[Wasm-Call] helper='{targetMethod.Name}' funcIdx={helperFuncIdx}, barriers={helperBarrierCount}, phaseMode={_phaseMode}, keys=[{string.Join(",", _generatorArgs.HelperBarrierCounts.Select(kv => $"'{kv.Key.Name}'={kv.Value}"))}]");
+                if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm-Call] helper='{targetMethod.Name}' funcIdx={helperFuncIdx}, barriers={helperBarrierCount}, phaseMode={_phaseMode}");
 
                 // No barrier reset needed — generation-counting barriers require no
                 // per-call reset. The generation counter monotonically increases, so

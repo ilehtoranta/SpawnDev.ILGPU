@@ -7,11 +7,19 @@ Write parallel compute code in C# and let the library pick the best available ba
 
 > **Your existing ILGPU kernels run in the browser with zero changes to the kernel code — and the same code runs on desktop too.**
 
-## What's New in 4.4.0
+## What's New in 4.6.0
 
-Two long-requested features that make ILGPU feel more like idiomatic C#. Both work on all 6 backends. ([ILGPU#463](https://github.com/m4rs-mt/ILGPU/issues/463))
+### Wasm Fiber-Based Barrier Dispatch
 
-### Capturing Lambda Kernels
+Complete rewrite of the Wasm backend's barrier synchronization model. Kernels with barriers now use a **fiber-based phase dispatch** — each barrier becomes a yield point where the kernel saves state, returns to the worker script, and re-enters at the next phase. This replaces the previous atomic-based barrier approach and enables correct execution of all ILGPU algorithms on the Wasm backend.
+
+- **RadixSort on Wasm** — All RadixSort variants now pass on Wasm (int, uint, float, 100K+ elements). Previously excluded.
+- **179 Wasm tests pass, 0 failures** — up from 49 pass / 10 fail. Every scan, barrier, broadcast, and sort test is green.
+- **8 bugs fixed** — br depth miscalculation, scratch overflow, shared memory stomping between sequential helper calls, stale dispatch state, completion state persistence, TryGetValue default value, shared memory inflation, scratch zeroing
+- **ShaderDebugService** — auto-dumps all generated WGSL, GLSL, and Wasm binaries to a local folder on every kernel compilation. Backend-organized subfolders. IDB persistence. Full metadata headers.
+- **Test results writer** — `UnitTestsView` writes `latest.json` (live progress) and timestamped `test-run-*.json` (history) to the debug folder
+
+### Capturing Lambda Kernels (4.4.0)
 
 Write GPU kernels as C# lambdas that capture local variables. Captured scalar values are automatically passed to the GPU at dispatch time — no boilerplate, no separate static methods.
 
@@ -23,44 +31,33 @@ var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<float>>(
 kernel((Index1D)length, buffer.View);
 ```
 
-Captures are read from the closure at each dispatch, matching C# semantics. Supported capture types: `int`, `float`, `long`, `double`, and other scalar value types.
-
-### DelegateSpecialization — Higher-Order GPU Kernels
+### DelegateSpecialization — Higher-Order GPU Kernels (4.4.0)
 
 Write one kernel that accepts different operations as parameters. The delegate is resolved at dispatch time and its body is inlined directly into the kernel via compile-time specialization — no function pointers, no overhead.
 
 ```csharp
-// One kernel, many operations
 static void MapKernel(Index1D index, ArrayView<int> buf,
     DelegateSpecialization<Func<int, int>> transform)
 {
     buf[index] = transform.Value(buf[index]);
 }
 
-// Define operations as static methods
 static int Negate(int x) => -x;
 static int DoubleIt(int x) => x * 2;
-static int Square(int x) => x * x;
 
-// Load once, dispatch with different operations
 var kernel = accelerator.LoadAutoGroupedStreamKernel<
     Index1D, ArrayView<int>, DelegateSpecialization<Func<int, int>>>(MapKernel);
 
 kernel(size, buffer, new DelegateSpecialization<Func<int, int>>(Negate));
 kernel(size, buffer, new DelegateSpecialization<Func<int, int>>(DoubleIt));
-kernel(size, buffer, new DelegateSpecialization<Func<int, int>>(Square));
 ```
 
-Each unique target method produces a specialized kernel compilation, cached automatically. The delegate never reaches the GPU — it's fully resolved and inlined at compile time.
+### Previous Highlights (4.0.0)
 
-## What's New in 4.0.0
-
-- **Wasm RadixSort** — ILGPU's RadixSort algorithm now works on the Wasm backend with full multi-worker parallelism. Fixed 7 codegen and dispatch bugs including struct-with-view serialization, view field mapping, local alloca addressing, and barrier synchronization
-- **Wasm barrier kernel improvements** — Per-thread scratch memory prevents cross-worker data races. Post-helper barriers ensure correct scan/reduce synchronization across parallel workers. Atomic loads/stores for cross-worker memory visibility
-- **WebGPU backend refactor** — Extracted `SharedMemoryResolver` and `UniformityAnalyzer` subsystems. Per-function emulation library trimming. Dead variable elimination. i64 constant hoisting. Pre-compiled regex patterns. WGSL pre-validation
-- **WebGPU RadixSort** — All RadixSort variants passing (including 4M+ element sorts, pairs, descending). Fixed shared memory sizing, scan barriers, range checks, and alignment padding
-- **Device loss detection** — WebGPU monitors `device.lost` promise; WebGL monitors `webglcontextlost` event. `IsDeviceLost`/`IsContextLost` properties and events enable fail-fast error handling
-- **Unified test infrastructure** — `PlaywrightMultiTest` runs all 1500+ tests (desktop + browser) in a single `dotnet test` invocation. 153 Wasm tests, 0 failures
+- **WebGPU backend refactor** — `SharedMemoryResolver`, `UniformityAnalyzer`, per-function emulation trimming, dead variable elimination, i64 constant hoisting, WGSL pre-validation
+- **WebGPU RadixSort** — All variants passing (4M+ elements, pairs, descending)
+- **Device loss detection** — WebGPU `device.lost` promise, WebGL `webglcontextlost` event
+- **Unified test infrastructure** — `PlaywrightMultiTest` runs all tests (desktop + browser) in a single `dotnet test` invocation
 
 ## Architecture
 
@@ -379,7 +376,7 @@ dotnet run --project SpawnDev.ILGPU.Demo
 | **Shared Memory** | Static and dynamic workgroup memory with `Group.Barrier()` | ✅ |
 | **Broadcast & Subgroups** | `Group.Broadcast`, `Warp.Shuffle` (WebGPU with subgroups extension) | ✅ |
 | **Dynamic Shared Memory** | Runtime-sized workgroup memory via `SharedMemory.GetDynamic()` | ✅ |
-| **ILGPU Algorithms** | RadixSort (pairs, non-pow2, descending, large), Scan, Reduce, Histogram | ✅ WebGPU, Wasm (RadixSort excluded on Wasm) |
+| **ILGPU Algorithms** | RadixSort (pairs, non-pow2, descending, large), Scan, Reduce, Histogram | ✅ All backends including Wasm |
 | **Special Values** | NaN, Infinity detection | ✅ |
 | **Backend Selection** | Auto-discovery, priority, cross-backend kernel execution | ✅ |
 | **GpuMatrix4x4** | Identity, translation, LookAt transforms across all backends | ✅ |

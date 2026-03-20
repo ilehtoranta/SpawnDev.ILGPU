@@ -843,14 +843,14 @@ namespace SpawnDev.ILGPU.Wasm
 
             if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm] Dispatch: workers={workerCount}, items={totalItems}, barriers={hasBarriers}, gs={groupSize}, ng={numGroups}, phases={phaseCount}");
 
-            // Dump barrier kernel binary for debugging (console capture by PlaywrightMultiTest)
-            if (hasBarriers)
+            // Dump barrier kernel binary for debugging (only when verbose)
+            if (hasBarriers && WasmBackend.VerboseLogging)
             {
-                Console.WriteLine($"[Wasm_DUMP_START] dispatch={_dispatchCount} size={wasmBytes.Length} phases={phaseCount} spt={scratchPerThread} shm={sharedMemBase} bar={barrierBase}");
+                WasmBackend.Log($"[Wasm_DUMP_START] dispatch={_dispatchCount} size={wasmBytes.Length} phases={phaseCount} spt={scratchPerThread} shm={sharedMemBase} bar={barrierBase}");
                 var b64 = Convert.ToBase64String(wasmBytes);
                 for (int ci = 0; ci < b64.Length; ci += 1000)
-                    Console.WriteLine($"[Wasm_DUMP] {b64.Substring(ci, Math.Min(1000, b64.Length - ci))}");
-                Console.WriteLine("[Wasm_DUMP_END]");
+                    WasmBackend.Log($"[Wasm_DUMP] {b64.Substring(ci, Math.Min(1000, b64.Length - ci))}");
+                WasmBackend.Log("[Wasm_DUMP_END]");
             }
 
             // Build the worker script
