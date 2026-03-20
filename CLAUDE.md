@@ -44,7 +44,7 @@ Detailed constraints live in each directory's own `CLAUDE.md`. Read the relevant
 
 Tests in `SpawnDev.ILGPU.Demo.Shared/UnitTests/BackendTestBase*.cs` (~211 tests, Tests1-10). Backend-specific classes inherit and override unsupported tests. See `PlaywrightMultiTest/CLAUDE.md` for running tests.
 
-**Current results (March 2026):** Wasm: 192 pass / 0 fail / 42 skip. Struct/scratch overlap fix enabled ILGPUReduce (int, float, double, long). Multi-pass scan routing enabled GlobalInclusiveScan (256/320/8000/4160). Float16 capability enabled 2 Half tests. Remaining 42 skips: 3 hardware-impossible + 39 fixable TODO.
+**Current results (March 2026):** Wasm: 206 pass / 0 fail / 28 skip (+24 this session). Key fixes: struct/scratch overlap, multi-pass scan, Float16 f16↔f32 conversion, unsigned atomic min/max, 256 threads/group, memory.grow(), struct Load snapshot, i64→i32 coercion. Remaining 28 skips: 3 hardware-impossible + 14 pairs sort + 11 other (OOM/multi-group/CopyFrom).
 
 ## Debugging Pipeline — ShaderDebugService
 

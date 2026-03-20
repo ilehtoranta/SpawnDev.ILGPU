@@ -881,14 +881,19 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             var right = value.Right.Resolve();
             var leftType = GetWasmTypeFromIR(left.Type);
             var rightType = GetWasmTypeFromIR(right.Type);
-            // Use the wider type for comparison opcode selection
-            var srcType = (leftType == WasmOpCodes.I64 || rightType == WasmOpCodes.I64) ? WasmOpCodes.I64 : leftType;
 
-            // Check ACTUAL local types for coercion (struct decomposition may store i64 in i32 locals)
+            // Check ACTUAL local types — IR types and local types can diverge
+            // (e.g., view.Length is i64 in IR but the local might be i32 or i64)
             var leftLocalIdx = GetLocal(left);
             var rightLocalIdx = GetLocal(right);
             var leftActualType = GetLocalType(leftLocalIdx);
             var rightActualType = GetLocalType(rightLocalIdx);
+
+            // Use the wider type from BOTH IR types and actual local types
+            var srcType = (leftType == WasmOpCodes.I64 || rightType == WasmOpCodes.I64
+                || leftActualType == WasmOpCodes.I64 || rightActualType == WasmOpCodes.I64)
+                ? WasmOpCodes.I64
+                : leftType;
 
             bool isUnsigned = value.IsUnsignedOrUnordered;
             byte extendOp = isUnsigned ? WasmOpCodes.I64ExtendI32U : WasmOpCodes.I64ExtendI32S;
@@ -896,9 +901,14 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             EmitGetLocalByIndex(leftLocalIdx);
             if (srcType == WasmOpCodes.I64 && leftActualType == WasmOpCodes.I32)
                 Code.Add(extendOp);
+            // Wrap i64 → i32 if we decided to use i32 comparison but actual is i64
+            if (srcType == WasmOpCodes.I32 && leftActualType == WasmOpCodes.I64)
+                Code.Add(WasmOpCodes.I32WrapI64);
             EmitGetLocalByIndex(rightLocalIdx);
             if (srcType == WasmOpCodes.I64 && rightActualType == WasmOpCodes.I32)
                 Code.Add(extendOp);
+            if (srcType == WasmOpCodes.I32 && rightActualType == WasmOpCodes.I64)
+                Code.Add(WasmOpCodes.I32WrapI64);
             byte opcode = (srcType, value.Kind, isUnsigned) switch
             {
                 (WasmOpCodes.I32, CompareKind.Equal, _) => WasmOpCodes.I32Eq,

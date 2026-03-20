@@ -85,9 +85,9 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         private int _scratchNextOffset = 0;
 
         /// <summary>
-        /// Tracks scratch offsets for struct Load copies. Each unique struct Load IR
-        /// value gets its own scratch slot (keyed by value ID). Slots are reused across
-        /// loop iterations since SSA values don't outlive their scope.
+        /// Tracks scratch offsets for struct Load copies. Each unique Load IR node
+        /// gets its own scratch slot for snapshot semantics (SSA-keyed). The offset
+        /// is safe because it's allocated AFTER phase state + helper scratch.
         /// </summary>
         private readonly Dictionary<string, int> _structLoadSlots = new();
 
@@ -1427,26 +1427,24 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         public override void GenerateCode(Load value)
         {
             // For struct types, copy the struct data from the source address to a
-            // scratch slot. This creates a snapshot — the loaded value is independent
-            // of later writes to the original memory (critical for in-place RadixSort
-            // pre-sort where view[pos] = value overwrites the source array while other
-            // threads still reference their loaded values).
-            // Uses a single reusable scratch region sized to the largest struct loaded,
-            // with per-Load offsets to allow multiple live struct values.
+            // scratch slot. This creates a snapshot — the copy is independent of
+            // later writes to the source memory (critical for in-place RadixSort
+            // pre-sort where view[pos] = value overwrites the source array).
+            // The scratch offset is safe because GenerateStateMachineCode already
+            // set _scratchNextOffset past phase state + helper scratch before IR visiting.
             if (value.Type is StructureType structType)
             {
                 int structSize = structType.Size;
-                int alignedSize = (structSize + 3) & ~3;
+                int alignedSize = (structSize + 7) & ~7;
 
-                // Track struct copy slots: each Load gets its own slot within scratch
-                // to allow multiple live struct values (e.g., both key and value reads).
-                // Use a monotonic counter — slots are reused across loop iterations
-                // since SSA values don't outlive their definition scope.
-                if (!_structLoadSlots.TryGetValue(GetValueKey(value), out int scratchOffset))
+                // Each unique Load IR node gets its own scratch slot (SSA-keyed).
+                // In loops, the same node reuses the same slot each iteration.
+                string valueKey = GetValueKey(value);
+                if (!_structLoadSlots.TryGetValue(valueKey, out int scratchOffset))
                 {
                     scratchOffset = _scratchNextOffset;
                     _scratchNextOffset += alignedSize;
-                    _structLoadSlots[GetValueKey(value)] = scratchOffset;
+                    _structLoadSlots[valueKey] = scratchOffset;
                 }
 
                 var target = AllocateLocal(value, WasmOpCodes.I32);
@@ -1464,21 +1462,16 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                     uint align;
                     switch (fieldWasmType)
                     {
-                        case WasmOpCodes.I64:
-                            loadOp = WasmOpCodes.I64Load; storeOp = WasmOpCodes.I64Store; align = 3; break;
-                        case WasmOpCodes.F32:
-                            loadOp = WasmOpCodes.F32Load; storeOp = WasmOpCodes.F32Store; align = 2; break;
-                        case WasmOpCodes.F64:
-                            loadOp = WasmOpCodes.F64Load; storeOp = WasmOpCodes.F64Store; align = 3; break;
-                        default:
-                            loadOp = WasmOpCodes.I32Load; storeOp = WasmOpCodes.I32Store; align = 2; break;
+                        case WasmOpCodes.I64: loadOp = WasmOpCodes.I64Load; storeOp = WasmOpCodes.I64Store; align = 3; break;
+                        case WasmOpCodes.F32: loadOp = WasmOpCodes.F32Load; storeOp = WasmOpCodes.F32Store; align = 2; break;
+                        case WasmOpCodes.F64: loadOp = WasmOpCodes.F64Load; storeOp = WasmOpCodes.F64Store; align = 3; break;
+                        default: loadOp = WasmOpCodes.I32Load; storeOp = WasmOpCodes.I32Store; align = 2; break;
                     }
 
                     // dst = scratchBase + scratchOffset + byteOffset
                     WasmModuleBuilder.EmitLocalGet(Code, _scratchBaseLocal);
                     WasmModuleBuilder.EmitI32Const(Code, scratchOffset + byteOffset);
                     Code.Add(WasmOpCodes.I32Add);
-
                     // src = source + byteOffset
                     EmitGetLocal(source);
                     if (byteOffset > 0)
@@ -1490,7 +1483,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                     WasmModuleBuilder.EmitStore(Code, storeOp, align, 0);
                 }
 
-                // Return scratch address as the struct's location
+                // Return scratch address as the struct's snapshot location
                 WasmModuleBuilder.EmitLocalGet(Code, _scratchBaseLocal);
                 WasmModuleBuilder.EmitI32Const(Code, scratchOffset);
                 Code.Add(WasmOpCodes.I32Add);
@@ -1502,11 +1495,20 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             var source2 = value.Source.Resolve();
             var wasmType = GetWasmType(value);
 
+            // Check if this is a Float16 load (2-byte element, promoted to f32)
+            bool isFloat16 = value.Type is PrimitiveType pt2 && pt2.BasicValueType == BasicValueType.Float16;
+
             // Push the address (byte offset in linear memory)
             EmitGetLocal(source2);
 
+            if (isFloat16)
+            {
+                // Float16: load 2 bytes as u16, convert to f32 via IEEE 754 bit manipulation
+                WasmModuleBuilder.EmitLoad(Code, WasmOpCodes.I32Load16U, 1, 0);
+                EmitF16ToF32(); // inline conversion: i32 (f16 bits) → f32
+            }
             // For barrier kernels, use atomic loads for cross-worker visibility
-            if (_hasBarriers && (wasmType == WasmOpCodes.I32 || wasmType == WasmOpCodes.I64))
+            else if (_hasBarriers && (wasmType == WasmOpCodes.I32 || wasmType == WasmOpCodes.I64))
             {
                 byte atomicLoadOp = wasmType == WasmOpCodes.I64
                     ? WasmOpCodes.I64AtomicLoad : WasmOpCodes.I32AtomicLoad;
@@ -1760,7 +1762,6 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             }
 
             // Handle struct field access from memory
-            // Source is a memory address (i32), and we need to load the specific field
             if (source.Type is StructureType structType)
             {
                 var fieldAccess = new FieldAccess(fieldIndex);
@@ -1920,7 +1921,9 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                         Code.Add(WasmOpCodes.I32Add);
                     }
 
-                    // Load field value from source address + offset (atomic for barrier kernels)
+                    // Load field value from source address + offset.
+                    // If the source was loaded via struct Load snapshot, it points to
+                    // scratch (safe copy), not the original array (which may be overwritten).
                     EmitGetLocal(storeValue);
                     if (byteOffset > 0)
                     {
@@ -1947,21 +1950,57 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 return;
             }
 
+            // Check if this is a Float16 store (f32 value → 2-byte memory)
+            bool isFloat16Store = false;
+            if (target.Type is AddressSpaceType addrTypeF16
+                && addrTypeF16.ElementType is PrimitiveType ptF16
+                && ptF16.BasicValueType == BasicValueType.Float16)
+            {
+                isFloat16Store = true;
+            }
+
+            if (isFloat16Store)
+            {
+                // Float16: convert f32 → f16 bits, store 2 bytes
+                EmitGetLocal(target);
+                EmitGetLocal(storeValue);
+                EmitF32ToF16(); // inline conversion: f32 → i32 (f16 bits)
+                WasmModuleBuilder.EmitStore(Code, WasmOpCodes.I32Store16, 1, 0);
+                return;
+            }
+
             // Non-struct types: typed store.
-            // For barrier kernels (multi-worker dispatch), use ATOMIC stores to ensure
-            // cross-worker visibility on SharedArrayBuffer. Non-atomic i32.store writes
-            // are not guaranteed to be visible to other workers after atomic.fence.
+            // Determine the actual types from the locals to handle width mismatches
+            // (e.g., i64 value stored to i32 location via view.IntLength → debug[0]).
             var wasmType = GetWasmTypeFromIR(storeValue.Type);
+            byte destType = wasmType;
+            // Check target pointer's element type
+            if (target.Type is AddressSpaceType addrType)
+            {
+                byte elemType = GetWasmTypeFromIR(addrType.ElementType);
+                if (elemType != wasmType && elemType != 0)
+                    destType = elemType;
+            }
+            // Also check the actual local type (more reliable than IR type)
+            var storeLocalIdx = GetLocal(storeValue);
+            byte actualType = GetLocalType(storeLocalIdx);
 
             EmitGetLocal(target);
-            EmitGetLocal(storeValue);
+            EmitGetLocalByIndex(storeLocalIdx);
 
-            if (_hasBarriers && (wasmType == WasmOpCodes.I32 || wasmType == WasmOpCodes.I64))
+            // Truncate i64 → i32 if storing to i32 memory
+            if (actualType == WasmOpCodes.I64 && destType == WasmOpCodes.I32)
+                Code.Add(WasmOpCodes.I32WrapI64);
+            // Extend i32 → i64 if storing to i64 memory
+            else if (actualType == WasmOpCodes.I32 && destType == WasmOpCodes.I64)
+                Code.Add(WasmOpCodes.I64ExtendI32S);
+
+            if (_hasBarriers && (destType == WasmOpCodes.I32 || destType == WasmOpCodes.I64))
             {
                 // Atomic store for integer types in barrier kernels
-                byte atomicStoreOp = wasmType == WasmOpCodes.I64
+                byte atomicStoreOp = destType == WasmOpCodes.I64
                     ? WasmOpCodes.I64AtomicStore : WasmOpCodes.I32AtomicStore;
-                uint atomicAlign = wasmType == WasmOpCodes.I64 ? 3u : 2u;
+                uint atomicAlign = destType == WasmOpCodes.I64 ? 3u : 2u;
                 WasmModuleBuilder.EmitAtomicRmw(Code, atomicStoreOp, atomicAlign, 0);
             }
             else
@@ -1969,7 +2008,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 // Non-barrier kernels or float types: regular store
                 byte sOp;
                 uint sAlign;
-                switch (wasmType)
+                switch (destType)
                 {
                     case WasmOpCodes.I64:
                         sOp = WasmOpCodes.I64Store;
@@ -3328,6 +3367,200 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                     return addr.ElementType;
             }
             return null;
+        }
+
+        #endregion
+
+        #region Float16 Conversion
+
+        /// <summary>
+        /// Emits inline Wasm code to convert f16 bits (i32 on stack) to f32.
+        /// IEEE 754 half-precision: sign(1) | exponent(5) | mantissa(10)
+        /// IEEE 754 single-precision: sign(1) | exponent(8) | mantissa(23)
+        /// </summary>
+        private void EmitF16ToF32()
+        {
+            // Stack has: i32 (f16 bits, 16-bit value)
+            // We need to produce: f32
+            //
+            // Algorithm:
+            //   sign = (h >> 15) & 1
+            //   exp = (h >> 10) & 0x1F
+            //   mant = h & 0x3FF
+            //   if exp == 0 && mant == 0: return sign << 31 (±0)
+            //   if exp == 0: denormal → normalize
+            //   if exp == 31: inf/nan → exp = 255
+            //   else: exp = exp + 112 (rebias: -15 + 127)
+            //   result = (sign << 31) | (exp << 23) | (mant << 13)
+            //
+            // Simplified: handle ±0 and normal cases (skip denormals/inf/nan for now)
+            var h = AllocateNewLocal(WasmOpCodes.I32);
+            var sign = AllocateNewLocal(WasmOpCodes.I32);
+            var exp = AllocateNewLocal(WasmOpCodes.I32);
+            var mant = AllocateNewLocal(WasmOpCodes.I32);
+            var result = AllocateNewLocal(WasmOpCodes.I32);
+
+            WasmModuleBuilder.EmitLocalSet(Code, h);
+
+            // sign = (h >> 15) & 1
+            WasmModuleBuilder.EmitLocalGet(Code, h);
+            WasmModuleBuilder.EmitI32Const(Code, 15);
+            Code.Add(WasmOpCodes.I32ShrU);
+            WasmModuleBuilder.EmitI32Const(Code, 1);
+            Code.Add(WasmOpCodes.I32And);
+            WasmModuleBuilder.EmitLocalSet(Code, sign);
+
+            // exp = (h >> 10) & 0x1F
+            WasmModuleBuilder.EmitLocalGet(Code, h);
+            WasmModuleBuilder.EmitI32Const(Code, 10);
+            Code.Add(WasmOpCodes.I32ShrU);
+            WasmModuleBuilder.EmitI32Const(Code, 0x1F);
+            Code.Add(WasmOpCodes.I32And);
+            WasmModuleBuilder.EmitLocalSet(Code, exp);
+
+            // mant = h & 0x3FF
+            WasmModuleBuilder.EmitLocalGet(Code, h);
+            WasmModuleBuilder.EmitI32Const(Code, 0x3FF);
+            Code.Add(WasmOpCodes.I32And);
+            WasmModuleBuilder.EmitLocalSet(Code, mant);
+
+            // if exp == 0 && mant == 0: result = sign << 31 (±0)
+            // if exp == 0 && mant != 0: denormal (approximate as 0 for simplicity)
+            // if exp == 31: inf/nan → result = (sign<<31) | (0xFF<<23) | (mant<<13)
+            // else: result = (sign<<31) | ((exp+112)<<23) | (mant<<13)
+
+            // Start with normal case: (sign<<31) | ((exp+112)<<23) | (mant<<13)
+            WasmModuleBuilder.EmitLocalGet(Code, sign);
+            WasmModuleBuilder.EmitI32Const(Code, 31);
+            Code.Add(WasmOpCodes.I32Shl);
+
+            WasmModuleBuilder.EmitLocalGet(Code, exp);
+            WasmModuleBuilder.EmitI32Const(Code, 112);
+            Code.Add(WasmOpCodes.I32Add);
+            WasmModuleBuilder.EmitI32Const(Code, 23);
+            Code.Add(WasmOpCodes.I32Shl);
+            Code.Add(WasmOpCodes.I32Or);
+
+            WasmModuleBuilder.EmitLocalGet(Code, mant);
+            WasmModuleBuilder.EmitI32Const(Code, 13);
+            Code.Add(WasmOpCodes.I32Shl);
+            Code.Add(WasmOpCodes.I32Or);
+            WasmModuleBuilder.EmitLocalSet(Code, result);
+
+            // Handle exp==0 (zero/denormal): result = sign << 31
+            WasmModuleBuilder.EmitLocalGet(Code, exp);
+            Code.Add(WasmOpCodes.I32Eqz);
+            Code.Add(WasmOpCodes.If);
+            Code.Add(WasmOpCodes.Void);
+            WasmModuleBuilder.EmitLocalGet(Code, sign);
+            WasmModuleBuilder.EmitI32Const(Code, 31);
+            Code.Add(WasmOpCodes.I32Shl);
+            WasmModuleBuilder.EmitLocalSet(Code, result);
+            Code.Add(WasmOpCodes.End);
+
+            // Handle exp==31 (inf/nan): result = (sign<<31) | (0xFF<<23) | (mant<<13)
+            WasmModuleBuilder.EmitLocalGet(Code, exp);
+            WasmModuleBuilder.EmitI32Const(Code, 31);
+            Code.Add(WasmOpCodes.I32Eq);
+            Code.Add(WasmOpCodes.If);
+            Code.Add(WasmOpCodes.Void);
+            WasmModuleBuilder.EmitLocalGet(Code, sign);
+            WasmModuleBuilder.EmitI32Const(Code, 31);
+            Code.Add(WasmOpCodes.I32Shl);
+            WasmModuleBuilder.EmitI32Const(Code, 0xFF << 23);
+            Code.Add(WasmOpCodes.I32Or);
+            WasmModuleBuilder.EmitLocalGet(Code, mant);
+            WasmModuleBuilder.EmitI32Const(Code, 13);
+            Code.Add(WasmOpCodes.I32Shl);
+            Code.Add(WasmOpCodes.I32Or);
+            WasmModuleBuilder.EmitLocalSet(Code, result);
+            Code.Add(WasmOpCodes.End);
+
+            // f32.reinterpret_i32
+            WasmModuleBuilder.EmitLocalGet(Code, result);
+            Code.Add(WasmOpCodes.F32ReinterpretI32);
+        }
+
+        /// <summary>
+        /// Emits inline Wasm code to convert f32 (on stack) to f16 bits (i32).
+        /// Truncates mantissa and rebiases exponent.
+        /// </summary>
+        private void EmitF32ToF16()
+        {
+            // Stack has: f32
+            // We need to produce: i32 (f16 bits, 16-bit value)
+            var bits = AllocateNewLocal(WasmOpCodes.I32);
+            var sign = AllocateNewLocal(WasmOpCodes.I32);
+            var exp = AllocateNewLocal(WasmOpCodes.I32);
+            var mant = AllocateNewLocal(WasmOpCodes.I32);
+
+            // Reinterpret f32 to i32
+            Code.Add(WasmOpCodes.I32ReinterpretF32);
+            WasmModuleBuilder.EmitLocalSet(Code, bits);
+
+            // sign = (bits >> 31) & 1
+            WasmModuleBuilder.EmitLocalGet(Code, bits);
+            WasmModuleBuilder.EmitI32Const(Code, 31);
+            Code.Add(WasmOpCodes.I32ShrU);
+            WasmModuleBuilder.EmitLocalSet(Code, sign);
+
+            // exp = (bits >> 23) & 0xFF
+            WasmModuleBuilder.EmitLocalGet(Code, bits);
+            WasmModuleBuilder.EmitI32Const(Code, 23);
+            Code.Add(WasmOpCodes.I32ShrU);
+            WasmModuleBuilder.EmitI32Const(Code, 0xFF);
+            Code.Add(WasmOpCodes.I32And);
+            WasmModuleBuilder.EmitLocalSet(Code, exp);
+
+            // mant = (bits >> 13) & 0x3FF
+            WasmModuleBuilder.EmitLocalGet(Code, bits);
+            WasmModuleBuilder.EmitI32Const(Code, 13);
+            Code.Add(WasmOpCodes.I32ShrU);
+            WasmModuleBuilder.EmitI32Const(Code, 0x3FF);
+            Code.Add(WasmOpCodes.I32And);
+            WasmModuleBuilder.EmitLocalSet(Code, mant);
+
+            // Rebias exponent: f16_exp = f32_exp - 112
+            // Clamp: if f32_exp <= 112 → f16_exp = 0 (underflow to zero)
+            //         if f32_exp >= 143 → f16_exp = 31 (overflow to inf)
+            //         if f32_exp == 255 → f16_exp = 31 (inf/nan)
+            WasmModuleBuilder.EmitLocalGet(Code, exp);
+            WasmModuleBuilder.EmitI32Const(Code, 112);
+            Code.Add(WasmOpCodes.I32Sub);
+            WasmModuleBuilder.EmitLocalSet(Code, exp);
+
+            // Clamp underflow
+            WasmModuleBuilder.EmitLocalGet(Code, exp);
+            WasmModuleBuilder.EmitI32Const(Code, 0);
+            Code.Add(WasmOpCodes.I32LtS);
+            Code.Add(WasmOpCodes.If);
+            Code.Add(WasmOpCodes.Void);
+            WasmModuleBuilder.EmitI32Const(Code, 0);
+            WasmModuleBuilder.EmitLocalSet(Code, exp);
+            WasmModuleBuilder.EmitI32Const(Code, 0);
+            WasmModuleBuilder.EmitLocalSet(Code, mant);
+            Code.Add(WasmOpCodes.End);
+
+            // Clamp overflow
+            WasmModuleBuilder.EmitLocalGet(Code, exp);
+            WasmModuleBuilder.EmitI32Const(Code, 31);
+            Code.Add(WasmOpCodes.I32GtS);
+            Code.Add(WasmOpCodes.If);
+            Code.Add(WasmOpCodes.Void);
+            WasmModuleBuilder.EmitI32Const(Code, 31);
+            WasmModuleBuilder.EmitLocalSet(Code, exp);
+            Code.Add(WasmOpCodes.End);
+
+            // Assemble: (sign << 15) | (exp << 10) | mant
+            WasmModuleBuilder.EmitLocalGet(Code, sign);
+            WasmModuleBuilder.EmitI32Const(Code, 15);
+            Code.Add(WasmOpCodes.I32Shl);
+            WasmModuleBuilder.EmitLocalGet(Code, exp);
+            WasmModuleBuilder.EmitI32Const(Code, 10);
+            Code.Add(WasmOpCodes.I32Shl);
+            Code.Add(WasmOpCodes.I32Or);
+            WasmModuleBuilder.EmitLocalGet(Code, mant);
+            Code.Add(WasmOpCodes.I32Or);
         }
 
         #endregion

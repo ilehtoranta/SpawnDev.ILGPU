@@ -491,27 +491,63 @@ namespace SpawnDev.ILGPU.Wasm
                 }
                 else if (!hasConcurrentWork)
                 {
-                    // No concurrent work, but need bigger memory — update cache
-                    _cachedMemoryBuffer?.Dispose();
-                    _cachedWasmMemory?.Dispose();
-                    _cachedWasmPages = wasmPages;
-                    _cachedWasmMemory = js.Call<JSObject>(
-                        "eval",
-                        $"new WebAssembly.Memory({{ initial: {wasmPages}, maximum: 2048, shared: true }})");
-                    _cachedMemoryBuffer = _cachedWasmMemory.JSRef!.Get<SharedArrayBuffer>("buffer");
-                    _initializedWorkers.Clear();
+                    // No concurrent work, but need bigger (or first) memory.
+                    // GROW existing memory instead of creating new — avoids browser
+                    // SharedArrayBuffer allocation limits that cause OOM when many
+                    // Wasm modules are compiled (e.g., RadixSort pairs pipeline).
+                    if (_cachedWasmMemory == null)
+                    {
+                        _cachedWasmPages = wasmPages;
+                        _cachedWasmMemory = js.Call<JSObject>(
+                            "eval",
+                            $"new WebAssembly.Memory({{ initial: {wasmPages}, maximum: 2048, shared: true }})");
+                        _cachedMemoryBuffer = _cachedWasmMemory.JSRef!.Get<SharedArrayBuffer>("buffer");
+                        _initializedWorkers.Clear();
+                    }
+                    else
+                    {
+                        // Grow in place — SharedArrayBuffer stays valid, workers see growth
+                        int growBy = wasmPages - _cachedWasmPages;
+                        if (growBy > 0)
+                        {
+                            _cachedWasmMemory.JSRef!.Call<int>("grow", growBy);
+                            _cachedWasmPages = wasmPages;
+                            // Re-get buffer reference (same SAB but .buffer accessor may update)
+                            _cachedMemoryBuffer?.Dispose();
+                            _cachedMemoryBuffer = _cachedWasmMemory.JSRef!.Get<SharedArrayBuffer>("buffer");
+                            _initializedWorkers.Clear();
+                        }
+                    }
                     wasmMemory = _cachedWasmMemory;
-                    memoryBuffer = _cachedMemoryBuffer;
+                    memoryBuffer = _cachedMemoryBuffer!;
                 }
                 else
                 {
-                    // Concurrent dispatches — create isolated per-dispatch memory
-                    disposeWasmMemory = js.Call<JSObject>(
-                        "eval",
-                        $"new WebAssembly.Memory({{ initial: {wasmPages}, maximum: 2048, shared: true }})");
-                    disposeBuffer = disposeWasmMemory.JSRef!.Get<SharedArrayBuffer>("buffer");
-                    wasmMemory = disposeWasmMemory;
-                    memoryBuffer = disposeBuffer;
+                    // "Concurrent" dispatches — on Blazor WASM (single-threaded), these
+                    // are actually serialized via _pendingWork. They appear concurrent because
+                    // _activeDispatchCount is incremented before the async task starts.
+                    // Reuse cached memory instead of creating new — avoids OOM from
+                    // repeated SharedArrayBuffer allocation (the root cause of pairs sort OOM).
+                    if (_cachedWasmMemory == null)
+                    {
+                        _cachedWasmPages = wasmPages;
+                        _cachedWasmMemory = js.Call<JSObject>(
+                            "eval",
+                            $"new WebAssembly.Memory({{ initial: {wasmPages}, maximum: 2048, shared: true }})");
+                        _cachedMemoryBuffer = _cachedWasmMemory.JSRef!.Get<SharedArrayBuffer>("buffer");
+                        _initializedWorkers.Clear();
+                    }
+                    else if (wasmPages > _cachedWasmPages)
+                    {
+                        int growBy = wasmPages - _cachedWasmPages;
+                        _cachedWasmMemory.JSRef!.Call<int>("grow", growBy);
+                        _cachedWasmPages = wasmPages;
+                        _cachedMemoryBuffer?.Dispose();
+                        _cachedMemoryBuffer = _cachedWasmMemory.JSRef!.Get<SharedArrayBuffer>("buffer");
+                        _initializedWorkers.Clear();
+                    }
+                    wasmMemory = _cachedWasmMemory;
+                    memoryBuffer = _cachedMemoryBuffer!;
                 }
 
                 // Zero out shared memory and barrier regions to prevent stale data.

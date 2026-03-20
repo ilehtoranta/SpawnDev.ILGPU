@@ -48,27 +48,7 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
         // load/store as 2-byte causes wrong bit patterns. 2 of 9 pass.
         // ═══════════════════════════════════════════════════════════════
 
-        [TestMethod]
-        public new async Task HalfArithmeticTest() =>
-            throw new UnsupportedTestException("Wasm: Half f16↔f32 load/store codegen wrong values (TODO)");
-        [TestMethod]
-        public new async Task HalfMinMaxTest() =>
-            throw new UnsupportedTestException("Wasm: Half f16↔f32 load/store codegen wrong values (TODO)");
-        [TestMethod]
-        public new async Task HalfMixedTypeTest() =>
-            throw new UnsupportedTestException("Wasm: Half f16↔f32 load/store codegen wrong values (TODO)");
-        [TestMethod]
-        public new async Task AlgorithmAllReduceHalfTest() =>
-            throw new UnsupportedTestException("Wasm: Half f16↔f32 load/store codegen wrong values (TODO)");
-        [TestMethod]
-        public new async Task AlgorithmGroupReduceHalfTest() =>
-            throw new UnsupportedTestException("Wasm: Half f16↔f32 load/store codegen wrong values (TODO)");
-        [TestMethod]
-        public new async Task AlgorithmExclusiveScanHalfTest() =>
-            throw new UnsupportedTestException("Wasm: Half f16↔f32 load/store codegen wrong values (TODO)");
-        [TestMethod]
-        public new async Task AlgorithmInclusiveScanHalfTest() =>
-            throw new UnsupportedTestException("Wasm: Half f16↔f32 load/store codegen wrong values (TODO)");
+        // Half tests: un-skipped — f16↔f32 inline bit conversion in Load/Store.
 
         // UNSIGNED COMPARISON — FIXED: codegen now uses i32.lt_u/i64.lt_u for unsigned compares.
 
@@ -76,68 +56,62 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
         // COMPILATION ERRORS (1)
         // ═══════════════════════════════════════════════════════════════
 
-        [TestMethod]
-        public new async Task AliasedBufferBindingTest() =>
-            throw new UnsupportedTestException("Wasm: i32.store expected i32 found i64 — SubView aliasing codegen (TODO)");
+        // AliasedBufferBindingTest: un-skipped — i64→i32 truncation in Store handler.
 
         // ═══════════════════════════════════════════════════════════════
-        // RADIXSORT PAIRS — struct Load snapshot fix applied, but all pairs tests
-        // OOM due to browser SharedArrayBuffer limits (5+ Wasm modules compiled for
-        // the pairs pipeline: Gather + Sort1 + Sort2 + Scan + Scatter).
-        // Needs Wasm module memory management optimization (TODO).
+        // RADIXSORT PAIRS — struct Load copies to scratch for snapshot semantics,
+        // but pairs sort still produces wrong results. Needs WAT disassembly
+        // of Gather/Sort/Scatter kernels with ShaderDebugService. (14 tests)
         // ═══════════════════════════════════════════════════════════════
 
         [TestMethod]
         public new async Task AlgorithmRadixSortPairsTest() =>
-            throw new UnsupportedTestException("Wasm: OOM — pairs sort compiles too many Wasm modules (TODO)");
+            throw new UnsupportedTestException("Wasm: pairs sort struct element codegen — needs WAT analysis (TODO)");
         [TestMethod]
         public new async Task AlgorithmRadixSortPairsIntTest() =>
-            throw new UnsupportedTestException("Wasm: OOM — pairs sort compiles too many Wasm modules (TODO)");
+            throw new UnsupportedTestException("Wasm: pairs sort struct element codegen (TODO)");
         [TestMethod]
         public new async Task AlgorithmRadixSortPairsDoubleTest() =>
-            throw new UnsupportedTestException("Wasm: OOM — pairs sort compiles too many Wasm modules (TODO)");
+            throw new UnsupportedTestException("Wasm: pairs sort struct element codegen (TODO)");
         [TestMethod]
         public new async Task AlgorithmRadixSortPairsLongTest() =>
-            throw new UnsupportedTestException("Wasm: OOM — pairs sort compiles too many Wasm modules (TODO)");
+            throw new UnsupportedTestException("Wasm: pairs sort struct element codegen (TODO)");
         [TestMethod]
         public new async Task AlgorithmRadixSortPairsDoubleOffsetTest() =>
-            throw new UnsupportedTestException("Wasm: OOM — pairs sort compiles too many Wasm modules (TODO)");
+            throw new UnsupportedTestException("Wasm: pairs sort struct element codegen (TODO)");
         [TestMethod]
         public new async Task AlgorithmRadixSortPairsLongOffsetTest() =>
-            throw new UnsupportedTestException("Wasm: OOM — pairs sort compiles too many Wasm modules (TODO)");
+            throw new UnsupportedTestException("Wasm: pairs sort struct element codegen (TODO)");
         [TestMethod]
         public new async Task AlgorithmRadixSortPairsUIntTest() =>
-            throw new UnsupportedTestException("Wasm: OOM — pairs sort compiles too many Wasm modules (TODO)");
+            throw new UnsupportedTestException("Wasm: pairs sort struct element codegen (TODO)");
         [TestMethod]
         public new async Task AlgorithmRadixSortPairsHalfTest() =>
-            throw new UnsupportedTestException("Wasm: OOM + Half codegen (TODO)");
+            throw new UnsupportedTestException("Wasm: pairs sort struct element codegen + Half (TODO)");
         [TestMethod]
         public new async Task RadixSortPairsIndexIntegrityTest() =>
-            throw new UnsupportedTestException("Wasm: OOM — pairs sort compiles too many Wasm modules (TODO)");
+            throw new UnsupportedTestException("Wasm: pairs sort struct element codegen (TODO)");
         [TestMethod]
         public new async Task RadixSortPairsDescendingIndexIntegrityTest() =>
-            throw new UnsupportedTestException("Wasm: OOM — pairs sort compiles too many Wasm modules (TODO)");
+            throw new UnsupportedTestException("Wasm: pairs sort struct element codegen (TODO)");
 
         // ═══════════════════════════════════════════════════════════════
         // MULTI-GROUP RADIXSORT — counter address / memory layout (11)
         // ═══════════════════════════════════════════════════════════════
 
-        // All pairs sort tests OOM due to module compilation memory pressure.
         [TestMethod]
         public new async Task AlgorithmRadixSortDescendingTest() =>
-            throw new UnsupportedTestException("Wasm: OOM — pairs sort (TODO)");
+            throw new UnsupportedTestException("Wasm: pairs sort struct element codegen (TODO)");
         [TestMethod]
         public new async Task AlgorithmRadixSortLargeTest() =>
-            throw new UnsupportedTestException("Wasm: OOM — pairs sort (TODO)");
+            throw new UnsupportedTestException("Wasm: pairs sort struct element codegen (TODO)");
         [TestMethod]
         public new async Task RadixSortBoundary16KTest() =>
-            throw new UnsupportedTestException("Wasm: OOM — pairs sort (TODO)");
+            throw new UnsupportedTestException("Wasm: pairs sort struct element codegen (TODO)");
         [TestMethod]
         public new async Task RadixSortBoundary20KTest() =>
-            throw new UnsupportedTestException("Wasm: OOM — pairs sort (TODO)");
-        [TestMethod]
-        public new async Task RadixSortMinimalPatternsTest() =>
-            throw new UnsupportedTestException("Wasm: OOM — 256-thread groups + multi-pass scan kernels exhaust memory (TODO)");
+            throw new UnsupportedTestException("Wasm: pairs sort struct element codegen (TODO)");
+        // RadixSortMinimalPatterns: un-skipped with memory.grow() fix.
         [TestMethod]
         public new async Task RadixSortThresholdProbeTest() =>
             throw new UnsupportedTestException("Wasm: multi-group RadixSort counter/memory (TODO)");
@@ -161,18 +135,7 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
         // MEMORY LIMITS — OOM or cascading memory (8)
         // ═══════════════════════════════════════════════════════════════
 
-        [TestMethod]
-        public new async Task AlgorithmRadixSortNonPairsFloatTest() =>
-            throw new UnsupportedTestException("Wasm: causes OOM for subsequent tests (works in isolation)");
-        [TestMethod]
-        public new async Task AlgorithmRadixSortNonPairsIntTest() =>
-            throw new UnsupportedTestException("Wasm: OOM after multi-pass scan kernel compilation (TODO)");
-        [TestMethod]
-        public new async Task AlgorithmRadixSortNonPow2Test() =>
-            throw new UnsupportedTestException("Wasm: OOM after multi-pass scan kernel compilation (TODO)");
-        [TestMethod]
-        public new async Task RadixSort100KBenchmarkTest() =>
-            throw new UnsupportedTestException("Wasm: OOM after multi-pass scan kernel compilation (TODO)");
+        // OOM tests — un-skipped with memory.grow() fix.
         [TestMethod]
         public new async Task RadixSortDescending1_4MTest() =>
             throw new UnsupportedTestException("Wasm: exceeds SharedArrayBuffer memory limit (TODO)");
