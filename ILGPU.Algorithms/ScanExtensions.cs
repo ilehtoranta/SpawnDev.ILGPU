@@ -163,7 +163,9 @@ namespace ILGPU.Algorithms
             return accelerator.AcceleratorType switch
             {
                 AcceleratorType.CPU => 1,
-                AcceleratorType.Wasm => 1,
+                AcceleratorType.Wasm => Interop.ComputeRelativeSizeOf<int, T>(
+                    accelerator.MaxNumGroupsExtent.Item1 + 1)
+                    + 2 * 63, // multi-pass scan (same as WebGPU)
                 // Single-pass scan: CreateSinglePassScan makes 2 Allocate() calls
                 // (Allocate<T>, Allocate<int>). Each adds up to 63 ints of 256-byte padding.
                 AcceleratorType.Cuda => ComputeNumIntElementsForSinglePassScan<T>()
@@ -1251,8 +1253,12 @@ namespace ILGPU.Algorithms
                     CreateSingleGroupScan<T, TStrideIn, TStrideOut, TScanOperation>(
                         accelerator,
                         kind),
+                // Wasm: use WebGPU multi-pass scan (KernelSpecialization + 2-pass with fence).
+                // The scan kernels use GroupExtensions.InclusiveScan which routes to
+                // WasmGroupExtensions (shared memory + barriers), fully supported by
+                // the fiber-based phase dispatch.
                 AcceleratorType.Wasm =>
-                    CreateSingleGroupScan<T, TStrideIn, TStrideOut, TScanOperation>(
+                    CreateWebGPUMultiPassScan<T, TStrideIn, TStrideOut, TScanOperation>(
                         accelerator,
                         kind),
                 AcceleratorType.OpenCL =>

@@ -12,6 +12,9 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
         [TestMethod]
         public async Task WasmBinaryDump_RadixSort() => await RunTest(async accelerator =>
         {
+            // This test is Wasm-specific (references WasmBackend.LastWasmBinary)
+            if (accelerator.AcceleratorType != AcceleratorType.Wasm)
+                throw new UnsupportedTestException("Wasm-specific diagnostic test");
             int n = 32;
             var data = new int[n];
             for (int i = 0; i < n; i++) data[i] = n - i;
@@ -49,6 +52,9 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
         [TestMethod]
         public async Task WasmBinaryDump_InclusiveScan() => await RunTest(async accelerator =>
         {
+            // This test is Wasm-specific (references WasmBackend.LastWasmBinary)
+            if (accelerator.AcceleratorType != AcceleratorType.Wasm)
+                throw new UnsupportedTestException("Wasm-specific diagnostic test");
             int groupSize = Math.Min(64, accelerator.Device.MaxNumThreadsPerGroup);
             using var inputBuf = accelerator.Allocate1D<uint>(groupSize);
             using var outputBuf = accelerator.Allocate1D<uint>(groupSize);

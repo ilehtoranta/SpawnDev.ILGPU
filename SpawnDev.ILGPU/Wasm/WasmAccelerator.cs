@@ -30,6 +30,7 @@ namespace SpawnDev.ILGPU.Wasm
         // Pending async work (kernel dispatches)
         internal readonly List<Task> _pendingWork = new();
         public static string? _lastImplicitIndexDebug;
+        public static string? _lastStructSerialDebug;
 
         // Worker count for parallel dispatch
         private int _workerCount = 4;
@@ -431,7 +432,19 @@ namespace SpawnDev.ILGPU.Wasm
                 int scratchSize = compiledKernel.HasBarriers
                     ? scratchPerThread * groupSize  // per-thread scratch for barrier kernels
                     : 4096;                          // shared scratch for non-barrier kernels
-                int afterScratch = scratchBase + scratchSize;
+
+                // Pre-compute struct param bytes so we can place them AFTER per-thread
+                // scratch. Without this, struct params at scratchBase + 0 overlap with
+                // thread 0's scratch, and state saves during barrier yields corrupt the
+                // struct fields (e.g., ReducedValue in ReductionImplementation).
+                int totalStructBytes = 0;
+                foreach (var pi in paramInfos)
+                {
+                    if (pi.IsScalar && pi.StructSize > 0)
+                        totalStructBytes += ((pi.StructSize + 3) & ~3); // 4-byte aligned
+                }
+                int structRegionBase = (scratchBase + scratchSize + 7) & ~7; // 8-byte align
+                int afterScratch = structRegionBase + totalStructBytes;
 
                 // Shared memory region (for barrier kernels)
                 int sharedMemBase = (afterScratch + 7) & ~7; // 8-byte align
@@ -455,7 +468,7 @@ namespace SpawnDev.ILGPU.Wasm
                 int fenceSlot = barrierBase + barrierSize;
                 int totalWithBarriers = fenceSlot + 16;
 
-                if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm] Memory layout: buffers={totalMemoryBytes}, scratch={scratchBase}, sharedMem={sharedMemBase}({sharedMemSize}), barrier={barrierBase}({barrierSize}), hasBarriers={compiledKernel.HasBarriers}, groupSize={groupSize}");
+                if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm] Memory layout: buffers={totalMemoryBytes}, scratch={scratchBase}(spt={scratchPerThread}), structRegion={structRegionBase}({totalStructBytes}), sharedMem={sharedMemBase}({sharedMemSize}), barrier={barrierBase}({barrierSize}), hasBarriers={compiledKernel.HasBarriers}, groupSize={groupSize}");
 
                 // Round up to Wasm page size (64KB)
                 int wasmPages = Math.Max(1, (totalWithBarriers + 65535) / 65536);
@@ -635,10 +648,22 @@ namespace SpawnDev.ILGPU.Wasm
                                 FlattenCLRStruct(value, flatValues);
 
                                 _lastImplicitIndexDebug += $" | IRLayout: fields={irLayout.Count}, size={structSize}, clrFlat={flatValues.Count}";
-                                for (int fi = 0; fi < irLayout.Count && fi < flatValues.Count; fi++)
+                                // Type-matched serialization: CLR/IR field ordering may differ
+                                // for complex structs. Match IR view-pointer fields with CLR
+                                // IArrayView values, and non-view fields with primitives.
+                                var viewValues = flatValues.Where(v => v is IArrayView).ToList();
+                                var nonViewValues = flatValues.Where(v => !(v is IArrayView)).ToList();
+                                int viewIdx = 0, nonViewIdx = 0;
+                                for (int fi = 0; fi < irLayout.Count; fi++)
                                 {
                                     var field = irLayout[fi];
-                                    var fieldVal = flatValues[fi];
+                                    object? fieldVal;
+                                    if (field.IsViewPtr && viewIdx < viewValues.Count)
+                                        fieldVal = viewValues[viewIdx++];
+                                    else if (!field.IsViewPtr && nonViewIdx < nonViewValues.Count)
+                                        fieldVal = nonViewValues[nonViewIdx++];
+                                    else
+                                        fieldVal = null;
                                     _lastImplicitIndexDebug += $" | f{fi}:off={field.Offset},t=0x{field.WasmType:X2},vp={field.IsViewPtr},v={fieldVal?.GetType().Name}";
 
                                     if (field.IsViewPtr)
@@ -677,6 +702,17 @@ namespace SpawnDev.ILGPU.Wasm
                                         // Primitive value: write at the IR offset
                                         WritePrimitiveToBytes(bytes, field.Offset, fieldVal, field.WasmType, field.Size);
                                     }
+                                }
+                                // TEMP: store view pointer debug info
+                                {
+                                    var vpDbg = new System.Text.StringBuilder();
+                                    for (int dfi = 0; dfi < irLayout.Count; dfi++)
+                                    {
+                                        var df = irLayout[dfi];
+                                        int val = df.Size >= 4 ? BitConverter.ToInt32(bytes, df.Offset) : bytes[df.Offset];
+                                        vpDbg.Append($"[{dfi}]off={df.Offset},t={df.WasmType:X},vp={df.IsViewPtr},sz={df.Size},val={val} ");
+                                    }
+                                    _lastStructSerialDebug = vpDbg.ToString();
                                 }
                             }
                             else if (value.GetType().IsValueType)
@@ -731,13 +767,15 @@ namespace SpawnDev.ILGPU.Wasm
                                 }
                             }
 
-                            // Align to 4 bytes within scratch
+                            // Align to 4 bytes within the struct region (AFTER per-thread scratch).
+                            // Using structRegionBase instead of scratchBase prevents overlap
+                            // with thread 0's scratch where state is saved during barrier yields.
                             scratchCursor = (scratchCursor + 3) & ~3;
-                            int absoluteOffset = scratchBase + scratchCursor;
+                            int absoluteOffset = structRegionBase + scratchCursor;
                             structScratchWrites.Add((absoluteOffset, bytes));
                             flatArgs.Add(absoluteOffset.ToString());
                             scratchCursor += structSize;
-                            if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm] Struct scalar arg: type={value.GetType().Name}, size={structSize}, scratchOffset={absoluteOffset}");
+                            if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm] Struct scalar arg: type={value.GetType().Name}, size={structSize}, scratchOffset={absoluteOffset}, structRegionBase={structRegionBase}");
                         }
                         else flatArgs.Add(value?.ToString() ?? "0");
                     }
@@ -825,13 +863,11 @@ namespace SpawnDev.ILGPU.Wasm
             int phaseCount = compiledKernel.PhaseCount;
             if (hasBarriers)
             {
-                // Fiber dispatch: use hardwareConcurrency workers, each running
-                // groupSize/workerCount fibers sequentially per phase.
-                // All barrier kernels (including those with helper barriers) use this path.
-                // Single worker for now — cross-worker Atomics.wait barrier
-                // deadlocks in browser workers. The fiber dispatch is correct
-                // but the inter-worker sync needs investigation.
-                // TODO: Fix cross-worker barrier to use multiple workers.
+                // Fiber dispatch: single worker runs all fibers sequentially per phase.
+                // Multi-worker attempted but deadlocks (Atomics.wait/notify between workers
+                // hangs in browser Web Workers). Needs investigation of cross-worker
+                // SharedArrayBuffer visibility semantics.
+                // See Wasm/Plans/multi-worker-barrier-dispatch.md for future work.
                 workerCount = 1;
             }
             else
@@ -1144,7 +1180,7 @@ namespace SpawnDev.ILGPU.Wasm
                 sb.AppendLine("        }");
                 sb.AppendLine("        if (phase >= 10) _phaseTrace += 'p' + phase + ':' + _yieldCount + '/' + (threadEnd-threadStart) + ' ';");
                 sb.AppendLine("        if (!anyYielded) break;");
-                sb.AppendLine("        if (phase >= 50) { self.postMessage({ done: false, error: 'Phase limit 50. trace: ' + _phaseTrace }); return; }");
+                sb.AppendLine("        if (phase >= 500) { self.postMessage({ done: false, error: 'Phase limit 500. trace: ' + _phaseTrace }); return; }");
                 // Cross-worker barrier between phases
                 // Phase barrier: only needed with multiple workers
                 sb.AppendLine("        if (workerCount > 1) {");
@@ -1162,6 +1198,9 @@ namespace SpawnDev.ILGPU.Wasm
                 sb.AppendLine("        }");
                 sb.AppendLine("        phase++;");
                 sb.AppendLine("      }");
+                // NOTE: Multi-group sorts with shared memory/barriers need investigation.
+                // Simple zeroing between groups wipes data the algorithm needs.
+                // The real fix is likely in counter address computation for multi-group.
                 // Cross-group barrier
                 sb.AppendLine("      const gArrived = Atomics.add(_groupBarrier, 0, 1) + 1;");
                 sb.AppendLine("      if (gArrived === workerCount) {");

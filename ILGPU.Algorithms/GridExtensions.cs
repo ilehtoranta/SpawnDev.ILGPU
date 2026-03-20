@@ -257,7 +257,8 @@ namespace ILGPU.Algorithms
             this Accelerator accelerator)
             where TBody : struct, IGridStrideKernelBody
         {
-            var spec = accelerator.AcceleratorType == AcceleratorType.WebGPU
+            var spec = (accelerator.AcceleratorType == AcceleratorType.WebGPU
+                || accelerator.AcceleratorType == AcceleratorType.Wasm)
                 ? new KernelSpecialization(accelerator.MaxNumThreadsPerGroup, null)
                 : KernelSpecialization.Empty;
             var kernel = accelerator.LoadKernel<LongIndex1D, TBody>(

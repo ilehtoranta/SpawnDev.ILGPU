@@ -83,8 +83,13 @@ The fiber refactor resolved the multi-group barrier dispatch limitation. Eight b
 6. **TryGetValue bool flag** — prevent calling Math.sin instead of helper function (Agent #1)
 7. **Sync yield after helper done** — prevent shared memory stomping between sequential helper calls (Agent #2)
 8. **Scratch zeroing** — zero from scratchBase (not 0) to prevent stale data between dispatches (Agent #2)
+9. **Struct/scratch overlap** — struct body params placed AFTER per-thread scratch (`structRegionBase = scratchBase + scratchSize`) to prevent thread 0's state save from corrupting struct fields during barrier yields (Agent #2)
 
-The 55 skipped tests are intentional backend capability skips (e.g., features not applicable to Wasm), not failures.
+The skipped tests are intentional backend capability skips (e.g., features not applicable to Wasm), not failures.
+
+## Tribal Knowledge: Struct Body Placement (March 2026)
+
+**STRUCT REGION RULE**: Struct parameters serialized to scratch (e.g., `ReductionImplementation` in `GridStrideLoopKernel`) must be placed in the `structRegionBase` area, which is AFTER all per-thread scratch regions. The per-thread scratch at `scratchBase + tid * scratchPerThread` is used for state save/restore during barrier yields. If a struct is placed at `scratchBase + 0`, thread 0's state save overwrites the struct fields, causing subsequent threads to read corrupted data (wrong ReducedValue, pointer values, etc.). The fix ensures `structRegionBase = scratchBase + scratchSize` (8-byte aligned).
 
 ## Debugging
 - `WasmBackend.LastWasmBinary` — capture last compiled kernel
