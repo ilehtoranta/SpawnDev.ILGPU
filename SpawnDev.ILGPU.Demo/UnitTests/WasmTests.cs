@@ -476,11 +476,12 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
         [TestMethod]
         public async Task WasmMinimalPairsSortDiagTest() => await RunTest(async accelerator =>
         {
-            // 16 elements — stable, no memory-pressure corruption
-            int n = 16;
+            // 2048 elements — reproduce large-sort violations for codegen investigation
+            int n = 2048;
             var keys = new float[n];
             var values = new int[n];
-            for (int j = 0; j < n; j++) { keys[j] = (float)(n - j); values[j] = (n - j) * 10; }
+            var rng = new Random(42); // deterministic
+            for (int j = 0; j < n; j++) { keys[j] = (float)(rng.NextDouble() * 10000.0); values[j] = j; }
 
             using var keysBuf = accelerator.Allocate1D(keys);
             using var valuesBuf = accelerator.Allocate1D(values);
@@ -520,19 +521,39 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
             var kernelInfos = SpawnDev.ILGPU.Wasm.Backend.WasmBackend.AllKernelInfos;
             string kiStr = kernelInfos != null ? string.Join(" | ", kernelInfos.TakeLast(10)) : "(null)";
 
+            // Check sort order and report exact violations
+            var violations = new System.Collections.Generic.List<string>();
+            for (int i = 1; i < n; i++)
+            {
+                if (sortedKeys[i] < sortedKeys[i - 1])
+                    violations.Add($"order[{i}]:{sortedKeys[i-1]}>{sortedKeys[i]}");
+            }
+            // Check value tracking — values[j] = j, so sortedValues[i] should be
+            // the original index of the key now at position i
+            var valueErrors = new System.Collections.Generic.List<string>();
             for (int i = 0; i < n; i++)
             {
-                float expectedKey = (float)(i + 1);
-                int expectedVal = (i + 1) * 10;
-                if (MathF.Abs(sortedKeys[i] - expectedKey) > 0.001f || sortedValues[i] != expectedVal)
-                {
-                    throw new Exception($"PairsSort16 FAIL at [{i}]: keys=[{keysStr}] vals=[{valsStr}]");
-                }
+                int origIdx = sortedValues[i];
+                if (origIdx < 0 || origIdx >= n)
+                    valueErrors.Add($"val[{i}]={origIdx}(OOB)");
+                else if (MathF.Abs(sortedKeys[i] - keys[origIdx]) > 0.001f)
+                    valueErrors.Add($"val[{i}]={origIdx}:key={sortedKeys[i]}!=orig[{origIdx}]={keys[origIdx]}");
+            }
+            if (violations.Count > 0 || valueErrors.Count > 0)
+            {
+                string vStr = violations.Count > 0 ? string.Join(",", violations.Take(10)) : "none";
+                string veStr = valueErrors.Count > 0 ? string.Join(",", valueErrors.Take(10)) : "none";
+                throw new Exception($"PairsSort2048: {violations.Count} order violations, {valueErrors.Count} value errors. Order: [{vStr}] Values: [{veStr}]");
             }
         });
 
-        // RADIXSORT PAIRS — FULLY FIXED! ViewSourceSequencer alignment + subViewByteOffset element size.
-        // Half pairs stays skipped (f16 in sort kernels).
+        // RADIXSORT PAIRS — Option 1 scratch layout + memory.grow error handling applied.
+        // 256-element float/int/uint pairs: PASS. Double/Long: intermittent 1-value errors.
+        // 16K: 2 order violations. Under investigation — may be shared memory boundary or
+        // cross-iteration contamination for 16-byte struct elements.
+        // Double/Long pairs: un-skipped with i64.shr_u fix
+        // Double/Long offset + index tests: un-skipped with unsigned shift fix
+        // 16K/20K + integrity: un-skipped with unsigned shift fix
         [TestMethod]
         public new async Task AlgorithmRadixSortPairsHalfTest() =>
             throw new UnsupportedTestException("Wasm: pairs Half — f16 in sort kernels (TODO)");
@@ -542,21 +563,8 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
         // ═══════════════════════════════════════════════════════════════
 
         // Pairs-dependent sort tests — small (128-256) pass, large (2048+) fail with order violations.
-        // AlgorithmRadixSortLargeTest: un-skipped for investigation (2048 pairs)
-        // 2048 pairs passes. 16K+ has 4-5 order violations from multi-group shared memory.
-        [TestMethod]
-        public new async Task RadixSortBoundary16KTest() =>
-            throw new UnsupportedTestException("Wasm: 16K pairs — multi-group shared memory (TODO)");
-        [TestMethod]
-        public new async Task RadixSortBoundary20KTest() =>
-            throw new UnsupportedTestException("Wasm: 20K pairs — multi-group shared memory (TODO)");
-        // 16K pairs: 4-5 non-deterministic order violations (0.03%). Memory reuse issue.
-        [TestMethod]
-        public new async Task RadixSortPairsIndexIntegrityTest() =>
-            throw new UnsupportedTestException("Wasm: 16K pairs — non-deterministic order violations (TODO)");
-        [TestMethod]
-        public new async Task RadixSortPairsDescendingIndexIntegrityTest() =>
-            throw new UnsupportedTestException("Wasm: 16K pairs — multi-group shared memory (TODO)");
+        // AlgorithmRadixSortDescending + Large: un-skipped with scratch layout fix
+        // 16K/20K + integrity tests: un-skipped with scratch layout fix
         // RadixSortMinimalPatterns: un-skipped with memory.grow() fix.
         [TestMethod]
         public new async Task RadixSortThresholdProbeTest() =>

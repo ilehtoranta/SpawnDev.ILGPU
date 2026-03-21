@@ -568,7 +568,9 @@ namespace SpawnDev.ILGPU.Wasm
                         int growBy = wasmPages - _cachedWasmPages;
                         if (growBy > 0)
                         {
-                            _cachedWasmMemory.JSRef!.Call<int>("grow", growBy);
+                            int growResult = _cachedWasmMemory.JSRef!.Call<int>("grow", growBy);
+                            if (growResult == -1)
+                                throw new OutOfMemoryException($"WebAssembly.Memory.grow({growBy} pages) failed. Current: {_cachedWasmPages} pages, requested: {wasmPages} pages ({wasmPages * 64}KB)");
                             _cachedWasmPages = wasmPages;
                             // Re-get buffer reference (same SAB but .buffer accessor may update)
                             _cachedMemoryBuffer?.Dispose();
@@ -598,7 +600,9 @@ namespace SpawnDev.ILGPU.Wasm
                     else if (wasmPages > _cachedWasmPages)
                     {
                         int growBy = wasmPages - _cachedWasmPages;
-                        _cachedWasmMemory.JSRef!.Call<int>("grow", growBy);
+                        int growResult = _cachedWasmMemory.JSRef!.Call<int>("grow", growBy);
+                        if (growResult == -1)
+                            throw new OutOfMemoryException($"WebAssembly.Memory.grow({growBy} pages) failed. Current: {_cachedWasmPages} pages, requested: {wasmPages} pages ({wasmPages * 64}KB)");
                         _cachedWasmPages = wasmPages;
                         _cachedMemoryBuffer?.Dispose();
                         _cachedMemoryBuffer = _cachedWasmMemory.JSRef!.Get<SharedArrayBuffer>("buffer");

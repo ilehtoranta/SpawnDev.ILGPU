@@ -1106,6 +1106,24 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             int reservedForYieldFlag = _phaseMode ? 4 : 0;
             _phaseStateOffset = ((_scratchNextOffset + reservedForYieldFlag) + 7) & ~7; // 8-byte align
 
+            // Advance _scratchNextOffset past the phase state region BEFORE IR visiting.
+            // Struct Load scratch copies allocated during IR visiting MUST be after the
+            // state save region. Otherwise, the yield state save overwrites the struct
+            // snapshot data, causing in-place pre-sort aliasing in RadixSortKernel1.
+            // (See pairs-sort-BEST-FIX.md for full analysis, reviewed by #1.)
+            //
+            // Option 1 (team-approved): estimate stateSize from IR value count.
+            // Each IR value becomes ~1 Wasm local. Each local takes 4 or 8 bytes in
+            // the state save. Use worst-case 8 bytes per value + margin for system locals.
+            if (_phaseMode)
+            {
+                int irValueCount = 0;
+                foreach (var block in blocks)
+                    irValueCount += block.Count;
+                int estimatedStateBytes = (irValueCount + 20) * 8;
+                _scratchNextOffset = (_phaseStateOffset + estimatedStateBytes + 7) & ~7;
+            }
+
             if (WasmBackend.VerboseLogging)
             {
                 WasmBackend.Log($"[Wasm-SM] State machine: {blocks.Count} IR blocks, {totalBarriers} barriers, {expandedBlockCount} SM blocks, phaseMode={_phaseMode}");
@@ -1228,9 +1246,10 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             // Propagate phase info
             if (_phaseMode)
             {
-                // Extend scratch to include phase state
+                // Extend scratch to include phase state. Use Math.Max to preserve
+                // any scratch allocated during IR visiting (struct Load copy slots).
                 int stateSize = ComputePhaseStateSize();
-                _scratchNextOffset = _phaseStateOffset + stateSize;
+                _scratchNextOffset = Math.Max(_scratchNextOffset, _phaseStateOffset + stateSize);
 
                 // NOW generate the phase entry prologue (all locals are known).
                 // This code restores locals from scratch when phaseId > 0.
