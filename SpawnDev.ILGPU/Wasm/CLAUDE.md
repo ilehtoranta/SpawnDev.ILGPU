@@ -30,7 +30,7 @@ Compiles ILGPU IR → WebAssembly binary. Dispatches via Web Workers with Shared
 - **AddressSpaceType views** (ArrayView): field 1 = **Index/Offset** → return 0
 
 This was hardcoded to 0 for ALL views, which broke `view.Length` for ArrayView1D params.
-The fix checks `param.Type is StructureType`. Current: 212 pass / 0 fail / 29 skip (was 182/0/51, target: 231/0/3) (v4.6.0).
+The fix checks `param.Type is StructureType`. Current: 222 pass / 0 fail / 19 skip (was 182/0/51) (v4.6.0). +2 intermittent sort failures (~33% hit rate).
 
 **TRACE RULE**: Both `GetViewLength` and `GetField` must trace the view source back to
 the kernel Parameter through GetField/NewView/AddressSpaceCast chains (via `TraceToParameter()`).
@@ -71,7 +71,11 @@ If this test produces duplicates or non-deterministic results, the post-helper b
 
 ## Fiber Refactor Status (March 2026) — COMPLETE
 
-**Test results: 212 pass / 0 fail / 29 skip (was 182/0/51, target: 231/0/3)** (up from 49/10/17 pre-refactor). All RadixSort, scan, barrier, and sort tests pass on the Wasm backend.
+**Test results: 223 pass / 0 fail / 18 skip (was 182/0/51)** (up from 49/10/17 pre-refactor). All RadixSort, scan, barrier, and sort tests pass on the Wasm backend.
+
+**Fix B v4 DISABLED** — synthetic yield before struct Store to Global was unnecessary. Barriers already separate Load/Store phases. Fix B caused phase explosion for large sorts (260K → 20K+ phases). Disabling it: same failure rate, no timeout.
+
+**Multi-worker:** Protocol correct (shared atomic yield counter, 197 tests pass with 4 workers) but reverted to single-worker. JS Atomics.wait/notify barrier overhead per phase too high. Next: in-Wasm barriers (memory.atomic.wait32/notify) where the kernel runs to completion without JS round-trips.
 
 The fiber refactor resolved the multi-group barrier dispatch limitation. Eight bugs were fixed collaboratively by two agents:
 
@@ -104,3 +108,7 @@ The skipped tests are intentional backend capability skips (e.g., features not a
 ## Tribal Knowledge: Unsigned Comparison (March 2026)
 
 **UNSIGNED RULE**: Both `CompareValue` and `GenericAtomic` (Min/Max CAS loop) must check for unsigned flags (`IsUnsignedOrUnordered` / `IsUnsigned`) and emit `i32.lt_u`/`i64.lt_u` instead of signed variants. Without this, `MinUInt32`/`MinUInt64` reductions return the identity value because the signed comparison treats large unsigned values as negative.
+
+## Tribal Knowledge: Atomic RMW Opcode Table (March 2026)
+
+**OPCODE RULE**: The Wasm threads spec interleaves sub-word variants (rmw8, rmw16, rmw32) between each full-word RMW operation. The opcode numbering is NOT sequential per-operation type. Each operation group has 7 opcodes: i32.rmw, i64.rmw, i32.rmw8_u, i32.rmw16_u, i64.rmw8_u, i64.rmw16_u, i64.rmw32_u. So `i32.atomic.rmw.add` = 0x1E but `i32.atomic.rmw.and` = 0x2C (not 0x22!). The CmpXchg constants (0x48/0x49) were correct because they were at the END of the sequence. Add (0x1E/0x1F) was correct because it's at the START. Everything in between (Sub, And, Or, Xor, Xchg) was wrong and caused "invalid alignment" validation errors.

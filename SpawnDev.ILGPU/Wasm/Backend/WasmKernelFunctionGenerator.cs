@@ -92,6 +92,12 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         private readonly Dictionary<string, int> _structLoadSlots = new();
 
         /// <summary>
+        /// Counter for struct-to-array Store yields emitted during code generation.
+        /// Must match the pre-count for correct br_table indexing.
+        /// </summary>
+        private int _structStoreYieldsEmitted = 0;
+
+        /// <summary>
         /// The index type of the kernel (Index1D, Index2D, Index3D).
         /// </summary>
         private IndexType _indexType = IndexType.Index1D;
@@ -1051,13 +1057,16 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                     }
                 }
             }
+            // Fix B: DISABLED — counting struct-to-Global Store yields removed
+            int structStoreYields = 0;
+
             // Sync yields are only needed when there are 2+ barrier-helper calls
             // (to prevent shared memory stomping between sequential calls).
             // With 1 call, no sync yield needed — remove the extra counts.
             _needsSyncYields = helperCallCount > 1;
             if (!_needsSyncYields && helperCallCount == 1)
                 helperBarriers -= 1; // undo the +1 sync yield added during scan
-            int totalBarriers = directBarriers + helperBarriers;
+            int totalBarriers = directBarriers + helperBarriers + structStoreYields;
             int expandedBlockCount = _blockCount + totalBarriers;
 
             // Build block map: assign state machine indices to each IR block.
@@ -1071,6 +1080,11 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 {
                     if (entry.Value is global::ILGPU.IR.Values.Barrier) count += 1;
                     else if (entry.Value is global::ILGPU.IR.Values.Broadcast) count += 2;
+                    else if (!_isHelperFunction && entry.Value is global::ILGPU.IR.Values.Store st2
+                        && st2.Value.Resolve().Type is StructureType
+                        && st2.Target.Resolve().Type is AddressSpaceType ast2
+                        && ast2.AddressSpace == MemoryAddressSpace.Global)
+                        count += 1;
                     else if (!_isHelperFunction && entry.Value is MethodCall mc2)
                     {
                         // Only count helper barriers for yield-per-phase (no own barriers).
@@ -1249,7 +1263,14 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 // Extend scratch to include phase state. Use Math.Max to preserve
                 // any scratch allocated during IR visiting (struct Load copy slots).
                 int stateSize = ComputePhaseStateSize();
-                _scratchNextOffset = Math.Max(_scratchNextOffset, _phaseStateOffset + stateSize);
+                int estimatedEnd = _scratchNextOffset; // current end (set by Option 1 estimate)
+                int actualEnd = _phaseStateOffset + stateSize;
+                if (actualEnd > estimatedEnd)
+                {
+                    // CRITICAL: the estimate was too small! State save will overflow into struct Load slots.
+                    WasmBackend.Log($"[Wasm-CRITICAL] Phase state OVERFLOW: estimated end={estimatedEnd}, actual end={actualEnd}, diff={actualEnd - estimatedEnd} bytes. IR values may have been undercounted or locals grew during IR visiting.");
+                }
+                _scratchNextOffset = Math.Max(_scratchNextOffset, actualEnd);
 
                 // NOW generate the phase entry prologue (all locals are known).
                 // This code restores locals from scratch when phaseId > 0.
@@ -1890,6 +1911,38 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         {
             var target = value.Target.Resolve();
             var storeValue = value.Value.Resolve();
+
+            // Fix B v4: DISABLED — #1's analysis shows barriers already separate Load/Store
+            // phases. Each thread writes to a unique position (guaranteed by exclusive scan),
+            // and struct Load scratch copies preserve data across barriers. The extra yield
+            // per grid-stride iteration caused ~20K phases for 260K-element sorts (timeout).
+            // Disabling to verify the intermittent failures are independent of Fix B.
+            if (false && _phaseMode && !_isHelperFunction
+                && storeValue.Type is StructureType
+                && target.Type is AddressSpaceType targetAst
+                && targetAst.AddressSpace == MemoryAddressSpace.Global)
+            {
+                _structStoreYieldsEmitted++;
+                int continuationIndex = _currentBlockEmitIndex + 1;
+                EmitSaveAllLocals();
+                WasmModuleBuilder.EmitI32Const(Code, continuationIndex);
+                WasmModuleBuilder.EmitLocalSet(Code, _stateLocal);
+                {
+                    int stateOffset = GetLocalSpillOffset(_stateLocal);
+                    WasmModuleBuilder.EmitLocalGet(Code, _scratchBaseLocal);
+                    WasmModuleBuilder.EmitI32Const(Code, stateOffset);
+                    Code.Add(WasmOpCodes.I32Add);
+                    WasmModuleBuilder.EmitLocalGet(Code, _stateLocal);
+                    WasmModuleBuilder.EmitStore(Code, WasmOpCodes.I32Store, 2, 0);
+                }
+                WasmModuleBuilder.EmitI32Const(Code, 1);
+                WasmModuleBuilder.EmitLocalSet(Code, _yieldedLocal);
+                uint exitDepth = (uint)(_blockCount - _currentBlockEmitIndex);
+                Code.Add(WasmOpCodes.Br);
+                WasmModuleBuilder.EmitU32Leb128(Code, exitDepth);
+                Code.Add(WasmOpCodes.End);
+                _currentBlockEmitIndex = continuationIndex;
+            }
 
             // For struct types, we need to copy each field from source to destination
             if (storeValue.Type is StructureType structType)

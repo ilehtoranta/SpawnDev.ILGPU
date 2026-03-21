@@ -334,7 +334,10 @@ namespace SpawnDev.ILGPU.Wasm
                                         if (iav != null) break;
                                     }
                                 }
-                                catch { }
+                                catch (Exception ex)
+                                {
+                                    WasmBackend.Log($"[Wasm] Embedded view extraction failed for param {i}: {ex.GetType().Name}: {ex.Message}");
+                                }
                             }
                         }
                     }
@@ -387,7 +390,14 @@ namespace SpawnDev.ILGPU.Wasm
                                     }
                                 }
                             }
-                            catch { }
+                            catch (Exception ex)
+                            {
+                                // SubView offset extraction failed — offset defaults to 0.
+                                // This is WRONG for SubViews with non-zero indices (e.g., in-place
+                                // RadixSort where output SubView is at a different offset).
+                                // Log unconditionally — this path should never fire silently.
+                                WasmBackend.Log($"[Wasm-SubView] OFFSET EXTRACTION FAILED for param {i}: {ex.GetType().Name}: {ex.Message}");
+                            }
                             viewSubOffsets.Add(subViewByteOffset);
 
                             // Log buffer identity for dispatch debugging
@@ -447,7 +457,7 @@ namespace SpawnDev.ILGPU.Wasm
                             foreach (var sf in structFields)
                             {
                                 try { if (sf.GetValue(args[i]) is IArrayView) { hasViews = true; break; } }
-                                catch { }
+                                catch (Exception ex) { WasmBackend.Log($"[Wasm] Struct view check failed for field {sf.Name}: {ex.Message}"); }
                             }
 
                             if (hasViews)
@@ -519,12 +529,14 @@ namespace SpawnDev.ILGPU.Wasm
                 // Barrier slots region: each barrier = 8 bytes (arrival counter i32 + sense flag i32)
                 int barrierBase = (afterShared + 3) & ~3; // 4-byte align
                 int barrierSize = compiledKernel.BarrierCount * 8;
-                // Add 16 bytes for two inter-worker barriers (phase + group).
-                // Each barrier = 2 × i32 (counter + generation).
-                // Phase barrier: syncs workers between phases within a group.
-                // Group barrier: syncs workers between group iterations.
+                // Add 32 bytes for inter-worker synchronization:
+                // Phase barrier: 2 × i32 (arrival counter + generation) @ fenceSlot+0
+                // Group barrier: 2 × i32 (arrival counter + generation) @ fenceSlot+8
+                // Global yield: 1 × i32 (yield counter across workers) @ fenceSlot+16
+                // Phase exit:   1 × i32 (exit flag: 1=all done) @ fenceSlot+20
+                // Reserved:     2 × i32 (future use) @ fenceSlot+24
                 int fenceSlot = barrierBase + barrierSize;
-                int totalWithBarriers = fenceSlot + 16;
+                int totalWithBarriers = fenceSlot + 32;
 
                 if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm] Memory layout: buffers={totalMemoryBytes}, scratch={scratchBase}(spt={scratchPerThread}), structRegion={structRegionBase}({totalStructBytes}), sharedMem={sharedMemBase}({sharedMemSize}), barrier={barrierBase}({barrierSize}), hasBarriers={compiledKernel.HasBarriers}, groupSize={groupSize}");
 
@@ -961,11 +973,13 @@ namespace SpawnDev.ILGPU.Wasm
             int phaseCount = compiledKernel.PhaseCount;
             if (hasBarriers)
             {
-                // Fiber dispatch: single worker runs all fibers sequentially per phase.
-                // Multi-worker attempted but deadlocks (Atomics.wait/notify between workers
-                // hangs in browser Web Workers). Needs investigation of cross-worker
-                // SharedArrayBuffer visibility semantics.
-                // See Wasm/Plans/multi-worker-barrier-dispatch.md for future work.
+                // Fiber dispatch: single worker for barrier kernels.
+                // Multi-worker protocol IS correct (shared atomic yield counter, tested
+                // 2026-03-22: 197 tests pass) but JS Atomics.wait/notify barrier overhead
+                // per phase makes RadixSort (32 dispatches × 100+ phases) too slow for
+                // the 30s test timeout. Need in-Wasm barriers (memory.atomic.wait32/notify)
+                // to eliminate JS round-trips — the kernel would run to completion in each
+                // worker without returning to JS at barriers.
                 workerCount = 1;
             }
             else
@@ -1254,12 +1268,12 @@ namespace SpawnDev.ILGPU.Wasm
                 sb.AppendLine($"    const scratchPerThread = {scratchPerThread};");
                 sb.AppendLine($"    const _phaseBarrier = new Int32Array(d.memory.buffer, {fenceSlot}, 2);");
                 sb.AppendLine($"    const _groupBarrier = new Int32Array(d.memory.buffer, {fenceSlot} + 8, 2);");
+                sb.AppendLine($"    const _globalYield = new Int32Array(d.memory.buffer, {fenceSlot} + 16, 2);");
                 sb.AppendLine();
                 sb.AppendLine("    for (let g = 0; g < numGroups; g++) {");
                 sb.AppendLine("      let phase = 0;");
                 sb.AppendLine("      let _phaseTrace = '';");
                 sb.AppendLine("      while (true) {");
-                sb.AppendLine("        let anyYielded = false;");
                 sb.AppendLine("        let _yieldCount = 0;");
                 sb.AppendLine("        for (let tid = threadStart; tid < threadEnd; tid++) {");
                 sb.AppendLine("          const globalIdx = g * groupSize + tid;");
@@ -1274,16 +1288,20 @@ namespace SpawnDev.ILGPU.Wasm
                 }
                 sb.AppendLine(");");
                 sb.AppendLine("          } catch(e) { self.postMessage({ done: false, error: 'Kernel trap: ' + e.message + ' g=' + g + ' tid=' + tid + ' phase=' + phase + ' spt=' + scratchPerThread + ' trace:' + _phaseTrace }); return; }");
-                sb.AppendLine("          if (r === 1) { anyYielded = true; _yieldCount++; } else if (phase >= 10) { _phaseTrace += 'DONE:t' + tid + ' '; }");
+                sb.AppendLine("          if (r === 1) { _yieldCount++; }");
                 sb.AppendLine("        }");
                 sb.AppendLine("        if (phase >= 10) _phaseTrace += 'p' + phase + ':' + _yieldCount + '/' + (threadEnd-threadStart) + ' ';");
-                sb.AppendLine("        if (!anyYielded) break;");
-                sb.AppendLine("        if (phase >= 500) { self.postMessage({ done: false, error: 'Phase limit 500. trace: ' + _phaseTrace }); return; }");
-                // Cross-worker barrier between phases
-                // Phase barrier: only needed with multiple workers
+                // Multi-worker: use shared atomic yield counter so ALL workers agree on exit
                 sb.AppendLine("        if (workerCount > 1) {");
+                // Add this worker's yield count to global counter
+                sb.AppendLine("          Atomics.add(_globalYield, 0, _yieldCount);");
+                // Phase barrier: synchronize all workers
                 sb.AppendLine("          const arrived = Atomics.add(_phaseBarrier, 0, 1) + 1;");
                 sb.AppendLine("          if (arrived === workerCount) {");
+                // Last worker: check global yield count, reset, and broadcast
+                sb.AppendLine("            const totalYields = Atomics.load(_globalYield, 0);");
+                sb.AppendLine("            Atomics.store(_globalYield, 0, 0);");
+                sb.AppendLine("            Atomics.store(_globalYield, 1, totalYields === 0 ? 1 : 0);");
                 sb.AppendLine("            Atomics.store(_phaseBarrier, 0, 0);");
                 sb.AppendLine("            Atomics.add(_phaseBarrier, 1, 1);");
                 sb.AppendLine("            Atomics.notify(_phaseBarrier, 1, workerCount);");
@@ -1293,7 +1311,13 @@ namespace SpawnDev.ILGPU.Wasm
                 sb.AppendLine("              Atomics.wait(_phaseBarrier, 1, gen, 1);");
                 sb.AppendLine("            }");
                 sb.AppendLine("          }");
+                // All workers check exit flag (set by last worker)
+                sb.AppendLine("          if (Atomics.load(_globalYield, 1) === 1) break;");
+                sb.AppendLine("        } else {");
+                // Single worker: just check own yields
+                sb.AppendLine("          if (_yieldCount === 0) break;");
                 sb.AppendLine("        }");
+                sb.AppendLine("        if (phase >= 1000000) { self.postMessage({ done: false, error: 'Phase limit 1M. trace: ' + _phaseTrace }); return; }");
                 sb.AppendLine("        phase++;");
                 sb.AppendLine("      }");
                 // NOTE: Multi-group sorts with shared memory/barriers need investigation.
@@ -1382,7 +1406,10 @@ namespace SpawnDev.ILGPU.Wasm
                     }
                 }
             }
-            catch { }
+            catch (Exception ex)
+            {
+                WasmBackend.Log($"[Wasm-CRITICAL] ExtractBuffersFromStruct FAILED: {ex.GetType().Name}: {ex.Message}");
+            }
         }
 
         /// <summary>
@@ -1436,7 +1463,10 @@ namespace SpawnDev.ILGPU.Wasm
                     }
                 }
             }
-            catch { }
+            catch (Exception ex)
+            {
+                WasmBackend.Log($"[Wasm-CRITICAL] PatchViewPointersInStruct FAILED: {ex.GetType().Name}: {ex.Message}");
+            }
         }
 
         private static void FindViewFieldsInStruct(

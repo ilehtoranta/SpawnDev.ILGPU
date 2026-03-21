@@ -179,6 +179,30 @@ namespace ILGPU.Runtime
             in ArrayView<byte> targetView);
 
         /// <summary>
+        /// Copies data from the source buffer to this buffer.
+        /// Override in derived classes (e.g., Wasm) to handle device-to-device
+        /// copies where both buffers use non-native memory (SharedArrayBuffer).
+        /// </summary>
+        /// <param name="stream">The used accelerator stream.</param>
+        /// <param name="sourceBuffer">The source memory buffer.</param>
+        /// <param name="sourceOffsetInBytes">Byte offset within the source.</param>
+        /// <param name="targetOffsetInBytes">Byte offset within this buffer.</param>
+        /// <param name="lengthInBytes">Number of bytes to copy.</param>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        protected internal virtual void CopyFromBuffer(
+            AcceleratorStream stream,
+            MemoryBuffer sourceBuffer,
+            long sourceOffsetInBytes,
+            long targetOffsetInBytes,
+            long lengthInBytes)
+        {
+            // Default: delegate to existing CopyFrom via ArrayView
+            var sourceView = sourceBuffer.AsRawArrayView(
+                sourceOffsetInBytes, lengthInBytes);
+            CopyFrom(stream, sourceView, targetOffsetInBytes);
+        }
+
+        /// <summary>
         /// Returns a raw array view of the whole buffer.
         /// </summary>
         /// <returns>The raw array view.</returns>

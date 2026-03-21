@@ -146,6 +146,38 @@ namespace SpawnDev.ILGPU.Wasm
             dstUint8.WriteBytes(data);
         }
 
+        /// <summary>
+        /// Copies data from the source buffer to this buffer.
+        /// Handles Wasm-to-Wasm copies via SharedArrayBuffer directly,
+        /// bypassing Marshal.Copy which requires native pointers.
+        /// </summary>
+        protected override void CopyFromBuffer(
+            AcceleratorStream stream,
+            MemoryBuffer sourceBuffer,
+            long sourceOffsetInBytes,
+            long targetOffsetInBytes,
+            long lengthInBytes)
+        {
+            if (sourceBuffer is WasmMemoryBuffer wasmSource)
+            {
+                // Wasm-to-Wasm: copy between SharedArrayBuffers via JS TypedArray
+                using var srcView = new Uint8Array(
+                    wasmSource.SharedBuffer,
+                    (int)sourceOffsetInBytes,
+                    (int)lengthInBytes);
+                using var dstView = new Uint8Array(
+                    SharedBuffer,
+                    (int)targetOffsetInBytes,
+                    (int)lengthInBytes);
+                dstView.JSRef!.CallVoid("set", srcView);
+                return;
+            }
+            // Non-Wasm source: fall back to default (via native pointer)
+            base.CopyFromBuffer(
+                stream, sourceBuffer,
+                sourceOffsetInBytes, targetOffsetInBytes, lengthInBytes);
+        }
+
         /// <inheritdoc/>
         protected override void DisposeAcceleratorObject(bool disposing)
         {

@@ -560,10 +560,12 @@ namespace ILGPU.Runtime
             AcceleratorStream stream,
             in TView source)
             where TView : IContiguousArrayView =>
-            target.Buffer.CopyFrom(
+            target.Buffer.CopyFromBuffer(
                 stream,
-                source.AsRawArrayView(),
-                target.IndexInBytes);
+                source.Buffer,
+                source.IndexInBytes,
+                target.IndexInBytes,
+                source.AsRawArrayView().LengthInBytes);
 
         #endregion
 

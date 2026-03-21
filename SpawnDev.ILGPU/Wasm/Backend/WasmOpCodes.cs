@@ -3,6 +3,9 @@
 //                    WebAssembly Compute Backend for Blazor WebAssembly
 //
 // File: WasmOpCodes.cs
+// All opcodes verified against the WebAssembly spec (2026-03-22 audit).
+// Ref: https://webassembly.github.io/spec/core/binary/instructions.html
+// Ref: https://webassembly.github.io/threads/core/binary/instructions.html
 // ---------------------------------------------------------------------------------------
 
 namespace SpawnDev.ILGPU.Wasm.Backend
@@ -46,7 +49,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         public const byte GlobalGet = 0x23;
         public const byte GlobalSet = 0x24;
 
-        // === Memory (i32) ===
+        // === Memory Load ===
         public const byte I32Load = 0x28;
         public const byte I64Load = 0x29;
         public const byte F32Load = 0x2A;
@@ -55,12 +58,27 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         public const byte I32Load8U = 0x2D;
         public const byte I32Load16S = 0x2E;
         public const byte I32Load16U = 0x2F;
+        public const byte I64Load8S = 0x30;
+        public const byte I64Load8U = 0x31;
+        public const byte I64Load16S = 0x32;
+        public const byte I64Load16U = 0x33;
+        public const byte I64Load32S = 0x34;
+        public const byte I64Load32U = 0x35;
+
+        // === Memory Store ===
         public const byte I32Store = 0x36;
         public const byte I64Store = 0x37;
         public const byte F32Store = 0x38;
         public const byte F64Store = 0x39;
         public const byte I32Store8 = 0x3A;
         public const byte I32Store16 = 0x3B;
+        public const byte I64Store8 = 0x3C;
+        public const byte I64Store16 = 0x3D;
+        public const byte I64Store32 = 0x3E;
+
+        // === Memory Control ===
+        public const byte MemorySize = 0x3F;
+        public const byte MemoryGrow = 0x40;
 
         // === Constants ===
         public const byte I32Const = 0x41;
@@ -187,17 +205,22 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         public const byte I32TruncF32S = 0xA8;
         public const byte I32TruncF32U = 0xA9;
         public const byte I32TruncF64S = 0xAA;
+        public const byte I32TruncF64U = 0xAB;
         public const byte I64ExtendI32S = 0xAC;
         public const byte I64ExtendI32U = 0xAD;
         public const byte I64TruncF32S = 0xAE;
+        public const byte I64TruncF32U = 0xAF;
         public const byte I64TruncF64S = 0xB0;
+        public const byte I64TruncF64U = 0xB1;
         public const byte F32ConvertI32S = 0xB2;
         public const byte F32ConvertI32U = 0xB3;
         public const byte F32ConvertI64S = 0xB4;
+        public const byte F32ConvertI64U = 0xB5;
         public const byte F32DemoteF64 = 0xB6;
         public const byte F64ConvertI32S = 0xB7;
         public const byte F64ConvertI32U = 0xB8;
         public const byte F64ConvertI64S = 0xB9;
+        public const byte F64ConvertI64U = 0xBA;
         public const byte F64PromoteF32 = 0xBB;
         public const byte I32ReinterpretF32 = 0xBC;
         public const byte I64ReinterpretF64 = 0xBD;
@@ -207,32 +230,100 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         // === Sign Extension ===
         public const byte I32Extend8S = 0xC0;
         public const byte I32Extend16S = 0xC1;
+        public const byte I64Extend8S = 0xC2;
+        public const byte I64Extend16S = 0xC3;
+        public const byte I64Extend32S = 0xC4;
 
         // === Atomic Instructions (0xFE prefix) ===
+        // Ref: https://webassembly.github.io/threads/core/binary/instructions.html
         public const byte AtomicPrefix = 0xFE;
-        // After the prefix byte:
-        public const byte MemoryAtomicNotify = 0x00;
-        public const byte MemoryAtomicWait32 = 0x01;
-        public const byte MemoryAtomicWait64 = 0x02;
-        public const byte AtomicFence = 0x03;
-        public const byte I32AtomicLoad = 0x10;
-        public const byte I64AtomicLoad = 0x11;
-        public const byte I32AtomicStore = 0x17;
-        public const byte I64AtomicStore = 0x18;
-        public const byte I32AtomicRmwAdd = 0x1E;
-        public const byte I64AtomicRmwAdd = 0x1F;
-        public const byte I32AtomicRmwSub = 0x20;
-        public const byte I64AtomicRmwSub = 0x21;
-        public const byte I32AtomicRmwAnd = 0x22;
-        public const byte I64AtomicRmwAnd = 0x23;
-        public const byte I32AtomicRmwOr = 0x24;
-        public const byte I64AtomicRmwOr = 0x25;
-        public const byte I32AtomicRmwXor = 0x26;
-        public const byte I64AtomicRmwXor = 0x27;
-        public const byte I32AtomicRmwXchg = 0x28;
-        public const byte I64AtomicRmwXchg = 0x29;
-        public const byte I32AtomicRmwCmpxchg = 0x48;
-        public const byte I64AtomicRmwCmpxchg = 0x49;
+
+        // Atomic memory control
+        public const byte MemoryAtomicNotify = 0x00;    // memory.atomic.notify
+        public const byte MemoryAtomicWait32 = 0x01;    // memory.atomic.wait32
+        public const byte MemoryAtomicWait64 = 0x02;    // memory.atomic.wait64
+        public const byte AtomicFence = 0x03;            // atomic.fence
+
+        // Atomic loads
+        public const byte I32AtomicLoad = 0x10;          // i32.atomic.load
+        public const byte I64AtomicLoad = 0x11;          // i64.atomic.load
+        public const byte I32AtomicLoad8U = 0x12;        // i32.atomic.load8_u
+        public const byte I32AtomicLoad16U = 0x13;       // i32.atomic.load16_u
+        public const byte I64AtomicLoad8U = 0x14;        // i64.atomic.load8_u
+        public const byte I64AtomicLoad16U = 0x15;       // i64.atomic.load16_u
+        public const byte I64AtomicLoad32U = 0x16;       // i64.atomic.load32_u
+
+        // Atomic stores
+        public const byte I32AtomicStore = 0x17;         // i32.atomic.store
+        public const byte I64AtomicStore = 0x18;         // i64.atomic.store
+        public const byte I32AtomicStore8 = 0x19;        // i32.atomic.store8
+        public const byte I32AtomicStore16 = 0x1A;       // i32.atomic.store16
+        public const byte I64AtomicStore8 = 0x1B;        // i64.atomic.store8
+        public const byte I64AtomicStore16 = 0x1C;       // i64.atomic.store16
+        public const byte I64AtomicStore32 = 0x1D;       // i64.atomic.store32
+
+        // Atomic RMW — Add (0x1E-0x24)
+        public const byte I32AtomicRmwAdd = 0x1E;        // i32.atomic.rmw.add
+        public const byte I64AtomicRmwAdd = 0x1F;        // i64.atomic.rmw.add
+        public const byte I32AtomicRmw8AddU = 0x20;      // i32.atomic.rmw8.add_u
+        public const byte I32AtomicRmw16AddU = 0x21;     // i32.atomic.rmw16.add_u
+        public const byte I64AtomicRmw8AddU = 0x22;      // i64.atomic.rmw8.add_u
+        public const byte I64AtomicRmw16AddU = 0x23;     // i64.atomic.rmw16.add_u
+        public const byte I64AtomicRmw32AddU = 0x24;     // i64.atomic.rmw32.add_u
+
+        // Atomic RMW — Sub (0x25-0x2B)
+        public const byte I32AtomicRmwSub = 0x25;        // i32.atomic.rmw.sub
+        public const byte I64AtomicRmwSub = 0x26;        // i64.atomic.rmw.sub
+        public const byte I32AtomicRmw8SubU = 0x27;      // i32.atomic.rmw8.sub_u
+        public const byte I32AtomicRmw16SubU = 0x28;     // i32.atomic.rmw16.sub_u
+        public const byte I64AtomicRmw8SubU = 0x29;      // i64.atomic.rmw8.sub_u
+        public const byte I64AtomicRmw16SubU = 0x2A;     // i64.atomic.rmw16.sub_u
+        public const byte I64AtomicRmw32SubU = 0x2B;     // i64.atomic.rmw32.sub_u
+
+        // Atomic RMW — And (0x2C-0x32)
+        public const byte I32AtomicRmwAnd = 0x2C;        // i32.atomic.rmw.and
+        public const byte I64AtomicRmwAnd = 0x2D;        // i64.atomic.rmw.and
+        public const byte I32AtomicRmw8AndU = 0x2E;      // i32.atomic.rmw8.and_u
+        public const byte I32AtomicRmw16AndU = 0x2F;     // i32.atomic.rmw16.and_u
+        public const byte I64AtomicRmw8AndU = 0x30;      // i64.atomic.rmw8.and_u
+        public const byte I64AtomicRmw16AndU = 0x31;     // i64.atomic.rmw16.and_u
+        public const byte I64AtomicRmw32AndU = 0x32;     // i64.atomic.rmw32.and_u
+
+        // Atomic RMW — Or (0x33-0x39)
+        public const byte I32AtomicRmwOr = 0x33;         // i32.atomic.rmw.or
+        public const byte I64AtomicRmwOr = 0x34;         // i64.atomic.rmw.or
+        public const byte I32AtomicRmw8OrU = 0x35;       // i32.atomic.rmw8.or_u
+        public const byte I32AtomicRmw16OrU = 0x36;      // i32.atomic.rmw16.or_u
+        public const byte I64AtomicRmw8OrU = 0x37;       // i64.atomic.rmw8.or_u
+        public const byte I64AtomicRmw16OrU = 0x38;      // i64.atomic.rmw16.or_u
+        public const byte I64AtomicRmw32OrU = 0x39;      // i64.atomic.rmw32.or_u
+
+        // Atomic RMW — Xor (0x3A-0x40)
+        public const byte I32AtomicRmwXor = 0x3A;        // i32.atomic.rmw.xor
+        public const byte I64AtomicRmwXor = 0x3B;        // i64.atomic.rmw.xor
+        public const byte I32AtomicRmw8XorU = 0x3C;      // i32.atomic.rmw8.xor_u
+        public const byte I32AtomicRmw16XorU = 0x3D;     // i32.atomic.rmw16.xor_u
+        public const byte I64AtomicRmw8XorU = 0x3E;      // i64.atomic.rmw8.xor_u
+        public const byte I64AtomicRmw16XorU = 0x3F;     // i64.atomic.rmw16.xor_u
+        public const byte I64AtomicRmw32XorU = 0x40;     // i64.atomic.rmw32.xor_u
+
+        // Atomic RMW — Xchg (0x41-0x47)
+        public const byte I32AtomicRmwXchg = 0x41;       // i32.atomic.rmw.xchg
+        public const byte I64AtomicRmwXchg = 0x42;       // i64.atomic.rmw.xchg
+        public const byte I32AtomicRmw8XchgU = 0x43;     // i32.atomic.rmw8.xchg_u
+        public const byte I32AtomicRmw16XchgU = 0x44;    // i32.atomic.rmw16.xchg_u
+        public const byte I64AtomicRmw8XchgU = 0x45;     // i64.atomic.rmw8.xchg_u
+        public const byte I64AtomicRmw16XchgU = 0x46;    // i64.atomic.rmw16.xchg_u
+        public const byte I64AtomicRmw32XchgU = 0x47;    // i64.atomic.rmw32.xchg_u
+
+        // Atomic RMW — CmpXchg (0x48-0x4E)
+        public const byte I32AtomicRmwCmpxchg = 0x48;    // i32.atomic.rmw.cmpxchg
+        public const byte I64AtomicRmwCmpxchg = 0x49;    // i64.atomic.rmw.cmpxchg
+        public const byte I32AtomicRmw8CmpxchgU = 0x4A;  // i32.atomic.rmw8.cmpxchg_u
+        public const byte I32AtomicRmw16CmpxchgU = 0x4B; // i32.atomic.rmw16.cmpxchg_u
+        public const byte I64AtomicRmw8CmpxchgU = 0x4C;  // i64.atomic.rmw8.cmpxchg_u
+        public const byte I64AtomicRmw16CmpxchgU = 0x4D; // i64.atomic.rmw16.cmpxchg_u
+        public const byte I64AtomicRmw32CmpxchgU = 0x4E; // i64.atomic.rmw32.cmpxchg_u
 
         // === Section IDs ===
         public const byte SectionCustom = 0;
@@ -247,6 +338,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         public const byte SectionElement = 9;
         public const byte SectionCode = 10;
         public const byte SectionData = 11;
+        public const byte SectionDataCount = 12;
 
         // === Import/Export Kinds ===
         public const byte ExternalFunc = 0x00;

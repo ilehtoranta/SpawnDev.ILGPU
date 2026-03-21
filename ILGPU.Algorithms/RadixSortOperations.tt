@@ -85,7 +85,7 @@ namespace ILGPU.Algorithms.RadixSortOperations
             var bits = Interop.FloatAsInt(value) ^ (signMask | onesComplementMask);
 <# } else if (type.IsFloat) { #>
             var signMask = 1<#= type.Name == "Double" ? "UL" : "U" #> << (NumBits - 1);
-            var onesComplementMask = (Interop.FloatAsInt(value) >> (NumBits - 1));
+            var onesComplementMask = (<#= type.Name == "Double" ? "ulong" : "uint" #>)((<#= type.Name == "Double" ? "long" : "int" #>)(Interop.FloatAsInt(value)) >> (NumBits - 1));
             var bits = Interop.FloatAsInt(value) ^ (signMask | onesComplementMask);
 <# } else { #>
             var bits = value;
