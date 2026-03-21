@@ -88,8 +88,11 @@ self.onmessage = async function(e) {
       _cachedModule = await WebAssembly.compile(wasmBuf);
       _cachedInstance = null; // Force re-instantiate with new module
     }
-    // Only re-instantiate when module or memory changes
-    if (!_cachedInstance || d.memory !== _lastMemory) {
+    // Only re-instantiate when module or memory's underlying buffer changes.
+    // PostMessage creates a new Memory wrapper (different object) but the underlying
+    // SharedArrayBuffer is the same. Compare .buffer to avoid wasteful re-instantiation.
+    var memChanged = !_cachedInstance || !_lastMemory || d.memory.buffer !== _lastMemory.buffer;
+    if (memChanged) {
       _lastMemory = d.memory;
       _cachedInstance = await WebAssembly.instantiate(_cachedModule, {
         env: { memory: d.memory },

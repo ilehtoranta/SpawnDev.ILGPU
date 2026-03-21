@@ -502,7 +502,14 @@ namespace SpawnDev.ILGPU.Wasm
                     bufferOffsets.Add(totalMemoryBytes);
                     totalMemoryBytes += (int)buf.LengthInBytes;
                 }
-                // Scratch memory for struct construction (after all buffers).
+                // Grid-stride padding: ILGPU kernels assume GPU-style memory overprovisioning.
+                // Grid-stride loops may read up to (gridDimX * groupSize) elements past the
+                // last buffer. On CUDA/OpenCL this is harmless (GPU memory is overprovisioned).
+                // On Wasm, linear memory is exactly sized — pad to prevent OOB traps.
+                int gridStridePadding = compiledKernel.HasBarriers ? groupSize * gridDimX * 4 : 0;
+                totalMemoryBytes += gridStridePadding;
+
+                // Scratch memory for struct construction (after all buffers + padding).
                 // For barrier kernels, each worker needs its own scratch to avoid races.
                 int scratchPerThread = Math.Max(compiledKernel.ScratchPerThread, 64); // min 64 bytes
                 int scratchBase = (totalMemoryBytes + 7) & ~7;
@@ -643,9 +650,6 @@ namespace SpawnDev.ILGPU.Wasm
                 }
 
                 // Zero out shared memory and barrier regions to prevent stale data.
-                // Zero scratch + shared + barrier regions to prevent stale data from
-                // previous dispatches affecting the current dispatch (phase state, shared
-                // memory, barrier counters). Buffer regions are overwritten by copy-in.
                 int zeroStart = scratchBase;
                 int zeroEnd = totalWithBarriers;
                 if (zeroEnd > zeroStart)
@@ -664,7 +668,6 @@ namespace SpawnDev.ILGPU.Wasm
                     using var dstView = new Uint8Array(memoryBuffer, offset, (int)buf.LengthInBytes);
                     dstView.JSRef!.CallVoid("set", srcView);
                 }
-
                 // Debug: check buf.SharedBuffer and Wasm memory after copy-in
                 if (dispNum >= 1 && dispNum <= 8 && bufferInfos.Count > 0)
                 {
@@ -991,13 +994,10 @@ namespace SpawnDev.ILGPU.Wasm
             int phaseCount = compiledKernel.PhaseCount;
             if (hasBarriers)
             {
-                // Multi-worker barrier dispatch. Eliminate empty workers to prevent
-                // barrier race (empty workers race through phases with no tid loop).
-                // Cap workers to avoid livelock/deadlock with too many.
-                // 8 workers confirmed working; 11+ deadlocks.
-                // Cap at 4 workers for barrier kernels while investigating
-                // intermittent ScanWithBoundaries failure (shared memory visibility).
-                workerCount = Math.Min(Math.Min(_workerCount, groupSize), 4);
+                // 2 workers for barrier kernels. Full hardwareConcurrency for non-barrier.
+                // 3+ workers have intermittent shared memory visibility failures at high
+                // barrier sync volumes (post-4.6.0 investigation). 2 workers = 100% pass.
+                workerCount = Math.Min(Math.Min(_workerCount, groupSize), 2);
                 int fibersPerWorker = (groupSize + workerCount - 1) / workerCount;
                 workerCount = (groupSize + fibersPerWorker - 1) / fibersPerWorker;
                 if (workerCount < 1) workerCount = 1;
@@ -1294,7 +1294,10 @@ namespace SpawnDev.ILGPU.Wasm
                 sb.AppendLine("    const dispatcher = d._instance.exports.dispatcher;");
                 sb.AppendLine("    const threadStart = d.threadStart;");
                 sb.AppendLine("    const threadEnd = d.threadEnd;");
-                sb.AppendLine();
+                // Verify memory is big enough before dispatching
+                sb.AppendLine($"    const memBytes = d.memory.buffer.byteLength;");
+                sb.AppendLine($"    const needed = {fenceSlot + 32};");
+                sb.AppendLine($"    if (memBytes < needed) {{ self.postMessage({{ done: false, error: 'MEM TOO SMALL: buffer=' + memBytes + ' needed=' + needed + ' fence={fenceSlot} scratch={scratchBase}+{scratchPerThread}*{groupSize} shared={sharedMemBase}' }}); return; }}");
                 sb.AppendLine("    try {");
                 sb.Append($"      dispatcher(threadStart, threadEnd, {numGroups}, {groupSize}, {gridDimX}, {gridDimY}, {scratchBase}, {scratchPerThread}, {sharedMemBase}, {barrierBase}, {dynamicSharedLength}, {zeroRegionSize}, {workerCount}, {fenceSlot}");
                 if (argStr.Length > 0)

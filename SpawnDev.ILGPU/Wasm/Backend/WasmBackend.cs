@@ -822,9 +822,8 @@ namespace SpawnDev.ILGPU.Wasm.Backend
 
             code.Add(WasmOpCodes.Else);
 
-            // Other workers: wait for generation to advance.
-            // wait32 with infinite timeout. Safe now that the zero region race is fixed
-            // (fence slots excluded from between-group zeroing).
+            // Other workers: wait for generation to advance (infinite wait32).
+            // wait32 provides stronger memory ordering than spin-wait.
             WasmModuleBuilder.EmitLocalGet(code, 13); // fenceBase
             WasmModuleBuilder.EmitLocalGet(code, pSavedGen);
             WasmModuleBuilder.EmitI64Const(code, -1); // infinite timeout

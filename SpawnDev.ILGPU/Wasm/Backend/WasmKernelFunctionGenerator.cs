@@ -1114,6 +1114,12 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             // Phase mode: enable when ANY barriers exist (own or via helpers).
             bool anyHelperHasBarriers = _generatorArgs.HelperBarrierCounts.Values.Any(c => c > 0);
             _phaseMode = totalBarriers > 0 || anyHelperHasBarriers || _generatorArgs.PhaseCount > 1;
+            // Set _hasBarriers BEFORE IR visiting so ALL shared memory loads/stores
+            // use atomic ops from the start. Previously, _hasBarriers was only set when
+            // the first barrier was encountered during IR visiting, causing early shared
+            // memory writes (e.g., RadixSort histogram zeroing) to use non-atomic stores.
+            if (_phaseMode)
+                _hasBarriers = true;
             if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm-Phase] totalBarriers={totalBarriers} (direct={directBarriers} helper={helperBarriers} calls={helperCallCount} sync={_needsSyncYields}), phaseMode={_phaseMode}, blockCount={_blockCount}, expandedBlockCount={expandedBlockCount}");
             // Reserve first 4 bytes of scratch for yield flag (Option E).
             // Phase state starts after, 8-byte aligned.

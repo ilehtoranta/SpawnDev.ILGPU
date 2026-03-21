@@ -585,5 +585,172 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
 
         // DualScanKernelTest: un-skipped — MaxNumThreadsPerGroup increased to 256.
         // TwoPassScanSimulationTest: un-skipped — CopyFromBuffer handles Wasm-to-Wasm copies.
+
+        // ═══════════════════════════════════════════════════════════════
+        // BARRIER ISOLATION TESTS — isolate the 3+ worker failure
+        // ═══════════════════════════════════════════════════════════════
+
+        // Test 1: Simple scan with 32 threads, repeated 50 times to detect intermittent failures
+        static void IsolationScan32Kernel(Index1D index, ArrayView<int> output)
+        {
+            var shared = SharedMemory.Allocate<int>(256);
+            shared[Group.IdxX] = 2;
+            Group.Barrier();
+            if (Group.IdxX == 0)
+            {
+                for (int i = 1; i < Group.DimX; i++)
+                    shared[i] = shared[i - 1] + shared[i];
+            }
+            Group.Barrier();
+            output[Group.IdxX] = shared[Group.IdxX];
+        }
+
+        [TestMethod]
+        public async Task WasmBarrierIsolation32Test() => await RunTest(async accelerator =>
+        {
+            int gs = 32;
+            for (int run = 0; run < 50; run++)
+            {
+                using var buf = accelerator.Allocate1D<int>(gs);
+                var kernel = accelerator.LoadStreamKernel<Index1D, ArrayView<int>>(IsolationScan32Kernel);
+                kernel(new KernelConfig(1, gs), (Index1D)gs, buf.View);
+                await accelerator.SynchronizeAsync();
+                var result = await buf.CopyToHostAsync<int>();
+                for (int i = 0; i < gs; i++)
+                {
+                    int expected = (i + 1) * 2;
+                    if (result[i] != expected)
+                        throw new Exception($"Isolation32 run {run} pos {i}: expected {expected}, got {result[i]}");
+                }
+            }
+        });
+
+        // Test 2: Same scan with 256 threads (RadixSort groupSize)
+        [TestMethod]
+        public async Task WasmBarrierIsolation256Test() => await RunTest(async accelerator =>
+        {
+            int gs = 256;
+            for (int run = 0; run < 50; run++)
+            {
+                using var buf = accelerator.Allocate1D<int>(gs);
+                var kernel = accelerator.LoadStreamKernel<Index1D, ArrayView<int>>(IsolationScan32Kernel);
+                kernel(new KernelConfig(1, gs), (Index1D)gs, buf.View);
+                await accelerator.SynchronizeAsync();
+                var result = await buf.CopyToHostAsync<int>();
+                for (int i = 0; i < gs; i++)
+                {
+                    int expected = (i + 1) * 2;
+                    if (result[i] != expected)
+                        throw new Exception($"Isolation256 run {run} pos {i}: expected {expected}, got {result[i]}");
+                }
+            }
+        });
+
+        // Test 4: ExclusiveScan via GroupExtensions (same path as RadixSort)
+        static void IsolationGroupScanKernel(Index1D index, ArrayView<int> input, ArrayView<int> output)
+        {
+            int val = input[Group.IdxX];
+            int scanned = GroupExtensions.ExclusiveScan<int,
+                global::ILGPU.Algorithms.ScanReduceOperations.AddInt32>(val);
+            output[Group.IdxX] = scanned;
+        }
+
+        [TestMethod]
+        public async Task WasmBarrierIsolationGroupScanTest() => await RunTest(async accelerator =>
+        {
+            int gs = 32;
+            for (int run = 0; run < 50; run++)
+            {
+                using var inBuf = accelerator.Allocate1D<int>(gs);
+                using var outBuf = accelerator.Allocate1D<int>(gs);
+                var data = new int[gs];
+                for (int i = 0; i < gs; i++) data[i] = 2;
+                inBuf.CopyFromCPU(data);
+                var kernel = accelerator.LoadStreamKernel<Index1D, ArrayView<int>, ArrayView<int>>(IsolationGroupScanKernel);
+                kernel(new KernelConfig(1, gs), (Index1D)gs, inBuf.View, outBuf.View);
+                await accelerator.SynchronizeAsync();
+                var result = await outBuf.CopyToHostAsync<int>();
+                for (int i = 0; i < gs; i++)
+                {
+                    int expected = i * 2; // exclusive scan: [0, 2, 4, ...]
+                    if (result[i] != expected)
+                        throw new Exception($"GroupScan run {run} pos {i}: expected {expected}, got {result[i]}");
+                }
+            }
+        });
+
+        // Test 3: Multi-group (4 groups × 256 threads)
+        static void IsolationMultiGroupKernel(Index1D index, ArrayView<int> output, int groupSize)
+        {
+            var shared = SharedMemory.Allocate<int>(256);
+            shared[Group.IdxX] = 2;
+            Group.Barrier();
+            if (Group.IdxX == 0)
+            {
+                for (int i = 1; i < groupSize; i++)
+                    shared[i] = shared[i - 1] + shared[i];
+            }
+            Group.Barrier();
+            int gid = Grid.IdxX * groupSize + Group.IdxX;
+            if (gid < output.Length)
+                output[gid] = shared[Group.IdxX];
+        }
+
+        [TestMethod]
+        public async Task WasmBarrierIsolationMultiGroupTest() => await RunTest(async accelerator =>
+        {
+            int gs = 256;
+            int numGroups = 4;
+            int total = gs * numGroups;
+            for (int run = 0; run < 20; run++)
+            {
+                using var buf = accelerator.Allocate1D<int>(total);
+                var kernel = accelerator.LoadStreamKernel<Index1D, ArrayView<int>, int>(IsolationMultiGroupKernel);
+                kernel(new KernelConfig(numGroups, gs), (Index1D)total, buf.View, gs);
+                await accelerator.SynchronizeAsync();
+                var result = await buf.CopyToHostAsync<int>();
+                for (int g = 0; g < numGroups; g++)
+                {
+                    for (int i = 0; i < gs; i++)
+                    {
+                        int expected = (i + 1) * 2;
+                        int actual = result[g * gs + i];
+                        if (actual != expected)
+                            throw new Exception($"IsolationMultiGroup run {run} group {g} pos {i}: expected {expected}, got {actual}");
+                    }
+                }
+            }
+        });
+        // Test 5: RadixSort at various sizes to find the failure threshold
+        [TestMethod(Timeout = 300000)]
+        public async Task WasmBarrierIsolationRadixSortSizeTest() => await RunTest(async accelerator =>
+        {
+            foreach (int size in new[] { 10000, 50000, 100000, 200000, 300000, 400000, 500000 })
+            {
+                var keys = new int[size];
+                var rng = new Random(42);
+                for (int i = 0; i < size; i++) keys[i] = rng.Next();
+
+                using var keysBuf = accelerator.Allocate1D(keys);
+                var tempSize = accelerator.ComputeRadixSortTempStorageSize<int,
+                    global::ILGPU.Algorithms.RadixSortOperations.AscendingInt32>(size);
+                using var tempBuf = accelerator.Allocate1D<int>(tempSize);
+
+                var sort = accelerator.CreateRadixSort<int, Stride1D.Dense,
+                    global::ILGPU.Algorithms.RadixSortOperations.AscendingInt32>();
+                sort(accelerator.DefaultStream, keysBuf.View, tempBuf.View.AsContiguous());
+                await accelerator.SynchronizeAsync();
+
+                var result = await keysBuf.CopyToHostAsync<int>();
+                int violations = 0;
+                for (int i = 1; i < size; i++)
+                {
+                    if (result[i] < result[i - 1])
+                        violations++;
+                }
+                if (violations > 0)
+                    throw new Exception($"RadixSort size={size}: {violations} order violations");
+            }
+        });
     }
 }
