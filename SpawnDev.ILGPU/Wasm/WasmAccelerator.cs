@@ -1257,85 +1257,22 @@ namespace SpawnDev.ILGPU.Wasm
 
             if (hasBarriers)
             {
-                // Fiber dispatch: each worker runs multiple fibers (threads) per phase.
-                // N workers × M fibers each. The kernel returns i32: 0=done, 1=yielded.
-                // Workers loop until all fibers return 0 (complete).
+                // Phase dispatcher: runs the thread/phase/group loop entirely in Wasm.
+                // Eliminates ~1M JS-Wasm boundary crossings for large sorts.
+                // The "dispatcher" function is compiled into the Wasm module.
+                sb.AppendLine("    const dispatcher = d._instance.exports.dispatcher;");
                 sb.AppendLine("    const threadStart = d.threadStart;");
                 sb.AppendLine("    const threadEnd = d.threadEnd;");
-                sb.AppendLine($"    const groupSize = {groupSize};");
-                sb.AppendLine($"    const numGroups = {numGroups};");
-                sb.AppendLine($"    const workerCount = {workerCount};");
-                sb.AppendLine($"    const scratchPerThread = {scratchPerThread};");
-                sb.AppendLine($"    const _phaseBarrier = new Int32Array(d.memory.buffer, {fenceSlot}, 2);");
-                sb.AppendLine($"    const _groupBarrier = new Int32Array(d.memory.buffer, {fenceSlot} + 8, 2);");
-                sb.AppendLine($"    const _globalYield = new Int32Array(d.memory.buffer, {fenceSlot} + 16, 2);");
                 sb.AppendLine();
-                sb.AppendLine("    for (let g = 0; g < numGroups; g++) {");
-                sb.AppendLine("      let phase = 0;");
-                sb.AppendLine("      let _phaseTrace = '';");
-                sb.AppendLine("      while (true) {");
-                sb.AppendLine("        let _yieldCount = 0;");
-                sb.AppendLine("        for (let tid = threadStart; tid < threadEnd; tid++) {");
-                sb.AppendLine("          const globalIdx = g * groupSize + tid;");
-                sb.AppendLine($"          const myScratch = {scratchBase} + tid * scratchPerThread;");
-                sb.AppendLine("          let r;");
-                sb.AppendLine("          try {");
-                sb.Append($"            r = kernel(globalIdx, {gridDimX}, {gridDimY}, myScratch, {groupSize}, tid, {sharedMemBase}, {barrierBase}, {dynamicSharedLength}, phase");
+                sb.AppendLine("    try {");
+                sb.Append($"      dispatcher(threadStart, threadEnd, {numGroups}, {groupSize}, {gridDimX}, {gridDimY}, {scratchBase}, {scratchPerThread}, {sharedMemBase}, {barrierBase}, {dynamicSharedLength}");
                 if (argStr.Length > 0)
                 {
                     sb.Append(", ");
                     sb.Append(argStr);
                 }
                 sb.AppendLine(");");
-                sb.AppendLine("          } catch(e) { self.postMessage({ done: false, error: 'Kernel trap: ' + e.message + ' g=' + g + ' tid=' + tid + ' phase=' + phase + ' spt=' + scratchPerThread + ' trace:' + _phaseTrace }); return; }");
-                sb.AppendLine("          if (r === 1) { _yieldCount++; }");
-                sb.AppendLine("        }");
-                sb.AppendLine("        if (phase >= 10) _phaseTrace += 'p' + phase + ':' + _yieldCount + '/' + (threadEnd-threadStart) + ' ';");
-                // Multi-worker: use shared atomic yield counter so ALL workers agree on exit
-                sb.AppendLine("        if (workerCount > 1) {");
-                // Add this worker's yield count to global counter
-                sb.AppendLine("          Atomics.add(_globalYield, 0, _yieldCount);");
-                // Phase barrier: synchronize all workers
-                sb.AppendLine("          const arrived = Atomics.add(_phaseBarrier, 0, 1) + 1;");
-                sb.AppendLine("          if (arrived === workerCount) {");
-                // Last worker: check global yield count, reset, and broadcast
-                sb.AppendLine("            const totalYields = Atomics.load(_globalYield, 0);");
-                sb.AppendLine("            Atomics.store(_globalYield, 0, 0);");
-                sb.AppendLine("            Atomics.store(_globalYield, 1, totalYields === 0 ? 1 : 0);");
-                sb.AppendLine("            Atomics.store(_phaseBarrier, 0, 0);");
-                sb.AppendLine("            Atomics.add(_phaseBarrier, 1, 1);");
-                sb.AppendLine("            Atomics.notify(_phaseBarrier, 1, workerCount);");
-                sb.AppendLine("          } else {");
-                sb.AppendLine("            const gen = Atomics.load(_phaseBarrier, 1);");
-                sb.AppendLine("            while (Atomics.load(_phaseBarrier, 1) === gen) {");
-                sb.AppendLine("              Atomics.wait(_phaseBarrier, 1, gen, 1);");
-                sb.AppendLine("            }");
-                sb.AppendLine("          }");
-                // All workers check exit flag (set by last worker)
-                sb.AppendLine("          if (Atomics.load(_globalYield, 1) === 1) break;");
-                sb.AppendLine("        } else {");
-                // Single worker: just check own yields
-                sb.AppendLine("          if (_yieldCount === 0) break;");
-                sb.AppendLine("        }");
-                sb.AppendLine("        if (phase >= 1000000) { self.postMessage({ done: false, error: 'Phase limit 1M. trace: ' + _phaseTrace }); return; }");
-                sb.AppendLine("        phase++;");
-                sb.AppendLine("      }");
-                // NOTE: Multi-group sorts with shared memory/barriers need investigation.
-                // Simple zeroing between groups wipes data the algorithm needs.
-                // The real fix is likely in counter address computation for multi-group.
-                // Cross-group barrier
-                sb.AppendLine("      const gArrived = Atomics.add(_groupBarrier, 0, 1) + 1;");
-                sb.AppendLine("      if (gArrived === workerCount) {");
-                sb.AppendLine("        Atomics.store(_groupBarrier, 0, 0);");
-                sb.AppendLine("        Atomics.add(_groupBarrier, 1, 1);");
-                sb.AppendLine("        Atomics.notify(_groupBarrier, 1, workerCount);");
-                sb.AppendLine("      } else {");
-                sb.AppendLine("        const gGen = Atomics.load(_groupBarrier, 1);");
-                sb.AppendLine("        while (Atomics.load(_groupBarrier, 1) === gGen) {");
-                sb.AppendLine("          Atomics.wait(_groupBarrier, 1, gGen, 1);");
-                sb.AppendLine("        }");
-                sb.AppendLine("      }");
-                sb.AppendLine("    }");
+                sb.AppendLine("    } catch(e) { self.postMessage({ done: false, error: 'Dispatcher trap: ' + e.message }); return; }");
             }
             else
             {

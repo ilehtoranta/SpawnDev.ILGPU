@@ -510,6 +510,15 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             // Update shared memory size to account for helper Broadcast slots
             data.SharedMemorySize = maxSharedMemorySize;
 
+            // Add phase dispatcher for barrier kernels.
+            // Moves the thread/phase loop from JS into Wasm, eliminating ~1M JS-Wasm
+            // boundary crossings per dispatch for large sorts (260K elements).
+            if (data.HasBarriers)
+            {
+                GeneratePhaseDispatcher(moduleBuilder, funcIdx, paramTypes, definedFuncIndex);
+                definedFuncIndex++;
+            }
+
             // Emit binary
             var wasmBinary = moduleBuilder.Emit();
 
@@ -553,6 +562,202 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 data.DynamicSharedElementSize,
                 data.ScratchPerThread,
                 data.PhaseCount);
+        }
+
+        /// <summary>
+        /// Generates a phase dispatcher function that runs the thread/phase loop
+        /// entirely in Wasm. Eliminates JS-Wasm boundary crossings per phase.
+        /// Dispatcher params: (threadStart, threadEnd, numGroups, groupSize,
+        ///   gridDimX, gridDimY, scratchBase, scratchPerThread,
+        ///   sharedMemBase, barrierBase, dynamicSharedLen, ...userArgs)
+        /// </summary>
+        private void GeneratePhaseDispatcher(
+            WasmModuleBuilder moduleBuilder,
+            int kernelFuncIdx,
+            byte[] kernelParamTypes,
+            int definedFuncIndex)
+        {
+            // Dispatcher params: 11 system + N user (same user params as kernel)
+            // Kernel params: 10 system (globalIdx..phase) + N user
+            int kernelSystemParams = 10; // globalIdx, dimX, dimY, scratch, groupDimX, tid, sharedMem, barrier, dynShared, phase
+            int userParamCount = kernelParamTypes.Length - kernelSystemParams;
+
+            // Dispatcher system params
+            var dispParamTypes = new List<byte>();
+            dispParamTypes.Add(WasmOpCodes.I32); // 0: threadStart
+            dispParamTypes.Add(WasmOpCodes.I32); // 1: threadEnd
+            dispParamTypes.Add(WasmOpCodes.I32); // 2: numGroups
+            dispParamTypes.Add(WasmOpCodes.I32); // 3: groupSize
+            dispParamTypes.Add(WasmOpCodes.I32); // 4: gridDimX
+            dispParamTypes.Add(WasmOpCodes.I32); // 5: gridDimY
+            dispParamTypes.Add(WasmOpCodes.I32); // 6: scratchBase
+            dispParamTypes.Add(WasmOpCodes.I32); // 7: scratchPerThread
+            dispParamTypes.Add(WasmOpCodes.I32); // 8: sharedMemBase
+            dispParamTypes.Add(WasmOpCodes.I32); // 9: barrierBase
+            dispParamTypes.Add(WasmOpCodes.I32); // 10: dynamicSharedLen
+            int dispSystemParams = 11;
+
+            // Add user params (same types as kernel's user params)
+            for (int i = kernelSystemParams; i < kernelParamTypes.Length; i++)
+                dispParamTypes.Add(kernelParamTypes[i]);
+
+            int dispTypeIdx = moduleBuilder.AddFuncType(dispParamTypes.ToArray(), Array.Empty<byte>());
+            int dispFuncIdx = moduleBuilder.AddFunction(dispTypeIdx);
+            moduleBuilder.ExportFunction("dispatcher", dispFuncIdx);
+
+            // Locals: g, phase, tid, anyYielded, r
+            var locals = new List<WasmLocal>
+            {
+                new WasmLocal { Type = WasmOpCodes.I32, Count = 5 } // g, phase, tid, anyYielded, r
+            };
+            uint pG = (uint)dispParamTypes.Count;         // local index for g
+            uint pPhase = pG + 1;
+            uint pTid = pG + 2;
+            uint pAnyYielded = pG + 3;
+            uint pR = pG + 4;
+
+            var code = new List<byte>();
+
+            // g = 0
+            WasmModuleBuilder.EmitI32Const(code, 0);
+            WasmModuleBuilder.EmitLocalSet(code, pG);
+
+            // block $exit_g
+            code.Add(WasmOpCodes.Block);
+            code.Add(WasmOpCodes.Void);
+            // loop $loop_g
+            code.Add(WasmOpCodes.Loop);
+            code.Add(WasmOpCodes.Void);
+
+            // br_if $exit_g (g >= numGroups)
+            WasmModuleBuilder.EmitLocalGet(code, pG);
+            WasmModuleBuilder.EmitLocalGet(code, 2); // numGroups
+            code.Add(WasmOpCodes.I32GeU);
+            code.Add(WasmOpCodes.BrIf);
+            WasmModuleBuilder.EmitU32Leb128(code, 1); // break to $exit_g
+
+            // phase = 0
+            WasmModuleBuilder.EmitI32Const(code, 0);
+            WasmModuleBuilder.EmitLocalSet(code, pPhase);
+
+            // block $exit_phase
+            code.Add(WasmOpCodes.Block);
+            code.Add(WasmOpCodes.Void);
+            // loop $loop_phase
+            code.Add(WasmOpCodes.Loop);
+            code.Add(WasmOpCodes.Void);
+
+            // anyYielded = 0
+            WasmModuleBuilder.EmitI32Const(code, 0);
+            WasmModuleBuilder.EmitLocalSet(code, pAnyYielded);
+
+            // tid = threadStart
+            WasmModuleBuilder.EmitLocalGet(code, 0); // threadStart
+            WasmModuleBuilder.EmitLocalSet(code, pTid);
+
+            // block $exit_tid
+            code.Add(WasmOpCodes.Block);
+            code.Add(WasmOpCodes.Void);
+            // loop $loop_tid
+            code.Add(WasmOpCodes.Loop);
+            code.Add(WasmOpCodes.Void);
+
+            // br_if $exit_tid (tid >= threadEnd)
+            WasmModuleBuilder.EmitLocalGet(code, pTid);
+            WasmModuleBuilder.EmitLocalGet(code, 1); // threadEnd
+            code.Add(WasmOpCodes.I32GeU);
+            code.Add(WasmOpCodes.BrIf);
+            WasmModuleBuilder.EmitU32Leb128(code, 1); // break to $exit_tid
+
+            // Push kernel args: globalIdx = g * groupSize + tid
+            WasmModuleBuilder.EmitLocalGet(code, pG);
+            WasmModuleBuilder.EmitLocalGet(code, 3); // groupSize
+            code.Add(WasmOpCodes.I32Mul);
+            WasmModuleBuilder.EmitLocalGet(code, pTid);
+            code.Add(WasmOpCodes.I32Add);
+            // gridDimX
+            WasmModuleBuilder.EmitLocalGet(code, 4);
+            // gridDimY
+            WasmModuleBuilder.EmitLocalGet(code, 5);
+            // myScratch = scratchBase + tid * scratchPerThread
+            WasmModuleBuilder.EmitLocalGet(code, 6); // scratchBase
+            WasmModuleBuilder.EmitLocalGet(code, pTid);
+            WasmModuleBuilder.EmitLocalGet(code, 7); // scratchPerThread
+            code.Add(WasmOpCodes.I32Mul);
+            code.Add(WasmOpCodes.I32Add);
+            // groupDimX = groupSize
+            WasmModuleBuilder.EmitLocalGet(code, 3);
+            // threadIdX = tid
+            WasmModuleBuilder.EmitLocalGet(code, pTid);
+            // sharedMemBase
+            WasmModuleBuilder.EmitLocalGet(code, 8);
+            // barrierBase
+            WasmModuleBuilder.EmitLocalGet(code, 9);
+            // dynamicSharedLen
+            WasmModuleBuilder.EmitLocalGet(code, 10);
+            // phase
+            WasmModuleBuilder.EmitLocalGet(code, pPhase);
+            // user args (pass through from dispatcher params)
+            for (int i = 0; i < userParamCount; i++)
+                WasmModuleBuilder.EmitLocalGet(code, (uint)(dispSystemParams + i));
+
+            // call kernel
+            code.Add(WasmOpCodes.Call);
+            WasmModuleBuilder.EmitU32Leb128(code, (uint)kernelFuncIdx);
+            WasmModuleBuilder.EmitLocalSet(code, pR);
+
+            // if (r === 1) anyYielded = 1
+            WasmModuleBuilder.EmitLocalGet(code, pR);
+            WasmModuleBuilder.EmitI32Const(code, 1);
+            code.Add(WasmOpCodes.I32Eq);
+            code.Add(WasmOpCodes.If);
+            code.Add(WasmOpCodes.Void);
+            WasmModuleBuilder.EmitI32Const(code, 1);
+            WasmModuleBuilder.EmitLocalSet(code, pAnyYielded);
+            code.Add(WasmOpCodes.End); // end if
+
+            // tid++
+            WasmModuleBuilder.EmitLocalGet(code, pTid);
+            WasmModuleBuilder.EmitI32Const(code, 1);
+            code.Add(WasmOpCodes.I32Add);
+            WasmModuleBuilder.EmitLocalSet(code, pTid);
+            code.Add(WasmOpCodes.Br);
+            WasmModuleBuilder.EmitU32Leb128(code, 0); // continue $loop_tid
+
+            code.Add(WasmOpCodes.End); // end loop $loop_tid
+            code.Add(WasmOpCodes.End); // end block $exit_tid
+
+            // if (!anyYielded) break
+            WasmModuleBuilder.EmitLocalGet(code, pAnyYielded);
+            code.Add(WasmOpCodes.I32Eqz);
+            code.Add(WasmOpCodes.BrIf);
+            WasmModuleBuilder.EmitU32Leb128(code, 1); // break to $exit_phase
+
+            // phase++
+            WasmModuleBuilder.EmitLocalGet(code, pPhase);
+            WasmModuleBuilder.EmitI32Const(code, 1);
+            code.Add(WasmOpCodes.I32Add);
+            WasmModuleBuilder.EmitLocalSet(code, pPhase);
+            code.Add(WasmOpCodes.Br);
+            WasmModuleBuilder.EmitU32Leb128(code, 0); // continue $loop_phase
+
+            code.Add(WasmOpCodes.End); // end loop $loop_phase
+            code.Add(WasmOpCodes.End); // end block $exit_phase
+
+            // g++
+            WasmModuleBuilder.EmitLocalGet(code, pG);
+            WasmModuleBuilder.EmitI32Const(code, 1);
+            code.Add(WasmOpCodes.I32Add);
+            WasmModuleBuilder.EmitLocalSet(code, pG);
+            code.Add(WasmOpCodes.Br);
+            WasmModuleBuilder.EmitU32Leb128(code, 0); // continue $loop_g
+
+            code.Add(WasmOpCodes.End); // end loop $loop_g
+            code.Add(WasmOpCodes.End); // end block $exit_g
+
+            moduleBuilder.SetFunctionBody(definedFuncIndex, locals, code.ToArray());
+
+            if (VerboseLogging) Log($"[Wasm-Dispatcher] Added phase dispatcher: funcIdx={dispFuncIdx}, params={dispParamTypes.Count} (system={dispSystemParams}, user={userParamCount}), code={code.Count}b");
         }
 
         #endregion

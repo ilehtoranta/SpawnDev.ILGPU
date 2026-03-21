@@ -573,9 +573,6 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
         public new async Task RadixSortBoundary20KTest() =>
             throw new UnsupportedTestException("Wasm: 20K pairs — intermittent order violations (~33%)");
         [TestMethod]
-        public new async Task RadixSortThresholdProbeTest() =>
-            throw new UnsupportedTestException("Wasm: 260K elements — timeout (30s limit, needs barrier optimization)");
-        [TestMethod]
         public new async Task ScanBroadcastIsolationTest() =>
             throw new UnsupportedTestException("Wasm: unaligned memory access at g=12 tid=147 phase=2 (codegen alignment bug)");
 
