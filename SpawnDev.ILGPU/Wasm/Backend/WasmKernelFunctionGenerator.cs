@@ -1437,12 +1437,53 @@ namespace SpawnDev.ILGPU.Wasm.Backend
 
         public override void GenerateCode(Load value)
         {
-            // For struct types, pass through the source address.
+            // For struct types, copy to scratch for snapshot semantics.
+            // Without this, in-place pre-sort `view[pos] = value` can overwrite
+            // the source data that another thread's Load references (aliasing).
+            // This causes ~1-5 element corruptions in large (16K+) sorts.
             if (value.Type is StructureType structType)
             {
+                int structSize = structType.Size;
+                int alignedSize = (structSize + 7) & ~7;
+                string valueKey = GetValueKey(value);
+                if (!_structLoadSlots.TryGetValue(valueKey, out int scratchOffset))
+                {
+                    scratchOffset = _scratchNextOffset;
+                    _scratchNextOffset += alignedSize;
+                    _structLoadSlots[valueKey] = scratchOffset;
+                }
                 var target = AllocateLocal(value, WasmOpCodes.I32);
                 var source = value.Source.Resolve();
-                EmitGetLocal(source);
+                for (int i = 0; i < structType.NumFields; i++)
+                {
+                    var fieldAccess = new FieldAccess(i);
+                    int byteOffset = structType.GetOffset(fieldAccess);
+                    var fieldType = structType.Fields[i];
+                    byte fieldWasmType = GetWasmTypeFromIR(fieldType);
+                    byte loadOp, storeOp;
+                    uint align;
+                    switch (fieldWasmType)
+                    {
+                        case WasmOpCodes.I64: loadOp = WasmOpCodes.I64Load; storeOp = WasmOpCodes.I64Store; align = 3; break;
+                        case WasmOpCodes.F32: loadOp = WasmOpCodes.F32Load; storeOp = WasmOpCodes.F32Store; align = 2; break;
+                        case WasmOpCodes.F64: loadOp = WasmOpCodes.F64Load; storeOp = WasmOpCodes.F64Store; align = 3; break;
+                        default: loadOp = WasmOpCodes.I32Load; storeOp = WasmOpCodes.I32Store; align = 2; break;
+                    }
+                    WasmModuleBuilder.EmitLocalGet(Code, _scratchBaseLocal);
+                    WasmModuleBuilder.EmitI32Const(Code, scratchOffset + byteOffset);
+                    Code.Add(WasmOpCodes.I32Add);
+                    EmitGetLocal(source);
+                    if (byteOffset > 0)
+                    {
+                        WasmModuleBuilder.EmitI32Const(Code, byteOffset);
+                        Code.Add(WasmOpCodes.I32Add);
+                    }
+                    WasmModuleBuilder.EmitLoad(Code, loadOp, align, 0);
+                    WasmModuleBuilder.EmitStore(Code, storeOp, align, 0);
+                }
+                WasmModuleBuilder.EmitLocalGet(Code, _scratchBaseLocal);
+                WasmModuleBuilder.EmitI32Const(Code, scratchOffset);
+                Code.Add(WasmOpCodes.I32Add);
                 WasmModuleBuilder.EmitLocalSet(Code, target);
                 return;
             }

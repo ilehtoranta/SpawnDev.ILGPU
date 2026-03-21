@@ -542,21 +542,21 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
         // ═══════════════════════════════════════════════════════════════
 
         // Pairs-dependent sort tests — small (128-256) pass, large (2048+) fail with order violations.
-        [TestMethod]
-        public new async Task AlgorithmRadixSortLargeTest() =>
-            throw new UnsupportedTestException("Wasm: 2048-element pairs sort order violation (TODO)");
+        // AlgorithmRadixSortLargeTest: un-skipped for investigation (2048 pairs)
+        // 2048 pairs passes. 16K+ has 4-5 order violations from multi-group shared memory.
         [TestMethod]
         public new async Task RadixSortBoundary16KTest() =>
-            throw new UnsupportedTestException("Wasm: 16K pairs sort order violation (TODO)");
+            throw new UnsupportedTestException("Wasm: 16K pairs — multi-group shared memory (TODO)");
         [TestMethod]
         public new async Task RadixSortBoundary20KTest() =>
-            throw new UnsupportedTestException("Wasm: 20K pairs sort order violation (TODO)");
+            throw new UnsupportedTestException("Wasm: 20K pairs — multi-group shared memory (TODO)");
+        // 16K pairs: 4-5 non-deterministic order violations (0.03%). Memory reuse issue.
         [TestMethod]
         public new async Task RadixSortPairsIndexIntegrityTest() =>
-            throw new UnsupportedTestException("Wasm: 16K pairs sort order violation (TODO)");
+            throw new UnsupportedTestException("Wasm: 16K pairs — non-deterministic order violations (TODO)");
         [TestMethod]
         public new async Task RadixSortPairsDescendingIndexIntegrityTest() =>
-            throw new UnsupportedTestException("Wasm: 16K pairs sort order violation (TODO)");
+            throw new UnsupportedTestException("Wasm: 16K pairs — multi-group shared memory (TODO)");
         // RadixSortMinimalPatterns: un-skipped with memory.grow() fix.
         [TestMethod]
         public new async Task RadixSortThresholdProbeTest() =>
