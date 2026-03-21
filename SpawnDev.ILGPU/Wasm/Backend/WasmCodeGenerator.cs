@@ -334,7 +334,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         /// <summary>
         /// Emits a typed memory load from the address on the stack.
         /// </summary>
-        protected void EmitTypedLoad(byte wasmType)
+        protected virtual void EmitTypedLoad(byte wasmType)
         {
             switch (wasmType)
             {
@@ -348,7 +348,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         /// <summary>
         /// Emits a typed memory store (address and value should already be on the stack).
         /// </summary>
-        protected void EmitTypedStore(byte wasmType)
+        protected virtual void EmitTypedStore(byte wasmType)
         {
             switch (wasmType)
             {

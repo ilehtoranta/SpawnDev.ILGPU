@@ -87,7 +87,7 @@ namespace SpawnDev.ILGPU.Wasm.Algorithms
             var sharedMemory = InclusiveScanImplementation<T, TScanOperation>(value);
             boundaries = new ScanBoundaries<T>(
                 sharedMemory[0],
-                sharedMemory[Math.Max(0, Group.DimX - 2)]);
+                sharedMemory[Group.DimX - 1]);
             return Group.IdxX == 0
                 ? default(TScanOperation).Identity
                 : sharedMemory[Group.IdxX - 1];

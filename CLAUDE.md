@@ -44,7 +44,7 @@ Detailed constraints live in each directory's own `CLAUDE.md`. Read the relevant
 
 Tests in `SpawnDev.ILGPU.Demo.Shared/UnitTests/BackendTestBase*.cs` (~211 tests, Tests1-10). Backend-specific classes inherit and override unsupported tests. See `PlaywrightMultiTest/CLAUDE.md` for running tests.
 
-**Current results (March 2026):** Wasm: 223 pass / 0 fail / 18 skip (+41 total, 22+ fixes). Key fixes: struct/scratch overlap, multi-pass scan, Float16, unsigned ops, 256 threads, memory.grow(), ViewSourceSequencer, subViewByteOffset, atomic RMW opcode table (And/Or/Xor/Sub/Xchg all wrong), CopyFromBuffer (Wasm-to-Wasm), onesComplementMask .tt template, Fix B disabled (unnecessary). Full opcode audit complete. Multi-worker protocol correct but reverted to single-worker (JS barrier overhead). Next: in-Wasm barriers (memory.atomic.wait32/notify) for multi-worker perf.
+**Current results (March 2026):** Wasm: 238 pass / 0 fail / 3 skip (v4.6.0). 4-worker barrier dispatch with in-Wasm atomic barriers + fences. `hardwareConcurrency` non-barrier dispatch. All large sort tests (260K-4M) passing. Key fixes: struct/scratch overlap, multi-pass scan, Float16, unsigned ops, 256 threads, memory.grow(), ViewSourceSequencer, subViewByteOffset, atomic RMW opcode table, CopyFromBuffer, onesComplementMask .tt template, per-worker scratch (killed intermittent bug), atomic.fence at 3 sync points, float atomic stores, broadcast atomic store/load, barrier counter zeroing between groups.
 
 ## Debugging Pipeline — ShaderDebugService
 

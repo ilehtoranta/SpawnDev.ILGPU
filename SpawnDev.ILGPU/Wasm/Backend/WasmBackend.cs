@@ -418,7 +418,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             // Max 2048 pages = 128MB. Larger values (65536=4GB, 16384=1GB) cause RangeError
             // on some browsers when creating SharedArrayBuffer-backed WebAssembly.Memory.
             // 128MB provides 60x+ headroom over realistic kernel workloads.
-            moduleBuilder.ImportSharedMemory("env", "memory", 1, 2048);
+            moduleBuilder.ImportSharedMemory("env", "memory", 1, 16384);
 
             // Import math functions from JavaScript Math object
             var mathImports = new Dictionary<string, uint>();
@@ -569,7 +569,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         /// entirely in Wasm. Eliminates JS-Wasm boundary crossings per phase.
         /// Dispatcher params: (threadStart, threadEnd, numGroups, groupSize,
         ///   gridDimX, gridDimY, scratchBase, scratchPerThread,
-        ///   sharedMemBase, barrierBase, dynamicSharedLen, ...userArgs)
+        ///   sharedMemBase, barrierBase, dynamicSharedLen, zeroRegionSize, ...userArgs)
         /// </summary>
         private void GeneratePhaseDispatcher(
             WasmModuleBuilder moduleBuilder,
@@ -595,7 +595,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             dispParamTypes.Add(WasmOpCodes.I32); // 8: sharedMemBase
             dispParamTypes.Add(WasmOpCodes.I32); // 9: barrierBase
             dispParamTypes.Add(WasmOpCodes.I32); // 10: dynamicSharedLen
-            dispParamTypes.Add(WasmOpCodes.I32); // 11: sharedMemSize (for zeroing between groups)
+            dispParamTypes.Add(WasmOpCodes.I32); // 11: zeroRegionSize (shared mem + barrier counters, for zeroing between groups)
             dispParamTypes.Add(WasmOpCodes.I32); // 12: workerCount (for inter-worker barriers)
             dispParamTypes.Add(WasmOpCodes.I32); // 13: fenceBase (for inter-worker atomic barriers)
             int dispSystemParams = 14;
@@ -737,6 +737,11 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             // For workerCount=1: simple check. For workerCount>1: Wasm atomic barrier.
             // fenceBase layout: [0]=arrival counter, [4]=generation, [8]=global yield count, [12]=exit flag
 
+            // Fence: flush non-atomic shared memory writes from this phase
+            code.Add(WasmOpCodes.AtomicPrefix);
+            WasmModuleBuilder.EmitU32Leb128(code, WasmOpCodes.AtomicFence);
+            code.Add(0x00);
+
             // Add this worker's yield count to global yield counter (atomic)
             WasmModuleBuilder.EmitLocalGet(code, 13); // fenceBase param
             WasmModuleBuilder.EmitLocalGet(code, pAnyYielded);
@@ -795,6 +800,11 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             WasmModuleBuilder.EmitU32Leb128(code, WasmOpCodes.I32AtomicStore);
             code.Add(0x02); code.Add(0x08); // offset=8 (global yield count)
 
+            // Fence before notify: ensure all writes visible to waking workers
+            code.Add(WasmOpCodes.AtomicPrefix);
+            WasmModuleBuilder.EmitU32Leb128(code, WasmOpCodes.AtomicFence);
+            code.Add(0x00);
+
             // Bump generation and notify
             WasmModuleBuilder.EmitLocalGet(code, 13); // fenceBase
             WasmModuleBuilder.EmitLocalGet(code, pSavedGen);
@@ -821,6 +831,11 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             code.Add(0x02); code.Add(0x04); // offset=4 (wait on generation)
             code.Add(WasmOpCodes.Drop);
 
+            // Fence after wait: acquire visibility of notifier's writes
+            code.Add(WasmOpCodes.AtomicPrefix);
+            WasmModuleBuilder.EmitU32Leb128(code, WasmOpCodes.AtomicFence);
+            code.Add(0x00);
+
             code.Add(WasmOpCodes.End); // end if
 
             // All workers: check exit flag
@@ -842,18 +857,19 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             code.Add(WasmOpCodes.End); // end loop $loop_phase
             code.Add(WasmOpCodes.End); // end block $exit_phase
 
-            // Zero shared memory between groups to prevent stale broadcast slots,
-            // scan buffers, and reduce accumulators from corrupting the next group.
-            // Loop: for (zeroIdx = 0; zeroIdx < sharedMemSize; zeroIdx += 4) i32.store(sharedMemBase + zeroIdx, 0)
+            // Zero shared memory AND barrier counters between groups to prevent stale
+            // broadcast slots, scan buffers, reduce accumulators, and barrier arrival/sense
+            // values from corrupting the next group.
+            // Loop: for (zeroIdx = 0; zeroIdx < zeroRegionSize; zeroIdx += 4) i32.store(sharedMemBase + zeroIdx, 0)
             WasmModuleBuilder.EmitI32Const(code, 0);
             WasmModuleBuilder.EmitLocalSet(code, pZeroIdx);
             code.Add(WasmOpCodes.Block);
             code.Add(WasmOpCodes.Void);
             code.Add(WasmOpCodes.Loop);
             code.Add(WasmOpCodes.Void);
-            // br_if exit (zeroIdx >= sharedMemSize)
+            // br_if exit (zeroIdx >= zeroRegionSize)
             WasmModuleBuilder.EmitLocalGet(code, pZeroIdx);
-            WasmModuleBuilder.EmitLocalGet(code, 11); // sharedMemSize param
+            WasmModuleBuilder.EmitLocalGet(code, 11); // zeroRegionSize param
             code.Add(WasmOpCodes.I32GeU);
             code.Add(WasmOpCodes.BrIf);
             WasmModuleBuilder.EmitU32Leb128(code, 1); // break to exit block
@@ -931,7 +947,13 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             WasmModuleBuilder.EmitU32Leb128(code, WasmOpCodes.MemoryAtomicWait32);
             code.Add(0x02); code.Add(0x14); // offset=20
             code.Add(WasmOpCodes.Drop);
-            code.Add(WasmOpCodes.End); // end if
+            code.Add(WasmOpCodes.End); // end if (group barrier)
+
+            // After group barrier: ALL workers fence + reset phase state for next group.
+            // atomic.fence ensures visibility of the last worker's exit flag reset.
+            code.Add(WasmOpCodes.AtomicPrefix);
+            WasmModuleBuilder.EmitU32Leb128(code, WasmOpCodes.AtomicFence);
+            code.Add(0x00); // fence ordering byte
 
             // g++
             WasmModuleBuilder.EmitLocalGet(code, pG);

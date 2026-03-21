@@ -127,7 +127,16 @@ namespace SpawnDev.ILGPU.Wasm
         {
             var device = new WasmILGPUDevice();
             var accelerator = new WasmAccelerator(context, device);
-            accelerator._workerCount = options?.WorkerCount ?? 4;
+            // Use navigator.hardwareConcurrency for optimal parallelism.
+            // On modern machines this is typically 8-24 workers.
+            int hwConcurrency = 4;
+            try
+            {
+                var js = BlazorJSRuntime.JS;
+                hwConcurrency = js.Get<int>("navigator.hardwareConcurrency");
+            }
+            catch { }
+            accelerator._workerCount = options?.WorkerCount ?? Math.Max(hwConcurrency, 1);
             var backend = new WasmBackend(context, options ?? new WasmBackendOptions());
             accelerator.Backend = backend;
             accelerator.Init(backend);
@@ -497,9 +506,14 @@ namespace SpawnDev.ILGPU.Wasm
                 // For barrier kernels, each worker needs its own scratch to avoid races.
                 int scratchPerThread = Math.Max(compiledKernel.ScratchPerThread, 64); // min 64 bytes
                 int scratchBase = (totalMemoryBytes + 7) & ~7;
+                // Compute actual worker count for scratch allocation (must match dispatch)
+                int effectiveWorkers = compiledKernel.HasBarriers
+                    ? Math.Min(4, groupSize)  // barrier: capped at 4
+                    : Math.Min(_workerCount, totalItems); // non-barrier: hardwareConcurrency
+                if (effectiveWorkers < 1) effectiveWorkers = 1;
                 int scratchSize = compiledKernel.HasBarriers
                     ? scratchPerThread * groupSize  // per-thread scratch for barrier kernels
-                    : scratchPerThread * _workerCount; // per-worker scratch for non-barrier kernels
+                    : scratchPerThread * effectiveWorkers; // per-worker scratch (exact, no waste)
 
                 // Pre-compute struct param bytes so we can place them AFTER per-thread
                 // scratch. Without this, struct params at scratchBase + 0 overlap with
@@ -540,8 +554,12 @@ namespace SpawnDev.ILGPU.Wasm
 
                 if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm] Memory layout: buffers={totalMemoryBytes}, scratch={scratchBase}(spt={scratchPerThread}), structRegion={structRegionBase}({totalStructBytes}), sharedMem={sharedMemBase}({sharedMemSize}), barrier={barrierBase}({barrierSize}), hasBarriers={compiledKernel.HasBarriers}, groupSize={groupSize}");
 
-                // Round up to Wasm page size (64KB)
+                // Round up to Wasm page size (64KB) with generous safety margin.
+                // Multi-worker dispatch with hardwareConcurrency workers needs extra
+                // headroom for per-worker scratch and alignment padding.
                 int wasmPages = Math.Max(1, (totalWithBarriers + 65535) / 65536);
+                wasmPages = wasmPages * 2; // 100% margin
+                if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm-MEM] total={totalWithBarriers} pages={wasmPages} buf={totalMemoryBytes} scratch={scratchBase}+{scratchSize} struct={structRegionBase}+{totalStructBytes} shared={sharedMemBase}+{sharedMemSize} barrier={barrierBase}+{barrierSize} fence={fenceSlot} spt={scratchPerThread} gs={groupSize} _wc={_workerCount}");
 
                 // Determine whether we can reuse the cached memory.
                 // If there are other pending kernel dispatches running concurrently,
@@ -570,7 +588,7 @@ namespace SpawnDev.ILGPU.Wasm
                         _cachedWasmPages = wasmPages;
                         _cachedWasmMemory = js.Call<JSObject>(
                             "eval",
-                            $"new WebAssembly.Memory({{ initial: {wasmPages}, maximum: 2048, shared: true }})");
+                            $"new WebAssembly.Memory({{ initial: {wasmPages}, maximum: 16384, shared: true }})");
                         _cachedMemoryBuffer = _cachedWasmMemory.JSRef!.Get<SharedArrayBuffer>("buffer");
                         _initializedWorkers.Clear();
                     }
@@ -605,7 +623,7 @@ namespace SpawnDev.ILGPU.Wasm
                         _cachedWasmPages = wasmPages;
                         _cachedWasmMemory = js.Call<JSObject>(
                             "eval",
-                            $"new WebAssembly.Memory({{ initial: {wasmPages}, maximum: 2048, shared: true }})");
+                            $"new WebAssembly.Memory({{ initial: {wasmPages}, maximum: 16384, shared: true }})");
                         _cachedMemoryBuffer = _cachedWasmMemory.JSRef!.Get<SharedArrayBuffer>("buffer");
                         _initializedWorkers.Clear();
                     }
@@ -973,12 +991,10 @@ namespace SpawnDev.ILGPU.Wasm
             int phaseCount = compiledKernel.PhaseCount;
             if (hasBarriers)
             {
-                // Single-worker for barrier kernels.
-                // In-Wasm atomic barriers work for phase sync, but multi-group dispatch
-                // also needs between-group barriers (workers can be at different groups
-                // simultaneously, causing shared memory corruption). Full multi-worker
-                // needs: phase barrier + group barrier + coordinated shared mem zeroing.
-                workerCount = 1;
+                // Multi-worker barrier with in-Wasm atomic barriers + fences.
+                // Cap at 4 workers — 12-worker OOB is a known post-4.6.0 issue.
+                workerCount = Math.Min(4, groupSize);
+                if (workerCount < 1) workerCount = 1;
             }
             else
             {
@@ -1006,7 +1022,10 @@ namespace SpawnDev.ILGPU.Wasm
                 gridDimX, gridDimY, scratchBase, scratchPerThread,
                 sharedMemBase, barrierBase, fenceSlot,
                 groupSize, numGroups, hasBarriers, argStr,
-                dynamicSharedElements, workerCount, phaseCount, compiledKernel.SharedMemorySize);
+                dynamicSharedElements, workerCount, phaseCount,
+                // Zero region covers both shared memory AND barrier counters so stale
+                // barrier arrival/sense values from the previous group don't leak through.
+                (barrierBase + compiledKernel.BarrierCount * 8) - sharedMemBase);
 
             // Lazily initialize the worker pool, or grow it if needed
             if (_workerPool == null)
@@ -1067,7 +1086,7 @@ namespace SpawnDev.ILGPU.Wasm
                         if (!done)
                         {
                             var errorMsg = msg.JSRef!.Get<string?>("data.error") ?? "Unknown worker error";
-                            tcs.TrySetException(new Exception($"[Wasm] Worker {workerIdx} error: {errorMsg}"));
+                            tcs.TrySetException(new Exception($"[Wasm] Worker {workerIdx} error: {errorMsg} | pages={_cachedWasmPages} mem={_cachedWasmPages*65536}"));
                             return;
                         }
                         tcs.TrySetResult();
@@ -1145,7 +1164,7 @@ namespace SpawnDev.ILGPU.Wasm
                         if (!done)
                         {
                             var errorMsg = msg.JSRef!.Get<string?>("data.error") ?? "Unknown worker error";
-                            tcs.TrySetException(new Exception($"[Wasm] Worker {workerIdx} error: {errorMsg}"));
+                            tcs.TrySetException(new Exception($"[Wasm] Worker {workerIdx} error: {errorMsg} | pages={_cachedWasmPages} mem={_cachedWasmPages*65536}"));
                             return;
                         }
                         tcs.TrySetResult();
@@ -1248,7 +1267,7 @@ namespace SpawnDev.ILGPU.Wasm
             int dynamicSharedLength = 0,
             int workerCount = 1,
             int phaseCount = 1,
-            int sharedMemSize = 0)
+            int zeroRegionSize = 0)
         {
             // Produces an async function body string that is sent as the 'script' field
             // in the message to the pool worker's async bootstrap.
@@ -1268,14 +1287,14 @@ namespace SpawnDev.ILGPU.Wasm
                 sb.AppendLine("    const threadEnd = d.threadEnd;");
                 sb.AppendLine();
                 sb.AppendLine("    try {");
-                sb.Append($"      dispatcher(threadStart, threadEnd, {numGroups}, {groupSize}, {gridDimX}, {gridDimY}, {scratchBase}, {scratchPerThread}, {sharedMemBase}, {barrierBase}, {dynamicSharedLength}, {sharedMemSize}, {workerCount}, {fenceSlot}");
+                sb.Append($"      dispatcher(threadStart, threadEnd, {numGroups}, {groupSize}, {gridDimX}, {gridDimY}, {scratchBase}, {scratchPerThread}, {sharedMemBase}, {barrierBase}, {dynamicSharedLength}, {zeroRegionSize}, {workerCount}, {fenceSlot}");
                 if (argStr.Length > 0)
                 {
                     sb.Append(", ");
                     sb.Append(argStr);
                 }
                 sb.AppendLine(");");
-                sb.AppendLine("    } catch(e) { self.postMessage({ done: false, error: 'Dispatcher trap: ' + e.message }); return; }");
+                sb.AppendLine("    } catch(e) { self.postMessage({ done: false, error: 'Dispatcher trap: ' + e.message + ' memSize=' + d.memory.buffer.byteLength }); return; }");
             }
             else
             {

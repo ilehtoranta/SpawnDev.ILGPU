@@ -30,7 +30,7 @@ Compiles ILGPU IR → WebAssembly binary. Dispatches via Web Workers with Shared
 - **AddressSpaceType views** (ArrayView): field 1 = **Index/Offset** → return 0
 
 This was hardcoded to 0 for ALL views, which broke `view.Length` for ArrayView1D params.
-The fix checks `param.Type is StructureType`. Current: 222 pass / 0 fail / 19 skip (was 182/0/51) (v4.6.0). +2 intermittent sort failures (~33% hit rate).
+The fix checks `param.Type is StructureType`. Current: 238 pass / 0 fail / 3 skip (was 182/0/51) (v4.6.0). Intermittent bug KILLED (per-worker scratch for non-barrier). 4-worker barrier dispatch with in-Wasm atomic phase + group barriers + fences. `hardwareConcurrency` non-barrier dispatch. Wasm phase dispatcher eliminates JS-Wasm boundary crossings.
 
 **TRACE RULE**: Both `GetViewLength` and `GetField` must trace the view source back to
 the kernel Parameter through GetField/NewView/AddressSpaceCast chains (via `TraceToParameter()`).
@@ -71,11 +71,11 @@ If this test produces duplicates or non-deterministic results, the post-helper b
 
 ## Fiber Refactor Status (March 2026) — COMPLETE
 
-**Test results: 223 pass / 0 fail / 18 skip (was 182/0/51)** (up from 49/10/17 pre-refactor). All RadixSort, scan, barrier, and sort tests pass on the Wasm backend.
+**Test results: 238 pass / 0 fail / 3 skip (was 182/0/51)** (up from 49/10/17 pre-refactor). All RadixSort, scan, barrier, sort, and large sort (260K-4M) tests pass on the Wasm backend.
 
 **Fix B v4 DISABLED** — synthetic yield before struct Store to Global was unnecessary. Barriers already separate Load/Store phases. Fix B caused phase explosion for large sorts (260K → 20K+ phases). Disabling it: same failure rate, no timeout.
 
-**Multi-worker:** Protocol correct (shared atomic yield counter, 197 tests pass with 4 workers) but reverted to single-worker. JS Atomics.wait/notify barrier overhead per phase too high. Next: in-Wasm barriers (memory.atomic.wait32/notify) where the kernel runs to completion without JS round-trips.
+**Multi-worker:** 4-worker barrier dispatch with in-Wasm atomic barriers (memory.atomic.wait32/notify), atomic.fence at 3 sync points, float atomic stores via reinterpret, broadcast atomic store/load. `hardwareConcurrency` workers for non-barrier kernels. 12-worker barrier OOB is post-4.6.0 (root cause unknown, address computation issue).
 
 The fiber refactor resolved the multi-group barrier dispatch limitation. Eight bugs were fixed collaboratively by two agents:
 

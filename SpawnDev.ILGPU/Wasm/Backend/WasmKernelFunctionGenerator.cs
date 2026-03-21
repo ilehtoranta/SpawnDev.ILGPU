@@ -1509,17 +1509,62 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                         case WasmOpCodes.F64: loadOp = WasmOpCodes.F64Load; storeOp = WasmOpCodes.F64Store; align = 3; break;
                         default: loadOp = WasmOpCodes.I32Load; storeOp = WasmOpCodes.I32Store; align = 2; break;
                     }
+                    // dest addr = scratchBase + scratchOffset + byteOffset
                     WasmModuleBuilder.EmitLocalGet(Code, _scratchBaseLocal);
                     WasmModuleBuilder.EmitI32Const(Code, scratchOffset + byteOffset);
                     Code.Add(WasmOpCodes.I32Add);
+                    // source addr
                     EmitGetLocal(source);
                     if (byteOffset > 0)
                     {
                         WasmModuleBuilder.EmitI32Const(Code, byteOffset);
                         Code.Add(WasmOpCodes.I32Add);
                     }
-                    WasmModuleBuilder.EmitLoad(Code, loadOp, align, 0);
-                    WasmModuleBuilder.EmitStore(Code, storeOp, align, 0);
+                    // Load from source (atomic in barrier kernels for cross-worker visibility)
+                    if (_hasBarriers)
+                    {
+                        switch (fieldWasmType)
+                        {
+                            case WasmOpCodes.I64:
+                                WasmModuleBuilder.EmitAtomicRmw(Code, WasmOpCodes.I64AtomicLoad, 3, 0);
+                                break;
+                            case WasmOpCodes.F32:
+                                WasmModuleBuilder.EmitAtomicRmw(Code, WasmOpCodes.I32AtomicLoad, 2, 0);
+                                // Keep as i32 — store to scratch as i32 (same bit pattern)
+                                break;
+                            case WasmOpCodes.F64:
+                                WasmModuleBuilder.EmitAtomicRmw(Code, WasmOpCodes.I64AtomicLoad, 3, 0);
+                                // Keep as i64 — store to scratch as i64 (same bit pattern)
+                                break;
+                            default: // I32
+                                WasmModuleBuilder.EmitAtomicRmw(Code, WasmOpCodes.I32AtomicLoad, 2, 0);
+                                break;
+                        }
+                        // Store to scratch (per-thread private, but use matching int type for
+                        // the value on the stack after atomic load of float fields)
+                        switch (fieldWasmType)
+                        {
+                            case WasmOpCodes.I64:
+                                WasmModuleBuilder.EmitStore(Code, WasmOpCodes.I64Store, 3, 0);
+                                break;
+                            case WasmOpCodes.F32:
+                                // Stack has i32 from atomic load; store as i32 (same bits as f32)
+                                WasmModuleBuilder.EmitStore(Code, WasmOpCodes.I32Store, 2, 0);
+                                break;
+                            case WasmOpCodes.F64:
+                                // Stack has i64 from atomic load; store as i64 (same bits as f64)
+                                WasmModuleBuilder.EmitStore(Code, WasmOpCodes.I64Store, 3, 0);
+                                break;
+                            default: // I32
+                                WasmModuleBuilder.EmitStore(Code, WasmOpCodes.I32Store, 2, 0);
+                                break;
+                        }
+                    }
+                    else
+                    {
+                        WasmModuleBuilder.EmitLoad(Code, loadOp, align, 0);
+                        WasmModuleBuilder.EmitStore(Code, storeOp, align, 0);
+                    }
                 }
                 WasmModuleBuilder.EmitLocalGet(Code, _scratchBaseLocal);
                 WasmModuleBuilder.EmitI32Const(Code, scratchOffset);
@@ -1541,16 +1586,43 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             if (isFloat16)
             {
                 // Float16: load 2 bytes as u16, convert to f32 via IEEE 754 bit manipulation
-                WasmModuleBuilder.EmitLoad(Code, WasmOpCodes.I32Load16U, 1, 0);
+                if (_hasBarriers)
+                {
+                    // Atomic 16-bit load (2-byte aligned)
+                    Code.Add(WasmOpCodes.AtomicPrefix);
+                    WasmModuleBuilder.EmitU32Leb128(Code, WasmOpCodes.I32AtomicLoad16U);
+                    Code.Add(0x01); Code.Add(0x00); // align=1 (2 bytes), offset=0
+                }
+                else
+                    WasmModuleBuilder.EmitLoad(Code, WasmOpCodes.I32Load16U, 1, 0);
                 EmitF16ToF32(); // inline conversion: i32 (f16 bits) → f32
             }
-            // For barrier kernels, use atomic loads for cross-worker visibility
-            else if (_hasBarriers && (wasmType == WasmOpCodes.I32 || wasmType == WasmOpCodes.I64))
+            // For barrier kernels, use atomic loads for ALL types for cross-worker visibility.
+            // Float types use reinterpret: i32.atomic.load → f32.reinterpret_i32 (or i64 → f64).
+            else if (_hasBarriers)
             {
-                byte atomicLoadOp = wasmType == WasmOpCodes.I64
-                    ? WasmOpCodes.I64AtomicLoad : WasmOpCodes.I32AtomicLoad;
-                uint atomicAlign = wasmType == WasmOpCodes.I64 ? 3u : 2u;
-                WasmModuleBuilder.EmitAtomicRmw(Code, atomicLoadOp, atomicAlign, 0);
+                switch (wasmType)
+                {
+                    case WasmOpCodes.I64:
+                        WasmModuleBuilder.EmitAtomicRmw(Code, WasmOpCodes.I64AtomicLoad, 3, 0);
+                        break;
+                    case WasmOpCodes.I32:
+                        WasmModuleBuilder.EmitAtomicRmw(Code, WasmOpCodes.I32AtomicLoad, 2, 0);
+                        break;
+                    case WasmOpCodes.F32:
+                        // i32.atomic.load then f32.reinterpret_i32
+                        WasmModuleBuilder.EmitAtomicRmw(Code, WasmOpCodes.I32AtomicLoad, 2, 0);
+                        Code.Add(WasmOpCodes.F32ReinterpretI32);
+                        break;
+                    case WasmOpCodes.F64:
+                        // i64.atomic.load then f64.reinterpret_i64
+                        WasmModuleBuilder.EmitAtomicRmw(Code, WasmOpCodes.I64AtomicLoad, 3, 0);
+                        Code.Add(WasmOpCodes.F64ReinterpretI64);
+                        break;
+                    default:
+                        WasmModuleBuilder.EmitAtomicRmw(Code, WasmOpCodes.I32AtomicLoad, 2, 0);
+                        break;
+                }
             }
             else
             {
@@ -1814,29 +1886,8 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                     Code.Add(WasmOpCodes.I32Add);
                 }
 
-                // Emit typed load for the field
-                byte loadOp;
-                uint align;
-                switch (fieldWasmType)
-                {
-                    case WasmOpCodes.I64:
-                        loadOp = WasmOpCodes.I64Load;
-                        align = 3;
-                        break;
-                    case WasmOpCodes.F32:
-                        loadOp = WasmOpCodes.F32Load;
-                        align = 2;
-                        break;
-                    case WasmOpCodes.F64:
-                        loadOp = WasmOpCodes.F64Load;
-                        align = 3;
-                        break;
-                    default:
-                        loadOp = WasmOpCodes.I32Load;
-                        align = 2;
-                        break;
-                }
-                WasmModuleBuilder.EmitLoad(Code, loadOp, align, 0);
+                // Emit typed load for the field (atomic for barrier kernels)
+                EmitTypedLoad(fieldWasmType);
                 WasmModuleBuilder.EmitLocalSet(Code, target);
                 return;
             }
@@ -1893,7 +1944,10 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                         align = 2;
                         break;
                 }
-                WasmModuleBuilder.EmitStore(Code, storeOp, align, 0);
+                if (_hasBarriers)
+                    EmitTypedStore(fieldWasmType);
+                else
+                    WasmModuleBuilder.EmitStore(Code, storeOp, align, 0);
 
                 // Return the base address (unchanged — struct was modified in-place)
                 EmitGetLocal(objectValue);
@@ -1999,20 +2053,51 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                         WasmModuleBuilder.EmitI32Const(Code, byteOffset);
                         Code.Add(WasmOpCodes.I32Add);
                     }
-                    if (_hasBarriers && (fieldWasmType == WasmOpCodes.I32 || fieldWasmType == WasmOpCodes.I64))
+                    // Load field value (atomic for barrier kernels, all types via reinterpret)
+                    if (_hasBarriers)
                     {
-                        byte atomicLoadOp = fieldWasmType == WasmOpCodes.I64
-                            ? WasmOpCodes.I64AtomicLoad : WasmOpCodes.I32AtomicLoad;
-                        WasmModuleBuilder.EmitAtomicRmw(Code, atomicLoadOp, align, 0);
+                        switch (fieldWasmType)
+                        {
+                            case WasmOpCodes.I64:
+                                WasmModuleBuilder.EmitAtomicRmw(Code, WasmOpCodes.I64AtomicLoad, 3, 0);
+                                break;
+                            case WasmOpCodes.F32:
+                                WasmModuleBuilder.EmitAtomicRmw(Code, WasmOpCodes.I32AtomicLoad, 2, 0);
+                                Code.Add(WasmOpCodes.F32ReinterpretI32);
+                                break;
+                            case WasmOpCodes.F64:
+                                WasmModuleBuilder.EmitAtomicRmw(Code, WasmOpCodes.I64AtomicLoad, 3, 0);
+                                Code.Add(WasmOpCodes.F64ReinterpretI64);
+                                break;
+                            default: // I32
+                                WasmModuleBuilder.EmitAtomicRmw(Code, WasmOpCodes.I32AtomicLoad, 2, 0);
+                                break;
+                        }
                     }
                     else
                         WasmModuleBuilder.EmitLoad(Code, loadOp, align, 0);
 
-                    // Store to destination (atomic for barrier kernels)
-                    if (_hasBarriers && (fieldWasmType == WasmOpCodes.I32 || fieldWasmType == WasmOpCodes.I64))
-                        WasmModuleBuilder.EmitAtomicRmw(Code,
-                            fieldWasmType == WasmOpCodes.I64 ? WasmOpCodes.I64AtomicStore : WasmOpCodes.I32AtomicStore,
-                            align, 0);
+                    // Store to destination (atomic for barrier kernels, all types via reinterpret)
+                    if (_hasBarriers)
+                    {
+                        switch (fieldWasmType)
+                        {
+                            case WasmOpCodes.I64:
+                                WasmModuleBuilder.EmitAtomicRmw(Code, WasmOpCodes.I64AtomicStore, 3, 0);
+                                break;
+                            case WasmOpCodes.F32:
+                                Code.Add(WasmOpCodes.I32ReinterpretF32);
+                                WasmModuleBuilder.EmitAtomicRmw(Code, WasmOpCodes.I32AtomicStore, 2, 0);
+                                break;
+                            case WasmOpCodes.F64:
+                                Code.Add(WasmOpCodes.I64ReinterpretF64);
+                                WasmModuleBuilder.EmitAtomicRmw(Code, WasmOpCodes.I64AtomicStore, 3, 0);
+                                break;
+                            default: // I32
+                                WasmModuleBuilder.EmitAtomicRmw(Code, WasmOpCodes.I32AtomicStore, 2, 0);
+                                break;
+                        }
+                    }
                     else
                         WasmModuleBuilder.EmitStore(Code, storeOp, align, 0);
                 }
@@ -2034,7 +2119,15 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 EmitGetLocal(target);
                 EmitGetLocal(storeValue);
                 EmitF32ToF16(); // inline conversion: f32 → i32 (f16 bits)
-                WasmModuleBuilder.EmitStore(Code, WasmOpCodes.I32Store16, 1, 0);
+                if (_hasBarriers)
+                {
+                    // Atomic 16-bit store (2-byte aligned)
+                    Code.Add(WasmOpCodes.AtomicPrefix);
+                    WasmModuleBuilder.EmitU32Leb128(Code, WasmOpCodes.I32AtomicStore16);
+                    Code.Add(0x01); Code.Add(0x00); // align=1 (2 bytes), offset=0
+                }
+                else
+                    WasmModuleBuilder.EmitStore(Code, WasmOpCodes.I32Store16, 1, 0);
                 return;
             }
 
@@ -2064,17 +2157,31 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             else if (actualType == WasmOpCodes.I32 && destType == WasmOpCodes.I64)
                 Code.Add(WasmOpCodes.I64ExtendI32S);
 
-            if (_hasBarriers && (destType == WasmOpCodes.I32 || destType == WasmOpCodes.I64))
+            if (_hasBarriers)
             {
-                // Atomic store for integer types in barrier kernels
-                byte atomicStoreOp = destType == WasmOpCodes.I64
-                    ? WasmOpCodes.I64AtomicStore : WasmOpCodes.I32AtomicStore;
-                uint atomicAlign = destType == WasmOpCodes.I64 ? 3u : 2u;
-                WasmModuleBuilder.EmitAtomicRmw(Code, atomicStoreOp, atomicAlign, 0);
+                // Atomic store for ALL types in barrier kernels.
+                // Float types use reinterpret: i32.reinterpret_f32 → i32.atomic.store (or i64/f64).
+                switch (destType)
+                {
+                    case WasmOpCodes.I64:
+                        WasmModuleBuilder.EmitAtomicRmw(Code, WasmOpCodes.I64AtomicStore, 3, 0);
+                        break;
+                    case WasmOpCodes.F32:
+                        Code.Add(WasmOpCodes.I32ReinterpretF32);
+                        WasmModuleBuilder.EmitAtomicRmw(Code, WasmOpCodes.I32AtomicStore, 2, 0);
+                        break;
+                    case WasmOpCodes.F64:
+                        Code.Add(WasmOpCodes.I64ReinterpretF64);
+                        WasmModuleBuilder.EmitAtomicRmw(Code, WasmOpCodes.I64AtomicStore, 3, 0);
+                        break;
+                    default: // I32
+                        WasmModuleBuilder.EmitAtomicRmw(Code, WasmOpCodes.I32AtomicStore, 2, 0);
+                        break;
+                }
             }
             else
             {
-                // Non-barrier kernels or float types: regular store
+                // Non-barrier kernels: regular store
                 byte sOp;
                 uint sAlign;
                 switch (destType)
@@ -2906,6 +3013,84 @@ namespace SpawnDev.ILGPU.Wasm.Backend
 
         #endregion
 
+        #region Atomic Memory Access for Multi-Worker
+
+        /// <summary>
+        /// Override to use atomic loads in barrier kernels for cross-worker visibility.
+        /// Float types use i32/i64 atomic load + reinterpret.
+        /// </summary>
+        protected override void EmitTypedLoad(byte wasmType)
+        {
+            if (!_hasBarriers) { base.EmitTypedLoad(wasmType); return; }
+            switch (wasmType)
+            {
+                case WasmOpCodes.I32:
+                    Code.Add(WasmOpCodes.AtomicPrefix);
+                    WasmModuleBuilder.EmitU32Leb128(Code, WasmOpCodes.I32AtomicLoad);
+                    Code.Add(0x02); Code.Add(0x00);
+                    break;
+                case WasmOpCodes.I64:
+                    Code.Add(WasmOpCodes.AtomicPrefix);
+                    WasmModuleBuilder.EmitU32Leb128(Code, WasmOpCodes.I64AtomicLoad);
+                    Code.Add(0x03); Code.Add(0x00);
+                    break;
+                case WasmOpCodes.F32:
+                    Code.Add(WasmOpCodes.AtomicPrefix);
+                    WasmModuleBuilder.EmitU32Leb128(Code, WasmOpCodes.I32AtomicLoad);
+                    Code.Add(0x02); Code.Add(0x00);
+                    Code.Add(WasmOpCodes.F32ReinterpretI32);
+                    break;
+                case WasmOpCodes.F64:
+                    Code.Add(WasmOpCodes.AtomicPrefix);
+                    WasmModuleBuilder.EmitU32Leb128(Code, WasmOpCodes.I64AtomicLoad);
+                    Code.Add(0x03); Code.Add(0x00);
+                    Code.Add(WasmOpCodes.F64ReinterpretI64);
+                    break;
+                default:
+                    base.EmitTypedLoad(wasmType);
+                    break;
+            }
+        }
+
+        /// <summary>
+        /// Override to use atomic stores in barrier kernels for cross-worker visibility.
+        /// Float types use reinterpret + i32/i64 atomic store.
+        /// </summary>
+        protected override void EmitTypedStore(byte wasmType)
+        {
+            if (!_hasBarriers) { base.EmitTypedStore(wasmType); return; }
+            switch (wasmType)
+            {
+                case WasmOpCodes.I32:
+                    Code.Add(WasmOpCodes.AtomicPrefix);
+                    WasmModuleBuilder.EmitU32Leb128(Code, WasmOpCodes.I32AtomicStore);
+                    Code.Add(0x02); Code.Add(0x00);
+                    break;
+                case WasmOpCodes.I64:
+                    Code.Add(WasmOpCodes.AtomicPrefix);
+                    WasmModuleBuilder.EmitU32Leb128(Code, WasmOpCodes.I64AtomicStore);
+                    Code.Add(0x03); Code.Add(0x00);
+                    break;
+                case WasmOpCodes.F32:
+                    Code.Add(WasmOpCodes.I32ReinterpretF32);
+                    Code.Add(WasmOpCodes.AtomicPrefix);
+                    WasmModuleBuilder.EmitU32Leb128(Code, WasmOpCodes.I32AtomicStore);
+                    Code.Add(0x02); Code.Add(0x00);
+                    break;
+                case WasmOpCodes.F64:
+                    Code.Add(WasmOpCodes.I64ReinterpretF64);
+                    Code.Add(WasmOpCodes.AtomicPrefix);
+                    WasmModuleBuilder.EmitU32Leb128(Code, WasmOpCodes.I64AtomicStore);
+                    Code.Add(0x03); Code.Add(0x00);
+                    break;
+                default:
+                    base.EmitTypedStore(wasmType);
+                    break;
+            }
+        }
+
+        #endregion
+
         #region Barrier Synchronization
 
         /// <summary>
@@ -3004,8 +3189,39 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 WasmModuleBuilder.EmitI32Const(Code, broadcastSlotOffset);
                 Code.Add(WasmOpCodes.I32Add);
             }
+            // Atomic store for multi-worker visibility
             EmitGetLocal(source);
-            WasmModuleBuilder.EmitStore(Code, storeOp, align, 0);
+            if (_hasBarriers)
+            {
+                // Convert to atomic store (reinterpret floats to ints)
+                switch (wasmType)
+                {
+                    case WasmOpCodes.F32:
+                        Code.Add(WasmOpCodes.I32ReinterpretF32);
+                        Code.Add(WasmOpCodes.AtomicPrefix);
+                        WasmModuleBuilder.EmitU32Leb128(Code, WasmOpCodes.I32AtomicStore);
+                        Code.Add(0x02); Code.Add(0x00);
+                        break;
+                    case WasmOpCodes.F64:
+                        Code.Add(WasmOpCodes.I64ReinterpretF64);
+                        Code.Add(WasmOpCodes.AtomicPrefix);
+                        WasmModuleBuilder.EmitU32Leb128(Code, WasmOpCodes.I64AtomicStore);
+                        Code.Add(0x03); Code.Add(0x00);
+                        break;
+                    case WasmOpCodes.I64:
+                        Code.Add(WasmOpCodes.AtomicPrefix);
+                        WasmModuleBuilder.EmitU32Leb128(Code, WasmOpCodes.I64AtomicStore);
+                        Code.Add(0x03); Code.Add(0x00);
+                        break;
+                    default: // I32
+                        Code.Add(WasmOpCodes.AtomicPrefix);
+                        WasmModuleBuilder.EmitU32Leb128(Code, WasmOpCodes.I32AtomicStore);
+                        Code.Add(0x02); Code.Add(0x00);
+                        break;
+                }
+            }
+            else
+                WasmModuleBuilder.EmitStore(Code, storeOp, align, 0);
 
             Code.Add(WasmOpCodes.End); // end if
 
@@ -3013,14 +3229,44 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             int barrier1 = _barrierCounter++;
             EmitBarrier(barrier1);
 
-            // Step 3: All threads load from the shared slot
+            // Step 3: All threads load from the shared slot (atomic for multi-worker)
             WasmModuleBuilder.EmitLocalGet(Code, _sharedMemBaseLocal);
             if (broadcastSlotOffset > 0)
             {
                 WasmModuleBuilder.EmitI32Const(Code, broadcastSlotOffset);
                 Code.Add(WasmOpCodes.I32Add);
             }
-            WasmModuleBuilder.EmitLoad(Code, loadOp, align, 0);
+            if (_hasBarriers)
+            {
+                // Atomic load (reinterpret for floats)
+                switch (wasmType)
+                {
+                    case WasmOpCodes.F32:
+                        Code.Add(WasmOpCodes.AtomicPrefix);
+                        WasmModuleBuilder.EmitU32Leb128(Code, WasmOpCodes.I32AtomicLoad);
+                        Code.Add(0x02); Code.Add(0x00);
+                        Code.Add(WasmOpCodes.F32ReinterpretI32);
+                        break;
+                    case WasmOpCodes.F64:
+                        Code.Add(WasmOpCodes.AtomicPrefix);
+                        WasmModuleBuilder.EmitU32Leb128(Code, WasmOpCodes.I64AtomicLoad);
+                        Code.Add(0x03); Code.Add(0x00);
+                        Code.Add(WasmOpCodes.F64ReinterpretI64);
+                        break;
+                    case WasmOpCodes.I64:
+                        Code.Add(WasmOpCodes.AtomicPrefix);
+                        WasmModuleBuilder.EmitU32Leb128(Code, WasmOpCodes.I64AtomicLoad);
+                        Code.Add(0x03); Code.Add(0x00);
+                        break;
+                    default: // I32
+                        Code.Add(WasmOpCodes.AtomicPrefix);
+                        WasmModuleBuilder.EmitU32Leb128(Code, WasmOpCodes.I32AtomicLoad);
+                        Code.Add(0x02); Code.Add(0x00);
+                        break;
+                }
+            }
+            else
+                WasmModuleBuilder.EmitLoad(Code, loadOp, align, 0);
             WasmModuleBuilder.EmitLocalSet(Code, target);
 
             // Step 4: Barrier — prevent broadcast slot reuse before all threads have read

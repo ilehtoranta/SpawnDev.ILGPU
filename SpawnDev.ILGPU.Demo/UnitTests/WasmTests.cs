@@ -556,37 +556,27 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
         public new async Task AlgorithmRadixSortPairsHalfTest() =>
             throw new UnsupportedTestException("Wasm: Half pairs — f16 struct handling in sort pipeline (not onesComplementMask)");
 
-        // 260K-4M: need multi-worker barrier dispatch with between-group sync.
-        [TestMethod]
-        public new async Task RadixSortThresholdProbeTest() =>
-            throw new UnsupportedTestException("Wasm: 260K — timeout (needs multi-worker barrier dispatch)");
-        [TestMethod]
-        public new async Task RadixSortDescendingWithSentinelsTest() =>
-            throw new UnsupportedTestException("Wasm: 1.4M — timeout");
-        [TestMethod]
-        public new async Task RadixSortRepeatedResortTest() =>
-            throw new UnsupportedTestException("Wasm: 500K — timeout");
-        [TestMethod]
-        public new async Task RadixSortHeavyDuplicateKeysTest() =>
-            throw new UnsupportedTestException("Wasm: 1M — timeout");
-        [TestMethod]
-        public new async Task RadixSortDescendingOddCountTest() =>
-            throw new UnsupportedTestException("Wasm: 1.5M — timeout");
-        [TestMethod]
-        public new async Task RadixSortSpawnSceneSimulationTest() =>
-            throw new UnsupportedTestException("Wasm: 1.4M — timeout");
-        [TestMethod]
-        public new async Task RadixSortDescending1_4MTest() =>
-            throw new UnsupportedTestException("Wasm: 1.4M — timeout");
-        [TestMethod]
-        public new async Task RadixSortDescending2MTest() =>
-            throw new UnsupportedTestException("Wasm: 2M — timeout");
-        [TestMethod]
-        public new async Task RadixSortDescending4MTest() =>
-            throw new UnsupportedTestException("Wasm: 4M — timeout");
-        [TestMethod]
-        public new async Task RadixSortAscending1_4MTest() =>
-            throw new UnsupportedTestException("Wasm: 1.4M — timeout");
+        // Large sort tests: increase timeout from 30s to 120s for 260K+ elements.
+        [TestMethod(Timeout = 120000)]
+        public new async Task RadixSortThresholdProbeTest() => await base.RadixSortThresholdProbeTest();
+        [TestMethod(Timeout = 120000)]
+        public new async Task RadixSortDescendingWithSentinelsTest() => await base.RadixSortDescendingWithSentinelsTest();
+        [TestMethod(Timeout = 120000)]
+        public new async Task RadixSortRepeatedResortTest() => await base.RadixSortRepeatedResortTest();
+        [TestMethod(Timeout = 120000)]
+        public new async Task RadixSortHeavyDuplicateKeysTest() => await base.RadixSortHeavyDuplicateKeysTest();
+        [TestMethod(Timeout = 120000)]
+        public new async Task RadixSortDescendingOddCountTest() => await base.RadixSortDescendingOddCountTest();
+        [TestMethod(Timeout = 120000)]
+        public new async Task RadixSortSpawnSceneSimulationTest() => await base.RadixSortSpawnSceneSimulationTest();
+        [TestMethod(Timeout = 120000)]
+        public new async Task RadixSortDescending1_4MTest() => await base.RadixSortDescending1_4MTest();
+        [TestMethod(Timeout = 120000)]
+        public new async Task RadixSortDescending2MTest() => await base.RadixSortDescending2MTest();
+        [TestMethod(Timeout = 120000)]
+        public new async Task RadixSortDescending4MTest() => await base.RadixSortDescending4MTest();
+        [TestMethod(Timeout = 120000)]
+        public new async Task RadixSortAscending1_4MTest() => await base.RadixSortAscending1_4MTest();
 
         // ═══════════════════════════════════════════════════════════════
         // MULTI-GROUP SCAN
