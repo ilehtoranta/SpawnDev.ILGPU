@@ -595,7 +595,10 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             dispParamTypes.Add(WasmOpCodes.I32); // 8: sharedMemBase
             dispParamTypes.Add(WasmOpCodes.I32); // 9: barrierBase
             dispParamTypes.Add(WasmOpCodes.I32); // 10: dynamicSharedLen
-            int dispSystemParams = 11;
+            dispParamTypes.Add(WasmOpCodes.I32); // 11: sharedMemSize (for zeroing between groups)
+            dispParamTypes.Add(WasmOpCodes.I32); // 12: workerCount (for inter-worker barriers)
+            dispParamTypes.Add(WasmOpCodes.I32); // 13: fenceBase (for inter-worker atomic barriers)
+            int dispSystemParams = 14;
 
             // Add user params (same types as kernel's user params)
             for (int i = kernelSystemParams; i < kernelParamTypes.Length; i++)
@@ -605,16 +608,19 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             int dispFuncIdx = moduleBuilder.AddFunction(dispTypeIdx);
             moduleBuilder.ExportFunction("dispatcher", dispFuncIdx);
 
-            // Locals: g, phase, tid, anyYielded, r
+            // Locals: g, phase, tid, anyYielded, r, zeroIdx, savedGen, arrived
             var locals = new List<WasmLocal>
             {
-                new WasmLocal { Type = WasmOpCodes.I32, Count = 5 } // g, phase, tid, anyYielded, r
+                new WasmLocal { Type = WasmOpCodes.I32, Count = 8 } // g, phase, tid, anyYielded, r, zeroIdx, savedGen, arrived
             };
             uint pG = (uint)dispParamTypes.Count;         // local index for g
             uint pPhase = pG + 1;
             uint pTid = pG + 2;
             uint pAnyYielded = pG + 3;
             uint pR = pG + 4;
+            uint pZeroIdx = pG + 5;
+            uint pSavedGen = pG + 6;
+            uint pArrived = pG + 7;
 
             var code = new List<byte>();
 
@@ -727,11 +733,103 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             code.Add(WasmOpCodes.End); // end loop $loop_tid
             code.Add(WasmOpCodes.End); // end block $exit_tid
 
-            // if (!anyYielded) break
+            // Inter-worker phase barrier + global yield check.
+            // For workerCount=1: simple check. For workerCount>1: Wasm atomic barrier.
+            // fenceBase layout: [0]=arrival counter, [4]=generation, [8]=global yield count, [12]=exit flag
+
+            // Add this worker's yield count to global yield counter (atomic)
+            WasmModuleBuilder.EmitLocalGet(code, 13); // fenceBase param
             WasmModuleBuilder.EmitLocalGet(code, pAnyYielded);
+            code.Add(WasmOpCodes.AtomicPrefix);
+            WasmModuleBuilder.EmitU32Leb128(code, WasmOpCodes.I32AtomicRmwAdd);
+            code.Add(0x02); code.Add(0x08); // align=2, offset=8 (global yield counter)
+            code.Add(WasmOpCodes.Drop);
+
+            // Save current generation
+            WasmModuleBuilder.EmitLocalGet(code, 13); // fenceBase
+            code.Add(WasmOpCodes.AtomicPrefix);
+            WasmModuleBuilder.EmitU32Leb128(code, WasmOpCodes.I32AtomicLoad);
+            code.Add(0x02); code.Add(0x04); // align=2, offset=4 (generation)
+            WasmModuleBuilder.EmitLocalSet(code, pSavedGen);
+
+            // Atomically increment arrival counter
+            WasmModuleBuilder.EmitLocalGet(code, 13); // fenceBase
+            WasmModuleBuilder.EmitI32Const(code, 1);
+            code.Add(WasmOpCodes.AtomicPrefix);
+            WasmModuleBuilder.EmitU32Leb128(code, WasmOpCodes.I32AtomicRmwAdd);
+            code.Add(0x02); code.Add(0x00); // align=2, offset=0 (arrival counter)
+            WasmModuleBuilder.EmitI32Const(code, 1);
+            code.Add(WasmOpCodes.I32Add);
+            WasmModuleBuilder.EmitLocalSet(code, pArrived);
+
+            // if (arrived == workerCount) — last worker
+            WasmModuleBuilder.EmitLocalGet(code, pArrived);
+            WasmModuleBuilder.EmitLocalGet(code, 12); // workerCount param
+            code.Add(WasmOpCodes.I32Eq);
+            code.Add(WasmOpCodes.If);
+            code.Add(WasmOpCodes.Void);
+
+            // Last worker: check global yield count
+            WasmModuleBuilder.EmitLocalGet(code, 13); // fenceBase
+            code.Add(WasmOpCodes.AtomicPrefix);
+            WasmModuleBuilder.EmitU32Leb128(code, WasmOpCodes.I32AtomicLoad);
+            code.Add(0x02); code.Add(0x08); // offset=8 (global yield count)
             code.Add(WasmOpCodes.I32Eqz);
+            // Store exit flag: 1 if no yields, 0 if yields remain
+            WasmModuleBuilder.EmitLocalSet(code, pAnyYielded); // reuse as temp
+            WasmModuleBuilder.EmitLocalGet(code, 13); // fenceBase
+            WasmModuleBuilder.EmitLocalGet(code, pAnyYielded);
+            code.Add(WasmOpCodes.AtomicPrefix);
+            WasmModuleBuilder.EmitU32Leb128(code, WasmOpCodes.I32AtomicStore);
+            code.Add(0x02); code.Add(0x0C); // offset=12 (exit flag)
+
+            // Reset arrival counter and global yield count
+            WasmModuleBuilder.EmitLocalGet(code, 13); // fenceBase
+            WasmModuleBuilder.EmitI32Const(code, 0);
+            code.Add(WasmOpCodes.AtomicPrefix);
+            WasmModuleBuilder.EmitU32Leb128(code, WasmOpCodes.I32AtomicStore);
+            code.Add(0x02); code.Add(0x00); // offset=0 (arrival counter)
+            WasmModuleBuilder.EmitLocalGet(code, 13); // fenceBase
+            WasmModuleBuilder.EmitI32Const(code, 0);
+            code.Add(WasmOpCodes.AtomicPrefix);
+            WasmModuleBuilder.EmitU32Leb128(code, WasmOpCodes.I32AtomicStore);
+            code.Add(0x02); code.Add(0x08); // offset=8 (global yield count)
+
+            // Bump generation and notify
+            WasmModuleBuilder.EmitLocalGet(code, 13); // fenceBase
+            WasmModuleBuilder.EmitLocalGet(code, pSavedGen);
+            WasmModuleBuilder.EmitI32Const(code, 1);
+            code.Add(WasmOpCodes.I32Add);
+            code.Add(WasmOpCodes.AtomicPrefix);
+            WasmModuleBuilder.EmitU32Leb128(code, WasmOpCodes.I32AtomicStore);
+            code.Add(0x02); code.Add(0x04); // offset=4 (generation)
+            WasmModuleBuilder.EmitLocalGet(code, 13); // fenceBase
+            WasmModuleBuilder.EmitI32Const(code, int.MaxValue);
+            code.Add(WasmOpCodes.AtomicPrefix);
+            WasmModuleBuilder.EmitU32Leb128(code, WasmOpCodes.MemoryAtomicNotify);
+            code.Add(0x02); code.Add(0x04); // offset=4 (notify on generation)
+            code.Add(WasmOpCodes.Drop);
+
+            code.Add(WasmOpCodes.Else);
+
+            // Other workers: wait for generation to advance
+            WasmModuleBuilder.EmitLocalGet(code, 13); // fenceBase
+            WasmModuleBuilder.EmitLocalGet(code, pSavedGen);
+            WasmModuleBuilder.EmitI64Const(code, -1); // infinite timeout
+            code.Add(WasmOpCodes.AtomicPrefix);
+            WasmModuleBuilder.EmitU32Leb128(code, WasmOpCodes.MemoryAtomicWait32);
+            code.Add(0x02); code.Add(0x04); // offset=4 (wait on generation)
+            code.Add(WasmOpCodes.Drop);
+
+            code.Add(WasmOpCodes.End); // end if
+
+            // All workers: check exit flag
+            WasmModuleBuilder.EmitLocalGet(code, 13); // fenceBase
+            code.Add(WasmOpCodes.AtomicPrefix);
+            WasmModuleBuilder.EmitU32Leb128(code, WasmOpCodes.I32AtomicLoad);
+            code.Add(0x02); code.Add(0x0C); // offset=12 (exit flag)
             code.Add(WasmOpCodes.BrIf);
-            WasmModuleBuilder.EmitU32Leb128(code, 1); // break to $exit_phase
+            WasmModuleBuilder.EmitU32Leb128(code, 1); // break to $exit_phase if exit=1
 
             // phase++
             WasmModuleBuilder.EmitLocalGet(code, pPhase);
@@ -743,6 +841,97 @@ namespace SpawnDev.ILGPU.Wasm.Backend
 
             code.Add(WasmOpCodes.End); // end loop $loop_phase
             code.Add(WasmOpCodes.End); // end block $exit_phase
+
+            // Zero shared memory between groups to prevent stale broadcast slots,
+            // scan buffers, and reduce accumulators from corrupting the next group.
+            // Loop: for (zeroIdx = 0; zeroIdx < sharedMemSize; zeroIdx += 4) i32.store(sharedMemBase + zeroIdx, 0)
+            WasmModuleBuilder.EmitI32Const(code, 0);
+            WasmModuleBuilder.EmitLocalSet(code, pZeroIdx);
+            code.Add(WasmOpCodes.Block);
+            code.Add(WasmOpCodes.Void);
+            code.Add(WasmOpCodes.Loop);
+            code.Add(WasmOpCodes.Void);
+            // br_if exit (zeroIdx >= sharedMemSize)
+            WasmModuleBuilder.EmitLocalGet(code, pZeroIdx);
+            WasmModuleBuilder.EmitLocalGet(code, 11); // sharedMemSize param
+            code.Add(WasmOpCodes.I32GeU);
+            code.Add(WasmOpCodes.BrIf);
+            WasmModuleBuilder.EmitU32Leb128(code, 1); // break to exit block
+            // i32.store(sharedMemBase + zeroIdx, 0)
+            WasmModuleBuilder.EmitLocalGet(code, 8); // sharedMemBase
+            WasmModuleBuilder.EmitLocalGet(code, pZeroIdx);
+            code.Add(WasmOpCodes.I32Add);
+            WasmModuleBuilder.EmitI32Const(code, 0);
+            WasmModuleBuilder.EmitStore(code, WasmOpCodes.I32Store, 2, 0);
+            // zeroIdx += 4
+            WasmModuleBuilder.EmitLocalGet(code, pZeroIdx);
+            WasmModuleBuilder.EmitI32Const(code, 4);
+            code.Add(WasmOpCodes.I32Add);
+            WasmModuleBuilder.EmitLocalSet(code, pZeroIdx);
+            code.Add(WasmOpCodes.Br);
+            WasmModuleBuilder.EmitU32Leb128(code, 0); // continue loop
+            code.Add(WasmOpCodes.End); // end loop
+            code.Add(WasmOpCodes.End); // end block
+
+            // Inter-worker group barrier: all workers must finish current group
+            // (including shared memory zeroing) before any starts the next group.
+            // Uses fenceBase + 16 for the group barrier (separate from phase barrier at +0).
+            // Save generation
+            WasmModuleBuilder.EmitLocalGet(code, 13); // fenceBase
+            code.Add(WasmOpCodes.AtomicPrefix);
+            WasmModuleBuilder.EmitU32Leb128(code, WasmOpCodes.I32AtomicLoad);
+            code.Add(0x02); code.Add(0x14); // align=2, offset=20 (group gen at fenceBase+20)
+            WasmModuleBuilder.EmitLocalSet(code, pSavedGen);
+            // Arrive
+            WasmModuleBuilder.EmitLocalGet(code, 13); // fenceBase
+            WasmModuleBuilder.EmitI32Const(code, 1);
+            code.Add(WasmOpCodes.AtomicPrefix);
+            WasmModuleBuilder.EmitU32Leb128(code, WasmOpCodes.I32AtomicRmwAdd);
+            code.Add(0x02); code.Add(0x10); // offset=16 (group arrival at fenceBase+16)
+            WasmModuleBuilder.EmitI32Const(code, 1);
+            code.Add(WasmOpCodes.I32Add);
+            WasmModuleBuilder.EmitLocalSet(code, pArrived);
+            // If last worker
+            WasmModuleBuilder.EmitLocalGet(code, pArrived);
+            WasmModuleBuilder.EmitLocalGet(code, 12); // workerCount
+            code.Add(WasmOpCodes.I32Eq);
+            code.Add(WasmOpCodes.If);
+            code.Add(WasmOpCodes.Void);
+            // Reset arrival, bump gen, notify
+            WasmModuleBuilder.EmitLocalGet(code, 13);
+            WasmModuleBuilder.EmitI32Const(code, 0);
+            code.Add(WasmOpCodes.AtomicPrefix);
+            WasmModuleBuilder.EmitU32Leb128(code, WasmOpCodes.I32AtomicStore);
+            code.Add(0x02); code.Add(0x10); // offset=16
+            WasmModuleBuilder.EmitLocalGet(code, 13);
+            WasmModuleBuilder.EmitLocalGet(code, pSavedGen);
+            WasmModuleBuilder.EmitI32Const(code, 1);
+            code.Add(WasmOpCodes.I32Add);
+            code.Add(WasmOpCodes.AtomicPrefix);
+            WasmModuleBuilder.EmitU32Leb128(code, WasmOpCodes.I32AtomicStore);
+            code.Add(0x02); code.Add(0x14); // offset=20
+            WasmModuleBuilder.EmitLocalGet(code, 13);
+            WasmModuleBuilder.EmitI32Const(code, int.MaxValue);
+            code.Add(WasmOpCodes.AtomicPrefix);
+            WasmModuleBuilder.EmitU32Leb128(code, WasmOpCodes.MemoryAtomicNotify);
+            code.Add(0x02); code.Add(0x14); // offset=20
+            code.Add(WasmOpCodes.Drop);
+            // Also reset the phase exit flag for next group
+            WasmModuleBuilder.EmitLocalGet(code, 13);
+            WasmModuleBuilder.EmitI32Const(code, 0);
+            code.Add(WasmOpCodes.AtomicPrefix);
+            WasmModuleBuilder.EmitU32Leb128(code, WasmOpCodes.I32AtomicStore);
+            code.Add(0x02); code.Add(0x0C); // offset=12 (exit flag)
+            code.Add(WasmOpCodes.Else);
+            // Wait
+            WasmModuleBuilder.EmitLocalGet(code, 13);
+            WasmModuleBuilder.EmitLocalGet(code, pSavedGen);
+            WasmModuleBuilder.EmitI64Const(code, -1);
+            code.Add(WasmOpCodes.AtomicPrefix);
+            WasmModuleBuilder.EmitU32Leb128(code, WasmOpCodes.MemoryAtomicWait32);
+            code.Add(0x02); code.Add(0x14); // offset=20
+            code.Add(WasmOpCodes.Drop);
+            code.Add(WasmOpCodes.End); // end if
 
             // g++
             WasmModuleBuilder.EmitLocalGet(code, pG);

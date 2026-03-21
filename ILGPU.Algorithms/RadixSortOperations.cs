@@ -590,7 +590,7 @@ namespace ILGPU.Algorithms.RadixSortOperations
 
             var signMask = 1U << (NumBits - 1);
             var onesComplementMask =
-                ((uint)(Interop.FloatAsInt(value)) >> (NumBits - 1));
+                ((uint)((short)(Interop.FloatAsInt(value)) >> (NumBits - 1))) & 0xFFFFu;
             var bits = Interop.FloatAsInt(value) ^ (signMask | onesComplementMask);
             return (int)(bits >> shift) & bitMask;
         }

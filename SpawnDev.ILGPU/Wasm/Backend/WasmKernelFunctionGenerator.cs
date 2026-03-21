@@ -2660,6 +2660,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         {
             var target = AllocateLocal(value);
             // gridDim = dimX / groupDimX (number of workgroups)
+            // dimX is totalThreads (numGroups * groupSize), passed by dispatch.
             WasmModuleBuilder.EmitLocalGet(Code, _dimXLocal);
             WasmModuleBuilder.EmitLocalGet(Code, _groupDimXLocal);
             Code.Add(WasmOpCodes.I32DivU);

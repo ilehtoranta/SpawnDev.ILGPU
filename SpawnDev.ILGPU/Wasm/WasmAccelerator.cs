@@ -499,7 +499,7 @@ namespace SpawnDev.ILGPU.Wasm
                 int scratchBase = (totalMemoryBytes + 7) & ~7;
                 int scratchSize = compiledKernel.HasBarriers
                     ? scratchPerThread * groupSize  // per-thread scratch for barrier kernels
-                    : 4096;                          // shared scratch for non-barrier kernels
+                    : scratchPerThread * _workerCount; // per-worker scratch for non-barrier kernels
 
                 // Pre-compute struct param bytes so we can place them AFTER per-thread
                 // scratch. Without this, struct params at scratchBase + 0 overlap with
@@ -973,18 +973,17 @@ namespace SpawnDev.ILGPU.Wasm
             int phaseCount = compiledKernel.PhaseCount;
             if (hasBarriers)
             {
-                // Fiber dispatch: single worker for barrier kernels.
-                // Multi-worker protocol IS correct (shared atomic yield counter, tested
-                // 2026-03-22: 197 tests pass) but JS Atomics.wait/notify barrier overhead
-                // per phase makes RadixSort (32 dispatches × 100+ phases) too slow for
-                // the 30s test timeout. Need in-Wasm barriers (memory.atomic.wait32/notify)
-                // to eliminate JS round-trips — the kernel would run to completion in each
-                // worker without returning to JS at barriers.
+                // Single-worker for barrier kernels.
+                // In-Wasm atomic barriers work for phase sync, but multi-group dispatch
+                // also needs between-group barriers (workers can be at different groups
+                // simultaneously, causing shared memory corruption). Full multi-worker
+                // needs: phase barrier + group barrier + coordinated shared mem zeroing.
                 workerCount = 1;
             }
             else
             {
-                // For non-barrier kernels, don't spawn more workers than items
+                // Multi-worker for non-barrier kernels. Each worker gets its own
+                // scratch region at scratchBase + workerIdx * scratchPerThread.
                 workerCount = _workerCount;
                 if (workerCount > totalItems) workerCount = Math.Max(1, totalItems);
             }
@@ -1007,7 +1006,7 @@ namespace SpawnDev.ILGPU.Wasm
                 gridDimX, gridDimY, scratchBase, scratchPerThread,
                 sharedMemBase, barrierBase, fenceSlot,
                 groupSize, numGroups, hasBarriers, argStr,
-                dynamicSharedElements, workerCount, phaseCount);
+                dynamicSharedElements, workerCount, phaseCount, compiledKernel.SharedMemorySize);
 
             // Lazily initialize the worker pool, or grow it if needed
             if (_workerPool == null)
@@ -1128,6 +1127,7 @@ namespace SpawnDev.ILGPU.Wasm
                     var worker = workers[w];
                     int startIdx = w * itemsPerWorker + Math.Min(w, remainder);
                     int endIdx = startIdx + itemsPerWorker + (w < remainder ? 1 : 0);
+                    int myScratch = scratchBase + w * scratchPerThread; // per-worker scratch
 
                     var tcs = new TaskCompletionSource();
                     int workerIdx = w;
@@ -1175,6 +1175,7 @@ namespace SpawnDev.ILGPU.Wasm
                             memory = wasmMemory,
                             startIdx = startIdx,
                             endIdx = endIdx,
+                            myScratch = myScratch,
                         });
                     }
                     else
@@ -1185,6 +1186,7 @@ namespace SpawnDev.ILGPU.Wasm
                             memory = wasmMemory,
                             startIdx = startIdx,
                             endIdx = endIdx,
+                            myScratch = myScratch,
                         });
                     }
 
@@ -1245,7 +1247,8 @@ namespace SpawnDev.ILGPU.Wasm
             string argStr,
             int dynamicSharedLength = 0,
             int workerCount = 1,
-            int phaseCount = 1)
+            int phaseCount = 1,
+            int sharedMemSize = 0)
         {
             // Produces an async function body string that is sent as the 'script' field
             // in the message to the pool worker's async bootstrap.
@@ -1265,7 +1268,7 @@ namespace SpawnDev.ILGPU.Wasm
                 sb.AppendLine("    const threadEnd = d.threadEnd;");
                 sb.AppendLine();
                 sb.AppendLine("    try {");
-                sb.Append($"      dispatcher(threadStart, threadEnd, {numGroups}, {groupSize}, {gridDimX}, {gridDimY}, {scratchBase}, {scratchPerThread}, {sharedMemBase}, {barrierBase}, {dynamicSharedLength}");
+                sb.Append($"      dispatcher(threadStart, threadEnd, {numGroups}, {groupSize}, {gridDimX}, {gridDimY}, {scratchBase}, {scratchPerThread}, {sharedMemBase}, {barrierBase}, {dynamicSharedLength}, {sharedMemSize}, {workerCount}, {fenceSlot}");
                 if (argStr.Length > 0)
                 {
                     sb.Append(", ");
@@ -1276,13 +1279,15 @@ namespace SpawnDev.ILGPU.Wasm
             }
             else
             {
-                // Non-barrier kernel: flat item dispatch
+                // Non-barrier kernel: flat item dispatch with per-worker scratch
                 sb.AppendLine("    const startIdx = d.startIdx;");
                 sb.AppendLine("    const endIdx = d.endIdx;");
+                sb.AppendLine("    const myScratch = d.myScratch;");
                 sb.AppendLine();
                 sb.AppendLine("    for (let i = startIdx; i < endIdx; i++) {");
                 // For non-barrier kernels: pass groupSize so Grid.IdxX/Y can decompose correctly
-                sb.Append($"      kernel(i, {gridDimX}, {gridDimY}, {scratchBase}, {groupSize}, i % {groupSize}, 0, 0, 0, 0");
+                // Each worker gets its own scratch region (myScratch) to prevent races.
+                sb.Append($"      kernel(i, {gridDimX}, {gridDimY}, myScratch, {groupSize}, i % {groupSize}, 0, 0, 0, 0");
                 if (argStr.Length > 0)
                 {
                     sb.Append(", ");

@@ -554,58 +554,39 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
         // but 16K int pairs still have intermittent corruption.
         [TestMethod]
         public new async Task AlgorithmRadixSortPairsHalfTest() =>
-            throw new UnsupportedTestException("Wasm: pairs Half — f16 in sort kernels (TODO)");
+            throw new UnsupportedTestException("Wasm: Half pairs — f16 struct handling in sort pipeline (not onesComplementMask)");
 
-        // ═══════════════════════════════════════════════════════════════
-        // INTERMITTENT SORT + TIMEOUT + CODEGEN BUGS
-        // Fix B DISABLED (confirmed unnecessary). NOT aliasing.
-        // ═══════════════════════════════════════════════════════════════
+        // 260K-4M: need multi-worker barrier dispatch with between-group sync.
         [TestMethod]
-        public new async Task RadixSortPairsIndexIntegrityTest() =>
-            throw new UnsupportedTestException("Wasm: 16K pairs — intermittent order violations (~33%)");
-        [TestMethod]
-        public new async Task RadixSortPairsDescendingIndexIntegrityTest() =>
-            throw new UnsupportedTestException("Wasm: 16K pairs — intermittent order violations (~33%)");
-        [TestMethod]
-        public new async Task RadixSortBoundary16KTest() =>
-            throw new UnsupportedTestException("Wasm: 16K pairs — intermittent order violations (~33%)");
-        [TestMethod]
-        public new async Task RadixSortBoundary20KTest() =>
-            throw new UnsupportedTestException("Wasm: 20K pairs — intermittent order violations (~33%)");
-        [TestMethod]
-        public new async Task ScanBroadcastIsolationTest() =>
-            throw new UnsupportedTestException("Wasm: unaligned memory access at g=12 tid=147 phase=2 (codegen alignment bug)");
-
-        // ═══════════════════════════════════════════════════════════════
-        // LARGE RADIXSORT — 500K+ elements, slow on Wasm
-        // ═══════════════════════════════════════════════════════════════
+        public new async Task RadixSortThresholdProbeTest() =>
+            throw new UnsupportedTestException("Wasm: 260K — timeout (needs multi-worker barrier dispatch)");
         [TestMethod]
         public new async Task RadixSortDescendingWithSentinelsTest() =>
-            throw new UnsupportedTestException("Wasm: 1.4M pairs — timeout risk on single-threaded dispatch");
+            throw new UnsupportedTestException("Wasm: 1.4M — timeout");
         [TestMethod]
         public new async Task RadixSortRepeatedResortTest() =>
-            throw new UnsupportedTestException("Wasm: 500K pairs × 5 iterations — timeout risk");
+            throw new UnsupportedTestException("Wasm: 500K — timeout");
         [TestMethod]
         public new async Task RadixSortHeavyDuplicateKeysTest() =>
-            throw new UnsupportedTestException("Wasm: 1M pairs — timeout risk on single-threaded dispatch");
+            throw new UnsupportedTestException("Wasm: 1M — timeout");
         [TestMethod]
         public new async Task RadixSortDescendingOddCountTest() =>
-            throw new UnsupportedTestException("Wasm: 1.5M pairs — timeout risk on single-threaded dispatch");
+            throw new UnsupportedTestException("Wasm: 1.5M — timeout");
         [TestMethod]
         public new async Task RadixSortSpawnSceneSimulationTest() =>
-            throw new UnsupportedTestException("Wasm: 1.4M pairs × 3 frames — timeout risk");
+            throw new UnsupportedTestException("Wasm: 1.4M — timeout");
         [TestMethod]
         public new async Task RadixSortDescending1_4MTest() =>
-            throw new UnsupportedTestException("Wasm: 1.4M pairs — timeout risk on single-threaded dispatch");
+            throw new UnsupportedTestException("Wasm: 1.4M — timeout");
         [TestMethod]
         public new async Task RadixSortDescending2MTest() =>
-            throw new UnsupportedTestException("Wasm: 2M pairs — timeout risk on single-threaded dispatch");
+            throw new UnsupportedTestException("Wasm: 2M — timeout");
         [TestMethod]
         public new async Task RadixSortDescending4MTest() =>
-            throw new UnsupportedTestException("Wasm: 4M pairs — timeout risk on single-threaded dispatch");
+            throw new UnsupportedTestException("Wasm: 4M — timeout");
         [TestMethod]
         public new async Task RadixSortAscending1_4MTest() =>
-            throw new UnsupportedTestException("Wasm: 1.4M pairs — timeout risk on single-threaded dispatch");
+            throw new UnsupportedTestException("Wasm: 1.4M — timeout");
 
         // ═══════════════════════════════════════════════════════════════
         // MULTI-GROUP SCAN
