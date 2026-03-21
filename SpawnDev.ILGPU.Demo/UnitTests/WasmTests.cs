@@ -646,6 +646,110 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
             }
         });
 
+        // Test 4b: In-place scatter — read, scan, write back at scanned position (like RadixSort presort)
+        static void IsolationPresortKernel(
+            Index1D index,
+            ArrayView<int> view, // read AND write to same buffer
+            SpecializedValue<int> groupSize)
+        {
+            var scanMem = SharedMemory.Allocate<int>(256);
+
+            bool inRange = Group.IdxX < view.Length;
+            int value = inRange ? view[Group.IdxX] : 0;
+
+            // Everyone contributes 1 to the histogram
+            scanMem[Group.IdxX] = inRange ? 1 : 0;
+            Group.Barrier();
+
+            // ExclusiveScan gives each thread a unique position
+            int pos = GroupExtensions.ExclusiveScan<int,
+                global::ILGPU.Algorithms.ScanReduceOperations.AddInt32>(scanMem[Group.IdxX]);
+            Group.Barrier();
+
+            // Write value to scanned position (in-place shuffle — identity for all-1 histogram)
+            if (inRange)
+                view[pos] = value;
+            Group.Barrier();
+        }
+
+        [TestMethod]
+        public async Task WasmBarrierIsolationPresortTest() => await RunTest(async accelerator =>
+        {
+            int gs = 256;
+            int numGroups = 12;
+            int total = gs * numGroups;
+            for (int run = 0; run < 10; run++)
+            {
+                using var buf = accelerator.Allocate1D<int>(total);
+                var data = new int[total];
+                for (int i = 0; i < total; i++) data[i] = i;
+                buf.CopyFromCPU(data);
+                var kernel = accelerator.LoadStreamKernel<Index1D, ArrayView<int>, SpecializedValue<int>>(IsolationPresortKernel);
+                kernel(new KernelConfig(numGroups, gs), (Index1D)total, buf.View, SpecializedValue.New(gs));
+                await accelerator.SynchronizeAsync();
+                var result = await buf.CopyToHostAsync<int>();
+                // Identity shuffle: each element should be at the same position
+                for (int i = 0; i < total; i++)
+                {
+                    if (result[i] != i)
+                        throw new Exception($"Presort run {run} pos {i}: expected {i}, got {result[i]}");
+                }
+            }
+        });
+
+        // Test 4a: FOUR ExclusiveScan calls with SpecializedValue (like RadixSort EXACTLY)
+        static void IsolationMultiScanKernel(
+            Index1D index,
+            ArrayView<int> input,
+            ArrayView<int> output,
+            SpecializedValue<int> groupSize)
+        {
+            var scanMem = SharedMemory.Allocate<int>(groupSize * 4); // groupSize × unrollFactor
+
+            // 4 scan operations (mimics RadixSort's unrollFactor=4)
+            for (int j = 0; j < 4; j++)
+            {
+                scanMem[Group.IdxX + Group.DimX * j] = (j == 0 && Group.IdxX < input.Length) ? input[Group.IdxX] : 0;
+            }
+            Group.Barrier();
+
+            for (int j = 0; j < 4; j++)
+            {
+                scanMem[Group.IdxX + Group.DimX * j] =
+                    GroupExtensions.ExclusiveScan<int,
+                        global::ILGPU.Algorithms.ScanReduceOperations.AddInt32>(
+                        scanMem[Group.IdxX + Group.DimX * j]);
+            }
+            Group.Barrier();
+
+            if (Group.IdxX < output.Length)
+                output[Group.IdxX] = scanMem[Group.IdxX]; // first bucket's scan result
+        }
+
+        [TestMethod]
+        public async Task WasmBarrierIsolationMultiScanTest() => await RunTest(async accelerator =>
+        {
+            int gs = 256;
+            for (int run = 0; run < 20; run++)
+            {
+                using var inBuf = accelerator.Allocate1D<int>(gs);
+                using var outBuf = accelerator.Allocate1D<int>(gs);
+                var data = new int[gs];
+                for (int i = 0; i < gs; i++) data[i] = 1;
+                inBuf.CopyFromCPU(data);
+                var kernel = accelerator.LoadStreamKernel<Index1D, ArrayView<int>, ArrayView<int>, SpecializedValue<int>>(IsolationMultiScanKernel);
+                kernel(new KernelConfig(1, gs), (Index1D)gs, inBuf.View, outBuf.View, SpecializedValue.New(gs));
+                await accelerator.SynchronizeAsync();
+                var result = await outBuf.CopyToHostAsync<int>();
+                for (int i = 0; i < gs; i++)
+                {
+                    int expected = i; // exclusive scan of all-1s = [0,1,2,...,255]
+                    if (result[i] != expected)
+                        throw new Exception($"MultiScan run {run} pos {i}: expected {expected}, got {result[i]}");
+                }
+            }
+        });
+
         // Test 4: ExclusiveScan via GroupExtensions (same path as RadixSort)
         static void IsolationGroupScanKernel(Index1D index, ArrayView<int> input, ArrayView<int> output)
         {
@@ -721,6 +825,124 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
                 }
             }
         });
+        // Test 5b: 12 groups, 256 threads — matching RadixSort exactly
+        [TestMethod]
+        public async Task WasmBarrierIsolation12GroupTest() => await RunTest(async accelerator =>
+        {
+            int gs = 256;
+            int numGroups = 12;
+            int total = gs * numGroups;
+            for (int run = 0; run < 20; run++)
+            {
+                using var buf = accelerator.Allocate1D<int>(total);
+                var kernel = accelerator.LoadStreamKernel<Index1D, ArrayView<int>, int>(IsolationMultiGroupKernel);
+                kernel(new KernelConfig(numGroups, gs), (Index1D)total, buf.View, gs);
+                await accelerator.SynchronizeAsync();
+                var result = await buf.CopyToHostAsync<int>();
+                for (int g = 0; g < numGroups; g++)
+                {
+                    for (int i = 0; i < gs; i++)
+                    {
+                        int expected = (i + 1) * 2;
+                        int actual = result[g * gs + i];
+                        if (actual != expected)
+                            throw new Exception($"Isolation12Group run {run} group {g} pos {i}: expected {expected}, got {actual}");
+                    }
+                }
+            }
+        });
+
+        // Test 5c: Multi-dispatch (mimics RadixSort's pass1→scan→pass2 pattern)
+        [TestMethod]
+        public async Task WasmBarrierIsolationMultiDispatchTest() => await RunTest(async accelerator =>
+        {
+            int gs = 256;
+            int numGroups = 12;
+            int total = gs * numGroups;
+            // Do 24 dispatches (matching RadixSort's 8 passes × 3 dispatches each)
+            for (int dispatch = 0; dispatch < 24; dispatch++)
+            {
+                using var buf = accelerator.Allocate1D<int>(total);
+                var kernel = accelerator.LoadStreamKernel<Index1D, ArrayView<int>, int>(IsolationMultiGroupKernel);
+                kernel(new KernelConfig(numGroups, gs), (Index1D)total, buf.View, gs);
+                await accelerator.SynchronizeAsync();
+                var result = await buf.CopyToHostAsync<int>();
+                for (int g = 0; g < numGroups; g++)
+                {
+                    int expected0 = 2; // first element always 2
+                    int actual0 = result[g * gs];
+                    if (actual0 != expected0)
+                        throw new Exception($"MultiDispatch #{dispatch} group {g} pos 0: expected {expected0}, got {actual0}");
+                    int expectedLast = gs * 2;
+                    int actualLast = result[g * gs + gs - 1];
+                    if (actualLast != expectedLast)
+                        throw new Exception($"MultiDispatch #{dispatch} group {g} pos {gs-1}: expected {expectedLast}, got {actualLast}");
+                }
+            }
+        });
+
+        // Test 5d: ExclusiveScan helper with 12 groups, 256 threads, grid-stride loop
+        // Mimics RadixSort's internal scan pattern
+        static void IsolationGridStrideScanKernel(
+            Index1D index,
+            ArrayView<int> input,
+            ArrayView<int> output,
+            SpecializedValue<int> groupSize,
+            int numGroups,
+            int paddedLength)
+        {
+            var scanMemory = SharedMemory.Allocate<int>(1024);
+            int gridIdx = Grid.IdxX;
+            for (int i = Grid.GlobalIndex.X; i < paddedLength; i += GridExtensions.GridStrideLoopStride)
+            {
+                bool inRange = i < input.Length;
+                int val = inRange ? input[i] : 0;
+
+                // Write to shared memory and scan (like RadixSort histogram)
+                scanMemory[Group.IdxX] = val;
+                Group.Barrier();
+
+                int scanned = GroupExtensions.ExclusiveScan<int,
+                    global::ILGPU.Algorithms.ScanReduceOperations.AddInt32>(scanMemory[Group.IdxX]);
+                Group.Barrier();
+
+                if (inRange)
+                    output[i] = scanned;
+
+                gridIdx += Grid.DimX;
+            }
+        }
+
+        [TestMethod(Timeout = 120000)]
+        public async Task WasmBarrierIsolationGridStrideScanTest() => await RunTest(async accelerator =>
+        {
+            int n = 500000;
+            int gs = 256;
+            var (gridDim, groupDim) = accelerator.ComputeGridStrideLoopExtent(n);
+            int paddedLength = ((n + gs - 1) / gs) * gs;
+
+            using var inBuf = accelerator.Allocate1D<int>(n);
+            using var outBuf = accelerator.Allocate1D<int>(n);
+            var data = new int[n];
+            for (int i = 0; i < n; i++) data[i] = 1;
+            inBuf.CopyFromCPU(data);
+
+            var kernel = accelerator.LoadStreamKernel<Index1D, ArrayView<int>, ArrayView<int>,
+                SpecializedValue<int>, int, int>(IsolationGridStrideScanKernel);
+            kernel(new KernelConfig(gridDim, groupDim), (Index1D)n, inBuf.View, outBuf.View,
+                SpecializedValue.New(gs), gridDim, paddedLength);
+            await accelerator.SynchronizeAsync();
+
+            var result = await outBuf.CopyToHostAsync<int>();
+            // Check first group's scan results: exclusive scan of all-1s = [0,1,2,...,255]
+            for (int i = 0; i < Math.Min(gs, n); i++)
+            {
+                int expected = i; // exclusive scan of 1s = index
+                if (result[i] != expected)
+                    throw new Exception($"GridStrideScan pos {i}: expected {expected}, got {result[i]}");
+            }
+        });
+
         // Test 5: RadixSort at various sizes to find the failure threshold
         [TestMethod(Timeout = 300000)]
         public async Task WasmBarrierIsolationRadixSortSizeTest() => await RunTest(async accelerator =>

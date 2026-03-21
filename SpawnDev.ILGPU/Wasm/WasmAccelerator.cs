@@ -502,12 +502,14 @@ namespace SpawnDev.ILGPU.Wasm
                     bufferOffsets.Add(totalMemoryBytes);
                     totalMemoryBytes += (int)buf.LengthInBytes;
                 }
-                // Grid-stride padding: ILGPU kernels assume GPU-style memory overprovisioning.
-                // Grid-stride loops may read up to (gridDimX * groupSize) elements past the
-                // last buffer. On CUDA/OpenCL this is harmless (GPU memory is overprovisioned).
-                // On Wasm, linear memory is exactly sized — pad to prevent OOB traps.
-                int gridStridePadding = compiledKernel.HasBarriers ? groupSize * gridDimX * 4 : 0;
-                totalMemoryBytes += gridStridePadding;
+                // Grid-stride padding: kernels with KernelConfig (groupSize > 1) use
+                // grid-stride loops that may access up to one stride past buffer boundaries.
+                // Max overshoot = one stride = gridDimX elements. For auto-grouped kernels
+                // (groupSize=1), no grid-stride overshoot. 8 bytes per element covers all types.
+                // Grid-stride padding: kernels with KernelConfig (groupSize > 1) use
+                // grid-stride loops that may access up to one stride past buffer boundaries.
+                if (groupSize > 1)
+                    totalMemoryBytes += gridDimX * 8;
 
                 // Scratch memory for struct construction (after all buffers + padding).
                 // For barrier kernels, each worker needs its own scratch to avoid races.
@@ -994,10 +996,8 @@ namespace SpawnDev.ILGPU.Wasm
             int phaseCount = compiledKernel.PhaseCount;
             if (hasBarriers)
             {
-                // 2 workers for barrier kernels. Full hardwareConcurrency for non-barrier.
-                // 3+ workers have intermittent shared memory visibility failures at high
-                // barrier sync volumes (post-4.6.0 investigation). 2 workers = 100% pass.
-                workerCount = Math.Min(Math.Min(_workerCount, groupSize), 2);
+                // Test: 3 workers to find exact threshold
+                workerCount = Math.Min(_workerCount, groupSize);
                 int fibersPerWorker = (groupSize + workerCount - 1) / workerCount;
                 workerCount = (groupSize + fibersPerWorker - 1) / fibersPerWorker;
                 if (workerCount < 1) workerCount = 1;
@@ -1095,7 +1095,7 @@ namespace SpawnDev.ILGPU.Wasm
                         if (!done)
                         {
                             var errorMsg = msg.JSRef!.Get<string?>("data.error") ?? "Unknown worker error";
-                            tcs.TrySetException(new Exception($"[Wasm] Worker {workerIdx} error: {errorMsg} | pages={_cachedWasmPages} mem={_cachedWasmPages*65536}"));
+                            tcs.TrySetException(new Exception($"[Wasm] Worker {workerIdx} error: {errorMsg} | disp={dispNum} pages={_cachedWasmPages} mem={_cachedWasmPages*65536} barriers={hasBarriers} scratch={scratchBase} shared={sharedMemBase} fence={fenceSlot} gs={groupSize} spt={scratchPerThread} items={totalItems} wc={workerCount}"));
                             return;
                         }
                         tcs.TrySetResult();
@@ -1173,7 +1173,7 @@ namespace SpawnDev.ILGPU.Wasm
                         if (!done)
                         {
                             var errorMsg = msg.JSRef!.Get<string?>("data.error") ?? "Unknown worker error";
-                            tcs.TrySetException(new Exception($"[Wasm] Worker {workerIdx} error: {errorMsg} | pages={_cachedWasmPages} mem={_cachedWasmPages*65536}"));
+                            tcs.TrySetException(new Exception($"[Wasm] Worker {workerIdx} error: {errorMsg} | disp={dispNum} pages={_cachedWasmPages} mem={_cachedWasmPages*65536} barriers={hasBarriers} scratch={scratchBase} shared={sharedMemBase} fence={fenceSlot} gs={groupSize} spt={scratchPerThread} items={totalItems} wc={workerCount}"));
                             return;
                         }
                         tcs.TrySetResult();

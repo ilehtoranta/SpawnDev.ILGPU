@@ -337,6 +337,24 @@ namespace ILGPU.IR.Transformations
                     return false;
                 }
 
+                // Don't convert if any region contains a Load instruction.
+                // IfConversion makes loads unconditional (load + select), which causes
+                // OOB traps on Wasm where memory is exactly sized. On GPU backends
+                // (CUDA/OpenCL), memory is overprovisioned so unconditional loads are
+                // harmless. For Wasm correctness, loads must remain inside their
+                // conditional blocks to respect bounds guards.
+                for (int i = 0; i < regions.Count; i++)
+                {
+                    foreach (var regionBlock in regions[i])
+                    {
+                        foreach (var value in regionBlock)
+                        {
+                            if (value is Load)
+                                return false;
+                        }
+                    }
+                }
+
                 // If we arrive here, we can be sure that each successor has its distinct
                 // region that we may safely merge into one chain of nested blocks
 
