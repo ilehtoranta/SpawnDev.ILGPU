@@ -560,22 +560,22 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
         // RadixSortMinimalPatterns: un-skipped with memory.grow() fix.
         [TestMethod]
         public new async Task RadixSortThresholdProbeTest() =>
-            throw new UnsupportedTestException("Wasm: multi-group RadixSort counter/memory (TODO)");
+            throw new UnsupportedTestException("Wasm: 260K-1.5M pairs — OOM (TODO)");
         [TestMethod]
         public new async Task RadixSortDescendingWithSentinelsTest() =>
-            throw new UnsupportedTestException("Wasm: multi-group RadixSort counter/memory (TODO)");
+            throw new UnsupportedTestException("Wasm: 260K-1.5M pairs — OOM (TODO)");
         [TestMethod]
         public new async Task RadixSortRepeatedResortTest() =>
-            throw new UnsupportedTestException("Wasm: multi-group RadixSort counter/memory (TODO)");
+            throw new UnsupportedTestException("Wasm: 260K-1.5M pairs — OOM (TODO)");
         [TestMethod]
         public new async Task RadixSortHeavyDuplicateKeysTest() =>
-            throw new UnsupportedTestException("Wasm: multi-group RadixSort counter/memory (TODO)");
+            throw new UnsupportedTestException("Wasm: 260K-1.5M pairs — OOM (TODO)");
         [TestMethod]
         public new async Task RadixSortDescendingOddCountTest() =>
-            throw new UnsupportedTestException("Wasm: multi-group RadixSort counter/memory (TODO)");
+            throw new UnsupportedTestException("Wasm: 260K-1.5M pairs — OOM (TODO)");
         [TestMethod]
         public new async Task RadixSortSpawnSceneSimulationTest() =>
-            throw new UnsupportedTestException("Wasm: multi-group RadixSort counter/memory (TODO)");
+            throw new UnsupportedTestException("Wasm: 260K-1.5M pairs — OOM (TODO)");
 
         // ═══════════════════════════════════════════════════════════════
         // MEMORY LIMITS — OOM or cascading memory (8)
@@ -605,6 +605,6 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
         // DualScanKernelTest: un-skipped — MaxNumThreadsPerGroup increased to 256.
         [TestMethod]
         public new async Task TwoPassScanSimulationTest() =>
-            throw new UnsupportedTestException("Wasm: hardcoded groupSize=256 exceeds max 64");
+            throw new UnsupportedTestException("Wasm: CopyFrom between views (NativePtr null on Wasm)");
     }
 }
