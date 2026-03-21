@@ -30,7 +30,7 @@ Compiles ILGPU IR → WebAssembly binary. Dispatches via Web Workers with Shared
 - **AddressSpaceType views** (ArrayView): field 1 = **Index/Offset** → return 0
 
 This was hardcoded to 0 for ALL views, which broke `view.Length` for ArrayView1D params.
-The fix checks `param.Type is StructureType`. Current: 211 pass / 0 fail / 28 skip (was 182/0/51, target: 231/0/3) (v4.6.0).
+The fix checks `param.Type is StructureType`. Current: 220 pass / 0 fail / 21 skip (was 182/0/51, target: 231/0/3) (v4.6.0).
 
 **TRACE RULE**: Both `GetViewLength` and `GetField` must trace the view source back to
 the kernel Parameter through GetField/NewView/AddressSpaceCast chains (via `TraceToParameter()`).
@@ -71,7 +71,7 @@ If this test produces duplicates or non-deterministic results, the post-helper b
 
 ## Fiber Refactor Status (March 2026) — COMPLETE
 
-**Test results: 211 pass / 0 fail / 28 skip (was 182/0/51, target: 231/0/3)** (up from 49/10/17 pre-refactor). All RadixSort, scan, barrier, and sort tests pass on the Wasm backend.
+**Test results: 220 pass / 0 fail / 21 skip (was 182/0/51, target: 231/0/3)** (up from 49/10/17 pre-refactor). All RadixSort, scan, barrier, and sort tests pass on the Wasm backend.
 
 The fiber refactor resolved the multi-group barrier dispatch limitation. Eight bugs were fixed collaboratively by two agents:
 

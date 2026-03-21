@@ -297,7 +297,49 @@ namespace SpawnDev.ILGPU.Wasm
                     int paramIdx = i - argOffset;
                     bool isView = paramIdx < paramInfos.Count && paramInfos[paramIdx].IsView;
 
-                    if (isView && args[i] is IArrayView iav)
+                    // If the codegen marked this as a view but the CLR arg isn't IArrayView,
+                    // it's a struct-with-embedded-view (e.g., ViewSourceSequencer). Extract
+                    // the first IArrayView field to use as the view arg.
+                    IArrayView iav = args[i] as IArrayView;
+                    if (isView && iav == null)
+                    {
+                        // Find first IArrayView field in the struct
+                        var structFields = args[i]?.GetType().GetFields(
+                            BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                        if (structFields != null)
+                        {
+                            foreach (var sf in structFields)
+                            {
+                                try
+                                {
+                                    if (sf.GetValue(args[i]) is IArrayView innerView)
+                                    {
+                                        iav = innerView;
+                                        break;
+                                    }
+                                    // Check nested structs (e.g., ViewSourceSequencer.ViewSource is ArrayView1D)
+                                    var val = sf.GetValue(args[i]);
+                                    if (val != null && val.GetType().IsValueType && !val.GetType().IsPrimitive)
+                                    {
+                                        var innerFields = val.GetType().GetFields(
+                                            BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                                        foreach (var inf in innerFields)
+                                        {
+                                            if (inf.GetValue(val) is IArrayView deepView)
+                                            {
+                                                iav = deepView;
+                                                break;
+                                            }
+                                        }
+                                        if (iav != null) break;
+                                    }
+                                }
+                                catch { }
+                            }
+                        }
+                    }
+
+                    if (isView && iav != null)
                     {
                         // ArrayView<T> is a value struct that implements IArrayView.
                         // Extract the underlying MemoryBuffer via .Buffer property.
@@ -326,14 +368,30 @@ namespace SpawnDev.ILGPU.Wasm
                                 {
                                     var idx = indexProp.GetValue(viewObj);
                                     if (idx is long longIdx)
-                                        subViewByteOffset = (int)(longIdx * iav.Buffer.ElementSize);
+                                    {
+                                        // Use the VIEW's element size for byte offset, not
+                                        // the buffer's. When a buffer is Cast (e.g., int[]
+                                        // → RadixSortPair[]), buffer.ElementSize differs
+                                        // from the view's element size.
+                                        int viewElemSize = iav.Buffer.ElementSize;
+                                        // Get the actual element size from the view type
+                                        var viewGenericType = viewObj.GetType();
+                                        if (viewGenericType.IsGenericType)
+                                        {
+                                            var elemType = viewGenericType.GetGenericArguments()[0];
+                                            int actualSize = global::ILGPU.Interop.SizeOf(elemType);
+                                            if (actualSize > 0)
+                                                viewElemSize = actualSize;
+                                        }
+                                        subViewByteOffset = (int)(longIdx * viewElemSize);
+                                    }
                                 }
                             }
                             catch { }
                             viewSubOffsets.Add(subViewByteOffset);
 
                             // Log buffer identity for dispatch debugging
-                            if (dispNum >= 2 && dispNum <= 20)
+                            if (dispNum >= 1 && dispNum <= 20)
                                 _dispatchLog += $"|D{dispNum}V{i}:buf={wasmBuf.GetHashCode()%1000},sub={subViewByteOffset},len={iav.Length}";
 
                             // Extract stride via cached reflection for multi-dimensional views
@@ -574,7 +632,7 @@ namespace SpawnDev.ILGPU.Wasm
                 }
 
                 // Debug: check buf.SharedBuffer and Wasm memory after copy-in
-                if (dispNum >= 6 && dispNum <= 8 && bufferInfos.Count > 0)
+                if (dispNum >= 1 && dispNum <= 8 && bufferInfos.Count > 0)
                 {
                     // What's in the buffer's SharedArrayBuffer?
                     using var sabView = new Uint8Array(bufferInfos[0].buffer.SharedBuffer, 0, 4);
@@ -833,7 +891,7 @@ namespace SpawnDev.ILGPU.Wasm
                     bufferInfos[i].buffer.NativePtr = IntPtr.Zero;
 
                 // Log first few dispatches' flat args for debugging
-                if (dispNum >= 2 && dispNum <= 6)
+                if (dispNum >= 1 && dispNum <= 6)
                 {
                     string flatArgStr = "";
                     for (int fi = 0; fi < flatArgs.Count; fi++)
@@ -1120,7 +1178,7 @@ namespace SpawnDev.ILGPU.Wasm
             await Task.WhenAll(tasks);
 
             // Debug: dump first 4 bytes of each buffer in Wasm memory after kernel
-            if (dispNum >= 2 && dispNum <= 6)
+            if (dispNum >= 1 && dispNum <= 6)
             {
                 for (int bi = 0; bi < bufferInfos.Count; bi++)
                 {

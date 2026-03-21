@@ -620,6 +620,8 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                     int elemSize = 4;
                     if (elemType is PrimitiveType pt)
                         elemSize = GetElementSize(pt.BasicValueType);
+                    else if (elemType is StructureType st)
+                        elemSize = st.Size;
 
                     _paramInfos.Add(new WasmParamInfo
                     {
@@ -1245,6 +1247,15 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 WasmModuleBuilder.EmitLocalSet(prologueCode, _yieldedLocal);
                 prologueCode.Add(WasmOpCodes.End); // end if
 
+                // For phase 0 (first entry): ensure view-derived locals are initialized.
+                // The IR may generate GetField(view, Length) → local copy that's only
+                // populated when the GetField code block executes. On first entry, if the
+                // GetField is in a later code block, the local stays at 0.
+                // We can't easily determine which locals need initialization, so this is
+                // handled by the EmitRestoreAllLocals which reads from zeroed scratch.
+                // The real fix should ensure GetField for view parameters always uses
+                // the function parameter local directly via _paramLocals.
+
                 // Set helper scratch base locals (runs on every phase, not just restore).
                 // Each helper gets scratchBase + _scratchNextOffset + cumulativeOffset.
                 foreach (var (localIdx, cumOffset) in _helperScratchBaseLocals)
@@ -1426,52 +1437,12 @@ namespace SpawnDev.ILGPU.Wasm.Backend
 
         public override void GenerateCode(Load value)
         {
-            // For struct types, copy the struct data from the source address to a
-            // scratch slot. This creates a snapshot — the copy is independent of
-            // later writes to the source memory (critical for in-place pre-sort).
+            // For struct types, pass through the source address.
             if (value.Type is StructureType structType)
             {
-                int structSize = structType.Size;
-                int alignedSize = (structSize + 7) & ~7;
-                string valueKey = GetValueKey(value);
-                if (!_structLoadSlots.TryGetValue(valueKey, out int scratchOffset))
-                {
-                    scratchOffset = _scratchNextOffset;
-                    _scratchNextOffset += alignedSize;
-                    _structLoadSlots[valueKey] = scratchOffset;
-                }
                 var target = AllocateLocal(value, WasmOpCodes.I32);
                 var source = value.Source.Resolve();
-                for (int i = 0; i < structType.NumFields; i++)
-                {
-                    var fieldAccess = new FieldAccess(i);
-                    int byteOffset = structType.GetOffset(fieldAccess);
-                    var fieldType = structType.Fields[i];
-                    byte fieldWasmType = GetWasmTypeFromIR(fieldType);
-                    byte loadOp, storeOp;
-                    uint align;
-                    switch (fieldWasmType)
-                    {
-                        case WasmOpCodes.I64: loadOp = WasmOpCodes.I64Load; storeOp = WasmOpCodes.I64Store; align = 3; break;
-                        case WasmOpCodes.F32: loadOp = WasmOpCodes.F32Load; storeOp = WasmOpCodes.F32Store; align = 2; break;
-                        case WasmOpCodes.F64: loadOp = WasmOpCodes.F64Load; storeOp = WasmOpCodes.F64Store; align = 3; break;
-                        default: loadOp = WasmOpCodes.I32Load; storeOp = WasmOpCodes.I32Store; align = 2; break;
-                    }
-                    WasmModuleBuilder.EmitLocalGet(Code, _scratchBaseLocal);
-                    WasmModuleBuilder.EmitI32Const(Code, scratchOffset + byteOffset);
-                    Code.Add(WasmOpCodes.I32Add);
-                    EmitGetLocal(source);
-                    if (byteOffset > 0)
-                    {
-                        WasmModuleBuilder.EmitI32Const(Code, byteOffset);
-                        Code.Add(WasmOpCodes.I32Add);
-                    }
-                    WasmModuleBuilder.EmitLoad(Code, loadOp, align, 0);
-                    WasmModuleBuilder.EmitStore(Code, storeOp, align, 0);
-                }
-                WasmModuleBuilder.EmitLocalGet(Code, _scratchBaseLocal);
-                WasmModuleBuilder.EmitI32Const(Code, scratchOffset);
-                Code.Add(WasmOpCodes.I32Add);
+                EmitGetLocal(source);
                 WasmModuleBuilder.EmitLocalSet(Code, target);
                 return;
             }
@@ -3323,14 +3294,12 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 // A view StructureType (ArrayView1D<T, TStride>) has AddressSpaceType as
                 // its first DirectField. This is the pointer field from ArrayView<T>.
                 //
-                // A struct-with-embedded-view (InitializerImplementation<T, TStride>) has
-                // a StructureType as its first DirectField (the ArrayView1D wrapper),
-                // NOT a direct AddressSpaceType.
-                //
-                // This distinction works because ILGPU represents ArrayView<T> as
-                // AddressSpaceType (a pointer), while ArrayView1D wraps it by having
-                // AddressSpaceType as its first direct field plus extent + stride.
-                // User structs containing views have the view as a nested struct field.
+                // WARNING: User structs containing views (ViewSourceSequencer) may also
+                // have AddressSpaceType as first DirectField after IR flattening. These
+                // are INDISTINGUISHABLE from real views at the IR level. The dispatch side
+                // handles this by checking `args[i] is IArrayView` — if the CLR arg isn't
+                // an IArrayView, it falls through to the struct serialization path.
+                // The codegen and dispatch MUST agree on the parameter count.
                 if (structType.DirectFields.Length > 0
                     && structType.DirectFields[0] is AddressSpaceType)
                     return true;

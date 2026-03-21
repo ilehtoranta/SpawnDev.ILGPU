@@ -44,7 +44,7 @@ Detailed constraints live in each directory's own `CLAUDE.md`. Read the relevant
 
 Tests in `SpawnDev.ILGPU.Demo.Shared/UnitTests/BackendTestBase*.cs` (~211 tests, Tests1-10). Backend-specific classes inherit and override unsupported tests. See `PlaywrightMultiTest/CLAUDE.md` for running tests.
 
-**Current results (March 2026):** Wasm: 211 pass / 0 fail / 28 skip (+29 this session). All 6 backends: 1484/0/187. Key fixes: struct/scratch overlap, multi-pass scan, Float16 f16↔f32 conversion, unsigned atomic min/max, 256 threads/group, memory.grow(), struct Load snapshot, i64→i32 coercion. Remaining 25 fixable skips: 14 pairs sort (struct element codegen in RadixSortKernel1 — needs WAT debug) + 11 other (OOM/CopyFrom).
+**Current results (March 2026):** Wasm: 220 pass / 0 fail / 21 skip (+38 this session). Key fixes: struct/scratch overlap, multi-pass scan, Float16 f16↔f32 conversion, unsigned atomic min/max, 256 threads/group, memory.grow(), ViewSourceSequencer dispatch alignment, subViewByteOffset element size (Interop.SizeOf), i64→i32 coercion. Remaining 18 fixable skips: 5 large pairs sort (2048+) + 6 multi-group RadixSort + 5 OOM + 1 TwoPassScan + 1 Half pairs.
 
 ## Debugging Pipeline — ShaderDebugService
 
