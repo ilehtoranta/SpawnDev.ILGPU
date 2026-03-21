@@ -20,6 +20,7 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
         protected override async Task<(Context context, Accelerator accelerator)> CreateAcceleratorAsync()
         {
             var builder = Context.Create()
+                //.Optimize(OptimizationLevel.Debug) // DEBUG: test showed no effect on intermittent failure
                 .EnableAlgorithms()
                 .EnableWasmAlgorithms()
                 .Wasm();

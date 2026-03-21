@@ -11,6 +11,7 @@
 
 using ILGPU.IR.Analyses.ControlFlowDirection;
 using ILGPU.IR.Analyses.TraversalOrders;
+using ILGPU.IR.Values;
 using System.Runtime.CompilerServices;
 
 namespace ILGPU.IR.Transformations
@@ -53,6 +54,22 @@ namespace ILGPU.IR.Transformations
                 // We cannot merge jump targets in div. control-flow or in the case
                 // of a block that we have already seen
                 if (nextBlock.Predecessors.Length > 1 || visited.Contains(nextBlock))
+                    break;
+
+                // Do NOT merge across barrier boundaries. If the root block contains
+                // a barrier (Group.Barrier), merging the successor allows later
+                // optimization passes to reorder loads across the barrier, causing
+                // shared memory visibility bugs in multi-worker dispatch.
+                bool hasBarrier = false;
+                foreach (var value in root)
+                {
+                    if (value is BarrierOperation)
+                    {
+                        hasBarrier = true;
+                        break;
+                    }
+                }
+                if (hasBarrier)
                     break;
 
                 // Mark next block as seen

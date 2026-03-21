@@ -508,7 +508,7 @@ namespace SpawnDev.ILGPU.Wasm
                 int scratchBase = (totalMemoryBytes + 7) & ~7;
                 // Compute actual worker count for scratch allocation (must match dispatch)
                 int effectiveWorkers = compiledKernel.HasBarriers
-                    ? Math.Min(4, groupSize)  // barrier: capped at 4
+                    ? Math.Min(_workerCount, groupSize)  // barrier: full hardwareConcurrency
                     : Math.Min(_workerCount, totalItems); // non-barrier: hardwareConcurrency
                 if (effectiveWorkers < 1) effectiveWorkers = 1;
                 int scratchSize = compiledKernel.HasBarriers
@@ -991,9 +991,15 @@ namespace SpawnDev.ILGPU.Wasm
             int phaseCount = compiledKernel.PhaseCount;
             if (hasBarriers)
             {
-                // Multi-worker barrier with in-Wasm atomic barriers + fences.
-                // Cap at 4 workers — 12-worker OOB is a known post-4.6.0 issue.
-                workerCount = Math.Min(4, groupSize);
+                // Multi-worker barrier dispatch. Eliminate empty workers to prevent
+                // barrier race (empty workers race through phases with no tid loop).
+                // Cap workers to avoid livelock/deadlock with too many.
+                // 8 workers confirmed working; 11+ deadlocks.
+                // Cap at 4 workers for barrier kernels while investigating
+                // intermittent ScanWithBoundaries failure (shared memory visibility).
+                workerCount = Math.Min(Math.Min(_workerCount, groupSize), 4);
+                int fibersPerWorker = (groupSize + workerCount - 1) / workerCount;
+                workerCount = (groupSize + fibersPerWorker - 1) / fibersPerWorker;
                 if (workerCount < 1) workerCount = 1;
             }
             else
@@ -1023,9 +1029,12 @@ namespace SpawnDev.ILGPU.Wasm
                 sharedMemBase, barrierBase, fenceSlot,
                 groupSize, numGroups, hasBarriers, argStr,
                 dynamicSharedElements, workerCount, phaseCount,
-                // Zero region covers both shared memory AND barrier counters so stale
-                // barrier arrival/sense values from the previous group don't leak through.
-                (barrierBase + compiledKernel.BarrierCount * 8) - sharedMemBase);
+                // Zero region covers shared memory + barrier counters only.
+                // MUST NOT include fence slots — the group barrier uses fenceSlot+16/+20
+                // immediately after the zero loop. If a slow worker zeroes the arrival
+                // counter after a fast worker already incremented it, both deadlock.
+                // Fence slots self-manage via the barrier protocol (last worker resets).
+                fenceSlot - sharedMemBase);
 
             // Lazily initialize the worker pool, or grow it if needed
             if (_workerPool == null)

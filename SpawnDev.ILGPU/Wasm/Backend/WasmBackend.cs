@@ -822,7 +822,9 @@ namespace SpawnDev.ILGPU.Wasm.Backend
 
             code.Add(WasmOpCodes.Else);
 
-            // Other workers: wait for generation to advance
+            // Other workers: wait for generation to advance.
+            // wait32 with infinite timeout. Safe now that the zero region race is fixed
+            // (fence slots excluded from between-group zeroing).
             WasmModuleBuilder.EmitLocalGet(code, 13); // fenceBase
             WasmModuleBuilder.EmitLocalGet(code, pSavedGen);
             WasmModuleBuilder.EmitI64Const(code, -1); // infinite timeout
@@ -857,10 +859,14 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             code.Add(WasmOpCodes.End); // end loop $loop_phase
             code.Add(WasmOpCodes.End); // end block $exit_phase
 
-            // Zero shared memory AND barrier counters between groups to prevent stale
-            // broadcast slots, scan buffers, reduce accumulators, and barrier arrival/sense
-            // values from corrupting the next group.
-            // Loop: for (zeroIdx = 0; zeroIdx < zeroRegionSize; zeroIdx += 4) i32.store(sharedMemBase + zeroIdx, 0)
+            // Zero shared memory AND barrier counters between groups.
+            // Only first worker (threadStart == 0) zeroes to avoid races.
+            // Other workers skip to the group barrier which ensures visibility.
+            WasmModuleBuilder.EmitLocalGet(code, 0); // threadStart param
+            WasmModuleBuilder.EmitI32Const(code, 0);
+            code.Add(WasmOpCodes.I32Eq);
+            code.Add(WasmOpCodes.If);
+            code.Add(WasmOpCodes.Void);
             WasmModuleBuilder.EmitI32Const(code, 0);
             WasmModuleBuilder.EmitLocalSet(code, pZeroIdx);
             code.Add(WasmOpCodes.Block);
@@ -873,12 +879,14 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             code.Add(WasmOpCodes.I32GeU);
             code.Add(WasmOpCodes.BrIf);
             WasmModuleBuilder.EmitU32Leb128(code, 1); // break to exit block
-            // i32.store(sharedMemBase + zeroIdx, 0)
+            // i32.atomic.store(sharedMemBase + zeroIdx, 0) — atomic for multi-worker visibility
             WasmModuleBuilder.EmitLocalGet(code, 8); // sharedMemBase
             WasmModuleBuilder.EmitLocalGet(code, pZeroIdx);
             code.Add(WasmOpCodes.I32Add);
             WasmModuleBuilder.EmitI32Const(code, 0);
-            WasmModuleBuilder.EmitStore(code, WasmOpCodes.I32Store, 2, 0);
+            code.Add(WasmOpCodes.AtomicPrefix);
+            WasmModuleBuilder.EmitU32Leb128(code, WasmOpCodes.I32AtomicStore);
+            code.Add(0x02); code.Add(0x00); // align=2, offset=0
             // zeroIdx += 4
             WasmModuleBuilder.EmitLocalGet(code, pZeroIdx);
             WasmModuleBuilder.EmitI32Const(code, 4);
@@ -888,6 +896,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             WasmModuleBuilder.EmitU32Leb128(code, 0); // continue loop
             code.Add(WasmOpCodes.End); // end loop
             code.Add(WasmOpCodes.End); // end block
+            code.Add(WasmOpCodes.End); // end if (threadStart == 0)
 
             // Inter-worker group barrier: all workers must finish current group
             // (including shared memory zeroing) before any starts the next group.
@@ -939,10 +948,10 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             WasmModuleBuilder.EmitU32Leb128(code, WasmOpCodes.I32AtomicStore);
             code.Add(0x02); code.Add(0x0C); // offset=12 (exit flag)
             code.Add(WasmOpCodes.Else);
-            // Wait
+            // Wait for group generation to advance (infinite wait32)
             WasmModuleBuilder.EmitLocalGet(code, 13);
             WasmModuleBuilder.EmitLocalGet(code, pSavedGen);
-            WasmModuleBuilder.EmitI64Const(code, -1);
+            WasmModuleBuilder.EmitI64Const(code, -1); // infinite
             code.Add(WasmOpCodes.AtomicPrefix);
             WasmModuleBuilder.EmitU32Leb128(code, WasmOpCodes.MemoryAtomicWait32);
             code.Add(0x02); code.Add(0x14); // offset=20
