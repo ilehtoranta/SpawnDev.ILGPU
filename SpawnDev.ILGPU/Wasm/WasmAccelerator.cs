@@ -996,8 +996,9 @@ namespace SpawnDev.ILGPU.Wasm
             int phaseCount = compiledKernel.PhaseCount;
             if (hasBarriers)
             {
-                // 3 workers for barrier — testing threshold
-                workerCount = Math.Min(Math.Min(_workerCount, groupSize), 3);
+                // Full hardwareConcurrency for barrier kernels.
+                // Pure spin barrier provides correct seq_cst ordering.
+                workerCount = Math.Min(_workerCount, groupSize);
                 int fibersPerWorker = (groupSize + workerCount - 1) / workerCount;
                 workerCount = (groupSize + fibersPerWorker - 1) / fibersPerWorker;
                 if (workerCount < 1) workerCount = 1;

@@ -284,6 +284,17 @@ namespace ILGPU.IR.Transformations
             var location = phiValue.Location;
             var targetAddressSpace = data[phiValue];
 
+            // Guard: don't rewrite phi nodes that merge Shared pointers to Generic.
+            if (targetAddressSpace != MemoryAddressSpace.Shared)
+            {
+                for (int i = 0, e = phiValue.Count; i < e; ++i)
+                {
+                    if (phiValue.Nodes[i].Type is AddressSpaceType ast &&
+                        ast.AddressSpace == MemoryAddressSpace.Shared)
+                        return;
+                }
+            }
+
             // Create a new target type
             var targetType = builder.SpecializeAddressSpaceType(
                 phiValue.Type.As<AddressSpaceType>(location),
@@ -314,6 +325,18 @@ namespace ILGPU.IR.Transformations
             var builder = context.Builder;
             var location = predicate.Location;
             var targetAddressSpace = data[predicate];
+
+            // Guard: don't rewrite predicates that select Shared pointers to Generic.
+            if (targetAddressSpace != MemoryAddressSpace.Shared)
+            {
+                bool hasSharedInput =
+                    (predicate.TrueValue.Type is AddressSpaceType trueAst &&
+                     trueAst.AddressSpace == MemoryAddressSpace.Shared) ||
+                    (predicate.FalseValue.Type is AddressSpaceType falseAst &&
+                     falseAst.AddressSpace == MemoryAddressSpace.Shared);
+                if (hasSharedInput)
+                    return;
+            }
 
             // Convert the true and false values
             var trueValue = builder.CreateAddressSpaceCast(
@@ -643,8 +666,18 @@ namespace ILGPU.IR.Transformations
 
             var location = value.Location;
             // If this is a simple scalar value, try to convert it
-            if (type is AddressSpaceType)
+            if (type is AddressSpaceType addressSpaceType)
             {
+                // Guard: never cast Shared alloca pointers to a non-Shared space.
+                // The Wasm backend uses sharedMemBase offsets for Shared allocas;
+                // casting to Generic loses the address space info and causes
+                // histogram writes to go to the wrong memory region.
+                if (addressSpaceType.AddressSpace == MemoryAddressSpace.Shared &&
+                    targetAddressSpace != MemoryAddressSpace.Shared)
+                {
+                    return value;
+                }
+
                 return context.Builder.CreateAddressSpaceCast(
                     location,
                     value,

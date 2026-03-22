@@ -370,3 +370,4 @@ FodyWeavers.xsd
 /.claude/settings.local.json
 /Notes
 /PlaywrightMultiTest/WGSLDumps
+/barrier_repro

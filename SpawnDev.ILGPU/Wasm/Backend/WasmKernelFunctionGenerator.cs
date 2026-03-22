@@ -2943,14 +2943,16 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             {
                 // Primary key miss — try fallback matching by element type + array size.
                 // The Alloca IR node from GenerateCode may be a different instance
-                // from the one registered during SetupSharedAllocations().
-                if (value.AddressSpace == MemoryAddressSpace.Shared)
+                // from the one registered during SetupSharedAllocations(), AND the IR
+                // optimizer may have changed the address space from Shared to Generic.
+                // Try type+size match regardless of address space.
                 {
                     string allocaElemType = value.AllocaType.ToString();
                     long allocaArrayLen = value.ArrayLength.Resolve() is global::ILGPU.IR.Values.PrimitiveValue pv
                         ? pv.Int64Value : -1;
 
                     string? matchedKey = null;
+                    // Try exact match first (type + size)
                     foreach (var kvp in _sharedAllocaMetadata)
                     {
                         if (kvp.Value.ElemType == allocaElemType && kvp.Value.ArraySize == allocaArrayLen)
@@ -2959,49 +2961,63 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                             break;
                         }
                     }
+                    // If no exact match, try type-only match (IR may change array length)
+                    if (matchedKey == null)
+                    {
+                        foreach (var kvp in _sharedAllocaMetadata)
+                        {
+                            if (kvp.Value.ElemType == allocaElemType)
+                            {
+                                matchedKey = kvp.Key;
+                                break;
+                            }
+                        }
+                    }
 
                     if (matchedKey != null && _sharedAllocaOffsets.TryGetValue(matchedKey, out offset))
                     {
-                        if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm-SharedMem] Alloca {key}: fallback match to {matchedKey} (type={allocaElemType}, size={allocaArrayLen})");
+                        if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm-SharedMem] Alloca {key}: fallback match to {matchedKey} (type={allocaElemType}, size={allocaArrayLen}, addrSpace={value.AddressSpace})");
+                    }
+                    else if (value.AddressSpace != MemoryAddressSpace.Shared)
+                    {
+                        // Log the miss for diagnostics
+                        if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm-Alloca] No shared match for non-Shared alloca: key={key}, type={allocaElemType}, size={allocaArrayLen}, addrSpace={value.AddressSpace}, sharedEntries={_sharedAllocaMetadata.Count}");
+                        // Not shared memory — local alloca.
+                        // Allocate in scratch memory (NOT address 0, which would corrupt
+                        // the data buffer region — see Wasm/CLAUDE.md RADIX RULE).
+                        int allocSize = 8; // default
+                        if (value.Type is AddressSpaceType localAddrType)
+                        {
+                            if (localAddrType.ElementType is PrimitiveType localPt)
+                                allocSize = GetElementSize(localPt.BasicValueType);
+                            else if (localAddrType.ElementType is StructureType localSt)
+                                allocSize = localSt.Size;
+                        }
+                        if (value.ArrayLength.Resolve() is global::ILGPU.IR.Values.PrimitiveValue localPv)
+                            allocSize *= localPv.Int32Value;
+
+                        int baseOff = _scratchNextOffset;
+                        _scratchNextOffset += allocSize;
+                        _scratchNextOffset = (_scratchNextOffset + 7) & ~7;
+
+                        var localTarget = AllocateLocal(value, WasmOpCodes.I32);
+                        WasmModuleBuilder.EmitLocalGet(Code, _scratchBaseLocal);
+                        if (baseOff > 0)
+                        {
+                            WasmModuleBuilder.EmitI32Const(Code, baseOff);
+                            Code.Add(WasmOpCodes.I32Add);
+                        }
+                        WasmModuleBuilder.EmitLocalSet(Code, localTarget);
+                        if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm-Alloca] Local alloca: key={key}, size={allocSize}, scratchOffset={baseOff}");
+                        return;
                     }
                     else
                     {
-                        // No match found — emit base alloca as a safety fallback
+                        // Shared address space but no matching entry — emit base alloca as safety fallback
                         if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm-SharedMem] WARNING: Alloca {key} (type={allocaElemType}, size={allocaArrayLen}) has no matching shared entry");
                         base.GenerateCode(value);
                         return;
                     }
-                }
-                else
-                {
-                    // Not shared memory — local alloca.
-                    // Allocate in scratch memory (NOT address 0, which would corrupt
-                    // the data buffer region — see Wasm/CLAUDE.md RADIX RULE).
-                    int allocSize = 8; // default
-                    if (value.Type is AddressSpaceType localAddrType)
-                    {
-                        if (localAddrType.ElementType is PrimitiveType localPt)
-                            allocSize = GetElementSize(localPt.BasicValueType);
-                        else if (localAddrType.ElementType is StructureType localSt)
-                            allocSize = localSt.Size;
-                    }
-                    if (value.ArrayLength.Resolve() is global::ILGPU.IR.Values.PrimitiveValue localPv)
-                        allocSize *= localPv.Int32Value;
-
-                    int baseOff = _scratchNextOffset;
-                    _scratchNextOffset += allocSize;
-                    _scratchNextOffset = (_scratchNextOffset + 7) & ~7;
-
-                    var localTarget = AllocateLocal(value, WasmOpCodes.I32);
-                    WasmModuleBuilder.EmitLocalGet(Code, _scratchBaseLocal);
-                    if (baseOff > 0)
-                    {
-                        WasmModuleBuilder.EmitI32Const(Code, baseOff);
-                        Code.Add(WasmOpCodes.I32Add);
-                    }
-                    WasmModuleBuilder.EmitLocalSet(Code, localTarget);
-                    if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm-Alloca] Local alloca: key={key}, size={allocSize}, scratchOffset={baseOff}");
-                    return;
                 }
             }
 
