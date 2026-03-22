@@ -990,20 +990,16 @@ namespace ILGPU.Algorithms
             int tileSize = Group.DimX * numIterationsPerGroup;
             int baseIdx = Grid.IdxX * tileSize + Group.IdxX;
 
-            // First chunk — explicit if to prevent IR load hoisting past bounds check.
-            // Ternary `idx < len ? arr[idx] : default` can be optimized to unconditional
-            // Load + Select, which OOBs on Wasm when idx >= buffer length.
-            T value = op.Identity;
-            if (baseIdx < input.IntLength)
-                value = input[baseIdx];
+            // First chunk
+            T value = baseIdx < input.IntLength
+                ? input[baseIdx]
+                : op.Identity;
             T boundary = AllReduce<T, TScanOperation>(value);
 
             // Additional chunks (grid-stride within tile)
             for (int i = baseIdx + Group.DimX; i < (Grid.IdxX + 1) * tileSize; i += Group.DimX)
             {
-                T v = op.Identity;
-                if (i < input.IntLength)
-                    v = input[i];
+                T v = i < input.IntLength ? input[i] : op.Identity;
                 T r = AllReduce<T, TScanOperation>(v);
                 boundary = op.Apply(boundary, r);
             }
@@ -1034,20 +1030,19 @@ namespace ILGPU.Algorithms
             int tileSize = Group.DimX * numIterationsPerGroup;
 
             // Step 1: Scan the right boundaries to get left boundary per group
-            // Explicit if to prevent IR load hoisting past bounds check
-            T localRB = op.Identity;
-            if (Group.IdxX < rightBoundaries.Length)
-                localRB = rightBoundaries[Group.IdxX];
+            T localRB = Group.IdxX < rightBoundaries.Length
+                ? rightBoundaries[Group.IdxX]
+                : op.Identity;
             T scanned = InclusiveScan<T, TScanOperation>(localRB);
             T leftBoundary = Group.Broadcast(scanned, Grid.IdxX);
 
             // Step 2: Scan each chunk of the tile
             int baseIdx = Grid.IdxX * tileSize + Group.IdxX;
 
-            // First chunk — explicit if to prevent IR load hoisting past bounds check
-            T inputVal = op.Identity;
-            if (baseIdx < input.IntLength)
-                inputVal = input[baseIdx];
+            // First chunk
+            T inputVal = baseIdx < input.IntLength
+                ? input[baseIdx]
+                : op.Identity;
             T current = InclusiveScanWithBoundaries<T, TScanOperation>(
                 inputVal, out var bounds);
 
@@ -1059,9 +1054,7 @@ namespace ILGPU.Algorithms
             {
                 leftBoundary = op.Apply(leftBoundary, bounds.RightBoundary);
 
-                inputVal = op.Identity;
-                if (i < input.IntLength)
-                    inputVal = input[i];
+                inputVal = i < input.IntLength ? input[i] : op.Identity;
                 current = InclusiveScanWithBoundaries<T, TScanOperation>(
                     inputVal, out bounds);
 
@@ -1090,19 +1083,19 @@ namespace ILGPU.Algorithms
             TScanOperation op = default;
             int tileSize = Group.DimX * numIterationsPerGroup;
 
-            // Step 1: Scan boundaries — explicit if to prevent IR load hoisting
-            T localRB = op.Identity;
-            if (Group.IdxX < rightBoundaries.Length)
-                localRB = rightBoundaries[Group.IdxX];
+            // Step 1: Scan boundaries
+            T localRB = Group.IdxX < rightBoundaries.Length
+                ? rightBoundaries[Group.IdxX]
+                : op.Identity;
             T scanned = InclusiveScan<T, TScanOperation>(localRB);
             T leftBoundary = Group.Broadcast(scanned, Grid.IdxX);
 
             // Step 2: Exclusive scan of each chunk
             int baseIdx = Grid.IdxX * tileSize + Group.IdxX;
 
-            T inputVal = op.Identity;
-            if (baseIdx < input.IntLength)
-                inputVal = input[baseIdx];
+            T inputVal = baseIdx < input.IntLength
+                ? input[baseIdx]
+                : op.Identity;
             T current = ExclusiveScanWithBoundaries<T, TScanOperation>(
                 inputVal, out var bounds);
 
@@ -1116,9 +1109,7 @@ namespace ILGPU.Algorithms
                     nextBoundary,
                     Group.Broadcast(inputVal, Group.DimX - 1));
 
-                inputVal = op.Identity;
-                if (i < input.IntLength)
-                    inputVal = input[i];
+                inputVal = i < input.IntLength ? input[i] : op.Identity;
                 current = ExclusiveScanWithBoundaries<T, TScanOperation>(
                     inputVal, out bounds);
 

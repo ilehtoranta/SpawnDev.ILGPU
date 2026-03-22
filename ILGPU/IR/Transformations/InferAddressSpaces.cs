@@ -668,16 +668,11 @@ namespace ILGPU.IR.Transformations
             // If this is a simple scalar value, try to convert it
             if (type is AddressSpaceType addressSpaceType)
             {
-                // Guard: never cast Shared alloca pointers to a non-Shared space.
-                // The Wasm backend uses sharedMemBase offsets for Shared allocas;
-                // casting to Generic loses the address space info and causes
-                // histogram writes to go to the wrong memory region.
                 if (addressSpaceType.AddressSpace == MemoryAddressSpace.Shared &&
                     targetAddressSpace != MemoryAddressSpace.Shared)
                 {
                     return value;
                 }
-
                 return context.Builder.CreateAddressSpaceCast(
                     location,
                     value,

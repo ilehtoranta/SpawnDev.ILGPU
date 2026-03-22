@@ -608,10 +608,10 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             int dispFuncIdx = moduleBuilder.AddFunction(dispTypeIdx);
             moduleBuilder.ExportFunction("dispatcher", dispFuncIdx);
 
-            // Locals: g, phase, tid, anyYielded, r, zeroIdx, savedGen, arrived, spinCount, spinCount2
+            // Locals: g, phase, tid, anyYielded, r, zeroIdx, savedGen, arrived (+ 2 unused reserved)
             var locals = new List<WasmLocal>
             {
-                new WasmLocal { Type = WasmOpCodes.I32, Count = 10 }
+                new WasmLocal { Type = WasmOpCodes.I32, Count = 8 }
             };
             uint pG = (uint)dispParamTypes.Count;         // local index for g
             uint pPhase = pG + 1;
@@ -621,8 +621,6 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             uint pZeroIdx = pG + 5;
             uint pSavedGen = pG + 6;
             uint pArrived = pG + 7;
-            uint pSpinCount = pG + 8;  // spin counter for bounded spin-wait
-            uint pSpinCount2 = pG + 9; // spin counter for group barrier spin-wait
 
             var code = new List<byte>();
 
@@ -807,10 +805,10 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             WasmModuleBuilder.EmitU32Leb128(code, WasmOpCodes.AtomicFence);
             code.Add(0x00);
 
-            // Bump generation (no notify — waiters use pure spin)
-            // wait32/notify has a visibility bug with 3+ workers where ANY
-            // execution of wait32 (even as a sleep) contaminates V8's internal
-            // ordering state. Pure spin on i32.atomic.load is the only correct approach.
+            // Bump generation (pure spin — no wait32/notify)
+            // wait32 has a visibility bug with 3+ workers where "not-equal" return
+            // doesn't provide happens-before for 3rd-party stores. Pure spin on
+            // i32.atomic.load provides correct seq_cst ordering.
             WasmModuleBuilder.EmitLocalGet(code, 13); // fenceBase
             WasmModuleBuilder.EmitLocalGet(code, pSavedGen);
             WasmModuleBuilder.EmitI32Const(code, 1);
@@ -821,10 +819,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
 
             code.Add(WasmOpCodes.Else);
 
-            // Other workers: pure spin-wait on i32.atomic.load.
-            // Each atomic.load is seq_cst, guaranteeing that when the generation
-            // change is observed, ALL prior stores from ALL workers are visible.
-            // Phase barriers are microseconds — spin cost is negligible.
+            // Other workers: pure spin-wait for generation to advance.
             code.Add(WasmOpCodes.Block);
             code.Add(WasmOpCodes.Void);
             code.Add(WasmOpCodes.Loop);
@@ -926,7 +921,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             code.Add(WasmOpCodes.I32Eq);
             code.Add(WasmOpCodes.If);
             code.Add(WasmOpCodes.Void);
-            // Reset arrival, bump gen (no notify — spin-wait instead)
+            // Reset arrival, bump gen (pure spin — no wait32/notify)
             WasmModuleBuilder.EmitLocalGet(code, 13);
             WasmModuleBuilder.EmitI32Const(code, 0);
             code.Add(WasmOpCodes.AtomicPrefix);
@@ -938,11 +933,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             code.Add(WasmOpCodes.AtomicPrefix);
             WasmModuleBuilder.EmitU32Leb128(code, WasmOpCodes.I32AtomicStore);
             code.Add(0x02); code.Add(0x0C); // offset=12 (exit flag)
-            // Fence before gen bump
-            code.Add(WasmOpCodes.AtomicPrefix);
-            WasmModuleBuilder.EmitU32Leb128(code, WasmOpCodes.AtomicFence);
-            code.Add(0x00);
-            // Bump group generation + notify backoff sleepers
+            // Bump group generation
             WasmModuleBuilder.EmitLocalGet(code, 13);
             WasmModuleBuilder.EmitLocalGet(code, pSavedGen);
             WasmModuleBuilder.EmitI32Const(code, 1);
@@ -950,14 +941,8 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             code.Add(WasmOpCodes.AtomicPrefix);
             WasmModuleBuilder.EmitU32Leb128(code, WasmOpCodes.I32AtomicStore);
             code.Add(0x02); code.Add(0x14); // offset=20
-            WasmModuleBuilder.EmitLocalGet(code, 13);
-            WasmModuleBuilder.EmitI32Const(code, int.MaxValue);
-            code.Add(WasmOpCodes.AtomicPrefix);
-            WasmModuleBuilder.EmitU32Leb128(code, WasmOpCodes.MemoryAtomicNotify);
-            code.Add(0x02); code.Add(0x14); // offset=20
-            code.Add(WasmOpCodes.Drop);
             code.Add(WasmOpCodes.Else);
-            // Pure spin-wait for group barrier (same rationale as phase barrier)
+            // Pure spin-wait for group generation
             code.Add(WasmOpCodes.Block);
             code.Add(WasmOpCodes.Void);
             code.Add(WasmOpCodes.Loop);
@@ -965,13 +950,13 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             WasmModuleBuilder.EmitLocalGet(code, 13);
             code.Add(WasmOpCodes.AtomicPrefix);
             WasmModuleBuilder.EmitU32Leb128(code, WasmOpCodes.I32AtomicLoad);
-            code.Add(0x02); code.Add(0x14); // offset=20 (group gen)
+            code.Add(0x02); code.Add(0x14); // offset=20
             WasmModuleBuilder.EmitLocalGet(code, pSavedGen);
             code.Add(WasmOpCodes.I32Ne);
             code.Add(WasmOpCodes.BrIf);
-            WasmModuleBuilder.EmitU32Leb128(code, 1); // break (gen changed)
+            WasmModuleBuilder.EmitU32Leb128(code, 1); // break
             code.Add(WasmOpCodes.Br);
-            WasmModuleBuilder.EmitU32Leb128(code, 0); // continue spin
+            WasmModuleBuilder.EmitU32Leb128(code, 0); // continue
             code.Add(WasmOpCodes.End); // end loop
             code.Add(WasmOpCodes.End); // end block
             code.Add(WasmOpCodes.End); // end if (group barrier)
