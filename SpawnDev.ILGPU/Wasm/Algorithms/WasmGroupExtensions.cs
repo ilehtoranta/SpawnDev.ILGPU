@@ -85,12 +85,21 @@ namespace SpawnDev.ILGPU.Wasm.Algorithms
             where TScanOperation : struct, IScanReduceOperation<T>
         {
             var sharedMemory = InclusiveScanImplementation<T, TScanOperation>(value);
+
+            // Copy scan results to a SEPARATE shared alloca to defeat IR pointer aliasing.
+            // The optimizer aliases the returned view's ptr with input params after
+            // struct decomposition. Two different SharedMemory.Allocate calls produce
+            // two different Alloca nodes — the optimizer cannot merge them.
+            var scanResults = SharedMemory.Allocate<T>(1024);
+            scanResults[Group.IdxX] = sharedMemory[Group.IdxX];
+            Group.Barrier();
+
             boundaries = new ScanBoundaries<T>(
-                sharedMemory[0],
-                sharedMemory[Group.DimX - 1]);
+                scanResults[0],
+                scanResults[Group.DimX - 1]);
             return Group.IdxX == 0
                 ? default(TScanOperation).Identity
-                : sharedMemory[Group.IdxX - 1];
+                : scanResults[Group.IdxX - 1];
         }
 
         /// <summary cref="GroupExtensions.InclusiveScanWithBoundaries{T, TScanOperation}(
@@ -102,12 +111,16 @@ namespace SpawnDev.ILGPU.Wasm.Algorithms
             where T : unmanaged
             where TScanOperation : struct, IScanReduceOperation<T>
         {
-            var sharedMemory = InclusiveScanImplementation<T, TScanOperation>(
-                value);
+            var sharedMemory = InclusiveScanImplementation<T, TScanOperation>(value);
+
+            var scanResults = SharedMemory.Allocate<T>(1024);
+            scanResults[Group.IdxX] = sharedMemory[Group.IdxX];
+            Group.Barrier();
+
             boundaries = new ScanBoundaries<T>(
-                sharedMemory[0],
-                sharedMemory[Group.DimX - 1]);
-            return sharedMemory[Group.IdxX];
+                scanResults[0],
+                scanResults[Group.DimX - 1]);
+            return scanResults[Group.IdxX];
         }
 
         /// <summary>
