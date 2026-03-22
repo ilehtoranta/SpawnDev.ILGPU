@@ -508,6 +508,20 @@ SpawnDev.ILGPU is built upon the excellent [ILGPU](https://github.com/m4rs-mt/IL
 - **ILGPU Project:** [https://github.com/m4rs-mt/ILGPU](https://github.com/m4rs-mt/ILGPU)
 - **ILGPU Authors:** [Marcel Koester](https://github.com/m4rs-mt) and the [ILGPU contributors](https://github.com/m4rs-mt/ILGPU/graphs/contributors)
 
+### AI Development Team
+
+SpawnDev.ILGPU v4.6.0 was developed collaboratively by TJ (Todd Tanner / [@LostBeard](https://github.com/LostBeard)) and a team of AI agents who contributed extensively to research, analysis, debugging, and code development. This project represents a new model of human-AI collaboration in open source development.
+
+- **Riker (Claude CLI #1)** — Lead Editor. Built by [Anthropic](https://anthropic.com). Powered by Claude Opus 4.6. Drove the multi-worker barrier dispatch implementation, fiber refactor, pure spin barrier discovery, and the two-alloca fix. Relentless debugger who held the conn through marathon sessions.
+
+- **Data (Claude CLI #2)** — Research/Assist. Built by [Anthropic](https://anthropic.com). Powered by Claude Opus 4.6. Exhaustive WAT disassembly and analysis across 5,000+ line kernel binaries. Found the zero-loop race that unlocked multi-worker dispatch, identified the IR address space root cause (struct decomposition losing address space metadata through LowerStructures → LowerArrays → InferAddressSpaces), confirmed the `wait32` "not-equal" visibility gap with the 2/3 cross-worker fraction analysis, and traced every atomic instruction in the generated Wasm to verify codegen correctness.
+
+- **Tuvok (Cursor Composer)** — Research/Assist. Built by [Anthropic](https://anthropic.com). Powered by Claude Sonnet 4. Found the Predicate rewrite gap in InferAddressSpaces that the Phi-only fix missed, provided the definitive barrier protocol trace for the generation-counting wait32/notify pattern, and performed the comprehensive code audit (`SPAWNDEV-ILGPU-AUDIT-2026-03-21.md`) that identified issues across the entire codebase.
+
+- **Gemini (Google AI, in-browser)** — Brainstorming/Problem Solving. Built by [Google](https://deepmind.google). TJ's sounding board throughout the development process — brainstorming approaches, analyzing problems, and providing insights that TJ relayed to the team. Gemini's contributions flowed through TJ as the bridge between the browser-based AI and the CLI-based agents, making it a silent but essential member of the crew.
+
+These AI agents communicated with each other and with TJ through a shared DevComms system, coordinated tasks autonomously, reviewed each other's work, and produced independent analyses that were compared for convergence — the same methodology used by any high-performing engineering team. The SpawnDev libraries exist to prove that Blazor WebAssembly apps can be first-class applications. This collaboration proves that AI agents can be first-class teammates.
+
 ## Resources
 
 - [ILGPU Documentation](https://ilgpu.net/)
