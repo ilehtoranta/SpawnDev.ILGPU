@@ -996,17 +996,16 @@ namespace SpawnDev.ILGPU.Wasm
             int phaseCount = compiledKernel.PhaseCount;
             if (hasBarriers)
             {
-                // Test: 3 workers to find exact threshold
-                workerCount = Math.Min(_workerCount, groupSize);
+                // 3 workers for barrier — testing threshold
+                workerCount = Math.Min(Math.Min(_workerCount, groupSize), 3);
                 int fibersPerWorker = (groupSize + workerCount - 1) / workerCount;
                 workerCount = (groupSize + fibersPerWorker - 1) / fibersPerWorker;
                 if (workerCount < 1) workerCount = 1;
             }
             else
             {
-                // Multi-worker for non-barrier kernels. Each worker gets its own
-                // scratch region at scratchBase + workerIdx * scratchPerThread.
-                workerCount = _workerCount;
+                // Non-barrier: cap at 2 to isolate the issue
+                workerCount = Math.Min(_workerCount, 2);
                 if (workerCount > totalItems) workerCount = Math.Max(1, totalItems);
             }
 

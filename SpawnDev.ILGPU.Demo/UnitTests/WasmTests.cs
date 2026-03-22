@@ -881,6 +881,86 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
             }
         });
 
+        // Test 5e: Full RadixSort-like kernel — 4 scans + presort in grid-stride loop
+        static void IsolationRadixLikeKernel(
+            Index1D index,
+            ArrayView<int> view,
+            SpecializedValue<int> groupSize,
+            int numGroups,
+            int paddedLength)
+        {
+            var scanMemory = SharedMemory.Allocate<int>(groupSize * 4);
+            int gridIdx = Grid.IdxX;
+
+            for (int i = Grid.GlobalIndex.X; i < paddedLength; i += GridExtensions.GridStrideLoopStride)
+            {
+                bool inRange = i < view.Length;
+                int value = 0;
+                if (inRange)
+                    value = view[i];
+
+                int bits = value & 3; // 0-3 (like ExtractRadixBits)
+
+                // Zero histogram
+                for (int j = 0; j < 4; j++)
+                    scanMemory[Group.IdxX + groupSize * j] = 0;
+                if (inRange)
+                    scanMemory[Group.IdxX + groupSize * bits] = 1;
+                Group.Barrier();
+
+                // 4 ExclusiveScan calls (like RadixSort)
+                for (int j = 0; j < 4; j++)
+                {
+                    var addr = Group.IdxX + groupSize * j;
+                    scanMemory[addr] = GroupExtensions.ExclusiveScan<int,
+                        global::ILGPU.Algorithms.ScanReduceOperations.AddInt32>(scanMemory[addr]);
+                }
+                Group.Barrier();
+
+                // Compute position and presort (in-place write)
+                int pos = gridIdx * Group.DimX + scanMemory[Group.IdxX + groupSize * bits];
+                if (inRange && pos < view.Length)
+                    view[pos] = value;
+                Group.Barrier();
+
+                gridIdx += Grid.DimX;
+            }
+        }
+
+        [TestMethod(Timeout = 120000)]
+        public async Task WasmBarrierIsolationRadixLikeTest() => await RunTest(async accelerator =>
+        {
+            int n = 260000;
+            int gs = 256;
+            var (gridDim, groupDim) = accelerator.ComputeGridStrideLoopExtent(n);
+            int paddedLength = ((n + gs - 1) / gs) * gs;
+            int numGroups = gridDim;
+
+            for (int run = 0; run < 3; run++)
+            {
+                using var buf = accelerator.Allocate1D<int>(n);
+                var data = new int[n];
+                var rng = new Random(42 + run);
+                for (int i = 0; i < n; i++) data[i] = rng.Next(4); // values 0-3
+                buf.CopyFromCPU(data);
+
+                var kernel = accelerator.LoadStreamKernel<Index1D, ArrayView<int>,
+                    SpecializedValue<int>, int, int>(IsolationRadixLikeKernel);
+                kernel(new KernelConfig(gridDim, groupDim), (Index1D)n, buf.View,
+                    SpecializedValue.New(gs), numGroups, paddedLength);
+                await accelerator.SynchronizeAsync();
+
+                // Just verify no OOB — the presort shuffle is valid if it doesn't crash
+                var result = await buf.CopyToHostAsync<int>();
+                // Check: all values should still be 0-3
+                for (int i = 0; i < n; i++)
+                {
+                    if (result[i] < 0 || result[i] > 3)
+                        throw new Exception($"RadixLike run {run} pos {i}: unexpected value {result[i]}");
+                }
+            }
+        });
+
         // Test 5d: ExclusiveScan helper with 12 groups, 256 threads, grid-stride loop
         // Mimics RadixSort's internal scan pattern
         static void IsolationGridStrideScanKernel(
