@@ -87,10 +87,10 @@ namespace SpawnDev.ILGPU.Wasm.Algorithms
             var sharedMemory = InclusiveScanImplementation<T, TScanOperation>(value);
 
             // Copy scan results to a SEPARATE shared alloca to defeat IR pointer aliasing.
-            // The optimizer aliases the returned view's ptr with input params after
-            // struct decomposition. Two different SharedMemory.Allocate calls produce
-            // two different Alloca nodes — the optimizer cannot merge them.
-            var scanResults = SharedMemory.Allocate<T>(1024);
+            // Uses size 256 (not 1024) to ensure the IR/codegen treats this as a
+            // DISTINCT alloca from the scan workspace (which is 1024). Same-size allocas
+            // may get deduped by SetupSharedAllocations, causing overlap in shared memory.
+            var scanResults = SharedMemory.Allocate<T>(256);
             scanResults[Group.IdxX] = sharedMemory[Group.IdxX];
             Group.Barrier();
 
@@ -113,7 +113,7 @@ namespace SpawnDev.ILGPU.Wasm.Algorithms
         {
             var sharedMemory = InclusiveScanImplementation<T, TScanOperation>(value);
 
-            var scanResults = SharedMemory.Allocate<T>(1024);
+            var scanResults = SharedMemory.Allocate<T>(256);
             scanResults[Group.IdxX] = sharedMemory[Group.IdxX];
             Group.Barrier();
 
