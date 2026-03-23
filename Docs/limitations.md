@@ -170,7 +170,7 @@ Not all ILGPU features work on all backends:
 ² Requires `subgroups` WebGPU extension  
 ³ Most algorithms require shared memory or atomics  
 ⁴ WebGPU: RadixSort, Scan, Reduce, Histogram fully supported and tested
-⁵ Wasm: RadixSort, Scan, Reduce, Histogram fully supported with fiber-based phase dispatch (v4.6.0). 179 pass / 0 fail.
+⁵ Wasm: RadixSort, Scan, Reduce, Histogram fully supported with fiber-based phase dispatch and pure spin barriers at full `hardwareConcurrency` (v4.6.0). 249 pass / 0 fail / 3 skip.
 
 ## Browser Compatibility
 

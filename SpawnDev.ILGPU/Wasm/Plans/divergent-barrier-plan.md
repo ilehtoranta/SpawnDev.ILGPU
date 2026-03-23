@@ -1,8 +1,8 @@
 # Divergent Barrier Support — Implementation Plan
 
 **Date:** 2026-03-20
-**Status:** Planning (next task after scan regression fix)
-**Prerequisite:** All uniform barrier tests passing (scan, broadcast, dot product)
+**Status:** Future work (post-v4.6.0). Prerequisite met: all uniform barrier tests pass (249/0/3).
+**Prerequisite:** ✅ All uniform barrier tests passing (scan, broadcast, dot product, RadixSort)
 
 ## The Problem
 

@@ -11,11 +11,12 @@ Write parallel compute code in C# and let the library pick the best available ba
 
 ### Wasm Fiber-Based Barrier Dispatch
 
-Complete rewrite of the Wasm backend's barrier synchronization model. Kernels with barriers now use a **fiber-based phase dispatch** — each barrier becomes a yield point where the kernel saves state, returns to the worker script, and re-enters at the next phase. This replaces the previous atomic-based barrier approach and enables correct execution of all ILGPU algorithms on the Wasm backend.
+Complete rewrite of the Wasm backend's barrier synchronization model. Kernels with barriers now use a **fiber-based phase dispatch** — each barrier becomes a yield point where the kernel saves state and re-enters at the next phase. A **Wasm-native phase dispatcher** handles the entire thread/phase loop inside WebAssembly, eliminating JS-Wasm boundary crossings between phases. Barriers use **pure spin synchronization** via `i32.atomic.load` loops for correct multi-worker execution at full `hardwareConcurrency`.
 
-- **RadixSort on Wasm** — All RadixSort variants now pass on Wasm (int, uint, float, 100K+ elements). Previously excluded.
-- **179 Wasm tests pass, 0 failures** — up from 49 pass / 10 fail. Every scan, barrier, broadcast, and sort test is green.
-- **8 bugs fixed** — br depth miscalculation, scratch overflow, shared memory stomping between sequential helper calls, stale dispatch state, completion state persistence, TryGetValue default value, shared memory inflation, scratch zeroing
+- **Full ILGPU Algorithms on Wasm** — All RadixSort variants (int, uint, float, pairs, descending, 100K–4M+ elements), Scan, Reduce, Histogram. Previously limited to ≤64 elements.
+- **249 Wasm tests pass, 0 failures, 3 skipped** — up from 49 pass / 10 fail. Every scan, barrier, broadcast, sort, and large sort test is green at full `hardwareConcurrency`.
+- **Pure spin barriers** — Replaced `memory.atomic.wait32`/`memory.atomic.notify` with atomic load spin loops after discovering a V8 visibility gap where `wait32` returning "not-equal" does not provide happens-before guarantees for third-party stores with 3+ workers.
+- **20+ bugs fixed** — fiber yield-per-phase, br depth miscalculation, scratch overflow, shared memory stomping, stale dispatch state, completion state persistence, shared memory alloca overlap (same-size dedup), IR address space aliasing (LowerStructures → LowerArrays → InferAddressSpaces chain), struct/scratch overlap, per-worker scratch isolation, atomic RMW opcode table, unsigned comparison, Float16, ViewSourceSequencer, subViewByteOffset, CopyFromBuffer, and more.
 - **ShaderDebugService** — auto-dumps all generated WGSL, GLSL, and Wasm binaries to a local folder on every kernel compilation. Backend-organized subfolders. IDB persistence. Full metadata headers.
 - **Test results writer** — `UnitTestsView` writes `latest.json` (live progress) and timestamped `test-run-*.json` (history) to the debug folder
 
@@ -125,7 +126,7 @@ Comprehensive documentation is available in the [Docs](Docs/) folder:
 | **Shared Memory** | ✅ | ❌ | ✅ |
 | **Group.Barrier()** | ✅ | ❌ | ✅ |
 | **Dynamic Shared Memory** | ✅ | ❌ | ✅ |
-| **ILGPU Algorithms** | ✅ RadixSort, Scan, Reduce, etc. | ❌ | ✅ Scan, Reduce; RadixSort (≤64 elements) |
+| **ILGPU Algorithms** | ✅ RadixSort, Scan, Reduce, etc. | ❌ | ✅ RadixSort, Scan, Reduce, Histogram |
 | **Atomics** | ✅ | ❌ | ✅ |
 | **64-bit (f64/i64)** | ✅ Emulated | ✅ Emulated | ✅ Native |
 | **Browser support** | Chrome/Edge 113+ | All modern browsers | All modern browsers |

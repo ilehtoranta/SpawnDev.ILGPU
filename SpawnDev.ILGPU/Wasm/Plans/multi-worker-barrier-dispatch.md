@@ -1,8 +1,8 @@
 # Re-Enable Multi-Worker Barrier Dispatch
 
 **Date:** 2026-03-20
-**Status:** Planned — high priority after RadixSort correctness fix
-**Impact:** Potentially 4-12x speedup for ALL barrier kernels (scan, sort, broadcast, dot product)
+**Status:** COMPLETE (v4.6.0, 2026-03-22) — Full `hardwareConcurrency` multi-worker barrier dispatch with pure spin barriers. 249/0/3 Wasm tests passing.
+**Impact:** Full `hardwareConcurrency` speedup for ALL barrier kernels
 
 ## Current State
 

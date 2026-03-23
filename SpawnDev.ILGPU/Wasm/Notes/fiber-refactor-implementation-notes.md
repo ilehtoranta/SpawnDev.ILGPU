@@ -1,6 +1,6 @@
 # Wasm Fiber Refactor — Implementation Notes
 
-## Status: In Progress
+## Status: COMPLETE (v4.6.0, 2026-03-22) — 249/0/3, full hardwareConcurrency, pure spin barriers
 
 ### What's Done (Infrastructure)
 - `WasmCompiledKernel.cs`: Added `PhaseCount` property

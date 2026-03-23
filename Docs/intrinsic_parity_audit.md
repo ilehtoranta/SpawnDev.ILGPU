@@ -15,7 +15,7 @@
 | **WebGL** | Browser | ❌ vertex shader | ❌ stubs only | ✅ **27/27 codegen** (3 TF-limited) |
 
 > [!IMPORTANT]
-> **Wasm** has full wasm-threads: Web Workers, SharedArrayBuffer, `memory.atomic.wait32`/`notify`, sense-reversing barriers, shared memory, and `Group.Broadcast`. It has **full `GenericAtomic` and `AtomicCAS` handlers** including float atomics via CAS loop with bitcast reinterpret (f32↔i32, f64↔i64). This includes float Add/Min/Max/Exchange and integer Add/Sub/And/Or/Xor/Exchange/Cmpxchg plus integer Min/Max via CAS.
+> **Wasm** has full wasm-threads: Web Workers, SharedArrayBuffer, pure spin barriers (`i32.atomic.load` loops — `wait32`/`notify` replaced due to V8 visibility gap), shared memory, and `Group.Broadcast`. Full `hardwareConcurrency` multi-worker barrier dispatch with in-Wasm phase dispatcher. It has **full `GenericAtomic` and `AtomicCAS` handlers** including float atomics via CAS loop with bitcast reinterpret (f32↔i32, f64↔i64). This includes float Add/Min/Max/Exchange and integer Add/Sub/And/Or/Xor/Exchange/Cmpxchg plus integer Min/Max via CAS.
 
 > [!IMPORTANT]
 > **WebGPU** has full `GenericAtomic` and `AtomicCAS` handlers with `ScanForAtomicUsage()` pre-pass. Float atomics use CAS loop (`atomicCompareExchangeWeak`). Unsigned atomics use `atomic<u32>`. Emulated 64-bit atomics supported via dual-u32 packing.
