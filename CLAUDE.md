@@ -87,6 +87,7 @@ node -e "const d=JSON.parse(require('fs').readFileSync('path/to/latest.json','ut
 
 ## Engineering Philosophy
 
+- **Bugs found here are HIGHEST PRIORITY.** SpawnDev.ILGPU is the foundation for SpawnDev.ILGPU.ML, SpawnScene, and every project that uses GPU compute. A bug here is a bug in everything. When a consuming project discovers a SpawnDev.ILGPU bug, stop all other work and fix it here first — with unit tests. No workarounds in consumers. No "fix it later." Treat every release as the final release.
 - **Correctness is non-negotiable. Performance is a close second.** Kernels dispatch thousands of times/sec.
 - **No workarounds that mask problems.** Fix root causes.
 - **Cross-backend impact** — changes to `ILGPU/` affect all 6 backends. Consider all of them.

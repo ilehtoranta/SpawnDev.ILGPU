@@ -18,7 +18,7 @@
 		<PackageIcon>icon-128.png</PackageIcon>
 		<RepositoryUrl>https://github.com/LostBeard/SpawnDev.ILGPU.git</RepositoryUrl>
 		<RepositoryType>git</RepositoryType>
-		<PackageTags>Blazor;BlazorWebAssembly;WebGPU;WebGL;WebAssembly;WebWorkers;GPGPU;ILGPU;ParallelProcessing;Cuda;OpenCL;ComputeShader;CrossPlatform</PackageTags>
+		<PackageTags>Blazor;BlazorWebAssembly;Cuda;OpenCL;WebGPU;WebGL;WebAssembly;Mutlithreading;WebWorkers;GPGPU;ILGPU;ParallelProcessing;ComputeShader;CrossPlatform</PackageTags>
 		<NoPackageAnalysis>true</NoPackageAnalysis>
 		<EnableDefaultCompileItems>true</EnableDefaultCompileItems>
 		<IsPackable>true</IsPackable>
