@@ -26,8 +26,11 @@ namespace ILGPU.Runtime
         /// Synchronizes all running streams to ensure a consistent debugging state.
         /// </summary>
         /// <param name="source">The source debugger state.</param>
-        protected static void SyncDebuggerState(ArrayView<T> source) =>
+        protected static void SyncDebuggerState(ArrayView<T> source)
+        {
+            if (source.Buffer == null) return;
             source.GetAccelerator().Synchronize();
+        }
 
         /// <summary>
         /// Returns the underlying data of the given view for debugging purposes.
@@ -36,6 +39,7 @@ namespace ILGPU.Runtime
         /// <returns>The raw view data for debugging purposes.</returns>
         protected static T[] GetDebuggerData(ArrayView<T> source)
         {
+            if (source.Buffer == null) return System.Array.Empty<T>();
             SyncDebuggerState(source);
             return source.GetAsArray();
         }
@@ -140,6 +144,7 @@ namespace ILGPU.Runtime
             Extent = source.Extent;
             Stride = source.Stride;
 
+            if (source.BaseView.Buffer == null) { Data = new T[0, 0]; return; }
             SyncDebuggerState(source.BaseView);
             Data = source.AsGeneral().GetAsArray2D();
         }
@@ -183,6 +188,7 @@ namespace ILGPU.Runtime
             Extent = source.Extent;
             Stride = source.Stride;
 
+            if (source.BaseView.Buffer == null) { Data = new T[0, 0, 0]; return; }
             SyncDebuggerState(source.BaseView);
             Data = source.AsGeneral().GetAsArray3D();
         }

@@ -326,7 +326,7 @@ namespace ILGPU.Runtime
             : base(accelerator, view.Length, view.ElementSize)
         {
             View = view;
-            NativePtr = Buffer.NativePtr;
+            NativePtr = Buffer?.NativePtr ?? IntPtr.Zero;
         }
 
         #endregion

@@ -11,6 +11,7 @@ namespace SpawnDev.ILGPU.Services;
 /// Auto-dumps all generated WGSL, GLSL, and Wasm to a user-selected local folder.
 /// Directory handle persisted in IndexedDB — set once, works across sessions.
 /// When active, every shader compilation automatically writes to disk.
+/// Each test run gets a timestamped subfolder for comparison across runs.
 /// </summary>
 public class ShaderDebugService : IAsyncBackgroundService, IAsyncDisposable
 {
@@ -20,6 +21,7 @@ public class ShaderDebugService : IAsyncBackgroundService, IAsyncDisposable
 
     private readonly BlazorJSRuntime _js;
     private FileSystemDirectoryHandle? _debugDir;
+    private FileSystemDirectoryHandle? _runDir;
     private FileSystemDirectoryHandle? _wgslDir;
     private FileSystemDirectoryHandle? _glslDir;
     private FileSystemDirectoryHandle? _wasmDir;
@@ -31,6 +33,10 @@ public class ShaderDebugService : IAsyncBackgroundService, IAsyncDisposable
     private const string KEY = "debugFolder";
 
     public FileSystemDirectoryHandle? DebugDirectory => _debugDir;
+    /// <summary>The current run's timestamped subfolder (created on first shader compile or StartNewRun).</summary>
+    public FileSystemDirectoryHandle? CurrentRunDirectory => _runDir;
+    /// <summary>Timestamp string for the current run (e.g., "2026-03-24_14-32-15").</summary>
+    public string? CurrentRunTimestamp { get; private set; }
     public bool HasDebugFolder => _debugDir != null;
     public bool HasReadPermission { get; private set; }
     public bool HasWritePermission { get; private set; }
@@ -109,6 +115,7 @@ public class ShaderDebugService : IAsyncBackgroundService, IAsyncDisposable
             _debugDir = handle;
             FolderName = handle.Name;
             HasWritePermission = true; // showDirectoryPicker with readwrite mode grants it
+            CurrentRunTimestamp = null;
             _wgslCount = 0;
             _wasmCount = 0;
             _glslCount = 0;
@@ -142,13 +149,70 @@ public class ShaderDebugService : IAsyncBackgroundService, IAsyncDisposable
         }
     }
 
+    /// <summary>Start a new timestamped run folder. Call before running tests.</summary>
+    public async Task<string?> StartNewRunAsync(string? description = null)
+    {
+        if (_debugDir == null || !HasWritePermission) return null;
+        // Close previous run's subdirs
+        DisposeRunDirs();
+        CurrentRunTimestamp = DateTime.UtcNow.ToString("yyyy-MM-dd_HH-mm-ss");
+        _runDir = await _debugDir.GetDirectoryHandle(CurrentRunTimestamp, create: true);
+        _wgslCount = 0;
+        _wasmCount = 0;
+        _glslCount = 0;
+        await WriteRunNotesAsync(description);
+        Console.WriteLine($"[ShaderDebug] New run: {CurrentRunTimestamp}");
+        return CurrentRunTimestamp;
+    }
+
+    /// <summary>Ensure a run directory exists (auto-creates on first shader compile if not started explicitly).</summary>
+    private bool _creatingRun;
+    private async Task EnsureRunDirectoryAsync()
+    {
+        if (_runDir != null) return;
+        if (_creatingRun) { while (_runDir == null) await Task.Yield(); return; }
+        _creatingRun = true;
+        try { await StartNewRunAsync(); }
+        finally { _creatingRun = false; }
+    }
+
+    private async Task WriteRunNotesAsync(string? description)
+    {
+        if (_runDir == null) return;
+        try
+        {
+            var lines = new List<string>
+            {
+                $"# Test Run — {CurrentRunTimestamp}",
+                "",
+                $"**Started:** {DateTime.UtcNow:O}",
+            };
+            if (!string.IsNullOrEmpty(description))
+            {
+                lines.Add($"**Description:** {description}");
+            }
+            lines.Add("");
+            lines.Add("## Notes");
+            lines.Add("");
+            lines.Add("<!-- Add observations, findings, and context for this run below -->");
+            lines.Add("");
+
+            using var fh = await _runDir.GetFileHandle("notes.md", create: true);
+            using var ws = await fh.CreateWritable();
+            await ws.Write(string.Join("\n", lines));
+            await ws.Close();
+        }
+        catch { }
+    }
+
     // Auto-dump callbacks — fire on every compilation
     private async void OnWGSLCompiled(string name, string source, WGSLEntry entry)
     {
         if (_debugDir == null || !HasWritePermission) return;
         try
         {
-            _wgslDir ??= await _debugDir.GetDirectoryHandle("wgsl", create: true);
+            await EnsureRunDirectoryAsync();
+            _wgslDir ??= await _runDir!.GetDirectoryHandle("wgsl", create: true);
             var header = $"// Kernel: {entry.KernelName}\n// Workgroup: {entry.WorkgroupSize}\n// SharedMem: {entry.SharedMemoryBytes}B\n// Bindings: {entry.BindingCount}\n// Time: {DateTime.UtcNow:O}\n\n";
             using var fh = await _wgslDir.GetFileHandle($"{_wgslCount++:D3}_{Safe(name)}.wgsl", create: true);
             using var ws = await fh.CreateWritable();
@@ -163,7 +227,8 @@ public class ShaderDebugService : IAsyncBackgroundService, IAsyncDisposable
         if (_debugDir == null || !HasWritePermission) return;
         try
         {
-            _glslDir ??= await _debugDir.GetDirectoryHandle("glsl", create: true);
+            await EnsureRunDirectoryAsync();
+            _glslDir ??= await _runDir!.GetDirectoryHandle("glsl", create: true);
             using var fh = await _glslDir.GetFileHandle($"{_glslCount++:D3}_{Safe(name)}.glsl", create: true);
             using var ws = await fh.CreateWritable();
             await ws.Write($"// GLSL Kernel: {name}\n// Time: {DateTime.UtcNow:O}\n\n" + source);
@@ -177,7 +242,8 @@ public class ShaderDebugService : IAsyncBackgroundService, IAsyncDisposable
         if (_debugDir == null || !HasWritePermission) return;
         try
         {
-            _wasmDir ??= await _debugDir.GetDirectoryHandle("wasm", create: true);
+            await EnsureRunDirectoryAsync();
+            _wasmDir ??= await _runDir!.GetDirectoryHandle("wasm", create: true);
             var idx = _wasmCount++;
             using var fh = await _wasmDir.GetFileHandle($"{idx:D3}_{Safe(name)}.wasm", create: true);
             using var ws = await fh.CreateWritable();
@@ -289,7 +355,7 @@ prompted for filesystem permission and the folder is automatically reconnected.
 
     private static string Safe(string n) => string.Join("_", n.Split(Path.GetInvalidFileNameChars()));
 
-    private void DisposeSubDirs()
+    private void DisposeRunDirs()
     {
         _wgslDir?.Dispose();
         _glslDir?.Dispose();
@@ -297,6 +363,13 @@ prompted for filesystem permission and the folder is automatically reconnected.
         _wgslDir = null;
         _glslDir = null;
         _wasmDir = null;
+        _runDir?.Dispose();
+        _runDir = null;
+    }
+
+    private void DisposeSubDirs()
+    {
+        DisposeRunDirs();
     }
 
     public async ValueTask DisposeAsync()
@@ -304,7 +377,7 @@ prompted for filesystem permission and the folder is automatically reconnected.
         WebGPUBackend.OnShaderCompiled -= OnWGSLCompiled;
         WasmBackend.OnKernelCompiled -= OnWasmCompiled;
         WebGLAccelerator.OnShaderCompiled -= OnGLSLCompiled;
-        DisposeSubDirs();
+        DisposeRunDirs();
         _debugDir?.Dispose();
     }
 }
