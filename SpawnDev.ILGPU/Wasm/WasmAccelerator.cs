@@ -27,6 +27,9 @@ namespace SpawnDev.ILGPU.Wasm
     /// </summary>
     public class WasmAccelerator : KernelAccelerator<WasmCompiledKernel, WasmKernel>
     {
+        // OOB diagnostic: last dispatch's view layout (for error messages)
+        private string _lastViewLayoutDiag = "";
+
         // Pending async work (kernel dispatches)
         internal readonly List<Task> _pendingWork = new();
         public static string? _lastImplicitIndexDebug;
@@ -492,7 +495,10 @@ namespace SpawnDev.ILGPU.Wasm
                     }
                 }
 
-                // Calculate total memory needed for all buffers
+                // Calculate total memory needed for all buffers.
+                // For deduped buffers (SubViews of the same parent), we need the FULL
+                // parent buffer because different SubViews may reference different ranges.
+                // The SubView byte offset is applied during flatArgs construction.
                 int totalMemoryBytes = 0;
                 var bufferOffsets = new List<int>();
 
@@ -651,12 +657,14 @@ namespace SpawnDev.ILGPU.Wasm
                     memoryBuffer = _cachedMemoryBuffer!;
                 }
 
-                // Zero out shared memory and barrier regions to prevent stale data.
-                int zeroStart = scratchBase;
+                // Zero out entire dispatch region including buffer area.
+                // Previous dispatches with different buffer layouts leave stale data in
+                // the buffer region [0..scratchBase). If a kernel reads from offsets that
+                // weren't fully overwritten by Copy-In, it gets garbage or OOB.
                 int zeroEnd = totalWithBarriers;
-                if (zeroEnd > zeroStart)
+                if (zeroEnd > 0)
                 {
-                    using var zeroView = new Uint8Array(memoryBuffer, zeroStart, zeroEnd - zeroStart);
+                    using var zeroView = new Uint8Array(memoryBuffer, 0, zeroEnd);
                     zeroView.JSRef!.CallVoid("fill", 0);
                 }
 
@@ -698,6 +706,25 @@ namespace SpawnDev.ILGPU.Wasm
                 // Track struct scalar args that need to be written into scratch memory
                 var structScratchWrites = new List<(int scratchOffset, byte[] bytes)>();
                 int scratchCursor = 0; // offset within scratch region
+
+                // OOB diagnostic: build view layout summary for error messages
+                int memorySize = wasmPages * 65536;
+                {
+                    var diagSb = new System.Text.StringBuilder();
+                    int viewCheckIdx = 0;
+                    foreach (var (isB, bufCheck, lenCheck, _, _, _) in wasmArgs)
+                    {
+                        if (isB)
+                        {
+                            int bIdx = viewBufferIdx[viewCheckIdx];
+                            int vOff = bufferOffsets[bIdx] + viewSubOffsets[viewCheckIdx];
+                            int dataEnd = vOff + lenCheck * 4;
+                            diagSb.Append($" V{viewCheckIdx}:[{vOff}..{dataEnd})/{memorySize}");
+                            viewCheckIdx++;
+                        }
+                    }
+                    _lastViewLayoutDiag = diagSb.ToString();
+                }
 
                 var flatArgs = new List<string>();
                 int viewIndex = 0; // tracks views for SubView offset lookup
@@ -1095,7 +1122,7 @@ namespace SpawnDev.ILGPU.Wasm
                         if (!done)
                         {
                             var errorMsg = msg.JSRef!.Get<string?>("data.error") ?? "Unknown worker error";
-                            tcs.TrySetException(new Exception($"[Wasm] Worker {workerIdx} error: {errorMsg} | disp={dispNum} pages={_cachedWasmPages} mem={_cachedWasmPages*65536} barriers={hasBarriers} scratch={scratchBase} shared={sharedMemBase} fence={fenceSlot} gs={groupSize} spt={scratchPerThread} items={totalItems} wc={workerCount}"));
+                            tcs.TrySetException(new Exception($"[Wasm] Worker {workerIdx} error: {errorMsg} | disp={dispNum} pages={_cachedWasmPages} mem={_cachedWasmPages*65536} barriers={hasBarriers} scratch={scratchBase} shared={sharedMemBase} fence={fenceSlot} gs={groupSize} spt={scratchPerThread} items={totalItems} wc={workerCount} views={_lastViewLayoutDiag}"));
                             return;
                         }
                         tcs.TrySetResult();
@@ -1173,7 +1200,7 @@ namespace SpawnDev.ILGPU.Wasm
                         if (!done)
                         {
                             var errorMsg = msg.JSRef!.Get<string?>("data.error") ?? "Unknown worker error";
-                            tcs.TrySetException(new Exception($"[Wasm] Worker {workerIdx} error: {errorMsg} | disp={dispNum} pages={_cachedWasmPages} mem={_cachedWasmPages*65536} barriers={hasBarriers} scratch={scratchBase} shared={sharedMemBase} fence={fenceSlot} gs={groupSize} spt={scratchPerThread} items={totalItems} wc={workerCount}"));
+                            tcs.TrySetException(new Exception($"[Wasm] Worker {workerIdx} error: {errorMsg} | disp={dispNum} pages={_cachedWasmPages} mem={_cachedWasmPages*65536} barriers={hasBarriers} scratch={scratchBase} shared={sharedMemBase} fence={fenceSlot} gs={groupSize} spt={scratchPerThread} items={totalItems} wc={workerCount} views={_lastViewLayoutDiag}"));
                             return;
                         }
                         tcs.TrySetResult();

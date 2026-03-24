@@ -157,10 +157,13 @@ namespace ILGPU.Runtime.Cuda
         /// </summary>
         protected override void DisposeAcceleratorObject(bool disposing)
         {
-            CudaException.VerifyDisposed(
-                disposing,
-                CurrentAPI.FreeMemory(NativePtr));
-            NativePtr = IntPtr.Zero;
+            if (NativePtr != IntPtr.Zero)
+            {
+                CudaException.VerifyDisposed(
+                    disposing,
+                    CurrentAPI.FreeMemory(NativePtr));
+                NativePtr = IntPtr.Zero;
+            }
         }
 
         #endregion

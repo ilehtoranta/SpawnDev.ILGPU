@@ -254,6 +254,14 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             if (value is global::ILGPU.IR.Values.Load load) return ResolveToParameterStatic(load.Source);
             if (value is LoadElementAddress lea) return ResolveToParameterStatic(lea.Source);
             if (value is LoadFieldAddress lfa) return ResolveToParameterStatic(lfa.Source);
+            // NewView creates a view from a pointer — trace through to the source
+            if (value is NewView nv) return ResolveToParameterStatic(nv.Pointer);
+            // AddressSpaceCast changes address space — trace through
+            if (value is AddressSpaceCast asc) return ResolveToParameterStatic(asc.Value);
+            // SubViewValue creates a sub-range — trace the source view
+            if (value is SubViewValue sv) return ResolveToParameterStatic(sv.Source);
+            // ConvertValue (pointer/view casts) — trace through
+            if (value is ConvertValue cv) return ResolveToParameterStatic(cv.Value);
             if (value is PhiValue phi)
             {
                 // For phi nodes, check all source values — if any traces to a buffer param, include it
@@ -516,6 +524,8 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                         Builder.AppendLine($"uniform highp {samplerType} u_param{param.Index}; // buffer param[{param.Index}]{(isStructBuffer ? " (struct, flattened)" : "")}");
                         // Tile width for 2D texture tiling (supports buffers > MAX_TEXTURE_SIZE)
                         Builder.AppendLine($"uniform highp int u_param{param.Index}_tileW;");
+                        // SubView element offset — added to texelFetch indices for SubView buffers
+                        Builder.AppendLine($"uniform highp int u_param{param.Index}_offset;");
                     }
                     _parameterBindings.Add(new KernelParameterBinding(param.Index, bindingIndex++, KernelParamKind.Buffer, glslType,
                         structFieldCount: isStructBuffer ? _structFieldCounts[param.Index] : 0));
@@ -1768,7 +1778,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                     }
 
                     if (_crossBlockPointers.Contains(value))
-                        _crossBlockPointerExprs[target.Name] = $"texelFetch(u_param{param.Index}, ivec2(int({offset}) % u_param{param.Index}_tileW, int({offset}) / u_param{param.Index}_tileW), 0)";
+                        _crossBlockPointerExprs[target.Name] = $"texelFetch(u_param{param.Index}, ivec2((int({offset}) + u_param{param.Index}_offset) % u_param{param.Index}_tileW, (int({offset}) + u_param{param.Index}_offset) / u_param{param.Index}_tileW), 0)";
 
                     declaredVariables.Add(target.Name);
                     AppendLine($"int {target.Name} = int({offset}); // LEA into param{param.Index}");
@@ -1789,7 +1799,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             if (_leaParamMap.TryGetValue(sourceVal.ToString(), out var sourceParamIdx))
             {
                 if (_crossBlockPointers.Contains(value))
-                    _crossBlockPointerExprs[target.Name] = $"texelFetch(u_param{sourceParamIdx}, ivec2(int({offset}) % u_param{sourceParamIdx}_tileW, int({offset}) / u_param{sourceParamIdx}_tileW), 0)";
+                    _crossBlockPointerExprs[target.Name] = $"texelFetch(u_param{sourceParamIdx}, ivec2((int({offset}) + u_param{sourceParamIdx}_offset) % u_param{sourceParamIdx}_tileW, (int({offset}) + u_param{sourceParamIdx}_offset) / u_param{sourceParamIdx}_tileW), 0)";
 
                 declaredVariables.Add(target.Name);
                 AppendLine($"int {target.Name} = int({offset}); // LEA into param{sourceParamIdx} (via alias)");
@@ -1841,8 +1851,8 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 // Check if this sampler is already integer-typed
                 bool emuSamplerIsInt = _bufferGlslTypes.TryGetValue(emulInfo.ParamIndex, out var emuSamplerType)
                     && (emuSamplerType == "int" || emuSamplerType == "uint");
-                string emuFetchLo = $"texelFetch(u_param{emulInfo.ParamIndex}, ivec2({baseIdxVar} % u_param{emulInfo.ParamIndex}_tileW, {baseIdxVar} / u_param{emulInfo.ParamIndex}_tileW), 0).r";
-                string emuFetchHi = $"texelFetch(u_param{emulInfo.ParamIndex}, ivec2(({baseIdxVar} + 1) % u_param{emulInfo.ParamIndex}_tileW, ({baseIdxVar} + 1) / u_param{emulInfo.ParamIndex}_tileW), 0).r";
+                string emuFetchLo = $"texelFetch(u_param{emulInfo.ParamIndex}, ivec2(({baseIdxVar} + u_param{emulInfo.ParamIndex}_offset) % u_param{emulInfo.ParamIndex}_tileW, ({baseIdxVar} + u_param{emulInfo.ParamIndex}_offset) / u_param{emulInfo.ParamIndex}_tileW), 0).r";
+                string emuFetchHi = $"texelFetch(u_param{emulInfo.ParamIndex}, ivec2(({baseIdxVar} + 1 + u_param{emulInfo.ParamIndex}_offset) % u_param{emulInfo.ParamIndex}_tileW, ({baseIdxVar} + 1 + u_param{emulInfo.ParamIndex}_offset) / u_param{emulInfo.ParamIndex}_tileW), 0).r";
                 // Integer samplers already return int/uint; float samplers need floatBitsToUint
                 string emuValLo = emuSamplerIsInt ? $"uint({emuFetchLo})" : $"floatBitsToUint({emuFetchLo})";
                 string emuValHi = emuSamplerIsInt ? $"uint({emuFetchHi})" : $"floatBitsToUint({emuFetchHi})";
@@ -1899,7 +1909,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                         // Use intBitsToFloat for float fields since texture is R32I
                         for (int fi = 0; fi < fieldPaths.Count; fi++)
                         {
-                            string fetchExpr = $"texelFetch(u_param{leaParamIdx}, ivec2((int({source}) * {structFieldCount} + {fi}) % u_param{leaParamIdx}_tileW, (int({source}) * {structFieldCount} + {fi}) / u_param{leaParamIdx}_tileW), 0).r";
+                            string fetchExpr = $"texelFetch(u_param{leaParamIdx}, ivec2((int({source}) * {structFieldCount} + {fi} + u_param{leaParamIdx}_offset) % u_param{leaParamIdx}_tileW, (int({source}) * {structFieldCount} + {fi} + u_param{leaParamIdx}_offset) / u_param{leaParamIdx}_tileW), 0).r";
                             string valExpr = fieldPaths[fi].GlslType == "float"
                                 ? $"intBitsToFloat({fetchExpr})"
                                 : fetchExpr;
@@ -1910,7 +1920,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 }
 
                 // Non-struct: standard single-texel load
-                string fetchExprStd = $"texelFetch(u_param{leaParamIdx}, ivec2(int({source}) % u_param{leaParamIdx}_tileW, int({source}) / u_param{leaParamIdx}_tileW), 0).r";
+                string fetchExprStd = $"texelFetch(u_param{leaParamIdx}, ivec2((int({source}) + u_param{leaParamIdx}_offset) % u_param{leaParamIdx}_tileW, (int({source}) + u_param{leaParamIdx}_offset) / u_param{leaParamIdx}_tileW), 0).r";
                 // For integer samplers (isampler2D/usampler2D), texelFetch already returns int/uint.
                 // For float samplers, texelFetch returns float; we may need floatBitsToInt/floatBitsToUint.
                 bool samplerIsInt = _bufferGlslTypes.TryGetValue(leaParamIdx, out var samplerGlslType)

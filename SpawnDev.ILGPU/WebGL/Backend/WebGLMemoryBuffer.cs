@@ -92,9 +92,22 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 // Mark CPU-dirty — needs upload to worker before next dispatch
                 NeedsUpload = true;
             }
+            else if (source.GetAcceleratorType() == AcceleratorType.WebGL)
+            {
+                // GPU→GPU copy: WebGL buffers always have a CPU-side backing array.
+                // Read from the source buffer's backing array and write to ours.
+                var sourceContiguous = (IContiguousArrayView)source;
+                var sourceMemBuf = (WebGLMemoryBuffer)sourceContiguous.Buffer;
+                var destContiguous = (IContiguousArrayView)destination;
+                var length = (int)source.Length;
+
+                var byteArray = sourceMemBuf._backingArray!.Read<byte>((int)sourceContiguous.Index, length);
+                _backingArray!.Write(byteArray, (int)destContiguous.Index);
+                NeedsUpload = true;
+            }
             else
             {
-                throw new NotSupportedException("Peer-to-peer copies not supported in WebGL backend.");
+                throw new NotSupportedException($"Copy from {source.GetAcceleratorType()} to WebGL not supported.");
             }
         }
 
@@ -114,9 +127,21 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 var byteArray = _backingArray!.Read<byte>((int)sourceContiguous.Index, length);
                 Marshal.Copy(byteArray, 0, destPtr, length);
             }
+            else if (destination.GetAcceleratorType() == AcceleratorType.WebGL)
+            {
+                // GPU→GPU copy: read from our backing array, write to destination's.
+                var sourceContiguous = (IContiguousArrayView)source;
+                var destContiguous = (IContiguousArrayView)destination;
+                var destMemBuf = (WebGLMemoryBuffer)destContiguous.Buffer;
+                var length = (int)source.Length;
+
+                var byteArray = _backingArray!.Read<byte>((int)sourceContiguous.Index, length);
+                destMemBuf._backingArray!.Write(byteArray, (int)destContiguous.Index);
+                destMemBuf.NeedsUpload = true;
+            }
             else
             {
-                throw new NotSupportedException("Peer-to-peer copies not supported in WebGL backend.");
+                throw new NotSupportedException($"Copy from WebGL to {destination.GetAcceleratorType()} not supported.");
             }
         }
 

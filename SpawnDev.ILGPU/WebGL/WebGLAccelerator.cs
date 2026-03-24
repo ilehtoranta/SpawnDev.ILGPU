@@ -711,13 +711,17 @@ namespace SpawnDev.ILGPU.WebGL
                     // Ensure buffer is allocated and uploaded in the worker
                     webGlAccel.EnsureBufferInWorker(memBuffer, bufferGlslType);
 
-                    // Send buffer reference (no data transfer)
+                    // Send buffer reference with SubView element offset
+                    // When a SubView starts at a non-zero index within the parent buffer,
+                    // the shader must add this offset to all texelFetch indices.
+                    int elementOffset = (int)(contiguous.Index / contiguous.ElementSize);
                     jsParams.Add(new
                     {
                         kind = "buffer_ref",
                         bufferId = memBuffer.WorkerBufferId,
                         paramIndex = glslParamIndex,
-                        elementCount = length
+                        elementCount = length,
+                        elementOffset
                     });
 
                     // Extract stride dimensions for multi-dim views
@@ -907,7 +911,7 @@ namespace SpawnDev.ILGPU.WebGL
                                 storeSlot = outputInfo.StoreSlot,
                                 storeCount = outputInfo.StoreCount,
                                 isAtomicVote = outputInfo.IsAtomicVote,
-                                writeByteOffset = (int)contiguous.Index,
+                                writeByteOffset = (int)(contiguous.Index * contiguous.ElementSize),
                                 writeLengthBytes = (int)contiguous.LengthInBytes
                             });
                         }
