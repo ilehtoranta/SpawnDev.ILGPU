@@ -504,7 +504,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 // Just ensure alignment.
                 data.ScratchPerThread = (data.ScratchPerThread + 7) & ~7;
 
-                Log($"[Wasm-Helper] '{helperMethod.Name}' funcIdx={helperFuncIdx}, params={result.ParamTypes.Length}, locals={result.Locals.Count}, code={result.Code.Length}b, barriers={result.BarrierCount}, resultTypes=[{string.Join(",", helperResultTypes.Select(t => $"0x{t:X2}"))}], phaseMode={data.PhaseCount > 1}");
+                if (VerboseLogging) Log($"[Wasm-Helper] '{helperMethod.Name}' funcIdx={helperFuncIdx}, params={result.ParamTypes.Length}, locals={result.Locals.Count}, code={result.Code.Length}b, barriers={result.BarrierCount}, resultTypes=[{string.Join(",", helperResultTypes.Select(t => $"0x{t:X2}"))}], phaseMode={data.PhaseCount > 1}");
             }
 
             // Update shared memory size to account for helper Broadcast slots
