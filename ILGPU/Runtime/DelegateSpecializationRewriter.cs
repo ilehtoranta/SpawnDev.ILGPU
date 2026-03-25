@@ -101,12 +101,31 @@ namespace ILGPU.Runtime
             var module = originalMethod.Module;
             var il = methodBuilder.GetILGenerator();
 
-            // Declare locals matching the original
+            // Declare locals matching the original.
+            // Replace delegate-typed and DelegateSpecialization<> locals with int —
+            // ILGPU's compiler rejects Func<> types, and these locals are skipped
+            // by the stloc/ldloc handlers so they're never actually used.
             foreach (var local in body.LocalVariables)
-                il.DeclareLocal(local.LocalType, local.IsPinned);
-
+            {
+                var localType = local.LocalType;
+                if (typeof(Delegate).IsAssignableFrom(localType) ||
+                    (localType.IsGenericType && localType.GetGenericTypeDefinition() == typeof(DelegateSpecialization<>)))
+                    localType = typeof(int); // Placeholder — never actually used
+                il.DeclareLocal(localType, local.IsPinned);
+            }
             // State for tracking delegate spec pattern
             bool skipNextCall = false; // true after ldarga of a delegate param
+            bool skipNextStore = false; // true after get_Value skip (compiler stored delegate in local)
+            var delegateLocals = new HashSet<int>(); // locals that hold skipped delegates
+
+            // Pre-mark locals that had DelegateSpecialization or delegate types
+            for (int li = 0; li < body.LocalVariables.Count; li++)
+            {
+                var lt = body.LocalVariables[li].LocalType;
+                if (typeof(Delegate).IsAssignableFrom(lt) ||
+                    (lt.IsGenericType && lt.GetGenericTypeDefinition() == typeof(DelegateSpecialization<>)))
+                    delegateLocals.Add(li);
+            }
 
             // Parse and re-emit IL instructions
             int pos = 0;
@@ -160,6 +179,9 @@ namespace ILGPU.Runtime
                         {
                             // Skip get_Value() — delegate is resolved
                             // at dispatch time, not in the kernel IL.
+                            // If the compiler stores this in a local,
+                            // the next stloc should also be skipped.
+                            skipNextStore = true;
                             continue;
                         }
                     }
@@ -172,6 +194,77 @@ namespace ILGPU.Runtime
                 }
 
                 skipNextCall = false;
+
+                // stloc after get_Value skip → mark local as delegate, skip the store
+                if (skipNextStore)
+                {
+                    int localIdx = -1;
+                    if (opcode == OpCodes.Stloc_0) localIdx = 0;
+                    else if (opcode == OpCodes.Stloc_1) localIdx = 1;
+                    else if (opcode == OpCodes.Stloc_2) localIdx = 2;
+                    else if (opcode == OpCodes.Stloc_3) localIdx = 3;
+                    else if (opcode == OpCodes.Stloc_S) { localIdx = ilBytes[pos]; pos += 1; }
+                    else if (opcode == OpCodes.Stloc) { localIdx = BitConverter.ToInt16(ilBytes, pos); pos += 2; }
+
+                    if (localIdx >= 0)
+                    {
+                        delegateLocals.Add(localIdx);
+                        skipNextStore = false;
+                        continue;
+                    }
+                    skipNextStore = false;
+                }
+
+                // ldloc/ldloca/stloc of a delegate local → skip
+                {
+                    int localIdx = -1;
+                    bool isLocalOp = false;
+                    // ldloc variants
+                    if (opcode == OpCodes.Ldloc_0) { localIdx = 0; isLocalOp = true; }
+                    else if (opcode == OpCodes.Ldloc_1) { localIdx = 1; isLocalOp = true; }
+                    else if (opcode == OpCodes.Ldloc_2) { localIdx = 2; isLocalOp = true; }
+                    else if (opcode == OpCodes.Ldloc_3) { localIdx = 3; isLocalOp = true; }
+                    else if (opcode == OpCodes.Ldloc_S || opcode == OpCodes.Ldloca_S)
+                        { localIdx = ilBytes[pos]; isLocalOp = true; }
+                    else if (opcode == OpCodes.Ldloc || opcode == OpCodes.Ldloca)
+                        { localIdx = BitConverter.ToInt16(ilBytes, pos); isLocalOp = true; }
+                    // stloc variants (for non-skipNextStore cases)
+                    else if (opcode == OpCodes.Stloc_0) { localIdx = 0; isLocalOp = true; }
+                    else if (opcode == OpCodes.Stloc_1) { localIdx = 1; isLocalOp = true; }
+                    else if (opcode == OpCodes.Stloc_2) { localIdx = 2; isLocalOp = true; }
+                    else if (opcode == OpCodes.Stloc_3) { localIdx = 3; isLocalOp = true; }
+                    else if (opcode == OpCodes.Stloc_S) { localIdx = ilBytes[pos]; isLocalOp = true; }
+                    else if (opcode == OpCodes.Stloc) { localIdx = BitConverter.ToInt16(ilBytes, pos); isLocalOp = true; }
+
+                    if (isLocalOp && localIdx >= 0 && delegateLocals.Contains(localIdx))
+                    {
+                        // Skip operand bytes
+                        if (opcode == OpCodes.Ldloc_S || opcode == OpCodes.Ldloca_S || opcode == OpCodes.Stloc_S)
+                            pos += 1;
+                        else if (opcode == OpCodes.Ldloc || opcode == OpCodes.Ldloca || opcode == OpCodes.Stloc)
+                            pos += 2;
+                        // For ldloca, also set skipNextCall since the address might be used for get_Value
+                        if (opcode == OpCodes.Ldloca_S || opcode == OpCodes.Ldloca)
+                            skipNextCall = true;
+                        continue;
+                    }
+                }
+
+                // initobj on DelegateSpecialization type → skip (struct init for removed param)
+                if (opcode == OpCodes.Initobj)
+                {
+                    int token = BitConverter.ToInt32(ilBytes, pos);
+                    try
+                    {
+                        var initType = module.ResolveType(token);
+                        if (initType.IsGenericType && initType.GetGenericTypeDefinition() == typeof(DelegateSpecialization<>))
+                        {
+                            pos += 4;
+                            continue;
+                        }
+                    }
+                    catch { }
+                }
 
                 // callvirt Invoke() → replace with call TargetMethod
                 if (opcode == OpCodes.Callvirt)

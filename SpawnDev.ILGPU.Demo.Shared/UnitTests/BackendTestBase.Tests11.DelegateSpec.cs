@@ -220,5 +220,88 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                     throw new Exception($"BinaryFunc Mul failed at {i}. Expected {expected}, got {result[i]}");
             }
         });
+
+        // ═══════════════════════════════════════════════════════════
+        //  Complex kernel: DelegateSpecialization + ArrayView1D + int strides
+        //  This is the pattern used by N-D broadcast kernels in SpawnDev.ILGPU.ML.
+        //  The C# compiler may store the delegate in a local variable when the
+        //  kernel has many typed parameters — the IL rewriter must handle this.
+        // ═══════════════════════════════════════════════════════════
+
+        static float StridedAdd(float a, float b) => a + b;
+        static float StridedDiv(float a, float b) => b != 0f ? a / b : 0f;
+
+        /// <summary>
+        /// Complex kernel with 5 ArrayView params + DelegateSpecialization.
+        /// Reproduces the broadcast binary kernel pattern from SpawnDev.ILGPU.ML.
+        /// </summary>
+        static void StridedBroadcastKernel(Index1D idx,
+            ArrayView1D<float, Stride1D.Dense> a,
+            ArrayView1D<float, Stride1D.Dense> b,
+            ArrayView1D<float, Stride1D.Dense> output,
+            ArrayView1D<int, Stride1D.Dense> strides,
+            DelegateSpecialization<Func<float, float, float>> op)
+        {
+            // Use strides to compute broadcast indices (simplified: just use direct index)
+            int rank = strides[0];
+            int aIdx = idx;
+            int bIdx = idx;
+            if (rank > 0 && strides.Length > 1)
+            {
+                // Simple stride: a uses direct index, b uses modular index
+                bIdx = idx % strides[1];
+            }
+            output[idx] = op.Value(a[aIdx], b[bIdx]);
+        }
+
+        [TestMethod]
+        public async Task DelegateSpecialization_ComplexKernel_StridedBroadcast() => await RunTest(async accelerator =>
+        {
+            int len = 64;
+            var aData = new float[len];
+            var bData = new float[len];
+            for (int i = 0; i < len; i++) { aData[i] = i + 1; bData[i] = 100; }
+
+            using var aBuf = accelerator.Allocate1D(aData);
+            using var bBuf = accelerator.Allocate1D(bData);
+            using var outBuf = accelerator.Allocate1D<float>(len);
+            // strides: [rank=0] (no broadcast, just direct index)
+            using var stridesBuf = accelerator.Allocate1D(new int[] { 0 });
+
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<
+                Index1D, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>,
+                ArrayView1D<float, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>,
+                DelegateSpecialization<Func<float, float, float>>>(StridedBroadcastKernel);
+
+            // Test with Add
+            kernel((Index1D)len, aBuf.View, bBuf.View, outBuf.View, stridesBuf.View,
+                new DelegateSpecialization<Func<float, float, float>>(StridedAdd));
+            await accelerator.SynchronizeAsync();
+
+            var result = await outBuf.CopyToHostAsync<float>();
+            for (int i = 0; i < len; i++)
+            {
+                float expected = (i + 1) + 100;
+                if (MathF.Abs(result[i] - expected) > 0.001f)
+                    throw new Exception($"StridedBroadcast Add failed at {i}. Expected {expected}, got {result[i]}");
+            }
+
+            // Test with Div (reuses same kernel, different specialization)
+            for (int i = 0; i < len; i++) bData[i] = 2;
+            aBuf.View.CopyFromCPU(aData);
+            bBuf.View.CopyFromCPU(bData);
+
+            kernel((Index1D)len, aBuf.View, bBuf.View, outBuf.View, stridesBuf.View,
+                new DelegateSpecialization<Func<float, float, float>>(StridedDiv));
+            await accelerator.SynchronizeAsync();
+
+            result = await outBuf.CopyToHostAsync<float>();
+            for (int i = 0; i < len; i++)
+            {
+                float expected = (i + 1) / 2f;
+                if (MathF.Abs(result[i] - expected) > 0.001f)
+                    throw new Exception($"StridedBroadcast Div failed at {i}. Expected {expected}, got {result[i]}");
+            }
+        });
     }
 }
