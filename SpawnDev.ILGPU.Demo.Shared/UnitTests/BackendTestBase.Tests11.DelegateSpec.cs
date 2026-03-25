@@ -141,5 +141,84 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                 throw new Exception("Expected NotSupportedException for lambda delegate target");
             await Task.CompletedTask;
         });
+
+        // ═══════════════════════════════════════════════════════════
+        //  Multi-argument delegate specialization (2-arg Func)
+        // ═══════════════════════════════════════════════════════════
+
+        static float FloatAdd(float a, float b) => a + b;
+        static float FloatMul(float a, float b) => a * b;
+
+        static void BinaryMapKernel(
+            Index1D index,
+            ArrayView<float> a,
+            ArrayView<float> b,
+            ArrayView<float> output,
+            DelegateSpecialization<Func<float, float, float>> op)
+        {
+            output[index] = op.Value(a[index], b[index]);
+        }
+
+        /// <summary>
+        /// Tests DelegateSpecialization with a 2-argument Func (binary operation).
+        /// This is the pattern needed for general N-D broadcast kernels.
+        /// </summary>
+        [TestMethod]
+        public async Task DelegateSpecialization_BinaryFunc_Add() => await RunTest(async accelerator =>
+        {
+            int len = 64;
+            var aData = new float[len];
+            var bData = new float[len];
+            for (int i = 0; i < len; i++) { aData[i] = i + 1; bData[i] = 100; }
+
+            using var aBuf = accelerator.Allocate1D(aData);
+            using var bBuf = accelerator.Allocate1D(bData);
+            using var outBuf = accelerator.Allocate1D<float>(len);
+
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<
+                Index1D, ArrayView<float>, ArrayView<float>, ArrayView<float>,
+                DelegateSpecialization<Func<float, float, float>>>(BinaryMapKernel);
+
+            kernel((Index1D)len, aBuf.View, bBuf.View, outBuf.View,
+                new DelegateSpecialization<Func<float, float, float>>(FloatAdd));
+            await accelerator.SynchronizeAsync();
+
+            var result = await outBuf.CopyToHostAsync<float>();
+            for (int i = 0; i < len; i++)
+            {
+                float expected = (i + 1) + 100;
+                if (MathF.Abs(result[i] - expected) > 0.001f)
+                    throw new Exception($"BinaryFunc Add failed at {i}. Expected {expected}, got {result[i]}");
+            }
+        });
+
+        [TestMethod]
+        public async Task DelegateSpecialization_BinaryFunc_Mul() => await RunTest(async accelerator =>
+        {
+            int len = 64;
+            var aData = new float[len];
+            var bData = new float[len];
+            for (int i = 0; i < len; i++) { aData[i] = i + 1; bData[i] = 2; }
+
+            using var aBuf = accelerator.Allocate1D(aData);
+            using var bBuf = accelerator.Allocate1D(bData);
+            using var outBuf = accelerator.Allocate1D<float>(len);
+
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<
+                Index1D, ArrayView<float>, ArrayView<float>, ArrayView<float>,
+                DelegateSpecialization<Func<float, float, float>>>(BinaryMapKernel);
+
+            kernel((Index1D)len, aBuf.View, bBuf.View, outBuf.View,
+                new DelegateSpecialization<Func<float, float, float>>(FloatMul));
+            await accelerator.SynchronizeAsync();
+
+            var result = await outBuf.CopyToHostAsync<float>();
+            for (int i = 0; i < len; i++)
+            {
+                float expected = (i + 1) * 2;
+                if (MathF.Abs(result[i] - expected) > 0.001f)
+                    throw new Exception($"BinaryFunc Mul failed at {i}. Expected {expected}, got {result[i]}");
+            }
+        });
     }
 }
