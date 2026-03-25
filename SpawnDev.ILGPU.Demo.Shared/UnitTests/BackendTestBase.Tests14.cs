@@ -445,7 +445,11 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             int rem = idx / outW;
             int oy = rem % outH;
             int oc = rem / outH;
-            double sum = (bias.Length > 0) ? (double)bias[oc] : 0.0;
+            // Always read bias unconditionally — ANGLE's HLSL optimizer changes FP
+            // evaluation of the accumulation loop when a conditional branch precedes
+            // it, degrading Dekker f64 emulation to float precision (~0.009 error).
+            // Callers must always provide a valid bias buffer (zero-filled if no bias).
+            double sum = (double)bias[oc];
             for (int ic = 0; ic < inC; ic++)
             {
                 int icBase = ic * inH * inW;
@@ -634,7 +638,8 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             int rem = idx / outW;
             int oy = rem % outH;
             int oc = rem / outH;
-            double sum = (bias.Length > 0) ? (double)bias[oc] : 0.0;
+            // Always read bias unconditionally — same ANGLE workaround as MLConv2DExactKernel
+            double sum = (double)bias[oc];
             for (int ic = 0; ic < inC; ic++)
             {
                 int icBase = ic * inH * inW;
