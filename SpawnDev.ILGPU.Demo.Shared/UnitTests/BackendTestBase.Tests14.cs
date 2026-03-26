@@ -425,7 +425,7 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                 sb.AppendLine($"  inC={inC,3} MADs={mads,4} maxErr={maxErr:E3}");
             }
 
-            Console.WriteLine(sb.ToString());
+            // Results available in sb if needed for debugging
         });
 
         // Exact copy of ML Conv2DImpl to test in standalone infrastructure

@@ -65,16 +65,7 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             // Capture the binary after compilation but before dispatch
             var kernel = accelerator.LoadStreamKernel<Index1D, ArrayView<uint>, ArrayView<uint>>(ScanDumpKernel);
             var binary = SpawnDev.ILGPU.Wasm.Backend.WasmBackend.LastWasmBinary;
-            // Log binary as base64 chunks to console (ShaderDebugService or PlaywrightMultiTest can capture)
-            if (binary != null)
-            {
-                Console.WriteLine($"[Wasm_DUMP_START] size={binary.Length}");
-                var b64 = Convert.ToBase64String(binary);
-                // Split into 1000-char chunks to avoid console truncation
-                for (int ci = 0; ci < b64.Length; ci += 1000)
-                    Console.WriteLine($"[Wasm_DUMP] {b64.Substring(ci, Math.Min(1000, b64.Length - ci))}");
-                Console.WriteLine("[Wasm_DUMP_END]");
-            }
+            // Binary available via ShaderDebugService dump if needed for debugging
             try
             {
                 kernel(new KernelConfig(1, groupSize), (Index1D)groupSize, inputBuf.View, outputBuf.View);
