@@ -21,8 +21,6 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
         {
             var builder = Context.Create()
                 //.Optimize(OptimizationLevel.Debug) // DEBUG: test showed no effect on intermittent failure
-                .EnableAlgorithms()
-                .EnableWasmAlgorithms()
                 .Wasm();
             var context = builder.ToContext();
             WasmBackend.VerboseLogging = false;

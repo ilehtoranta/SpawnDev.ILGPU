@@ -63,11 +63,6 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         private bool _usesGroupReduce = false;
         /// <summary>Set to true by GenerateGroupAllReduce to request emission of <c>var&lt;workgroup&gt; _grp_reduce_i32: atomic&lt;i32&gt;</c>.</summary>
         public override bool UsesGroupReduce { get => _usesGroupReduce; set => _usesGroupReduce = value; }
-        // Tracks view params with byte/int8/int16 element types — WGSL declares these as array<u32>
-        // but element access must extract individual bytes/shorts from packed u32 words
-        private HashSet<int> _byteElementParams = new HashSet<int>();
-        // Maps LEA variable names to their byte-element param index (for Load/Store byte extraction)
-        private Dictionary<string, int> _byteElementLEAVars = new Dictionary<string, int>();
         // Maps variable names to their emulation info (param index, is emu_f64)
         private Dictionary<string, (int ParamIndex, bool IsF64)> _emulatedVarMappings = new Dictionary<string, (int, bool)>();
         // Maps cross-block pointer variable names to inline expressions (e.g. "param1[v_3_idx]")
@@ -1118,11 +1113,6 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                         isEmulatedF64 = true;
                     if (Backend.EnableI64Emulation && (elemWgslType == "emu_i64" || elemWgslType == "emu_u64"))
                         isEmulatedI64 = true;
-                    // Track byte-element views: WGSL has no byte type, buffer is array<u32>,
-                    // element access needs byte extraction from packed u32 words
-                    if (paramElemType is PrimitiveType pt &&
-                        (pt.BasicValueType == BasicValueType.Int8 || pt.BasicValueType == BasicValueType.Int16))
-                        _byteElementParams.Add(param.Index);
                 }
 
                 if (isEmulatedF64)
@@ -3543,21 +3533,6 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                         return;
                     }
 
-                    // BYTE-ELEMENT VIEW FIX:
-                    // WGSL has no byte type — buffer is array<u32>. For byte-element views,
-                    // we can't take a pointer to a byte within a u32 word. Instead, store the
-                    // byte index and extract the byte in the Load codegen.
-                    if (_byteElementParams.Contains(param.Index))
-                    {
-                        _byteElementLEAVars[target.Name] = param.Index;
-                        AppendIndent();
-                        Builder.Append($"let {target.Name} = {adjustedOffsetExpr};");
-                        Builder.AppendLine();
-                        if (_crossBlockPointers.Contains(value))
-                            _crossBlockPointerExprs[target.Name] = $"(param{param.Index}[u32({adjustedOffsetExpr}) / 4u] >> ((u32({adjustedOffsetExpr}) % 4u) * 8u)) & 0xFFu";
-                        return;
-                    }
-
                     // CROSS-BLOCK POINTER FIX:
                     // If this LoadElementAddress is used in a different switch-case block,
                     // its `let v_X = &paramN[offset]` will be out of scope at the use site.
@@ -3690,21 +3665,6 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     else
                         fieldExpr = fieldRef; // u32 or other: raw u32
                     AppendLine($"{target}.field_{fi} = {fieldExpr};");
-                }
-                return;
-            }
-
-            // BYTE-ELEMENT VIEW FIX: Extract byte from packed u32 word
-            if (_byteElementLEAVars.TryGetValue(source.ToString(), out var byteParamIdx))
-            {
-                var byteIdx = source.ToString();
-                var extractExpr = $"i32((param{byteParamIdx}[u32({byteIdx}) / 4u] >> ((u32({byteIdx}) % 4u) * 8u)) & 0xFFu)";
-                if (_hoistedPrimitives.Contains(loadVal))
-                    AppendLine($"{target} = {extractExpr};");
-                else
-                {
-                    Declare(target);
-                    AppendLine($"{target} = {extractExpr};");
                 }
                 return;
             }

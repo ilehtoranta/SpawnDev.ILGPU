@@ -10,7 +10,7 @@ public class OpenCLTests : BackendTestBase
 
     protected override Task<(Context context, Accelerator accelerator)> CreateAcceleratorAsync()
     {
-        var context = Context.Create(builder => builder.AllAccelerators().EnableAlgorithms());
+        var context = Context.Create(builder => builder.AllAccelerators());
         var clDevices = context.GetCLDevices();
         if (clDevices.Count == 0)
         {

@@ -10,7 +10,7 @@ public class CudaTests : BackendTestBase
 
     protected override Task<(Context context, Accelerator accelerator)> CreateAcceleratorAsync()
     {
-        var context = Context.Create(builder => builder.AllAccelerators().EnableAlgorithms());
+        var context = Context.Create(builder => builder.AllAccelerators());
         var cudaDevices = context.GetCudaDevices();
         if (cudaDevices.Count == 0)
         {

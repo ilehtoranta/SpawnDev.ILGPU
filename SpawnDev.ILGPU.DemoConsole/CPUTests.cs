@@ -12,8 +12,7 @@ public class CPUTests : BackendTestBase
         // Use the Nvidia preset (warp=32, warps=32) to support group sizes up to 1024.
         // The default preset (warp=4, warps=4) only supports groups of 16.
         var context = Context.Create(builder => builder
-            .CPU(CPUDevice.Nvidia)
-            .EnableAlgorithms());
+            .CPU(CPUDevice.Nvidia));
         var accelerator = context.GetCPUDevice(0).CreateCPUAccelerator(context);
         return Task.FromResult<(Context, Accelerator)>((context, accelerator));
     }
