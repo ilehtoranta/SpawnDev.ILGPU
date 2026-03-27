@@ -1434,50 +1434,24 @@ namespace SpawnDev.ILGPU.Wasm
                         _lastImplicitIndexDebug += $" | buf={wasmBuf?.GetType().Name ?? "null"} len={iav.Length} inDict={wasmBuf != null && uniqueBuffers.ContainsKey(wasmBuf)}";
                         if (wasmBuf != null)
                         {
-                            // Extract SubView byte range from this view
-                            int svByteOffset = 0;
-                            int svByteEnd = (int)wasmBuf.LengthInBytes;
-                            try
-                            {
-                                var viewType = val.GetType();
-                                var baseProp = viewType.GetProperty("BaseView");
-                                object viewObj = baseProp != null ? baseProp.GetValue(val)! : val;
-                                var indexProp = viewObj.GetType().GetProperty("Index",
-                                    BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-                                if (indexProp != null)
-                                {
-                                    var idx = indexProp.GetValue(viewObj);
-                                    if (idx is long longIdx)
-                                    {
-                                        int viewElemSize = iav.Buffer.ElementSize;
-                                        var viewGenericType = viewObj.GetType();
-                                        if (viewGenericType.IsGenericType)
-                                        {
-                                            var elemType = viewGenericType.GetGenericArguments()[0];
-                                            int actualSize = global::ILGPU.Interop.SizeOf(elemType);
-                                            if (actualSize > 0) viewElemSize = actualSize;
-                                        }
-                                        svByteOffset = (int)(longIdx * viewElemSize);
-                                        svByteEnd = svByteOffset + (int)iav.Length * viewElemSize;
-                                    }
-                                }
-                            }
-                            catch { /* Fall back to full buffer range */ }
-
+                            // Struct-embedded views use FULL buffer range for safety.
+                            // Extracting SubView ranges from structs breaks RadixSort's
+                            // ViewSourceSequencer (struct with ArrayView1D) — the range
+                            // extraction doesn't account for how the struct's view may be
+                            // reinterpreted across multi-pass dispatches.
                             if (!uniqueBuffers.ContainsKey(wasmBuf))
                             {
                                 int bufIdx = bufferInfos.Count;
                                 uniqueBuffers[wasmBuf] = bufIdx;
                                 bufferInfos.Add((wasmBuf, 0));
-                                bufferRanges?.Add((svByteOffset, svByteEnd));
-                                _lastImplicitIndexDebug += $" | ADDED buf#{bufIdx} range=[{svByteOffset},{svByteEnd})";
+                                bufferRanges?.Add((0, (int)wasmBuf.LengthInBytes));
+                                _lastImplicitIndexDebug += $" | ADDED buf#{bufIdx} range=[0,{wasmBuf.LengthInBytes}) (full/struct)";
                             }
                             else if (bufferRanges != null)
                             {
-                                // Buffer already known — expand range to include this SubView
+                                // Buffer already known — expand to full range
                                 int bufIdx = uniqueBuffers[wasmBuf];
-                                var (curMin, curMax) = bufferRanges[bufIdx];
-                                bufferRanges[bufIdx] = (Math.Min(curMin, svByteOffset), Math.Max(curMax, svByteEnd));
+                                bufferRanges[bufIdx] = (0, (int)wasmBuf.LengthInBytes);
                             }
                         }
                     }
