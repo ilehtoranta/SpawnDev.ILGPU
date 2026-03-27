@@ -20,7 +20,7 @@ public class NvJpegTests : IDisposable
     {
         if (_accelerator != null) return;
 
-        _context = Context.Create(builder => builder.AllAccelerators());
+        _context = Context.Create(builder => builder.AllAccelerators().EnableAlgorithms());
         var cudaDevices = _context.GetCudaDevices();
         if (cudaDevices.Count == 0)
         {

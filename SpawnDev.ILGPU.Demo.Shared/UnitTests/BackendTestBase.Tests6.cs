@@ -8,7 +8,7 @@ using SpawnDev.UnitTesting;
 namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
 {
     // Part 6: Algorithm tests (scan, reduce, radix sort)
-    // Algorithms are auto-enabled via AllAcceleratorsAsync().
+    // These tests require EnableAlgorithms() + EnableWebGPUAlgorithms() on the context.
     public abstract partial class BackendTestBase
     {
         /// <summary>

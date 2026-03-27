@@ -17,7 +17,7 @@ public class CuRandTests : IDisposable
     private async Task EnsureInitialized()
     {
         if (_accelerator != null) return;
-        _context = Context.Create(builder => builder.AllAccelerators());
+        _context = Context.Create(builder => builder.AllAccelerators().EnableAlgorithms());
         var cudaDevices = _context.GetCudaDevices();
         if (cudaDevices.Count == 0)
         {

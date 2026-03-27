@@ -4,7 +4,7 @@ SpawnDev.ILGPU includes wrappers for several NVIDIA CUDA libraries. These provid
 
 > **CUDA-only.** These libraries require an NVIDIA GPU with CUDA drivers. They are not available on browser backends (WebGPU, WebGL, Wasm) or non-NVIDIA devices (OpenCL, CPU).
 
-All libraries are enabled automatically when you use `AllAcceleratorsAsync()` (the recommended SpawnDev setup). Algorithms are always auto-enabled — `EnableAlgorithms()` is called internally and does not need to be called manually. The method still exists for backward compatibility with code ported from upstream ILGPU. CUDA libraries detect the installed NVIDIA library version at runtime and use the newest available.
+All libraries are enabled automatically when you call `builder.AllAccelerators()` or `builder.EnableAlgorithms()` during context creation. They detect the installed NVIDIA library version at runtime and use the newest available.
 
 ---
 

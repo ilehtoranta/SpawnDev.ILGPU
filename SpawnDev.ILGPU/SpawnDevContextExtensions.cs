@@ -44,9 +44,6 @@ namespace SpawnDev.ILGPU
             // Synchronous backends first (CPU, OpenCL, Cuda — latter two fail silently in WASM)
             builder.AllAccelerators();
 
-            // Always enable algorithms — zero runtime cost, just registers intrinsic mappings
-            builder.EnableAlgorithms();
-
             // Browser backends — only available in Blazor WebAssembly
             if (OperatingSystem.IsBrowser())
             {
@@ -54,7 +51,6 @@ namespace SpawnDev.ILGPU
                 try
                 {
                     builder.Wasm();
-                    builder.EnableWasmAlgorithms();
                 }
                 catch
                 {
@@ -65,7 +61,6 @@ namespace SpawnDev.ILGPU
                 try
                 {
                     await builder.WebGPU();
-                    builder.EnableWebGPUAlgorithms();
                 }
                 catch
                 {
