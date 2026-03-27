@@ -16,6 +16,7 @@ Comprehensive documentation for SpawnDev.ILGPU — run ILGPU C# kernels on WebGP
 
 ### Advanced
 - **[Advanced Patterns](advanced-patterns.md)** — ILGPU Algorithms (RadixSort, Scan, Reduce), GPU device sharing, external buffers, rendering pipelines, canvas blitting
+- **[CUDA Libraries](cuda-libraries.md)** — NVIDIA-specific libraries: nvJPEG (image encode/decode), cuRand (random numbers), cuBLAS (linear algebra), cuFFT (FFT), NVML (device monitoring)
 - **[Limitations & Constraints](limitations.md)** — Blazor WASM restrictions, unsupported features, precision, and browser compatibility
 
 ### Reference

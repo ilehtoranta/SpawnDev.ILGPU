@@ -34,6 +34,8 @@ SpawnDev.ILGPU supports multiple backends for running ILGPU kernels. In the brow
 **Auto-selection priority (browser):** WebGPU → WebGL → Wasm
 **Auto-selection priority (desktop):** Cuda → OpenCL → CPU
 
+> **CUDA extras:** The CUDA backend also provides access to NVIDIA-specific libraries: nvJPEG (image encode/decode), cuRand (random numbers), cuBLAS (linear algebra), cuFFT (FFT), and NVML (device monitoring). See [CUDA Libraries](cuda-libraries.md).
+
 ## Automatic Backend Selection
 
 ### Recommended: Unified Async Pattern

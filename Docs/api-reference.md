@@ -311,3 +311,48 @@ Wasm compilation backend.
 | Property | Type | Default | Description |
 |----------|------|---------|-------------|
 | `MaxWorkers` | `int?` | `null` (auto) | Maximum Web Workers for dispatch |
+
+---
+
+## ILGPU.Runtime.Cuda — NVIDIA CUDA Libraries
+
+CUDA-only libraries for hardware-accelerated image processing, random numbers, linear algebra, FFT, and device monitoring. Require an NVIDIA GPU.
+
+> **Full guide:** [CUDA Libraries](cuda-libraries.md)
+
+### NvJpeg — JPEG Encode & Decode
+
+| Class | Description |
+|-------|-------------|
+| `NvJpeg` | Entry point. Version detection, `CreateSimple()` |
+| `NvJpegLibrary` | High-level decode/encode, state/params management |
+| `NvJpegState` | Decoder state (disposable) |
+| `NvJpegEncoderState` | Encoder state (disposable) |
+| `NvJpegEncoderParams` | Encoder parameters (disposable) |
+
+### CuRand — Random Number Generation
+
+| Class | Description |
+|-------|-------------|
+| `GPUCuRand` | GPU random generator — uniform, normal, log-normal, Poisson |
+| `CPUCuRand` | CPU random generator (same distributions, host memory) |
+| `CuRand` | Factory: `CreateGPU()`, `CreateCPU()` |
+
+### CuBlas — Linear Algebra
+
+| Class | Description |
+|-------|-------------|
+| `CuBlas<T>` | BLAS Level 1/2/3 (GEMM, AXPY, DOT, etc.) with pointer mode handlers |
+
+### CuFFT — Fast Fourier Transform
+
+| Class | Description |
+|-------|-------------|
+| `CuFFT` | 1D/2D/3D FFT plans, C2C/R2C/C2R transforms |
+| `CuFFTW` | FFTW-compatible wrapper |
+
+### NVML — Device Monitoring
+
+| Class | Description |
+|-------|-------------|
+| `NvmlDevice` | 113+ GPU query functions (temperature, clocks, memory, power, PCIe) |
