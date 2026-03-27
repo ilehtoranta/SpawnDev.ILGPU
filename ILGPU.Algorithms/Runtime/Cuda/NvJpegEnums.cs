@@ -44,6 +44,25 @@ namespace ILGPU.Runtime.Cuda
         NVJPEG_OUTPUT_FORMAT_MAX = NVJPEG_OUTPUT_BGRI
     }
 
+    public enum NvJpegJpegEncoding : int
+    {
+        NVJPEG_ENCODING_UNKNOWN = 0x0,
+        NVJPEG_ENCODING_BASELINE_DCT = 0xc0,
+        NVJPEG_ENCODING_EXTENDED_SEQUENTIAL_DCT_HUFFMAN = 0xc1,
+        NVJPEG_ENCODING_PROGRESSIVE_DCT_HUFFMAN = 0xc2,
+        NVJPEG_ENCODING_LOSSLESS_HUFFMAN = 0xc3,
+    }
+
+    public enum NvJpegInputFormat : int
+    {
+        NVJPEG_INPUT_YUV = 1,
+        NVJPEG_INPUT_RGB = 3,
+        NVJPEG_INPUT_BGR = 4,
+        NVJPEG_INPUT_RGBI = 5,
+        NVJPEG_INPUT_BGRI = 6,
+        NVJPEG_INPUT_NV12 = 8,
+    }
+
     public enum NvJpegStatus : int
     {
         NVJPEG_STATUS_SUCCESS = 0,

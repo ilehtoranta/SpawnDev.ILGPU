@@ -82,6 +82,42 @@
             <Parameter Name="mean" Type="double" />
             <Parameter Name="stddev" Type="double" />
         </Import>
+        <Import Name="curandGenerateLogNormal"
+                DisplayName="GenerateLogNormalFloat">
+            <Parameter Name="libHandle" Type="IntPtr" />
+            <Parameter Name="outputPtr" Type="IntPtr" />
+            <Parameter Name="length" Type="IntPtr" />
+            <Parameter Name="mean" Type="float" />
+            <Parameter Name="stddev" Type="float" />
+        </Import>
+        <Import Name="curandGenerateLogNormalDouble">
+            <Parameter Name="libHandle" Type="IntPtr" />
+            <Parameter Name="outputPtr" Type="IntPtr" />
+            <Parameter Name="length" Type="IntPtr" />
+            <Parameter Name="mean" Type="double" />
+            <Parameter Name="stddev" Type="double" />
+        </Import>
+        <Import Name="curandGeneratePoisson">
+            <Parameter Name="libHandle" Type="IntPtr" />
+            <Parameter Name="outputPtr" Type="IntPtr" />
+            <Parameter Name="length" Type="IntPtr" />
+            <Parameter Name="lambda" Type="double" />
+        </Import>
+    </Region>
+
+    <Region Name="Configuration">
+        <Import Name="curandSetGeneratorOffset">
+            <Parameter Name="libHandle" Type="IntPtr" />
+            <Parameter Name="offset" Type="ulong" />
+        </Import>
+        <Import Name="curandSetGeneratorOrdering">
+            <Parameter Name="libHandle" Type="IntPtr" />
+            <Parameter Name="order" Type="CuRandOrdering" />
+        </Import>
+        <Import Name="curandSetQuasiRandomGeneratorDimensions">
+            <Parameter Name="libHandle" Type="IntPtr" />
+            <Parameter Name="numDimensions" Type="uint" />
+        </Import>
     </Region>
 
     <Region Name="Utilities">

@@ -427,6 +427,97 @@ namespace ILGPU.Runtime.Cuda
                     stddev));
         }
 
+        /// <summary>
+        /// Fills the given view with log-normally distributed floats.
+        /// </summary>
+        /// <param name="stream">The stream to use.</param>
+        /// <param name="view">The view to fill.</param>
+        /// <param name="mean">The log-normal distribution mean.</param>
+        /// <param name="stddev">The log-normal distribution standard deviation.</param>
+        public unsafe void FillLogNormal(
+            AcceleratorStream stream,
+            ArrayView<float> view,
+            float mean,
+            float stddev)
+        {
+            UpdateOrKeepStream(stream);
+            CuRandException.ThrowIfFailed(
+                API.GenerateLogNormalFloat(
+                    GeneratorPtr,
+                    view.LoadEffectiveAddressAsPtr(),
+                    new IntPtr(view.Length),
+                    mean,
+                    stddev));
+        }
+
+        /// <summary>
+        /// Fills the given view with log-normally distributed doubles.
+        /// </summary>
+        /// <param name="stream">The stream to use.</param>
+        /// <param name="view">The view to fill.</param>
+        /// <param name="mean">The log-normal distribution mean.</param>
+        /// <param name="stddev">The log-normal distribution standard deviation.</param>
+        public unsafe void FillLogNormal(
+            AcceleratorStream stream,
+            ArrayView<double> view,
+            double mean,
+            double stddev)
+        {
+            UpdateOrKeepStream(stream);
+            CuRandException.ThrowIfFailed(
+                API.GenerateLogNormalDouble(
+                    GeneratorPtr,
+                    view.LoadEffectiveAddressAsPtr(),
+                    new IntPtr(view.Length),
+                    mean,
+                    stddev));
+        }
+
+        /// <summary>
+        /// Fills the given view with Poisson-distributed unsigned integers.
+        /// </summary>
+        /// <param name="stream">The stream to use.</param>
+        /// <param name="view">The view to fill.</param>
+        /// <param name="lambda">The lambda parameter of the Poisson distribution.</param>
+        public unsafe void FillPoisson(
+            AcceleratorStream stream,
+            ArrayView<uint> view,
+            double lambda)
+        {
+            UpdateOrKeepStream(stream);
+            CuRandException.ThrowIfFailed(
+                API.GeneratePoisson(
+                    GeneratorPtr,
+                    view.LoadEffectiveAddressAsPtr(),
+                    new IntPtr(view.Length),
+                    lambda));
+        }
+
+        /// <summary>
+        /// Sets the generator offset for reproducibility.
+        /// </summary>
+        /// <param name="offset">The offset value.</param>
+        public void SetOffset(ulong offset) =>
+            CuRandException.ThrowIfFailed(
+                API.SetGeneratorOffset(GeneratorPtr, offset));
+
+        /// <summary>
+        /// Sets the generator ordering type.
+        /// </summary>
+        /// <param name="ordering">The ordering type.</param>
+        public void SetOrdering(CuRandOrdering ordering) =>
+            CuRandException.ThrowIfFailed(
+                API.SetGeneratorOrdering(GeneratorPtr, ordering));
+
+        /// <summary>
+        /// Sets the number of dimensions for quasi-random generators.
+        /// </summary>
+        /// <param name="numDimensions">The number of dimensions.</param>
+        public void SetQuasiRandomDimensions(uint numDimensions) =>
+            CuRandException.ThrowIfFailed(
+                API.SetQuasiRandomGeneratorDimensions(
+                    GeneratorPtr, numDimensions));
+
         #endregion
 
         #region IDisposable
@@ -662,6 +753,80 @@ namespace ILGPU.Runtime.Cuda
                         stddev));
             }
         }
+
+        /// <summary>
+        /// Fills the given span with log-normally distributed floats.
+        /// </summary>
+        /// <param name="span">The span to fill.</param>
+        /// <param name="mean">The log-normal distribution mean.</param>
+        /// <param name="stddev">The log-normal distribution standard deviation.</param>
+        public unsafe void FillLogNormal(Span<float> span, float mean, float stddev)
+        {
+            fixed (float* ptr = span)
+            {
+                CuRandException.ThrowIfFailed(
+                    API.GenerateLogNormalFloat(
+                        GeneratorPtr,
+                        new IntPtr(ptr),
+                        new IntPtr(span.Length),
+                        mean,
+                        stddev));
+            }
+        }
+
+        /// <summary>
+        /// Fills the given span with log-normally distributed doubles.
+        /// </summary>
+        /// <param name="span">The span to fill.</param>
+        /// <param name="mean">The log-normal distribution mean.</param>
+        /// <param name="stddev">The log-normal distribution standard deviation.</param>
+        public unsafe void FillLogNormal(Span<double> span, double mean, double stddev)
+        {
+            fixed (double* ptr = span)
+            {
+                CuRandException.ThrowIfFailed(
+                    API.GenerateLogNormalDouble(
+                        GeneratorPtr,
+                        new IntPtr(ptr),
+                        new IntPtr(span.Length),
+                        mean,
+                        stddev));
+            }
+        }
+
+        /// <summary>
+        /// Fills the given span with Poisson-distributed unsigned integers.
+        /// </summary>
+        /// <param name="span">The span to fill.</param>
+        /// <param name="lambda">The lambda parameter of the Poisson distribution.</param>
+        public unsafe void FillPoisson(Span<uint> span, double lambda)
+        {
+            fixed (uint* ptr = span)
+            {
+                CuRandException.ThrowIfFailed(
+                    API.GeneratePoisson(
+                        GeneratorPtr,
+                        new IntPtr(ptr),
+                        new IntPtr(span.Length),
+                        lambda));
+            }
+        }
+
+        /// <summary>
+        /// Sets the generator offset for reproducibility.
+        /// </summary>
+        /// <param name="offset">The offset value.</param>
+        public void SetOffset(ulong offset) =>
+            CuRandException.ThrowIfFailed(
+                API.SetGeneratorOffset(GeneratorPtr, offset));
+
+        /// <summary>
+        /// Sets the generator ordering type.
+        /// </summary>
+        /// <param name="ordering">The ordering type.</param>
+        public void SetOrdering(CuRandOrdering ordering) =>
+            CuRandException.ThrowIfFailed(
+                API.SetGeneratorOrdering(GeneratorPtr, ordering));
 
         #endregion
 

@@ -47,6 +47,15 @@ namespace ILGPU.Runtime.Cuda
         CURAND_RNG_QUASI_SOBOL64 = 203,
         CURAND_RNG_QUASI_SCRAMBLED_SOBOL64 = 204,
     }
+    public enum CuRandOrdering : int
+    {
+        CURAND_ORDERING_PSEUDO_BEST = 100,
+        CURAND_ORDERING_PSEUDO_DEFAULT = 101,
+        CURAND_ORDERING_PSEUDO_SEEDED = 102,
+        CURAND_ORDERING_PSEUDO_LEGACY = 103,
+        CURAND_ORDERING_PSEUDO_DYNAMIC = 104,
+        CURAND_ORDERING_QUASI_DEFAULT = 201,
+    }
 }
 
 #pragma warning restore CA1008 // Enums should have zero value

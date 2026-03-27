@@ -187,6 +187,42 @@ namespace ILGPU.Runtime.Cuda.API
             [In] double mean,
             [In] double stddev);
 
+        public abstract CuRandStatus GenerateLogNormalFloat(
+            [In] IntPtr libHandle,
+            [In] IntPtr outputPtr,
+            [In] IntPtr length,
+            [In] float mean,
+            [In] float stddev);
+
+        public abstract CuRandStatus GenerateLogNormalDouble(
+            [In] IntPtr libHandle,
+            [In] IntPtr outputPtr,
+            [In] IntPtr length,
+            [In] double mean,
+            [In] double stddev);
+
+        public abstract CuRandStatus GeneratePoisson(
+            [In] IntPtr libHandle,
+            [In] IntPtr outputPtr,
+            [In] IntPtr length,
+            [In] double lambda);
+
+        #endregion
+
+        #region Configuration
+
+        public abstract CuRandStatus SetGeneratorOffset(
+            [In] IntPtr libHandle,
+            [In] ulong offset);
+
+        public abstract CuRandStatus SetGeneratorOrdering(
+            [In] IntPtr libHandle,
+            [In] CuRandOrdering order);
+
+        public abstract CuRandStatus SetQuasiRandomGeneratorDimensions(
+            [In] IntPtr libHandle,
+            [In] uint numDimensions);
+
         #endregion
 
         #region Utilities
@@ -558,6 +594,210 @@ namespace ILGPU.Runtime.Cuda.API
                 length,
                 mean,
                 stddev);
+
+        #if NET7_0_OR_GREATER
+        [LibraryImport(LibName,
+            EntryPoint = "curandGenerateLogNormal"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static partial
+         CuRandStatus curandGenerateLogNormal(
+             IntPtr libHandle,
+             IntPtr outputPtr,
+             IntPtr length,
+             float mean,
+             float stddev);
+
+        #else
+        [DllImport(LibName,
+            EntryPoint = "curandGenerateLogNormal"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static extern
+         CuRandStatus curandGenerateLogNormal(
+            [In] IntPtr libHandle,
+            [In] IntPtr outputPtr,
+            [In] IntPtr length,
+            [In] float mean,
+            [In] float stddev);
+
+        #endif
+        public sealed override CuRandStatus GenerateLogNormalFloat(
+            [In] IntPtr libHandle,
+            [In] IntPtr outputPtr,
+            [In] IntPtr length,
+            [In] float mean,
+            [In] float stddev) =>
+            curandGenerateLogNormal(
+                libHandle,
+                outputPtr,
+                length,
+                mean,
+                stddev);
+
+        #if NET7_0_OR_GREATER
+        [LibraryImport(LibName,
+            EntryPoint = "curandGenerateLogNormalDouble"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static partial
+         CuRandStatus curandGenerateLogNormalDouble(
+             IntPtr libHandle,
+             IntPtr outputPtr,
+             IntPtr length,
+             double mean,
+             double stddev);
+
+        #else
+        [DllImport(LibName,
+            EntryPoint = "curandGenerateLogNormalDouble"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static extern
+         CuRandStatus curandGenerateLogNormalDouble(
+            [In] IntPtr libHandle,
+            [In] IntPtr outputPtr,
+            [In] IntPtr length,
+            [In] double mean,
+            [In] double stddev);
+
+        #endif
+        public sealed override CuRandStatus GenerateLogNormalDouble(
+            [In] IntPtr libHandle,
+            [In] IntPtr outputPtr,
+            [In] IntPtr length,
+            [In] double mean,
+            [In] double stddev) =>
+            curandGenerateLogNormalDouble(
+                libHandle,
+                outputPtr,
+                length,
+                mean,
+                stddev);
+
+        #if NET7_0_OR_GREATER
+        [LibraryImport(LibName,
+            EntryPoint = "curandGeneratePoisson"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static partial
+         CuRandStatus curandGeneratePoisson(
+             IntPtr libHandle,
+             IntPtr outputPtr,
+             IntPtr length,
+             double lambda);
+
+        #else
+        [DllImport(LibName,
+            EntryPoint = "curandGeneratePoisson"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static extern
+         CuRandStatus curandGeneratePoisson(
+            [In] IntPtr libHandle,
+            [In] IntPtr outputPtr,
+            [In] IntPtr length,
+            [In] double lambda);
+
+        #endif
+        public sealed override CuRandStatus GeneratePoisson(
+            [In] IntPtr libHandle,
+            [In] IntPtr outputPtr,
+            [In] IntPtr length,
+            [In] double lambda) =>
+            curandGeneratePoisson(
+                libHandle,
+                outputPtr,
+                length,
+                lambda);
+
+        #endregion
+
+        #region Configuration
+
+        #if NET7_0_OR_GREATER
+        [LibraryImport(LibName,
+            EntryPoint = "curandSetGeneratorOffset"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static partial
+         CuRandStatus curandSetGeneratorOffset(
+             IntPtr libHandle,
+             ulong offset);
+
+        #else
+        [DllImport(LibName,
+            EntryPoint = "curandSetGeneratorOffset"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static extern
+         CuRandStatus curandSetGeneratorOffset(
+            [In] IntPtr libHandle,
+            [In] ulong offset);
+
+        #endif
+        public sealed override CuRandStatus SetGeneratorOffset(
+            [In] IntPtr libHandle,
+            [In] ulong offset) =>
+            curandSetGeneratorOffset(
+                libHandle,
+                offset);
+
+        #if NET7_0_OR_GREATER
+        [LibraryImport(LibName,
+            EntryPoint = "curandSetGeneratorOrdering"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static partial
+         CuRandStatus curandSetGeneratorOrdering(
+             IntPtr libHandle,
+             CuRandOrdering order);
+
+        #else
+        [DllImport(LibName,
+            EntryPoint = "curandSetGeneratorOrdering"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static extern
+         CuRandStatus curandSetGeneratorOrdering(
+            [In] IntPtr libHandle,
+            [In] CuRandOrdering order);
+
+        #endif
+        public sealed override CuRandStatus SetGeneratorOrdering(
+            [In] IntPtr libHandle,
+            [In] CuRandOrdering order) =>
+            curandSetGeneratorOrdering(
+                libHandle,
+                order);
+
+        #if NET7_0_OR_GREATER
+        [LibraryImport(LibName,
+            EntryPoint = "curandSetQuasiRandomGeneratorDimensions"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static partial
+         CuRandStatus curandSetQuasiRandomGeneratorDimensions(
+             IntPtr libHandle,
+             uint numDimensions);
+
+        #else
+        [DllImport(LibName,
+            EntryPoint = "curandSetQuasiRandomGeneratorDimensions"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static extern
+         CuRandStatus curandSetQuasiRandomGeneratorDimensions(
+            [In] IntPtr libHandle,
+            [In] uint numDimensions);
+
+        #endif
+        public sealed override CuRandStatus SetQuasiRandomGeneratorDimensions(
+            [In] IntPtr libHandle,
+            [In] uint numDimensions) =>
+            curandSetQuasiRandomGeneratorDimensions(
+                libHandle,
+                numDimensions);
 
         #endregion
 
@@ -976,6 +1216,210 @@ namespace ILGPU.Runtime.Cuda.API
                 mean,
                 stddev);
 
+        #if NET7_0_OR_GREATER
+        [LibraryImport(LibName,
+            EntryPoint = "curandGenerateLogNormal"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static partial
+         CuRandStatus curandGenerateLogNormal(
+             IntPtr libHandle,
+             IntPtr outputPtr,
+             IntPtr length,
+             float mean,
+             float stddev);
+
+        #else
+        [DllImport(LibName,
+            EntryPoint = "curandGenerateLogNormal"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static extern
+         CuRandStatus curandGenerateLogNormal(
+            [In] IntPtr libHandle,
+            [In] IntPtr outputPtr,
+            [In] IntPtr length,
+            [In] float mean,
+            [In] float stddev);
+
+        #endif
+        public sealed override CuRandStatus GenerateLogNormalFloat(
+            [In] IntPtr libHandle,
+            [In] IntPtr outputPtr,
+            [In] IntPtr length,
+            [In] float mean,
+            [In] float stddev) =>
+            curandGenerateLogNormal(
+                libHandle,
+                outputPtr,
+                length,
+                mean,
+                stddev);
+
+        #if NET7_0_OR_GREATER
+        [LibraryImport(LibName,
+            EntryPoint = "curandGenerateLogNormalDouble"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static partial
+         CuRandStatus curandGenerateLogNormalDouble(
+             IntPtr libHandle,
+             IntPtr outputPtr,
+             IntPtr length,
+             double mean,
+             double stddev);
+
+        #else
+        [DllImport(LibName,
+            EntryPoint = "curandGenerateLogNormalDouble"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static extern
+         CuRandStatus curandGenerateLogNormalDouble(
+            [In] IntPtr libHandle,
+            [In] IntPtr outputPtr,
+            [In] IntPtr length,
+            [In] double mean,
+            [In] double stddev);
+
+        #endif
+        public sealed override CuRandStatus GenerateLogNormalDouble(
+            [In] IntPtr libHandle,
+            [In] IntPtr outputPtr,
+            [In] IntPtr length,
+            [In] double mean,
+            [In] double stddev) =>
+            curandGenerateLogNormalDouble(
+                libHandle,
+                outputPtr,
+                length,
+                mean,
+                stddev);
+
+        #if NET7_0_OR_GREATER
+        [LibraryImport(LibName,
+            EntryPoint = "curandGeneratePoisson"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static partial
+         CuRandStatus curandGeneratePoisson(
+             IntPtr libHandle,
+             IntPtr outputPtr,
+             IntPtr length,
+             double lambda);
+
+        #else
+        [DllImport(LibName,
+            EntryPoint = "curandGeneratePoisson"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static extern
+         CuRandStatus curandGeneratePoisson(
+            [In] IntPtr libHandle,
+            [In] IntPtr outputPtr,
+            [In] IntPtr length,
+            [In] double lambda);
+
+        #endif
+        public sealed override CuRandStatus GeneratePoisson(
+            [In] IntPtr libHandle,
+            [In] IntPtr outputPtr,
+            [In] IntPtr length,
+            [In] double lambda) =>
+            curandGeneratePoisson(
+                libHandle,
+                outputPtr,
+                length,
+                lambda);
+
+        #endregion
+
+        #region Configuration
+
+        #if NET7_0_OR_GREATER
+        [LibraryImport(LibName,
+            EntryPoint = "curandSetGeneratorOffset"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static partial
+         CuRandStatus curandSetGeneratorOffset(
+             IntPtr libHandle,
+             ulong offset);
+
+        #else
+        [DllImport(LibName,
+            EntryPoint = "curandSetGeneratorOffset"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static extern
+         CuRandStatus curandSetGeneratorOffset(
+            [In] IntPtr libHandle,
+            [In] ulong offset);
+
+        #endif
+        public sealed override CuRandStatus SetGeneratorOffset(
+            [In] IntPtr libHandle,
+            [In] ulong offset) =>
+            curandSetGeneratorOffset(
+                libHandle,
+                offset);
+
+        #if NET7_0_OR_GREATER
+        [LibraryImport(LibName,
+            EntryPoint = "curandSetGeneratorOrdering"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static partial
+         CuRandStatus curandSetGeneratorOrdering(
+             IntPtr libHandle,
+             CuRandOrdering order);
+
+        #else
+        [DllImport(LibName,
+            EntryPoint = "curandSetGeneratorOrdering"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static extern
+         CuRandStatus curandSetGeneratorOrdering(
+            [In] IntPtr libHandle,
+            [In] CuRandOrdering order);
+
+        #endif
+        public sealed override CuRandStatus SetGeneratorOrdering(
+            [In] IntPtr libHandle,
+            [In] CuRandOrdering order) =>
+            curandSetGeneratorOrdering(
+                libHandle,
+                order);
+
+        #if NET7_0_OR_GREATER
+        [LibraryImport(LibName,
+            EntryPoint = "curandSetQuasiRandomGeneratorDimensions"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static partial
+         CuRandStatus curandSetQuasiRandomGeneratorDimensions(
+             IntPtr libHandle,
+             uint numDimensions);
+
+        #else
+        [DllImport(LibName,
+            EntryPoint = "curandSetQuasiRandomGeneratorDimensions"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static extern
+         CuRandStatus curandSetQuasiRandomGeneratorDimensions(
+            [In] IntPtr libHandle,
+            [In] uint numDimensions);
+
+        #endif
+        public sealed override CuRandStatus SetQuasiRandomGeneratorDimensions(
+            [In] IntPtr libHandle,
+            [In] uint numDimensions) =>
+            curandSetQuasiRandomGeneratorDimensions(
+                libHandle,
+                numDimensions);
+
         #endregion
 
         #region Utilities
@@ -1392,6 +1836,210 @@ namespace ILGPU.Runtime.Cuda.API
                 length,
                 mean,
                 stddev);
+
+        #if NET7_0_OR_GREATER
+        [LibraryImport(LibName,
+            EntryPoint = "curandGenerateLogNormal"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static partial
+         CuRandStatus curandGenerateLogNormal(
+             IntPtr libHandle,
+             IntPtr outputPtr,
+             IntPtr length,
+             float mean,
+             float stddev);
+
+        #else
+        [DllImport(LibName,
+            EntryPoint = "curandGenerateLogNormal"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static extern
+         CuRandStatus curandGenerateLogNormal(
+            [In] IntPtr libHandle,
+            [In] IntPtr outputPtr,
+            [In] IntPtr length,
+            [In] float mean,
+            [In] float stddev);
+
+        #endif
+        public sealed override CuRandStatus GenerateLogNormalFloat(
+            [In] IntPtr libHandle,
+            [In] IntPtr outputPtr,
+            [In] IntPtr length,
+            [In] float mean,
+            [In] float stddev) =>
+            curandGenerateLogNormal(
+                libHandle,
+                outputPtr,
+                length,
+                mean,
+                stddev);
+
+        #if NET7_0_OR_GREATER
+        [LibraryImport(LibName,
+            EntryPoint = "curandGenerateLogNormalDouble"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static partial
+         CuRandStatus curandGenerateLogNormalDouble(
+             IntPtr libHandle,
+             IntPtr outputPtr,
+             IntPtr length,
+             double mean,
+             double stddev);
+
+        #else
+        [DllImport(LibName,
+            EntryPoint = "curandGenerateLogNormalDouble"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static extern
+         CuRandStatus curandGenerateLogNormalDouble(
+            [In] IntPtr libHandle,
+            [In] IntPtr outputPtr,
+            [In] IntPtr length,
+            [In] double mean,
+            [In] double stddev);
+
+        #endif
+        public sealed override CuRandStatus GenerateLogNormalDouble(
+            [In] IntPtr libHandle,
+            [In] IntPtr outputPtr,
+            [In] IntPtr length,
+            [In] double mean,
+            [In] double stddev) =>
+            curandGenerateLogNormalDouble(
+                libHandle,
+                outputPtr,
+                length,
+                mean,
+                stddev);
+
+        #if NET7_0_OR_GREATER
+        [LibraryImport(LibName,
+            EntryPoint = "curandGeneratePoisson"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static partial
+         CuRandStatus curandGeneratePoisson(
+             IntPtr libHandle,
+             IntPtr outputPtr,
+             IntPtr length,
+             double lambda);
+
+        #else
+        [DllImport(LibName,
+            EntryPoint = "curandGeneratePoisson"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static extern
+         CuRandStatus curandGeneratePoisson(
+            [In] IntPtr libHandle,
+            [In] IntPtr outputPtr,
+            [In] IntPtr length,
+            [In] double lambda);
+
+        #endif
+        public sealed override CuRandStatus GeneratePoisson(
+            [In] IntPtr libHandle,
+            [In] IntPtr outputPtr,
+            [In] IntPtr length,
+            [In] double lambda) =>
+            curandGeneratePoisson(
+                libHandle,
+                outputPtr,
+                length,
+                lambda);
+
+        #endregion
+
+        #region Configuration
+
+        #if NET7_0_OR_GREATER
+        [LibraryImport(LibName,
+            EntryPoint = "curandSetGeneratorOffset"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static partial
+         CuRandStatus curandSetGeneratorOffset(
+             IntPtr libHandle,
+             ulong offset);
+
+        #else
+        [DllImport(LibName,
+            EntryPoint = "curandSetGeneratorOffset"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static extern
+         CuRandStatus curandSetGeneratorOffset(
+            [In] IntPtr libHandle,
+            [In] ulong offset);
+
+        #endif
+        public sealed override CuRandStatus SetGeneratorOffset(
+            [In] IntPtr libHandle,
+            [In] ulong offset) =>
+            curandSetGeneratorOffset(
+                libHandle,
+                offset);
+
+        #if NET7_0_OR_GREATER
+        [LibraryImport(LibName,
+            EntryPoint = "curandSetGeneratorOrdering"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static partial
+         CuRandStatus curandSetGeneratorOrdering(
+             IntPtr libHandle,
+             CuRandOrdering order);
+
+        #else
+        [DllImport(LibName,
+            EntryPoint = "curandSetGeneratorOrdering"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static extern
+         CuRandStatus curandSetGeneratorOrdering(
+            [In] IntPtr libHandle,
+            [In] CuRandOrdering order);
+
+        #endif
+        public sealed override CuRandStatus SetGeneratorOrdering(
+            [In] IntPtr libHandle,
+            [In] CuRandOrdering order) =>
+            curandSetGeneratorOrdering(
+                libHandle,
+                order);
+
+        #if NET7_0_OR_GREATER
+        [LibraryImport(LibName,
+            EntryPoint = "curandSetQuasiRandomGeneratorDimensions"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static partial
+         CuRandStatus curandSetQuasiRandomGeneratorDimensions(
+             IntPtr libHandle,
+             uint numDimensions);
+
+        #else
+        [DllImport(LibName,
+            EntryPoint = "curandSetQuasiRandomGeneratorDimensions"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static extern
+         CuRandStatus curandSetQuasiRandomGeneratorDimensions(
+            [In] IntPtr libHandle,
+            [In] uint numDimensions);
+
+        #endif
+        public sealed override CuRandStatus SetQuasiRandomGeneratorDimensions(
+            [In] IntPtr libHandle,
+            [In] uint numDimensions) =>
+            curandSetQuasiRandomGeneratorDimensions(
+                libHandle,
+                numDimensions);
 
         #endregion
 
@@ -1810,6 +2458,210 @@ namespace ILGPU.Runtime.Cuda.API
                 mean,
                 stddev);
 
+        #if NET7_0_OR_GREATER
+        [LibraryImport(LibName,
+            EntryPoint = "curandGenerateLogNormal"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static partial
+         CuRandStatus curandGenerateLogNormal(
+             IntPtr libHandle,
+             IntPtr outputPtr,
+             IntPtr length,
+             float mean,
+             float stddev);
+
+        #else
+        [DllImport(LibName,
+            EntryPoint = "curandGenerateLogNormal"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static extern
+         CuRandStatus curandGenerateLogNormal(
+            [In] IntPtr libHandle,
+            [In] IntPtr outputPtr,
+            [In] IntPtr length,
+            [In] float mean,
+            [In] float stddev);
+
+        #endif
+        public sealed override CuRandStatus GenerateLogNormalFloat(
+            [In] IntPtr libHandle,
+            [In] IntPtr outputPtr,
+            [In] IntPtr length,
+            [In] float mean,
+            [In] float stddev) =>
+            curandGenerateLogNormal(
+                libHandle,
+                outputPtr,
+                length,
+                mean,
+                stddev);
+
+        #if NET7_0_OR_GREATER
+        [LibraryImport(LibName,
+            EntryPoint = "curandGenerateLogNormalDouble"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static partial
+         CuRandStatus curandGenerateLogNormalDouble(
+             IntPtr libHandle,
+             IntPtr outputPtr,
+             IntPtr length,
+             double mean,
+             double stddev);
+
+        #else
+        [DllImport(LibName,
+            EntryPoint = "curandGenerateLogNormalDouble"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static extern
+         CuRandStatus curandGenerateLogNormalDouble(
+            [In] IntPtr libHandle,
+            [In] IntPtr outputPtr,
+            [In] IntPtr length,
+            [In] double mean,
+            [In] double stddev);
+
+        #endif
+        public sealed override CuRandStatus GenerateLogNormalDouble(
+            [In] IntPtr libHandle,
+            [In] IntPtr outputPtr,
+            [In] IntPtr length,
+            [In] double mean,
+            [In] double stddev) =>
+            curandGenerateLogNormalDouble(
+                libHandle,
+                outputPtr,
+                length,
+                mean,
+                stddev);
+
+        #if NET7_0_OR_GREATER
+        [LibraryImport(LibName,
+            EntryPoint = "curandGeneratePoisson"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static partial
+         CuRandStatus curandGeneratePoisson(
+             IntPtr libHandle,
+             IntPtr outputPtr,
+             IntPtr length,
+             double lambda);
+
+        #else
+        [DllImport(LibName,
+            EntryPoint = "curandGeneratePoisson"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static extern
+         CuRandStatus curandGeneratePoisson(
+            [In] IntPtr libHandle,
+            [In] IntPtr outputPtr,
+            [In] IntPtr length,
+            [In] double lambda);
+
+        #endif
+        public sealed override CuRandStatus GeneratePoisson(
+            [In] IntPtr libHandle,
+            [In] IntPtr outputPtr,
+            [In] IntPtr length,
+            [In] double lambda) =>
+            curandGeneratePoisson(
+                libHandle,
+                outputPtr,
+                length,
+                lambda);
+
+        #endregion
+
+        #region Configuration
+
+        #if NET7_0_OR_GREATER
+        [LibraryImport(LibName,
+            EntryPoint = "curandSetGeneratorOffset"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static partial
+         CuRandStatus curandSetGeneratorOffset(
+             IntPtr libHandle,
+             ulong offset);
+
+        #else
+        [DllImport(LibName,
+            EntryPoint = "curandSetGeneratorOffset"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static extern
+         CuRandStatus curandSetGeneratorOffset(
+            [In] IntPtr libHandle,
+            [In] ulong offset);
+
+        #endif
+        public sealed override CuRandStatus SetGeneratorOffset(
+            [In] IntPtr libHandle,
+            [In] ulong offset) =>
+            curandSetGeneratorOffset(
+                libHandle,
+                offset);
+
+        #if NET7_0_OR_GREATER
+        [LibraryImport(LibName,
+            EntryPoint = "curandSetGeneratorOrdering"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static partial
+         CuRandStatus curandSetGeneratorOrdering(
+             IntPtr libHandle,
+             CuRandOrdering order);
+
+        #else
+        [DllImport(LibName,
+            EntryPoint = "curandSetGeneratorOrdering"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static extern
+         CuRandStatus curandSetGeneratorOrdering(
+            [In] IntPtr libHandle,
+            [In] CuRandOrdering order);
+
+        #endif
+        public sealed override CuRandStatus SetGeneratorOrdering(
+            [In] IntPtr libHandle,
+            [In] CuRandOrdering order) =>
+            curandSetGeneratorOrdering(
+                libHandle,
+                order);
+
+        #if NET7_0_OR_GREATER
+        [LibraryImport(LibName,
+            EntryPoint = "curandSetQuasiRandomGeneratorDimensions"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static partial
+         CuRandStatus curandSetQuasiRandomGeneratorDimensions(
+             IntPtr libHandle,
+             uint numDimensions);
+
+        #else
+        [DllImport(LibName,
+            EntryPoint = "curandSetQuasiRandomGeneratorDimensions"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static extern
+         CuRandStatus curandSetQuasiRandomGeneratorDimensions(
+            [In] IntPtr libHandle,
+            [In] uint numDimensions);
+
+        #endif
+        public sealed override CuRandStatus SetQuasiRandomGeneratorDimensions(
+            [In] IntPtr libHandle,
+            [In] uint numDimensions) =>
+            curandSetQuasiRandomGeneratorDimensions(
+                libHandle,
+                numDimensions);
+
         #endregion
 
         #region Utilities
@@ -2226,6 +3078,210 @@ namespace ILGPU.Runtime.Cuda.API
                 length,
                 mean,
                 stddev);
+
+        #if NET7_0_OR_GREATER
+        [LibraryImport(LibName,
+            EntryPoint = "curandGenerateLogNormal"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static partial
+         CuRandStatus curandGenerateLogNormal(
+             IntPtr libHandle,
+             IntPtr outputPtr,
+             IntPtr length,
+             float mean,
+             float stddev);
+
+        #else
+        [DllImport(LibName,
+            EntryPoint = "curandGenerateLogNormal"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static extern
+         CuRandStatus curandGenerateLogNormal(
+            [In] IntPtr libHandle,
+            [In] IntPtr outputPtr,
+            [In] IntPtr length,
+            [In] float mean,
+            [In] float stddev);
+
+        #endif
+        public sealed override CuRandStatus GenerateLogNormalFloat(
+            [In] IntPtr libHandle,
+            [In] IntPtr outputPtr,
+            [In] IntPtr length,
+            [In] float mean,
+            [In] float stddev) =>
+            curandGenerateLogNormal(
+                libHandle,
+                outputPtr,
+                length,
+                mean,
+                stddev);
+
+        #if NET7_0_OR_GREATER
+        [LibraryImport(LibName,
+            EntryPoint = "curandGenerateLogNormalDouble"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static partial
+         CuRandStatus curandGenerateLogNormalDouble(
+             IntPtr libHandle,
+             IntPtr outputPtr,
+             IntPtr length,
+             double mean,
+             double stddev);
+
+        #else
+        [DllImport(LibName,
+            EntryPoint = "curandGenerateLogNormalDouble"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static extern
+         CuRandStatus curandGenerateLogNormalDouble(
+            [In] IntPtr libHandle,
+            [In] IntPtr outputPtr,
+            [In] IntPtr length,
+            [In] double mean,
+            [In] double stddev);
+
+        #endif
+        public sealed override CuRandStatus GenerateLogNormalDouble(
+            [In] IntPtr libHandle,
+            [In] IntPtr outputPtr,
+            [In] IntPtr length,
+            [In] double mean,
+            [In] double stddev) =>
+            curandGenerateLogNormalDouble(
+                libHandle,
+                outputPtr,
+                length,
+                mean,
+                stddev);
+
+        #if NET7_0_OR_GREATER
+        [LibraryImport(LibName,
+            EntryPoint = "curandGeneratePoisson"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static partial
+         CuRandStatus curandGeneratePoisson(
+             IntPtr libHandle,
+             IntPtr outputPtr,
+             IntPtr length,
+             double lambda);
+
+        #else
+        [DllImport(LibName,
+            EntryPoint = "curandGeneratePoisson"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static extern
+         CuRandStatus curandGeneratePoisson(
+            [In] IntPtr libHandle,
+            [In] IntPtr outputPtr,
+            [In] IntPtr length,
+            [In] double lambda);
+
+        #endif
+        public sealed override CuRandStatus GeneratePoisson(
+            [In] IntPtr libHandle,
+            [In] IntPtr outputPtr,
+            [In] IntPtr length,
+            [In] double lambda) =>
+            curandGeneratePoisson(
+                libHandle,
+                outputPtr,
+                length,
+                lambda);
+
+        #endregion
+
+        #region Configuration
+
+        #if NET7_0_OR_GREATER
+        [LibraryImport(LibName,
+            EntryPoint = "curandSetGeneratorOffset"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static partial
+         CuRandStatus curandSetGeneratorOffset(
+             IntPtr libHandle,
+             ulong offset);
+
+        #else
+        [DllImport(LibName,
+            EntryPoint = "curandSetGeneratorOffset"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static extern
+         CuRandStatus curandSetGeneratorOffset(
+            [In] IntPtr libHandle,
+            [In] ulong offset);
+
+        #endif
+        public sealed override CuRandStatus SetGeneratorOffset(
+            [In] IntPtr libHandle,
+            [In] ulong offset) =>
+            curandSetGeneratorOffset(
+                libHandle,
+                offset);
+
+        #if NET7_0_OR_GREATER
+        [LibraryImport(LibName,
+            EntryPoint = "curandSetGeneratorOrdering"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static partial
+         CuRandStatus curandSetGeneratorOrdering(
+             IntPtr libHandle,
+             CuRandOrdering order);
+
+        #else
+        [DllImport(LibName,
+            EntryPoint = "curandSetGeneratorOrdering"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static extern
+         CuRandStatus curandSetGeneratorOrdering(
+            [In] IntPtr libHandle,
+            [In] CuRandOrdering order);
+
+        #endif
+        public sealed override CuRandStatus SetGeneratorOrdering(
+            [In] IntPtr libHandle,
+            [In] CuRandOrdering order) =>
+            curandSetGeneratorOrdering(
+                libHandle,
+                order);
+
+        #if NET7_0_OR_GREATER
+        [LibraryImport(LibName,
+            EntryPoint = "curandSetQuasiRandomGeneratorDimensions"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static partial
+         CuRandStatus curandSetQuasiRandomGeneratorDimensions(
+             IntPtr libHandle,
+             uint numDimensions);
+
+        #else
+        [DllImport(LibName,
+            EntryPoint = "curandSetQuasiRandomGeneratorDimensions"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static extern
+         CuRandStatus curandSetQuasiRandomGeneratorDimensions(
+            [In] IntPtr libHandle,
+            [In] uint numDimensions);
+
+        #endif
+        public sealed override CuRandStatus SetQuasiRandomGeneratorDimensions(
+            [In] IntPtr libHandle,
+            [In] uint numDimensions) =>
+            curandSetQuasiRandomGeneratorDimensions(
+                libHandle,
+                numDimensions);
 
         #endregion
 
@@ -2644,6 +3700,210 @@ namespace ILGPU.Runtime.Cuda.API
                 mean,
                 stddev);
 
+        #if NET7_0_OR_GREATER
+        [LibraryImport(LibName,
+            EntryPoint = "curandGenerateLogNormal"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static partial
+         CuRandStatus curandGenerateLogNormal(
+             IntPtr libHandle,
+             IntPtr outputPtr,
+             IntPtr length,
+             float mean,
+             float stddev);
+
+        #else
+        [DllImport(LibName,
+            EntryPoint = "curandGenerateLogNormal"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static extern
+         CuRandStatus curandGenerateLogNormal(
+            [In] IntPtr libHandle,
+            [In] IntPtr outputPtr,
+            [In] IntPtr length,
+            [In] float mean,
+            [In] float stddev);
+
+        #endif
+        public sealed override CuRandStatus GenerateLogNormalFloat(
+            [In] IntPtr libHandle,
+            [In] IntPtr outputPtr,
+            [In] IntPtr length,
+            [In] float mean,
+            [In] float stddev) =>
+            curandGenerateLogNormal(
+                libHandle,
+                outputPtr,
+                length,
+                mean,
+                stddev);
+
+        #if NET7_0_OR_GREATER
+        [LibraryImport(LibName,
+            EntryPoint = "curandGenerateLogNormalDouble"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static partial
+         CuRandStatus curandGenerateLogNormalDouble(
+             IntPtr libHandle,
+             IntPtr outputPtr,
+             IntPtr length,
+             double mean,
+             double stddev);
+
+        #else
+        [DllImport(LibName,
+            EntryPoint = "curandGenerateLogNormalDouble"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static extern
+         CuRandStatus curandGenerateLogNormalDouble(
+            [In] IntPtr libHandle,
+            [In] IntPtr outputPtr,
+            [In] IntPtr length,
+            [In] double mean,
+            [In] double stddev);
+
+        #endif
+        public sealed override CuRandStatus GenerateLogNormalDouble(
+            [In] IntPtr libHandle,
+            [In] IntPtr outputPtr,
+            [In] IntPtr length,
+            [In] double mean,
+            [In] double stddev) =>
+            curandGenerateLogNormalDouble(
+                libHandle,
+                outputPtr,
+                length,
+                mean,
+                stddev);
+
+        #if NET7_0_OR_GREATER
+        [LibraryImport(LibName,
+            EntryPoint = "curandGeneratePoisson"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static partial
+         CuRandStatus curandGeneratePoisson(
+             IntPtr libHandle,
+             IntPtr outputPtr,
+             IntPtr length,
+             double lambda);
+
+        #else
+        [DllImport(LibName,
+            EntryPoint = "curandGeneratePoisson"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static extern
+         CuRandStatus curandGeneratePoisson(
+            [In] IntPtr libHandle,
+            [In] IntPtr outputPtr,
+            [In] IntPtr length,
+            [In] double lambda);
+
+        #endif
+        public sealed override CuRandStatus GeneratePoisson(
+            [In] IntPtr libHandle,
+            [In] IntPtr outputPtr,
+            [In] IntPtr length,
+            [In] double lambda) =>
+            curandGeneratePoisson(
+                libHandle,
+                outputPtr,
+                length,
+                lambda);
+
+        #endregion
+
+        #region Configuration
+
+        #if NET7_0_OR_GREATER
+        [LibraryImport(LibName,
+            EntryPoint = "curandSetGeneratorOffset"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static partial
+         CuRandStatus curandSetGeneratorOffset(
+             IntPtr libHandle,
+             ulong offset);
+
+        #else
+        [DllImport(LibName,
+            EntryPoint = "curandSetGeneratorOffset"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static extern
+         CuRandStatus curandSetGeneratorOffset(
+            [In] IntPtr libHandle,
+            [In] ulong offset);
+
+        #endif
+        public sealed override CuRandStatus SetGeneratorOffset(
+            [In] IntPtr libHandle,
+            [In] ulong offset) =>
+            curandSetGeneratorOffset(
+                libHandle,
+                offset);
+
+        #if NET7_0_OR_GREATER
+        [LibraryImport(LibName,
+            EntryPoint = "curandSetGeneratorOrdering"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static partial
+         CuRandStatus curandSetGeneratorOrdering(
+             IntPtr libHandle,
+             CuRandOrdering order);
+
+        #else
+        [DllImport(LibName,
+            EntryPoint = "curandSetGeneratorOrdering"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static extern
+         CuRandStatus curandSetGeneratorOrdering(
+            [In] IntPtr libHandle,
+            [In] CuRandOrdering order);
+
+        #endif
+        public sealed override CuRandStatus SetGeneratorOrdering(
+            [In] IntPtr libHandle,
+            [In] CuRandOrdering order) =>
+            curandSetGeneratorOrdering(
+                libHandle,
+                order);
+
+        #if NET7_0_OR_GREATER
+        [LibraryImport(LibName,
+            EntryPoint = "curandSetQuasiRandomGeneratorDimensions"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static partial
+         CuRandStatus curandSetQuasiRandomGeneratorDimensions(
+             IntPtr libHandle,
+             uint numDimensions);
+
+        #else
+        [DllImport(LibName,
+            EntryPoint = "curandSetQuasiRandomGeneratorDimensions"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static extern
+         CuRandStatus curandSetQuasiRandomGeneratorDimensions(
+            [In] IntPtr libHandle,
+            [In] uint numDimensions);
+
+        #endif
+        public sealed override CuRandStatus SetQuasiRandomGeneratorDimensions(
+            [In] IntPtr libHandle,
+            [In] uint numDimensions) =>
+            curandSetQuasiRandomGeneratorDimensions(
+                libHandle,
+                numDimensions);
+
         #endregion
 
         #region Utilities
@@ -3060,6 +4320,210 @@ namespace ILGPU.Runtime.Cuda.API
                 length,
                 mean,
                 stddev);
+
+        #if NET7_0_OR_GREATER
+        [LibraryImport(LibName,
+            EntryPoint = "curandGenerateLogNormal"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static partial
+         CuRandStatus curandGenerateLogNormal(
+             IntPtr libHandle,
+             IntPtr outputPtr,
+             IntPtr length,
+             float mean,
+             float stddev);
+
+        #else
+        [DllImport(LibName,
+            EntryPoint = "curandGenerateLogNormal"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static extern
+         CuRandStatus curandGenerateLogNormal(
+            [In] IntPtr libHandle,
+            [In] IntPtr outputPtr,
+            [In] IntPtr length,
+            [In] float mean,
+            [In] float stddev);
+
+        #endif
+        public sealed override CuRandStatus GenerateLogNormalFloat(
+            [In] IntPtr libHandle,
+            [In] IntPtr outputPtr,
+            [In] IntPtr length,
+            [In] float mean,
+            [In] float stddev) =>
+            curandGenerateLogNormal(
+                libHandle,
+                outputPtr,
+                length,
+                mean,
+                stddev);
+
+        #if NET7_0_OR_GREATER
+        [LibraryImport(LibName,
+            EntryPoint = "curandGenerateLogNormalDouble"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static partial
+         CuRandStatus curandGenerateLogNormalDouble(
+             IntPtr libHandle,
+             IntPtr outputPtr,
+             IntPtr length,
+             double mean,
+             double stddev);
+
+        #else
+        [DllImport(LibName,
+            EntryPoint = "curandGenerateLogNormalDouble"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static extern
+         CuRandStatus curandGenerateLogNormalDouble(
+            [In] IntPtr libHandle,
+            [In] IntPtr outputPtr,
+            [In] IntPtr length,
+            [In] double mean,
+            [In] double stddev);
+
+        #endif
+        public sealed override CuRandStatus GenerateLogNormalDouble(
+            [In] IntPtr libHandle,
+            [In] IntPtr outputPtr,
+            [In] IntPtr length,
+            [In] double mean,
+            [In] double stddev) =>
+            curandGenerateLogNormalDouble(
+                libHandle,
+                outputPtr,
+                length,
+                mean,
+                stddev);
+
+        #if NET7_0_OR_GREATER
+        [LibraryImport(LibName,
+            EntryPoint = "curandGeneratePoisson"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static partial
+         CuRandStatus curandGeneratePoisson(
+             IntPtr libHandle,
+             IntPtr outputPtr,
+             IntPtr length,
+             double lambda);
+
+        #else
+        [DllImport(LibName,
+            EntryPoint = "curandGeneratePoisson"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static extern
+         CuRandStatus curandGeneratePoisson(
+            [In] IntPtr libHandle,
+            [In] IntPtr outputPtr,
+            [In] IntPtr length,
+            [In] double lambda);
+
+        #endif
+        public sealed override CuRandStatus GeneratePoisson(
+            [In] IntPtr libHandle,
+            [In] IntPtr outputPtr,
+            [In] IntPtr length,
+            [In] double lambda) =>
+            curandGeneratePoisson(
+                libHandle,
+                outputPtr,
+                length,
+                lambda);
+
+        #endregion
+
+        #region Configuration
+
+        #if NET7_0_OR_GREATER
+        [LibraryImport(LibName,
+            EntryPoint = "curandSetGeneratorOffset"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static partial
+         CuRandStatus curandSetGeneratorOffset(
+             IntPtr libHandle,
+             ulong offset);
+
+        #else
+        [DllImport(LibName,
+            EntryPoint = "curandSetGeneratorOffset"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static extern
+         CuRandStatus curandSetGeneratorOffset(
+            [In] IntPtr libHandle,
+            [In] ulong offset);
+
+        #endif
+        public sealed override CuRandStatus SetGeneratorOffset(
+            [In] IntPtr libHandle,
+            [In] ulong offset) =>
+            curandSetGeneratorOffset(
+                libHandle,
+                offset);
+
+        #if NET7_0_OR_GREATER
+        [LibraryImport(LibName,
+            EntryPoint = "curandSetGeneratorOrdering"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static partial
+         CuRandStatus curandSetGeneratorOrdering(
+             IntPtr libHandle,
+             CuRandOrdering order);
+
+        #else
+        [DllImport(LibName,
+            EntryPoint = "curandSetGeneratorOrdering"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static extern
+         CuRandStatus curandSetGeneratorOrdering(
+            [In] IntPtr libHandle,
+            [In] CuRandOrdering order);
+
+        #endif
+        public sealed override CuRandStatus SetGeneratorOrdering(
+            [In] IntPtr libHandle,
+            [In] CuRandOrdering order) =>
+            curandSetGeneratorOrdering(
+                libHandle,
+                order);
+
+        #if NET7_0_OR_GREATER
+        [LibraryImport(LibName,
+            EntryPoint = "curandSetQuasiRandomGeneratorDimensions"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static partial
+         CuRandStatus curandSetQuasiRandomGeneratorDimensions(
+             IntPtr libHandle,
+             uint numDimensions);
+
+        #else
+        [DllImport(LibName,
+            EntryPoint = "curandSetQuasiRandomGeneratorDimensions"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static extern
+         CuRandStatus curandSetQuasiRandomGeneratorDimensions(
+            [In] IntPtr libHandle,
+            [In] uint numDimensions);
+
+        #endif
+        public sealed override CuRandStatus SetQuasiRandomGeneratorDimensions(
+            [In] IntPtr libHandle,
+            [In] uint numDimensions) =>
+            curandSetQuasiRandomGeneratorDimensions(
+                libHandle,
+                numDimensions);
 
         #endregion
 
@@ -3478,6 +4942,210 @@ namespace ILGPU.Runtime.Cuda.API
                 mean,
                 stddev);
 
+        #if NET7_0_OR_GREATER
+        [LibraryImport(LibName,
+            EntryPoint = "curandGenerateLogNormal"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static partial
+         CuRandStatus curandGenerateLogNormal(
+             IntPtr libHandle,
+             IntPtr outputPtr,
+             IntPtr length,
+             float mean,
+             float stddev);
+
+        #else
+        [DllImport(LibName,
+            EntryPoint = "curandGenerateLogNormal"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static extern
+         CuRandStatus curandGenerateLogNormal(
+            [In] IntPtr libHandle,
+            [In] IntPtr outputPtr,
+            [In] IntPtr length,
+            [In] float mean,
+            [In] float stddev);
+
+        #endif
+        public sealed override CuRandStatus GenerateLogNormalFloat(
+            [In] IntPtr libHandle,
+            [In] IntPtr outputPtr,
+            [In] IntPtr length,
+            [In] float mean,
+            [In] float stddev) =>
+            curandGenerateLogNormal(
+                libHandle,
+                outputPtr,
+                length,
+                mean,
+                stddev);
+
+        #if NET7_0_OR_GREATER
+        [LibraryImport(LibName,
+            EntryPoint = "curandGenerateLogNormalDouble"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static partial
+         CuRandStatus curandGenerateLogNormalDouble(
+             IntPtr libHandle,
+             IntPtr outputPtr,
+             IntPtr length,
+             double mean,
+             double stddev);
+
+        #else
+        [DllImport(LibName,
+            EntryPoint = "curandGenerateLogNormalDouble"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static extern
+         CuRandStatus curandGenerateLogNormalDouble(
+            [In] IntPtr libHandle,
+            [In] IntPtr outputPtr,
+            [In] IntPtr length,
+            [In] double mean,
+            [In] double stddev);
+
+        #endif
+        public sealed override CuRandStatus GenerateLogNormalDouble(
+            [In] IntPtr libHandle,
+            [In] IntPtr outputPtr,
+            [In] IntPtr length,
+            [In] double mean,
+            [In] double stddev) =>
+            curandGenerateLogNormalDouble(
+                libHandle,
+                outputPtr,
+                length,
+                mean,
+                stddev);
+
+        #if NET7_0_OR_GREATER
+        [LibraryImport(LibName,
+            EntryPoint = "curandGeneratePoisson"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static partial
+         CuRandStatus curandGeneratePoisson(
+             IntPtr libHandle,
+             IntPtr outputPtr,
+             IntPtr length,
+             double lambda);
+
+        #else
+        [DllImport(LibName,
+            EntryPoint = "curandGeneratePoisson"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static extern
+         CuRandStatus curandGeneratePoisson(
+            [In] IntPtr libHandle,
+            [In] IntPtr outputPtr,
+            [In] IntPtr length,
+            [In] double lambda);
+
+        #endif
+        public sealed override CuRandStatus GeneratePoisson(
+            [In] IntPtr libHandle,
+            [In] IntPtr outputPtr,
+            [In] IntPtr length,
+            [In] double lambda) =>
+            curandGeneratePoisson(
+                libHandle,
+                outputPtr,
+                length,
+                lambda);
+
+        #endregion
+
+        #region Configuration
+
+        #if NET7_0_OR_GREATER
+        [LibraryImport(LibName,
+            EntryPoint = "curandSetGeneratorOffset"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static partial
+         CuRandStatus curandSetGeneratorOffset(
+             IntPtr libHandle,
+             ulong offset);
+
+        #else
+        [DllImport(LibName,
+            EntryPoint = "curandSetGeneratorOffset"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static extern
+         CuRandStatus curandSetGeneratorOffset(
+            [In] IntPtr libHandle,
+            [In] ulong offset);
+
+        #endif
+        public sealed override CuRandStatus SetGeneratorOffset(
+            [In] IntPtr libHandle,
+            [In] ulong offset) =>
+            curandSetGeneratorOffset(
+                libHandle,
+                offset);
+
+        #if NET7_0_OR_GREATER
+        [LibraryImport(LibName,
+            EntryPoint = "curandSetGeneratorOrdering"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static partial
+         CuRandStatus curandSetGeneratorOrdering(
+             IntPtr libHandle,
+             CuRandOrdering order);
+
+        #else
+        [DllImport(LibName,
+            EntryPoint = "curandSetGeneratorOrdering"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static extern
+         CuRandStatus curandSetGeneratorOrdering(
+            [In] IntPtr libHandle,
+            [In] CuRandOrdering order);
+
+        #endif
+        public sealed override CuRandStatus SetGeneratorOrdering(
+            [In] IntPtr libHandle,
+            [In] CuRandOrdering order) =>
+            curandSetGeneratorOrdering(
+                libHandle,
+                order);
+
+        #if NET7_0_OR_GREATER
+        [LibraryImport(LibName,
+            EntryPoint = "curandSetQuasiRandomGeneratorDimensions"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static partial
+         CuRandStatus curandSetQuasiRandomGeneratorDimensions(
+             IntPtr libHandle,
+             uint numDimensions);
+
+        #else
+        [DllImport(LibName,
+            EntryPoint = "curandSetQuasiRandomGeneratorDimensions"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static extern
+         CuRandStatus curandSetQuasiRandomGeneratorDimensions(
+            [In] IntPtr libHandle,
+            [In] uint numDimensions);
+
+        #endif
+        public sealed override CuRandStatus SetQuasiRandomGeneratorDimensions(
+            [In] IntPtr libHandle,
+            [In] uint numDimensions) =>
+            curandSetQuasiRandomGeneratorDimensions(
+                libHandle,
+                numDimensions);
+
         #endregion
 
         #region Utilities
@@ -3895,6 +5563,210 @@ namespace ILGPU.Runtime.Cuda.API
                 mean,
                 stddev);
 
+        #if NET7_0_OR_GREATER
+        [LibraryImport(LibName,
+            EntryPoint = "curandGenerateLogNormal"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static partial
+         CuRandStatus curandGenerateLogNormal(
+             IntPtr libHandle,
+             IntPtr outputPtr,
+             IntPtr length,
+             float mean,
+             float stddev);
+
+        #else
+        [DllImport(LibName,
+            EntryPoint = "curandGenerateLogNormal"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static extern
+         CuRandStatus curandGenerateLogNormal(
+            [In] IntPtr libHandle,
+            [In] IntPtr outputPtr,
+            [In] IntPtr length,
+            [In] float mean,
+            [In] float stddev);
+
+        #endif
+        public sealed override CuRandStatus GenerateLogNormalFloat(
+            [In] IntPtr libHandle,
+            [In] IntPtr outputPtr,
+            [In] IntPtr length,
+            [In] float mean,
+            [In] float stddev) =>
+            curandGenerateLogNormal(
+                libHandle,
+                outputPtr,
+                length,
+                mean,
+                stddev);
+
+        #if NET7_0_OR_GREATER
+        [LibraryImport(LibName,
+            EntryPoint = "curandGenerateLogNormalDouble"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static partial
+         CuRandStatus curandGenerateLogNormalDouble(
+             IntPtr libHandle,
+             IntPtr outputPtr,
+             IntPtr length,
+             double mean,
+             double stddev);
+
+        #else
+        [DllImport(LibName,
+            EntryPoint = "curandGenerateLogNormalDouble"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static extern
+         CuRandStatus curandGenerateLogNormalDouble(
+            [In] IntPtr libHandle,
+            [In] IntPtr outputPtr,
+            [In] IntPtr length,
+            [In] double mean,
+            [In] double stddev);
+
+        #endif
+        public sealed override CuRandStatus GenerateLogNormalDouble(
+            [In] IntPtr libHandle,
+            [In] IntPtr outputPtr,
+            [In] IntPtr length,
+            [In] double mean,
+            [In] double stddev) =>
+            curandGenerateLogNormalDouble(
+                libHandle,
+                outputPtr,
+                length,
+                mean,
+                stddev);
+
+        #if NET7_0_OR_GREATER
+        [LibraryImport(LibName,
+            EntryPoint = "curandGeneratePoisson"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static partial
+         CuRandStatus curandGeneratePoisson(
+             IntPtr libHandle,
+             IntPtr outputPtr,
+             IntPtr length,
+             double lambda);
+
+        #else
+        [DllImport(LibName,
+            EntryPoint = "curandGeneratePoisson"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static extern
+         CuRandStatus curandGeneratePoisson(
+            [In] IntPtr libHandle,
+            [In] IntPtr outputPtr,
+            [In] IntPtr length,
+            [In] double lambda);
+
+        #endif
+        public sealed override CuRandStatus GeneratePoisson(
+            [In] IntPtr libHandle,
+            [In] IntPtr outputPtr,
+            [In] IntPtr length,
+            [In] double lambda) =>
+            curandGeneratePoisson(
+                libHandle,
+                outputPtr,
+                length,
+                lambda);
+
+        #endregion
+
+        #region Configuration
+
+        #if NET7_0_OR_GREATER
+        [LibraryImport(LibName,
+            EntryPoint = "curandSetGeneratorOffset"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static partial
+         CuRandStatus curandSetGeneratorOffset(
+             IntPtr libHandle,
+             ulong offset);
+
+        #else
+        [DllImport(LibName,
+            EntryPoint = "curandSetGeneratorOffset"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static extern
+         CuRandStatus curandSetGeneratorOffset(
+            [In] IntPtr libHandle,
+            [In] ulong offset);
+
+        #endif
+        public sealed override CuRandStatus SetGeneratorOffset(
+            [In] IntPtr libHandle,
+            [In] ulong offset) =>
+            curandSetGeneratorOffset(
+                libHandle,
+                offset);
+
+        #if NET7_0_OR_GREATER
+        [LibraryImport(LibName,
+            EntryPoint = "curandSetGeneratorOrdering"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static partial
+         CuRandStatus curandSetGeneratorOrdering(
+             IntPtr libHandle,
+             CuRandOrdering order);
+
+        #else
+        [DllImport(LibName,
+            EntryPoint = "curandSetGeneratorOrdering"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static extern
+         CuRandStatus curandSetGeneratorOrdering(
+            [In] IntPtr libHandle,
+            [In] CuRandOrdering order);
+
+        #endif
+        public sealed override CuRandStatus SetGeneratorOrdering(
+            [In] IntPtr libHandle,
+            [In] CuRandOrdering order) =>
+            curandSetGeneratorOrdering(
+                libHandle,
+                order);
+
+        #if NET7_0_OR_GREATER
+        [LibraryImport(LibName,
+            EntryPoint = "curandSetQuasiRandomGeneratorDimensions"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static partial
+         CuRandStatus curandSetQuasiRandomGeneratorDimensions(
+             IntPtr libHandle,
+             uint numDimensions);
+
+        #else
+        [DllImport(LibName,
+            EntryPoint = "curandSetQuasiRandomGeneratorDimensions"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static extern
+         CuRandStatus curandSetQuasiRandomGeneratorDimensions(
+            [In] IntPtr libHandle,
+            [In] uint numDimensions);
+
+        #endif
+        public sealed override CuRandStatus SetQuasiRandomGeneratorDimensions(
+            [In] IntPtr libHandle,
+            [In] uint numDimensions) =>
+            curandSetQuasiRandomGeneratorDimensions(
+                libHandle,
+                numDimensions);
+
         #endregion
 
         #region Utilities
@@ -4311,6 +6183,210 @@ namespace ILGPU.Runtime.Cuda.API
                 length,
                 mean,
                 stddev);
+
+        #if NET7_0_OR_GREATER
+        [LibraryImport(LibName,
+            EntryPoint = "curandGenerateLogNormal"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static partial
+         CuRandStatus curandGenerateLogNormal(
+             IntPtr libHandle,
+             IntPtr outputPtr,
+             IntPtr length,
+             float mean,
+             float stddev);
+
+        #else
+        [DllImport(LibName,
+            EntryPoint = "curandGenerateLogNormal"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static extern
+         CuRandStatus curandGenerateLogNormal(
+            [In] IntPtr libHandle,
+            [In] IntPtr outputPtr,
+            [In] IntPtr length,
+            [In] float mean,
+            [In] float stddev);
+
+        #endif
+        public sealed override CuRandStatus GenerateLogNormalFloat(
+            [In] IntPtr libHandle,
+            [In] IntPtr outputPtr,
+            [In] IntPtr length,
+            [In] float mean,
+            [In] float stddev) =>
+            curandGenerateLogNormal(
+                libHandle,
+                outputPtr,
+                length,
+                mean,
+                stddev);
+
+        #if NET7_0_OR_GREATER
+        [LibraryImport(LibName,
+            EntryPoint = "curandGenerateLogNormalDouble"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static partial
+         CuRandStatus curandGenerateLogNormalDouble(
+             IntPtr libHandle,
+             IntPtr outputPtr,
+             IntPtr length,
+             double mean,
+             double stddev);
+
+        #else
+        [DllImport(LibName,
+            EntryPoint = "curandGenerateLogNormalDouble"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static extern
+         CuRandStatus curandGenerateLogNormalDouble(
+            [In] IntPtr libHandle,
+            [In] IntPtr outputPtr,
+            [In] IntPtr length,
+            [In] double mean,
+            [In] double stddev);
+
+        #endif
+        public sealed override CuRandStatus GenerateLogNormalDouble(
+            [In] IntPtr libHandle,
+            [In] IntPtr outputPtr,
+            [In] IntPtr length,
+            [In] double mean,
+            [In] double stddev) =>
+            curandGenerateLogNormalDouble(
+                libHandle,
+                outputPtr,
+                length,
+                mean,
+                stddev);
+
+        #if NET7_0_OR_GREATER
+        [LibraryImport(LibName,
+            EntryPoint = "curandGeneratePoisson"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static partial
+         CuRandStatus curandGeneratePoisson(
+             IntPtr libHandle,
+             IntPtr outputPtr,
+             IntPtr length,
+             double lambda);
+
+        #else
+        [DllImport(LibName,
+            EntryPoint = "curandGeneratePoisson"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static extern
+         CuRandStatus curandGeneratePoisson(
+            [In] IntPtr libHandle,
+            [In] IntPtr outputPtr,
+            [In] IntPtr length,
+            [In] double lambda);
+
+        #endif
+        public sealed override CuRandStatus GeneratePoisson(
+            [In] IntPtr libHandle,
+            [In] IntPtr outputPtr,
+            [In] IntPtr length,
+            [In] double lambda) =>
+            curandGeneratePoisson(
+                libHandle,
+                outputPtr,
+                length,
+                lambda);
+
+        #endregion
+
+        #region Configuration
+
+        #if NET7_0_OR_GREATER
+        [LibraryImport(LibName,
+            EntryPoint = "curandSetGeneratorOffset"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static partial
+         CuRandStatus curandSetGeneratorOffset(
+             IntPtr libHandle,
+             ulong offset);
+
+        #else
+        [DllImport(LibName,
+            EntryPoint = "curandSetGeneratorOffset"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static extern
+         CuRandStatus curandSetGeneratorOffset(
+            [In] IntPtr libHandle,
+            [In] ulong offset);
+
+        #endif
+        public sealed override CuRandStatus SetGeneratorOffset(
+            [In] IntPtr libHandle,
+            [In] ulong offset) =>
+            curandSetGeneratorOffset(
+                libHandle,
+                offset);
+
+        #if NET7_0_OR_GREATER
+        [LibraryImport(LibName,
+            EntryPoint = "curandSetGeneratorOrdering"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static partial
+         CuRandStatus curandSetGeneratorOrdering(
+             IntPtr libHandle,
+             CuRandOrdering order);
+
+        #else
+        [DllImport(LibName,
+            EntryPoint = "curandSetGeneratorOrdering"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static extern
+         CuRandStatus curandSetGeneratorOrdering(
+            [In] IntPtr libHandle,
+            [In] CuRandOrdering order);
+
+        #endif
+        public sealed override CuRandStatus SetGeneratorOrdering(
+            [In] IntPtr libHandle,
+            [In] CuRandOrdering order) =>
+            curandSetGeneratorOrdering(
+                libHandle,
+                order);
+
+        #if NET7_0_OR_GREATER
+        [LibraryImport(LibName,
+            EntryPoint = "curandSetQuasiRandomGeneratorDimensions"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static partial
+         CuRandStatus curandSetQuasiRandomGeneratorDimensions(
+             IntPtr libHandle,
+             uint numDimensions);
+
+        #else
+        [DllImport(LibName,
+            EntryPoint = "curandSetQuasiRandomGeneratorDimensions"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static extern
+         CuRandStatus curandSetQuasiRandomGeneratorDimensions(
+            [In] IntPtr libHandle,
+            [In] uint numDimensions);
+
+        #endif
+        public sealed override CuRandStatus SetQuasiRandomGeneratorDimensions(
+            [In] IntPtr libHandle,
+            [In] uint numDimensions) =>
+            curandSetQuasiRandomGeneratorDimensions(
+                libHandle,
+                numDimensions);
 
         #endregion
 

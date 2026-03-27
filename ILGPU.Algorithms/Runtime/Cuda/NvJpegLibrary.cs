@@ -119,5 +119,285 @@ namespace ILGPU.Runtime.Cuda
                 imageBytes,
                 outputFormat,
                 destination);
+
+        /// <summary>
+        /// Creates a new NvJpeg encoder state instance.
+        /// </summary>
+        /// <param name="stream">The accelerator stream.</param>
+        public NvJpegEncoderState CreateEncoderState(CudaStream stream)
+        {
+            NvJpegException.ThrowIfFailed(
+                API.EncoderStateCreate(
+                    LibHandle,
+                    out IntPtr stateHandle,
+                    stream.StreamPtr));
+            return new NvJpegEncoderState(API, stateHandle);
+        }
+
+        /// <summary>
+        /// Creates a new NvJpeg encoder state instance.
+        /// </summary>
+        public NvJpegEncoderState CreateEncoderState()
+        {
+            NvJpegException.ThrowIfFailed(
+                API.EncoderStateCreate(
+                    LibHandle,
+                    out IntPtr stateHandle,
+                    IntPtr.Zero));
+            return new NvJpegEncoderState(API, stateHandle);
+        }
+
+        /// <summary>
+        /// Creates new NvJpeg encoder parameters.
+        /// </summary>
+        /// <param name="stream">The accelerator stream.</param>
+        public NvJpegEncoderParams CreateEncoderParams(CudaStream stream)
+        {
+            NvJpegException.ThrowIfFailed(
+                API.EncoderParamsCreate(
+                    LibHandle,
+                    out IntPtr paramsHandle,
+                    stream));
+            return new NvJpegEncoderParams(API, paramsHandle);
+        }
+
+        /// <summary>
+        /// Creates new NvJpeg encoder parameters.
+        /// </summary>
+        public NvJpegEncoderParams CreateEncoderParams()
+        {
+            NvJpegException.ThrowIfFailed(
+                API.EncoderParamsCreate(
+                    LibHandle,
+                    out IntPtr paramsHandle));
+            return new NvJpegEncoderParams(API, paramsHandle);
+        }
+
+        /// <inheritdoc cref="NvJpegAPI.EncoderParamsSetQuality(
+        ///     IntPtr,
+        ///     int,
+        ///     CudaStream)"/>
+        public NvJpegStatus EncoderParamsSetQuality(
+            NvJpegEncoderParams encoderParams,
+            int quality,
+            CudaStream stream) =>
+            API.EncoderParamsSetQuality(
+                encoderParams.ParamsHandle,
+                quality,
+                stream);
+
+        /// <inheritdoc cref="NvJpegAPI.EncoderParamsSetQuality(
+        ///     IntPtr,
+        ///     int)"/>
+        public NvJpegStatus EncoderParamsSetQuality(
+            NvJpegEncoderParams encoderParams,
+            int quality) =>
+            API.EncoderParamsSetQuality(
+                encoderParams.ParamsHandle,
+                quality);
+
+        /// <inheritdoc cref="NvJpegAPI.EncoderParamsSetSamplingFactors(
+        ///     IntPtr,
+        ///     NvJpegChromaSubsampling,
+        ///     CudaStream)"/>
+        public NvJpegStatus EncoderParamsSetSamplingFactors(
+            NvJpegEncoderParams encoderParams,
+            NvJpegChromaSubsampling subsampling,
+            CudaStream stream) =>
+            API.EncoderParamsSetSamplingFactors(
+                encoderParams.ParamsHandle,
+                subsampling,
+                stream);
+
+        /// <inheritdoc cref="NvJpegAPI.EncoderParamsSetSamplingFactors(
+        ///     IntPtr,
+        ///     NvJpegChromaSubsampling)"/>
+        public NvJpegStatus EncoderParamsSetSamplingFactors(
+            NvJpegEncoderParams encoderParams,
+            NvJpegChromaSubsampling subsampling) =>
+            API.EncoderParamsSetSamplingFactors(
+                encoderParams.ParamsHandle,
+                subsampling);
+
+        /// <inheritdoc cref="NvJpegAPI.EncoderParamsSetEncoding(
+        ///     IntPtr,
+        ///     NvJpegJpegEncoding,
+        ///     CudaStream)"/>
+        public NvJpegStatus EncoderParamsSetEncoding(
+            NvJpegEncoderParams encoderParams,
+            NvJpegJpegEncoding encoding,
+            CudaStream stream) =>
+            API.EncoderParamsSetEncoding(
+                encoderParams.ParamsHandle,
+                encoding,
+                stream);
+
+        /// <inheritdoc cref="NvJpegAPI.EncoderParamsSetEncoding(
+        ///     IntPtr,
+        ///     NvJpegJpegEncoding)"/>
+        public NvJpegStatus EncoderParamsSetEncoding(
+            NvJpegEncoderParams encoderParams,
+            NvJpegJpegEncoding encoding) =>
+            API.EncoderParamsSetEncoding(
+                encoderParams.ParamsHandle,
+                encoding);
+
+        /// <inheritdoc cref="NvJpegAPI.EncoderParamsSetOptimizedHuffman(
+        ///     IntPtr,
+        ///     int,
+        ///     CudaStream)"/>
+        public NvJpegStatus EncoderParamsSetOptimizedHuffman(
+            NvJpegEncoderParams encoderParams,
+            int optimized,
+            CudaStream stream) =>
+            API.EncoderParamsSetOptimizedHuffman(
+                encoderParams.ParamsHandle,
+                optimized,
+                stream);
+
+        /// <inheritdoc cref="NvJpegAPI.EncoderParamsSetOptimizedHuffman(
+        ///     IntPtr,
+        ///     int)"/>
+        public NvJpegStatus EncoderParamsSetOptimizedHuffman(
+            NvJpegEncoderParams encoderParams,
+            int optimized) =>
+            API.EncoderParamsSetOptimizedHuffman(
+                encoderParams.ParamsHandle,
+                optimized);
+
+        /// <inheritdoc cref="NvJpegAPI.EncodeYUV(
+        ///     IntPtr,
+        ///     IntPtr,
+        ///     IntPtr,
+        ///     in NvJpegImage,
+        ///     NvJpegChromaSubsampling,
+        ///     int,
+        ///     int,
+        ///     CudaStream)"/>
+        public unsafe NvJpegStatus EncodeYUV(
+            NvJpegEncoderState state,
+            NvJpegEncoderParams encoderParams,
+            in NvJpegImage source,
+            NvJpegChromaSubsampling subsampling,
+            int width,
+            int height,
+            CudaStream stream) =>
+            API.EncodeYUV(
+                LibHandle,
+                state.StateHandle,
+                encoderParams.ParamsHandle,
+                source,
+                subsampling,
+                width,
+                height,
+                stream);
+
+        /// <inheritdoc cref="NvJpegAPI.EncodeYUV(
+        ///     IntPtr,
+        ///     IntPtr,
+        ///     IntPtr,
+        ///     in NvJpegImage,
+        ///     NvJpegChromaSubsampling,
+        ///     int,
+        ///     int)"/>
+        public NvJpegStatus EncodeYUV(
+            NvJpegEncoderState state,
+            NvJpegEncoderParams encoderParams,
+            in NvJpegImage source,
+            NvJpegChromaSubsampling subsampling,
+            int width,
+            int height) =>
+            API.EncodeYUV(
+                LibHandle,
+                state.StateHandle,
+                encoderParams.ParamsHandle,
+                source,
+                subsampling,
+                width,
+                height);
+
+        /// <inheritdoc cref="NvJpegAPI.EncodeImage(
+        ///     IntPtr,
+        ///     IntPtr,
+        ///     IntPtr,
+        ///     in NvJpegImage,
+        ///     NvJpegInputFormat,
+        ///     int,
+        ///     int,
+        ///     CudaStream)"/>
+        public unsafe NvJpegStatus EncodeImage(
+            NvJpegEncoderState state,
+            NvJpegEncoderParams encoderParams,
+            in NvJpegImage source,
+            NvJpegInputFormat inputFormat,
+            int width,
+            int height,
+            CudaStream stream) =>
+            API.EncodeImage(
+                LibHandle,
+                state.StateHandle,
+                encoderParams.ParamsHandle,
+                source,
+                inputFormat,
+                width,
+                height,
+                stream);
+
+        /// <inheritdoc cref="NvJpegAPI.EncodeImage(
+        ///     IntPtr,
+        ///     IntPtr,
+        ///     IntPtr,
+        ///     in NvJpegImage,
+        ///     NvJpegInputFormat,
+        ///     int,
+        ///     int)"/>
+        public NvJpegStatus EncodeImage(
+            NvJpegEncoderState state,
+            NvJpegEncoderParams encoderParams,
+            in NvJpegImage source,
+            NvJpegInputFormat inputFormat,
+            int width,
+            int height) =>
+            API.EncodeImage(
+                LibHandle,
+                state.StateHandle,
+                encoderParams.ParamsHandle,
+                source,
+                inputFormat,
+                width,
+                height);
+
+        /// <inheritdoc cref="NvJpegAPI.EncodeRetrieveBitstream(
+        ///     IntPtr,
+        ///     IntPtr,
+        ///     Span{byte},
+        ///     out ulong,
+        ///     CudaStream)"/>
+        public NvJpegStatus EncodeRetrieveBitstream(
+            NvJpegEncoderState state,
+            Span<byte> data,
+            out ulong length,
+            CudaStream stream) =>
+            API.EncodeRetrieveBitstream(
+                LibHandle,
+                state.StateHandle,
+                data,
+                out length,
+                stream);
+
+        /// <inheritdoc cref="NvJpegAPI.EncodeRetrieveBitstream(
+        ///     IntPtr,
+        ///     IntPtr,
+        ///     Span{byte},
+        ///     out ulong)"/>
+        public NvJpegStatus EncodeRetrieveBitstream(
+            NvJpegEncoderState state,
+            Span<byte> data,
+            out ulong length) =>
+            API.EncodeRetrieveBitstream(
+                LibHandle,
+                state.StateHandle,
+                data,
+                out length);
     }
 }

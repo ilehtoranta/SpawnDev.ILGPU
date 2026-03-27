@@ -159,9 +159,19 @@ namespace ILGPU.Runtime.Cuda
         {
             if (NativePtr != IntPtr.Zero)
             {
-                CudaException.VerifyDisposed(
-                    disposing,
-                    CurrentAPI.FreeMemory(NativePtr));
+                try
+                {
+                    CudaException.VerifyDisposed(
+                        disposing,
+                        CurrentAPI.FreeMemory(NativePtr));
+                }
+                catch (CudaException)
+                {
+                    // Swallow CUDA errors during dispose to prevent one bad buffer
+                    // from cascading and blocking disposal of remaining buffers.
+                    // Common with large models (300+ buffers) where a prior kernel
+                    // OOB write corrupts GPU memory state.
+                }
                 NativePtr = IntPtr.Zero;
             }
         }
