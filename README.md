@@ -525,11 +525,23 @@ These AI agents communicated with each other and with TJ through a shared DevCom
 
 [![AI Conversation Screenshot](https://raw.githubusercontent.com/LostBeard/SpawnDev.ILGPU/master/SpawnDev.ILGPU.Demo/wwwroot/screenshots/spawndev-team-data-tj.jpg)](https://raw.githubusercontent.com/LostBeard/SpawnDev.ILGPU/master/SpawnDev.ILGPU.Demo/wwwroot/screenshots/spawndev-team-data-tj.jpg)
 
+## Coming Soon: Distributed GPU Compute Across Devices
+
+The [SpawnDev.WebTorrent](https://github.com/LostBeard/SpawnDev.WebTorrent) P2P network we're building creates a natural foundation for **distributed GPU compute**. Every connected device exchanges data over WebRTC — extending this to share compute workloads is the next step:
+
+- **`AcceleratorType.P2P` — 7th Backend** — Distributes kernels across connected devices transparently. Same C# kernel code, same `LoadAutoGroupedStreamKernel` API. The developer writes one kernel, it runs on 1 GPU or 10 GPUs across a household.
+- **Model inference sharding** — Split a 14B model across multiple devices. Each runs inference on their portion via SpawnDev.ILGPU, passes intermediate tensors to the next peer. A model that doesn't fit on one device runs across your phone, laptop, tablet, and desktop.
+- **Volunteer compute pools** — Users opt in to donate idle GPU time. Like Folding@Home for ML inference in the browser.
+
+Every device in your home contributing to one shared AI compute pool — phone, laptop, tablet, desktop, old gaming PC. The living room becomes a compute cluster.
+
 ## Resources
 
 - [ILGPU Documentation](https://ilgpu.net/)
 - [WebGPU Specification](https://www.w3.org/TR/webgpu/)
 - [SpawnDev.BlazorJS](https://github.com/LostBeard/SpawnDev.BlazorJS)
+- [SpawnDev.WebTorrent](https://github.com/LostBeard/SpawnDev.WebTorrent) — Pure C# BitTorrent/WebTorrent for P2P model delivery
+- [SpawnDev.ILGPU.ML](https://github.com/LostBeard/SpawnDev.ILGPU.ML) — GPU ML inference + training for .NET
 - [GitHub Repository](https://github.com/LostBeard/SpawnDev.ILGPU)
 
 
