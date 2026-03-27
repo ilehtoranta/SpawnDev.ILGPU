@@ -6,6 +6,9 @@ using SpawnDev.ILGPU.Demo;
 using SpawnDev.ILGPU.Demo.UnitTests;
 using SpawnDev.ILGPU.WebGPU.Backend;
 
+// Print build timestamp so we can verify we're running the right build via browser console
+Console.WriteLine($"[SpawnDev.ILGPU.Demo] Build: {BuildTimestamp.Value}");
+
 var builder = WebAssemblyHostBuilder.CreateDefault(args);
 
 // Ensure WebGPU verbose logging is disabled during Blazor unit tests

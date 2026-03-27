@@ -14,6 +14,14 @@
 		<PlaywrightMultiTest></PlaywrightMultiTest>
 	</PropertyGroup>
 
+	<!-- Inject build timestamp into assembly metadata so the app can print it to browser console -->
+	<ItemGroup>
+		<AssemblyAttribute Include="System.Reflection.AssemblyMetadataAttribute">
+			<_Parameter1>BuildTimestamp</_Parameter1>
+			<_Parameter2>$([System.DateTime]::UtcNow.ToString("yyyy-MM-dd HH:mm:ss")) UTC</_Parameter2>
+		</AssemblyAttribute>
+	</ItemGroup>
+
 	<ItemGroup>
 		<Content Remove="playwright-test.json" />
 	</ItemGroup>
