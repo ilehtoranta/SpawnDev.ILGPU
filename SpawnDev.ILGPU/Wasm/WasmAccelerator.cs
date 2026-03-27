@@ -300,6 +300,7 @@ namespace SpawnDev.ILGPU.Wasm
                 // track per-view SubView byte offsets within the buffer.
                 var uniqueBuffers = new Dictionary<WasmMemoryBuffer, int>(); // buffer → index
                 var bufferInfos = new List<(WasmMemoryBuffer buffer, int byteOffset)>();
+                var bufferRanges = new List<(int minByte, int maxByte)>(); // per-buffer: used byte range
                 var viewBufferIdx = new List<int>();   // per-view: which buffer in bufferInfos
                 var viewSubOffsets = new List<int>();   // per-view: SubView byte offset
                 var wasmArgs = new List<(bool isBuffer, WasmMemoryBuffer? buffer, int length, int stride, int stride2, object? value)>();
@@ -367,6 +368,7 @@ namespace SpawnDev.ILGPU.Wasm
                                 bufIdx = bufferInfos.Count;
                                 uniqueBuffers[wasmBuf] = bufIdx;
                                 bufferInfos.Add((wasmBuf, 0));
+                                bufferRanges.Add((int.MaxValue, 0)); // will be updated below
                             }
                             viewBufferIdx.Add(bufIdx);
 
@@ -411,6 +413,12 @@ namespace SpawnDev.ILGPU.Wasm
                                 WasmBackend.Log($"[Wasm-SubView] OFFSET EXTRACTION FAILED for param {i}: {ex.GetType().Name}: {ex.Message}");
                             }
                             viewSubOffsets.Add(subViewByteOffset);
+
+                            // Update the buffer's used byte range to include this SubView
+                            int viewByteLen = (int)iav.Length * wasmBuf.ElementSize;
+                            int viewEnd = subViewByteOffset + viewByteLen;
+                            var (curMin, curMax) = bufferRanges[bufIdx];
+                            bufferRanges[bufIdx] = (Math.Min(curMin, subViewByteOffset), Math.Max(curMax, viewEnd));
 
                             // Log buffer identity for dispatch debugging
                             if (dispNum >= 1 && dispNum <= 20)
@@ -479,7 +487,7 @@ namespace SpawnDev.ILGPU.Wasm
                                 // (NOT decomposed — ILGPU keeps it as a single param).
                                 // NativePtr patching ensures the view pointer in the serialized
                                 // bytes points to the correct Wasm memory offset.
-                                ExtractBuffersFromStruct(args[i], uniqueBuffers, bufferInfos);
+                                ExtractBuffersFromStruct(args[i], uniqueBuffers, bufferInfos, bufferRanges);
                             }
                         }
 
@@ -496,17 +504,23 @@ namespace SpawnDev.ILGPU.Wasm
                 }
 
                 // Calculate total memory needed for all buffers.
-                // For deduped buffers (SubViews of the same parent), we need the FULL
-                // parent buffer because different SubViews may reference different ranges.
-                // The SubView byte offset is applied during flatArgs construction.
+                // For deduped buffers (SubViews of the same parent), allocate only the
+                // union of SubView ranges — NOT the full parent buffer. This prevents
+                // ML inference from OOMing Wasm memory (100+ SubViews of a 5MB weight buffer
+                // would allocate 500MB instead of ~5MB).
                 int totalMemoryBytes = 0;
                 var bufferOffsets = new List<int>();
 
-                foreach (var (buf, _) in bufferInfos)
+                for (int bi = 0; bi < bufferInfos.Count; bi++)
                 {
+                    var (buf, _) = bufferInfos[bi];
+                    var (rangeMin, rangeMax) = bufferRanges[bi];
+                    // If no SubViews updated the range, use the full buffer (safety fallback)
+                    if (rangeMin == int.MaxValue) { rangeMin = 0; rangeMax = (int)buf.LengthInBytes; }
+                    int rangeSize = rangeMax - rangeMin;
                     totalMemoryBytes = (totalMemoryBytes + 7) & ~7; // 8-byte align
                     bufferOffsets.Add(totalMemoryBytes);
-                    totalMemoryBytes += (int)buf.LengthInBytes;
+                    totalMemoryBytes += rangeSize;
                 }
                 // Grid-stride padding: kernels with KernelConfig (groupSize > 1) use
                 // grid-stride loops that may access up to one stride past buffer boundaries.
@@ -668,14 +682,18 @@ namespace SpawnDev.ILGPU.Wasm
                     zeroView.JSRef!.CallVoid("fill", 0);
                 }
 
-                // Copy buffer data into the Wasm linear memory at computed offsets
+                // Copy buffer data into the Wasm linear memory at computed offsets.
+                // Only the used SubView range is copied (not the full parent buffer).
                 for (int i = 0; i < bufferInfos.Count; i++)
                 {
                     var (buf, _) = bufferInfos[i];
                     int offset = bufferOffsets[i];
+                    var (rangeMin, rangeMax) = bufferRanges[i];
+                    if (rangeMin == int.MaxValue) { rangeMin = 0; rangeMax = (int)buf.LengthInBytes; }
+                    int rangeSize = rangeMax - rangeMin;
 
-                    using var srcView = new Uint8Array(buf.SharedBuffer);
-                    using var dstView = new Uint8Array(memoryBuffer, offset, (int)buf.LengthInBytes);
+                    using var srcView = new Uint8Array(buf.SharedBuffer, rangeMin, rangeSize);
+                    using var dstView = new Uint8Array(memoryBuffer, offset, rangeSize);
                     dstView.JSRef!.CallVoid("set", srcView);
                 }
                 // Debug: check buf.SharedBuffer and Wasm memory after copy-in
@@ -696,10 +714,17 @@ namespace SpawnDev.ILGPU.Wasm
                 // kernel reads this as the buffer's address. With NativePtr=0, the kernel
                 // would write to address 0 instead of the buffer's actual Wasm position.
                 // We restore NativePtr to 0 after serialization.
+                // NOTE: NativePtr points to where the buffer's START (byte 0) would be in
+                // Wasm memory. Since we only copy the used range starting at rangeMin,
+                // we subtract rangeMin so SubView offsets resolve correctly:
+                //   wasmAddr = NativePtr + subViewByteOffset
+                //            = (bufferOffset - rangeMin) + subViewByteOffset
                 for (int i = 0; i < bufferInfos.Count; i++)
                 {
                     var (buf, _) = bufferInfos[i];
-                    buf.NativePtr = (IntPtr)bufferOffsets[i];
+                    var (rangeMin, _) = bufferRanges[i];
+                    if (rangeMin == int.MaxValue) rangeMin = 0;
+                    buf.NativePtr = (IntPtr)(bufferOffsets[i] - rangeMin);
                 }
 
                 // Build flat argument list
@@ -717,7 +742,9 @@ namespace SpawnDev.ILGPU.Wasm
                         if (isB)
                         {
                             int bIdx = viewBufferIdx[viewCheckIdx];
-                            int vOff = bufferOffsets[bIdx] + viewSubOffsets[viewCheckIdx];
+                            var (diagRMin, _) = bufferRanges[bIdx];
+                            if (diagRMin == int.MaxValue) diagRMin = 0;
+                            int vOff = bufferOffsets[bIdx] + viewSubOffsets[viewCheckIdx] - diagRMin;
                             int dataEnd = vOff + lenCheck * 4;
                             diagSb.Append($" V{viewCheckIdx}:[{vOff}..{dataEnd})/{memorySize}");
                             viewCheckIdx++;
@@ -734,9 +761,13 @@ namespace SpawnDev.ILGPU.Wasm
                     if (isBuffer)
                     {
                         // Compute the kernel's byte address for this view:
-                        // = buffer's Wasm memory base + SubView byte offset within buffer
+                        // = buffer's Wasm memory base + (SubView byte offset - rangeMin)
+                        // Since only the used range [rangeMin, rangeMax) was copied to Wasm
+                        // memory, we subtract rangeMin to get the offset within the copied region.
                         int bufIdx = viewBufferIdx[viewIndex];
-                        int viewOffset = bufferOffsets[bufIdx] + viewSubOffsets[viewIndex];
+                        var (rMin, _) = bufferRanges[bufIdx];
+                        if (rMin == int.MaxValue) rMin = 0;
+                        int viewOffset = bufferOffsets[bufIdx] + viewSubOffsets[viewIndex] - rMin;
                         flatArgs.Add(viewOffset.ToString());
                         flatArgs.Add(length.ToString());
                         if (stride != -1) // -1 = skip (struct-embedded views)
@@ -971,7 +1002,7 @@ namespace SpawnDev.ILGPU.Wasm
                     sharedMemBase, barrierBase, fenceSlot, compiledKernel,
                     groupSize, numGroups,
                     flatArgs, compiledKernel.WasmBinary,
-                    wasmMemory, memoryBuffer, bufferOffsets, bufferInfos,
+                    wasmMemory, memoryBuffer, bufferOffsets, bufferInfos, bufferRanges,
                     dynamicSharedElements, dispNum);
 
                 // Clean up per-dispatch memory (only created for concurrent dispatches)
@@ -1014,6 +1045,7 @@ namespace SpawnDev.ILGPU.Wasm
             SharedArrayBuffer memoryBuffer,
             List<int> bufferOffsets,
             List<(WasmMemoryBuffer buffer, int byteOffset)> bufferInfos,
+            List<(int minByte, int maxByte)> bufferRanges,
             int dynamicSharedElements = 0,
             int dispNum = 0)
         {
@@ -1269,21 +1301,28 @@ namespace SpawnDev.ILGPU.Wasm
                 }
             }
 
-            // Copy results back from Wasm linear memory to individual buffers
+            // Copy results back from Wasm linear memory to individual buffers.
+            // Only the used SubView range is copied back (matching copy-in).
             for (int i = 0; i < bufferInfos.Count; i++)
             {
                 var (buf, _) = bufferInfos[i];
                 int offset = bufferOffsets[i];
+                var (rangeMin, rangeMax) = bufferRanges[i];
+                if (rangeMin == int.MaxValue) { rangeMin = 0; rangeMax = (int)buf.LengthInBytes; }
+                int rangeSize = rangeMax - rangeMin;
 
-                using var srcView = new Uint8Array(memoryBuffer, offset, (int)buf.LengthInBytes);
-                using var dstView = new Uint8Array(buf.SharedBuffer);
+                using var srcView = new Uint8Array(memoryBuffer, offset, rangeSize);
+                using var dstView = new Uint8Array(buf.SharedBuffer, rangeMin, rangeSize);
                 dstView.JSRef!.CallVoid("set", srcView);
                 // Read first 4 bytes from Wasm memory at this offset for debugging
-                var debugSrc = new Uint8Array(memoryBuffer, offset, 4);
-                var debugBytes = debugSrc.ReadBytes();
-                debugSrc.Dispose();
-                int debugVal = BitConverter.ToInt32(debugBytes);
-                _lastImplicitIndexDebug += $" | wasmMem[{offset}]={debugVal}";
+                if (rangeSize >= 4)
+                {
+                    var debugSrc = new Uint8Array(memoryBuffer, offset, 4);
+                    var debugBytes = debugSrc.ReadBytes();
+                    debugSrc.Dispose();
+                    int debugVal = BitConverter.ToInt32(debugBytes);
+                    _lastImplicitIndexDebug += $" | wasmMem[{offset}]={debugVal}";
+                }
             }
             _lastImplicitIndexDebug += $" | copyOutCount={bufferInfos.Count}";
         }
@@ -1372,7 +1411,8 @@ namespace SpawnDev.ILGPU.Wasm
         private static void ExtractBuffersFromStruct(
             object structValue,
             Dictionary<WasmMemoryBuffer, int> uniqueBuffers,
-            List<(WasmMemoryBuffer buffer, int byteOffset)> bufferInfos)
+            List<(WasmMemoryBuffer buffer, int byteOffset)> bufferInfos,
+            List<(int minByte, int maxByte)>? bufferRanges = null)
         {
             try
             {
@@ -1392,17 +1432,58 @@ namespace SpawnDev.ILGPU.Wasm
                     {
                         var wasmBuf = iav.Buffer as WasmMemoryBuffer;
                         _lastImplicitIndexDebug += $" | buf={wasmBuf?.GetType().Name ?? "null"} len={iav.Length} inDict={wasmBuf != null && uniqueBuffers.ContainsKey(wasmBuf)}";
-                        if (wasmBuf != null && !uniqueBuffers.ContainsKey(wasmBuf))
+                        if (wasmBuf != null)
                         {
-                            int bufIdx = bufferInfos.Count;
-                            uniqueBuffers[wasmBuf] = bufIdx;
-                            bufferInfos.Add((wasmBuf, 0));
-                            _lastImplicitIndexDebug += $" | ADDED buf#{bufIdx}";
+                            // Extract SubView byte range from this view
+                            int svByteOffset = 0;
+                            int svByteEnd = (int)wasmBuf.LengthInBytes;
+                            try
+                            {
+                                var viewType = val.GetType();
+                                var baseProp = viewType.GetProperty("BaseView");
+                                object viewObj = baseProp != null ? baseProp.GetValue(val)! : val;
+                                var indexProp = viewObj.GetType().GetProperty("Index",
+                                    BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                                if (indexProp != null)
+                                {
+                                    var idx = indexProp.GetValue(viewObj);
+                                    if (idx is long longIdx)
+                                    {
+                                        int viewElemSize = iav.Buffer.ElementSize;
+                                        var viewGenericType = viewObj.GetType();
+                                        if (viewGenericType.IsGenericType)
+                                        {
+                                            var elemType = viewGenericType.GetGenericArguments()[0];
+                                            int actualSize = global::ILGPU.Interop.SizeOf(elemType);
+                                            if (actualSize > 0) viewElemSize = actualSize;
+                                        }
+                                        svByteOffset = (int)(longIdx * viewElemSize);
+                                        svByteEnd = svByteOffset + (int)iav.Length * viewElemSize;
+                                    }
+                                }
+                            }
+                            catch { /* Fall back to full buffer range */ }
+
+                            if (!uniqueBuffers.ContainsKey(wasmBuf))
+                            {
+                                int bufIdx = bufferInfos.Count;
+                                uniqueBuffers[wasmBuf] = bufIdx;
+                                bufferInfos.Add((wasmBuf, 0));
+                                bufferRanges?.Add((svByteOffset, svByteEnd));
+                                _lastImplicitIndexDebug += $" | ADDED buf#{bufIdx} range=[{svByteOffset},{svByteEnd})";
+                            }
+                            else if (bufferRanges != null)
+                            {
+                                // Buffer already known — expand range to include this SubView
+                                int bufIdx = uniqueBuffers[wasmBuf];
+                                var (curMin, curMax) = bufferRanges[bufIdx];
+                                bufferRanges[bufIdx] = (Math.Min(curMin, svByteOffset), Math.Max(curMax, svByteEnd));
+                            }
                         }
                     }
                     else if (val.GetType().IsValueType && !val.GetType().IsPrimitive && !val.GetType().IsEnum)
                     {
-                        ExtractBuffersFromStruct(val, uniqueBuffers, bufferInfos);
+                        ExtractBuffersFromStruct(val, uniqueBuffers, bufferInfos, bufferRanges);
                     }
                 }
             }

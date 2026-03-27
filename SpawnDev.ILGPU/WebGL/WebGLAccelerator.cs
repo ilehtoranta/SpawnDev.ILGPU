@@ -714,7 +714,7 @@ namespace SpawnDev.ILGPU.WebGL
                     // Send buffer reference with SubView element offset
                     // When a SubView starts at a non-zero index within the parent buffer,
                     // the shader must add this offset to all texelFetch indices.
-                    int elementOffset = (int)(contiguous.Index / contiguous.ElementSize);
+                    int elementOffset = (int)contiguous.Index;
                     jsParams.Add(new
                     {
                         kind = "buffer_ref",

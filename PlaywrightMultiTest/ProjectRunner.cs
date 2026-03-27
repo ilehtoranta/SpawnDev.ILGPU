@@ -153,7 +153,7 @@ namespace PlaywrightMultiTest
 
                         // start a static file server to serve the published output
                         // Fixed port so IndexedDB persists across runs (same origin = same IDB)
-                        var _port = 5550;
+                        var _port = 5551;
                         var baseUrl = $"https://localhost:{_port}/";
                         testableProject.Server = new StaticFileServer(testableProject.ProjectDetails.WwwRoot, baseUrl);
                         // start https server to serve the Blazor WASM app
@@ -166,7 +166,7 @@ namespace PlaywrightMultiTest
                         // Use persistent context so IndexedDB, localStorage, and
                         // File System Access permissions survive across test runs.
                         // This enables ShaderDebugService's debug folder persistence.
-                        var userDataDir = Path.Combine(Path.GetTempPath(), "SpawnDev.ILGPU.PlaywrightProfile");
+                        var userDataDir = Path.Combine(Path.GetTempPath(), "SpawnDev.ILGPU.ML.PlaywrightProfile");
                         Directory.CreateDirectory(userDataDir);
                         LogStatus($"Launching Chromium (persistent profile: {userDataDir})...");
                         testableProject.BrowserContext = await testableProject.Playwright.Chromium.LaunchPersistentContextAsync(
@@ -224,7 +224,7 @@ namespace PlaywrightMultiTest
                                 wasmDumpChunks.Clear();
                             }
                             // Only log messages related to WGSL dumps, Wasm worker traces, or errors
-                            if (text.Contains("WGSL") || text.Contains("@compute") || text.Contains("@workgroup_size") || text.Contains("WGSL_DUMP") || text.Contains("GLSL_DUMP") || text.Contains("[WasmWorker]") || text.Contains("[Wasm") || msg.Type == "error")
+                            if (text.Contains("WGSL") || text.Contains("@compute") || text.Contains("@workgroup_size") || text.Contains("WGSL_DUMP") || text.Contains("GLSL_DUMP") || text.Contains("[WasmWorker]") || text.Contains("[Wasm") || text.Contains("CONV2D_TRACE") || text.Contains("TEX_UNIT") || text.Contains("PREPROCESS_TRACE") || text.Contains("LAYER_TRACE") || text.Contains("LOGITS_TRACE") || text.Contains("CPU_LOGITS") || text.Contains("DISP_TRACE") || text.Contains("TF_OFFSET") || msg.Type == "error")
                             {
                                 try
                                 {
