@@ -166,7 +166,7 @@ namespace PlaywrightMultiTest
                         // Use persistent context so IndexedDB, localStorage, and
                         // File System Access permissions survive across test runs.
                         // This enables ShaderDebugService's debug folder persistence.
-                        var userDataDir = Path.Combine(Path.GetTempPath(), "SpawnDev.ILGPU.ML.PlaywrightProfile");
+                        var userDataDir = Path.Combine(Path.GetTempPath(), "SpawnDev.ILGPU.PlaywrightProfile");
                         Directory.CreateDirectory(userDataDir);
                         LogStatus($"Launching Chromium (persistent profile: {userDataDir})...");
                         testableProject.BrowserContext = await testableProject.Playwright.Chromium.LaunchPersistentContextAsync(

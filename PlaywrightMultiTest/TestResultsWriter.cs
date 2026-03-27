@@ -23,7 +23,7 @@ public static class TestResultsWriter
     {
         // Write to _mldump/ relative to the solution root
         var solutionDir = FindSolutionRoot();
-        OutputDir = Path.Combine(solutionDir, "_mldump");
+        OutputDir = Path.Combine(solutionDir, "_ilgpudump");
         Directory.CreateDirectory(OutputDir);
 
         LatestPath = Path.Combine(OutputDir, "playwright-latest.json");

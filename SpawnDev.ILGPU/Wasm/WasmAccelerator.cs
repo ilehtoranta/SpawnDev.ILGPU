@@ -515,21 +515,13 @@ namespace SpawnDev.ILGPU.Wasm
                 {
                     var (buf, _) = bufferInfos[bi];
                     var (rangeMin, rangeMax) = bufferRanges[bi];
-                    // If no SubViews updated the range, use the full buffer
-                    if (rangeMin == int.MaxValue) { rangeMin = 0; rangeMax = (int)buf.LengthInBytes; }
-                    // Only apply range optimization when SubViews are truly tiny relative
-                    // to the parent (e.g., ML weight slices: 50KB from a 5MB buffer).
-                    // Multi-pass algorithms (RadixSort) use different SubView windows of
-                    // the same buffer across dispatches — per-dispatch range trimming breaks
-                    // cross-dispatch data flow. Fall back to full buffer unless the range
-                    // is <10% of the parent (safe threshold for ML weight patterns).
-                    int fullSize = (int)buf.LengthInBytes;
-                    int rangeSize = rangeMax - rangeMin;
-                    if (rangeSize > fullSize / 10)
-                    {
-                        rangeMin = 0; rangeMax = fullSize; rangeSize = fullSize;
-                        bufferRanges[bi] = (rangeMin, rangeMax);
-                    }
+                    // DISABLED: Range optimization breaks multi-pass algorithms (RadixSort)
+                    // that share a buffer via different SubViews across dispatches.
+                    // Buffer deduplication (uniqueBuffers) already ensures each parent buffer
+                    // is allocated only ONCE per dispatch regardless of SubView count.
+                    // The ML OOB fix relies on dedup, not range trimming.
+                    bufferRanges[bi] = (0, (int)buf.LengthInBytes);
+                    int rangeSize = (int)buf.LengthInBytes;
                     totalMemoryBytes = (totalMemoryBytes + 7) & ~7; // 8-byte align
                     bufferOffsets.Add(totalMemoryBytes);
                     totalMemoryBytes += rangeSize;
