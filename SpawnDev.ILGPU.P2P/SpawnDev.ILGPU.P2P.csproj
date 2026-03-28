@@ -1,0 +1,34 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+	<PropertyGroup>
+		<TargetFramework>net10.0</TargetFramework>
+		<ImplicitUsings>enable</ImplicitUsings>
+		<Nullable>enable</Nullable>
+		<Version>4.7.1-preview.1</Version>
+		<GeneratePackageOnBuild>True</GeneratePackageOnBuild>
+		<GenerateDocumentationFile>true</GenerateDocumentationFile>
+		<EmbedAllSources>true</EmbedAllSources>
+		<DebugType>Embedded</DebugType>
+		<Title>SpawnDev.ILGPU.P2P</Title>
+		<Authors>LostBeard</Authors>
+		<Description>P2P distributed GPU compute via SpawnDev.WebTorrent. AcceleratorType.P2P — the 7th ILGPU backend. Distributes kernels across connected devices via WebRTC. Scan a QR code, contribute GPU power.</Description>
+		<PackageProjectUrl>https://github.com/LostBeard/SpawnDev.ILGPU</PackageProjectUrl>
+		<PackageLicenseFile>LICENSE.txt</PackageLicenseFile>
+		<RepositoryUrl>https://github.com/LostBeard/SpawnDev.ILGPU.git</RepositoryUrl>
+		<RepositoryType>git</RepositoryType>
+		<PackageTags>P2P;WebRTC;WebTorrent;ILGPU;GPU;DistributedCompute;GPGPU</PackageTags>
+		<LangVersion>latest</LangVersion>
+		<AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+	</PropertyGroup>
+
+	<ItemGroup>
+		<None Include="..\LICENSE.txt" Pack="true" PackagePath="\" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<ProjectReference Include="..\SpawnDev.ILGPU\SpawnDev.ILGPU.csproj" />
+		<ProjectReference Include="..\ILGPU\ILGPU.csproj" />
+		<ProjectReference Include="..\..\..\SpawnDev.WebTorrent\SpawnDev.WebTorrent\SpawnDev.WebTorrent\SpawnDev.WebTorrent.csproj" />
+	</ItemGroup>
+
+</Project>

@@ -34,7 +34,6 @@
 	<ItemGroup>
 		<ProjectReference Include="..\ILGPU\ILGPU.csproj" PrivateAssets="All" />
 		<ProjectReference Include="..\ILGPU.Algorithms\ILGPU.Algorithms.csproj" PrivateAssets="All" />
-		<ProjectReference Include="..\..\..\SpawnDev.WebTorrent\SpawnDev.WebTorrent\SpawnDev.WebTorrent\SpawnDev.WebTorrent.csproj" />
 	</ItemGroup>
 
 	<PropertyGroup>
