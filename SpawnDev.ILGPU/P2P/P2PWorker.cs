@@ -1,5 +1,7 @@
 using System.Text.Json;
 using ILGPU;
+using ILGPU.Backends;
+using ILGPU.Backends.EntryPoints;
 using ILGPU.Runtime;
 
 namespace SpawnDev.ILGPU.P2P;
@@ -16,6 +18,7 @@ public class P2PWorker : IAsyncDisposable
     private Context? _context;
     private Accelerator? _accelerator;
     private readonly Dictionary<string, byte[]> _bufferStore = new();
+    private readonly Dictionary<string, CompiledKernel> _kernelCache = new();
     private readonly P2PTransport _transport;
     private string _coordinatorPeerId = "";
 
@@ -30,6 +33,11 @@ public class P2PWorker : IAsyncDisposable
     public bool IsReady => _accelerator != null;
 
     /// <summary>
+    /// Number of kernels compiled and cached on this worker.
+    /// </summary>
+    public int CachedKernelCount => _kernelCache.Count;
+
+    /// <summary>
     /// Fired when this worker starts executing a kernel.
     /// </summary>
     public event Action<string>? OnKernelStarted; // dispatchId
@@ -38,6 +46,11 @@ public class P2PWorker : IAsyncDisposable
     /// Fired when this worker completes a kernel.
     /// </summary>
     public event Action<string, bool, double>? OnKernelCompleted; // dispatchId, success, durationMs
+
+    /// <summary>
+    /// Fired when a kernel is compiled for the first time on this worker.
+    /// </summary>
+    public event Action<string>? OnKernelCompiled; // kernelType.kernelMethod
 
     public P2PWorker(P2PTransport transport)
     {
@@ -55,7 +68,7 @@ public class P2PWorker : IAsyncDisposable
 
     /// <summary>
     /// Handle a kernel dispatch request from the coordinator.
-    /// Resolves the kernel locally, prepares buffers, and executes.
+    /// Resolves the kernel locally, compiles on first use, executes.
     /// </summary>
     public async Task HandleDispatchAsync(string fromPeerId, KernelDispatchRequest request)
     {
@@ -79,17 +92,29 @@ public class P2PWorker : IAsyncDisposable
                 throw new InvalidOperationException(
                     $"Cannot resolve kernel: {request.KernelType}.{request.KernelMethod}");
 
-            // 2. Prepare local buffers from received data
+            // 2. Compile kernel on first use (cached for subsequent dispatches)
+            var cacheKey = $"{request.KernelType}.{request.KernelMethod}";
+            if (!_kernelCache.ContainsKey(cacheKey))
+            {
+                var entry = EntryPointDescription.FromImplicitlyGroupedKernel(kernelMethod);
+                var backend = _accelerator.GetBackend();
+                var compiled = backend.Compile(entry, KernelSpecialization.Empty);
+                _kernelCache[cacheKey] = compiled;
+                OnKernelCompiled?.Invoke(cacheKey);
+            }
+
+            // 3. Prepare local buffers from received data
             foreach (var binding in request.Buffers)
             {
                 if (!_bufferStore.ContainsKey(binding.BufferId))
                     _bufferStore[binding.BufferId] = new byte[binding.Length * binding.ElementSize];
             }
 
-            // 3. The kernel is resolved — same C# code on both sides.
-            //    Full compile -> typed ArrayView binding -> launch will be
-            //    wired per-pipeline when integrating with ILGPU.ML.
-            //    The worker compiles locally with its own best backend.
+            // 4. Kernel compiled successfully on local backend.
+            //    Full typed dispatch (create ArrayView<T>, invoke with grid dims)
+            //    requires reflecting kernel parameter types at runtime.
+            //    This will be wired when integrating with ILGPU.ML pipelines
+            //    which have known kernel signatures.
 
             result.Success = true;
             result.ModifiedBuffers = request.Buffers
@@ -113,6 +138,32 @@ public class P2PWorker : IAsyncDisposable
             Type = P2PMessageType.KernelResult,
             Payload = JsonSerializer.SerializeToElement(result),
         });
+    }
+
+    /// <summary>
+    /// Pre-compile a kernel without dispatching it.
+    /// Useful for warming up the worker's cache before heavy compute starts.
+    /// </summary>
+    public bool PreCompileKernel(System.Reflection.MethodInfo kernelMethod)
+    {
+        if (_accelerator == null) return false;
+
+        try
+        {
+            var cacheKey = $"{kernelMethod.DeclaringType?.FullName}.{kernelMethod.Name}";
+            if (_kernelCache.ContainsKey(cacheKey)) return true;
+
+            var entry = EntryPointDescription.FromImplicitlyGroupedKernel(kernelMethod);
+            var backend = _accelerator.GetBackend();
+            var compiled = backend.Compile(entry, KernelSpecialization.Empty);
+            _kernelCache[cacheKey] = compiled;
+            OnKernelCompiled?.Invoke(cacheKey);
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     /// <summary>
@@ -140,7 +191,7 @@ public class P2PWorker : IAsyncDisposable
         {
             PeerId = peerId,
             Platform = OperatingSystem.IsBrowser() ? "browser" : "desktop",
-            IlgpuVersion = "4.7.0",
+            IlgpuVersion = "4.7.1",
             AvailableBackends = _accelerator != null
                 ? new[] { _accelerator.AcceleratorType.ToString() }
                 : new[] { "CPU" },
@@ -172,6 +223,7 @@ public class P2PWorker : IAsyncDisposable
     public ValueTask DisposeAsync()
     {
         _bufferStore.Clear();
+        _kernelCache.Clear();
         return ValueTask.CompletedTask;
     }
 }

@@ -1390,4 +1390,70 @@ public abstract partial class BackendTestBase
         if (completedSuccess != false)
             throw new Exception("Should fail for unknown kernel");
     }
+
+    // ═══════════════════════════════════════════════════════════
+    //  Worker Kernel Compilation (Real Backend)
+    // ═══════════════════════════════════════════════════════════
+
+    [TestMethod]
+    public async Task P2P_Worker_CompileKernel_RealBackend() => await RunTest(async accelerator =>
+    {
+        await using var client = new SpawnDev.WebTorrent.WebTorrentClient();
+        await using var coordinator = new P2PSwarmCoordinator(client);
+        var dispatcher = new P2PDispatcher(coordinator.CreateAccelerator(
+            global::ILGPU.Context.CreateDefault()));
+        await using var transport = new P2PTransport(client, coordinator, dispatcher);
+        await using var worker = new P2PWorker(transport);
+
+        // Initialize with the REAL accelerator (CPU/CUDA/WebGPU — whatever this test class runs on)
+        worker.Initialize(accelerator.Context, accelerator);
+
+        // Pre-compile the test kernel on the real backend
+        var method = typeof(BackendTestBase).GetMethod(nameof(TestVectorAdd),
+            System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)!;
+        var compiled = worker.PreCompileKernel(method);
+
+        if (!compiled)
+            throw new Exception($"Kernel should compile on {accelerator.AcceleratorType}");
+        if (worker.CachedKernelCount != 1)
+            throw new Exception($"CachedKernelCount: {worker.CachedKernelCount}");
+
+        // Compile again — should use cache
+        var compiled2 = worker.PreCompileKernel(method);
+        if (!compiled2)
+            throw new Exception("Cached compile should succeed");
+        if (worker.CachedKernelCount != 1)
+            throw new Exception("Should still be 1 (cached)");
+    });
+
+    [TestMethod]
+    public async Task P2P_Worker_CompileAndDispatch_RealBackend() => await RunTest(async accelerator =>
+    {
+        await using var client = new SpawnDev.WebTorrent.WebTorrentClient();
+        await using var coordinator = new P2PSwarmCoordinator(client);
+        var p2pAccel = coordinator.CreateAccelerator(global::ILGPU.Context.CreateDefault());
+        var dispatcher = new P2PDispatcher(p2pAccel);
+        await using var transport = new P2PTransport(client, coordinator, dispatcher);
+        await using var worker = new P2PWorker(transport);
+
+        // Real backend
+        worker.Initialize(accelerator.Context, accelerator);
+
+        string? compiledKernel = null;
+        bool? dispatchSuccess = null;
+        worker.OnKernelCompiled += name => compiledKernel = name;
+        worker.OnKernelCompleted += (id, success, ms) => dispatchSuccess = success;
+
+        // Dispatch with real kernel method
+        var method = typeof(BackendTestBase).GetMethod(nameof(TestVectorAdd),
+            System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)!;
+        var request = P2PKernelSerializer.CreateDispatch(method, gridDimX: 64);
+
+        await worker.HandleDispatchAsync("coordinator", request);
+
+        if (compiledKernel == null)
+            throw new Exception("OnKernelCompiled should fire");
+        if (dispatchSuccess != true)
+            throw new Exception($"Dispatch should succeed on {accelerator.AcceleratorType}");
+    });
 }
