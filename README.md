@@ -430,6 +430,20 @@ var options = new WebGPUBackendOptions { F64Emulation = F64EmulationMode.Disable
 using var accelerator = await device.CreateAcceleratorAsync(context, options);
 ```
 
+## CUDA Libraries
+
+SpawnDev.ILGPU includes wrappers for NVIDIA CUDA libraries: **nvJPEG** (JPEG encode/decode), **cuRand** (random numbers), **cuBLAS** (linear algebra), **cuFFT** (FFT), and **NVML** (device monitoring).
+
+```csharp
+// Check availability before use
+if (NvJpegAPI.IsAvailable) { /* nvJPEG ready */ }
+if (CuRandAPI.IsAvailable) { /* cuRand ready */ }
+```
+
+> **Note:** Starting with CUDA 13.x, nvJPEG is no longer bundled with the CUDA Toolkit and must be [installed separately](https://developer.nvidia.com/nvjpeg). cuRand and cuBLAS are included in the NVIDIA driver.
+
+See [Docs/cuda-libraries.md](Docs/cuda-libraries.md) for full API reference.
+
 ## Wasm Backend
 
 The Wasm backend compiles ILGPU kernels to native WebAssembly binary modules and dispatches them to Web Workers for parallel execution. This provides near-native performance for compute-intensive workloads.

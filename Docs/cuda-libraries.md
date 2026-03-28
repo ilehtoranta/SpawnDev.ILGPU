@@ -4,7 +4,31 @@ SpawnDev.ILGPU includes wrappers for several NVIDIA CUDA libraries. These provid
 
 > **CUDA-only.** These libraries require an NVIDIA GPU with CUDA drivers. They are not available on browser backends (WebGPU, WebGL, Wasm) or non-NVIDIA devices (OpenCL, CPU).
 
-All libraries are enabled automatically when you call `builder.AllAccelerators()` or `builder.EnableAlgorithms()` during context creation. They detect the installed NVIDIA library version at runtime and use the newest available.
+All libraries are enabled automatically when you call `builder.AllAcceleratorsAsync()` during context creation. They detect the installed NVIDIA library version at runtime and use the newest available.
+
+### Availability Detection
+
+Each library provides a static `IsAvailable` property to check if the required native library is installed:
+
+```csharp
+if (NvJpegAPI.IsAvailable)    Console.WriteLine("nvJPEG ready");
+if (CuRandAPI.IsAvailable)    Console.WriteLine("cuRand ready");
+if (CuBlasAPI.IsAvailable)    Console.WriteLine("cuBLAS ready");
+if (CuFFTAPI.IsAvailable)     Console.WriteLine("cuFFT ready");
+if (NvmlAPI.IsAvailable)      Console.WriteLine("NVML ready");
+```
+
+### Installation Requirements
+
+| Library | Included With | Separate Install Required |
+|---------|--------------|--------------------------|
+| **cuRand** | NVIDIA Driver | No — included in driver runtime |
+| **cuBLAS** | NVIDIA Driver | No — included in driver runtime |
+| **cuFFT** | CUDA Toolkit | Yes — [CUDA Toolkit](https://developer.nvidia.com/cuda-toolkit) |
+| **nvJPEG** | Separate | Yes — [nvJPEG](https://developer.nvidia.com/nvjpeg) (removed from CUDA Toolkit in CUDA 13.x) |
+| **NVML** | NVIDIA Driver | No — included in driver |
+
+> **Note:** Starting with CUDA 13.x, nvJPEG is no longer bundled with the CUDA Toolkit. It must be downloaded and installed separately from NVIDIA's website.
 
 ---
 
