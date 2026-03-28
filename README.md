@@ -76,6 +76,8 @@ kernel(size, buffer, new DelegateSpecialization<Func<int, int>>(DoubleIt));
 | **Compiles to** | PTX | OpenCL C | — |
 | **Runs on** | NVIDIA GPU | Any GPU | CPU cores (multi-threaded) |
 
+**Coming: `AcceleratorType.P2P`** — A 7th backend that distributes kernels across connected devices via [SpawnDev.WebTorrent](https://github.com/LostBeard/SpawnDev.WebTorrent). Uses BEP 46 DHT mutable items for shared GPU state coordination and WebRTC data channels for peer-to-peer compute dispatch. Same C# kernel code runs on 1 GPU or 10 GPUs across a household — transparently.
+
 ## Demo Applications
 
 ### Browser Demo (Blazor WebAssembly)
