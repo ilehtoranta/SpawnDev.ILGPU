@@ -29,8 +29,18 @@ public class NvJpegTests : IDisposable
             throw new UnsupportedTestException("No CUDA devices found");
         }
         _accelerator = (CudaAccelerator)cudaDevices[0].CreateAccelerator(_context);
-        _nvjpeg = new NvJpeg();
-        _library = _nvjpeg.CreateSimple();
+        try
+        {
+            _nvjpeg = new NvJpeg();
+            _library = _nvjpeg.CreateSimple();
+        }
+        catch (DllNotFoundException)
+        {
+            _accelerator.Dispose();
+            _context.Dispose();
+            _context = null;
+            throw new UnsupportedTestException("nvJPEG library not found — install CUDA Toolkit");
+        }
         await Task.CompletedTask;
     }
 

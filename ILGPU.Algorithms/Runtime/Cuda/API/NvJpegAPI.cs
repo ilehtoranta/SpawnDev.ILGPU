@@ -21,6 +21,18 @@ namespace ILGPU.Runtime.Cuda.API
         #region Static
 
         /// <summary>
+        /// Check if this CUDA library is available on the current system.
+        /// </summary>
+        public static bool IsAvailable
+        {
+            get
+            {
+                try { return CreateLatest() != null; }
+                catch { return false; }
+            }
+        }
+
+        /// <summary>
         /// Creates a new API wrapper.
         /// </summary>
         /// <param name="version">The nvJPEG version to use.</param>
