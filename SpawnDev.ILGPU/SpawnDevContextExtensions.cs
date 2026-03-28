@@ -13,9 +13,11 @@ using global::ILGPU.Runtime;
 using ILGPU.Runtime.CPU;
 using SpawnDev.BlazorJS.JSObjects;
 using SpawnDev.ILGPU.Wasm;
+using SpawnDev.ILGPU.Wasm.Algorithms;
 using SpawnDev.ILGPU.WebGL;
 using SpawnDev.ILGPU.WebGL.Backend;
 using SpawnDev.ILGPU.WebGPU;
+using SpawnDev.ILGPU.WebGPU.Algorithms;
 using SpawnDev.ILGPU.WebGPU.Backend;
 
 using System.Runtime.InteropServices;
@@ -41,6 +43,9 @@ namespace SpawnDev.ILGPU
         public static async Task<Context.Builder> AllAcceleratorsAsync(
             this Context.Builder builder)
         {
+            // Enable algorithms by default — users shouldn't need to call this manually
+            builder.EnableAlgorithms();
+
             // Synchronous backends first (CPU, OpenCL, Cuda — latter two fail silently in WASM)
             builder.AllAccelerators();
 
@@ -51,6 +56,7 @@ namespace SpawnDev.ILGPU
                 try
                 {
                     builder.Wasm();
+                    builder.EnableWasmAlgorithms();
                 }
                 catch
                 {
@@ -61,6 +67,7 @@ namespace SpawnDev.ILGPU
                 try
                 {
                     await builder.WebGPU();
+                    builder.EnableWebGPUAlgorithms();
                 }
                 catch
                 {
