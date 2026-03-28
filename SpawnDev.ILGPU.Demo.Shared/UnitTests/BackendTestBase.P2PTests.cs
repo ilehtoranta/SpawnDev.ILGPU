@@ -1456,4 +1456,161 @@ public abstract partial class BackendTestBase
         if (dispatchSuccess != true)
             throw new Exception($"Dispatch should succeed on {accelerator.AcceleratorType}");
     });
+
+    // ═══════════════════════════════════════════════════════════
+    //  Buffer Transfer — Chunking & Reassembly
+    // ═══════════════════════════════════════════════════════════
+
+    [TestMethod]
+    public async Task P2P_BufferTransfer_SmallBuffer_SingleChunk()
+    {
+        var transfer = new P2PBufferTransfer();
+        var data = new byte[] { 1, 2, 3, 4, 5 };
+
+        var chunks = transfer.CreateChunks("buf-1", data);
+        if (chunks.Length != 1) throw new Exception($"Small buffer should be 1 chunk: {chunks.Length}");
+        if (chunks[0].TotalBytes != 5) throw new Exception($"TotalBytes: {chunks[0].TotalBytes}");
+    }
+
+    [TestMethod]
+    public async Task P2P_BufferTransfer_LargeBuffer_MultiChunk()
+    {
+        var transfer = new P2PBufferTransfer { MaxChunkSize = 1024 };
+        var data = new byte[5000];
+        Random.Shared.NextBytes(data);
+
+        var chunks = transfer.CreateChunks("buf-large", data);
+        if (chunks.Length != 5) throw new Exception($"5000/1024 should be 5 chunks: {chunks.Length}");
+
+        // Verify chunk metadata
+        for (int i = 0; i < chunks.Length; i++)
+        {
+            if (chunks[i].ChunkIndex != i) throw new Exception($"Chunk {i} index wrong");
+            if (chunks[i].TotalChunks != 5) throw new Exception($"TotalChunks: {chunks[i].TotalChunks}");
+            if (chunks[i].BufferId != "buf-large") throw new Exception("BufferId mismatch");
+        }
+    }
+
+    [TestMethod]
+    public async Task P2P_BufferTransfer_Reassemble()
+    {
+        var transfer = new P2PBufferTransfer { MaxChunkSize = 1024 };
+        var originalData = new byte[5000];
+        Random.Shared.NextBytes(originalData);
+
+        var chunks = transfer.CreateChunks("buf-reassemble", originalData);
+
+        byte[]? received = null;
+        transfer.OnBufferReceived += (id, data) => received = data;
+
+        // Feed chunks in order
+        for (int i = 0; i < chunks.Length; i++)
+        {
+            var complete = transfer.ReceiveChunk(chunks[i]);
+            if (i < chunks.Length - 1 && complete)
+                throw new Exception("Should not be complete before last chunk");
+        }
+
+        if (received == null) throw new Exception("OnBufferReceived should fire");
+        if (received.Length != 5000) throw new Exception($"Length: {received.Length}");
+        if (!received.SequenceEqual(originalData))
+            throw new Exception("Reassembled data doesn't match original");
+    }
+
+    [TestMethod]
+    public async Task P2P_BufferTransfer_OutOfOrder()
+    {
+        var transfer = new P2PBufferTransfer { MaxChunkSize = 1024 };
+        var data = new byte[3000];
+        Random.Shared.NextBytes(data);
+
+        var chunks = transfer.CreateChunks("buf-ooo", data);
+
+        byte[]? received = null;
+        transfer.OnBufferReceived += (id, d) => received = d;
+
+        // Feed in reverse order
+        for (int i = chunks.Length - 1; i >= 0; i--)
+            transfer.ReceiveChunk(chunks[i]);
+
+        if (received == null) throw new Exception("Should reassemble from out-of-order chunks");
+        if (!received.SequenceEqual(data))
+            throw new Exception("Out-of-order reassembly data mismatch");
+    }
+
+    [TestMethod]
+    public async Task P2P_BufferTransfer_Progress()
+    {
+        var transfer = new P2PBufferTransfer { MaxChunkSize = 1024 };
+        var data = new byte[4096]; // 4 chunks
+
+        var chunks = transfer.CreateChunks("buf-progress", data);
+
+        transfer.ReceiveChunk(chunks[0]);
+        var p1 = transfer.GetProgress("buf-progress");
+        if (Math.Abs(p1 - 0.25) > 0.01) throw new Exception($"After 1/4: {p1}");
+
+        transfer.ReceiveChunk(chunks[1]);
+        var p2 = transfer.GetProgress("buf-progress");
+        if (Math.Abs(p2 - 0.5) > 0.01) throw new Exception($"After 2/4: {p2}");
+    }
+
+    [TestMethod]
+    public async Task P2P_BufferTransfer_DuplicateChunk()
+    {
+        var transfer = new P2PBufferTransfer { MaxChunkSize = 1024 };
+        var data = new byte[2048]; // 2 chunks
+        Random.Shared.NextBytes(data);
+
+        var chunks = transfer.CreateChunks("buf-dup", data);
+
+        byte[]? received = null;
+        transfer.OnBufferReceived += (id, d) => received = d;
+
+        // Send chunk 0 twice, then chunk 1
+        transfer.ReceiveChunk(chunks[0]);
+        transfer.ReceiveChunk(chunks[0]); // duplicate
+        transfer.ReceiveChunk(chunks[1]);
+
+        if (received == null) throw new Exception("Should complete despite duplicate");
+        if (!received.SequenceEqual(data)) throw new Exception("Data mismatch after duplicate");
+    }
+
+    [TestMethod]
+    public async Task P2P_BufferTransfer_Cancel()
+    {
+        var transfer = new P2PBufferTransfer { MaxChunkSize = 1024 };
+        var data = new byte[4096];
+        var chunks = transfer.CreateChunks("buf-cancel", data);
+
+        transfer.ReceiveChunk(chunks[0]);
+        if (transfer.ActiveTransfers != 1) throw new Exception($"Active: {transfer.ActiveTransfers}");
+
+        transfer.CancelTransfer("buf-cancel");
+        if (transfer.ActiveTransfers != 0) throw new Exception("Should be 0 after cancel");
+    }
+
+    [TestMethod]
+    public async Task P2P_BufferTransfer_1MB_Tensor()
+    {
+        // Simulate transferring a 1MB float tensor (256K floats)
+        var transfer = new P2PBufferTransfer(); // default 64KB chunks
+        var tensorData = new byte[1024 * 1024];
+        Random.Shared.NextBytes(tensorData);
+
+        var chunks = transfer.CreateChunks("tensor-1mb", tensorData);
+        // 1MB / 64KB = 16 chunks
+        if (chunks.Length != 16) throw new Exception($"1MB should be 16 chunks: {chunks.Length}");
+
+        byte[]? received = null;
+        transfer.OnBufferReceived += (id, d) => received = d;
+
+        foreach (var chunk in chunks)
+            transfer.ReceiveChunk(chunk);
+
+        if (received == null) throw new Exception("Should receive 1MB tensor");
+        if (received.Length != 1024 * 1024) throw new Exception($"Length: {received.Length}");
+        if (!received.SequenceEqual(tensorData))
+            throw new Exception("1MB tensor data corruption");
+    }
 }
