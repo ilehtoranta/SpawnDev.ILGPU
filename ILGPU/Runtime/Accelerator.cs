@@ -59,6 +59,12 @@ namespace ILGPU.Runtime
         /// Represents a WebAssembly compute accelerator (CPU threads via Web Workers).
         /// </summary>
         Wasm,
+
+        /// <summary>
+        /// Represents a P2P accelerator that distributes kernels across connected
+        /// devices via SpawnDev.WebTorrent WebRTC data channels.
+        /// </summary>
+        P2P,
     }
 
 

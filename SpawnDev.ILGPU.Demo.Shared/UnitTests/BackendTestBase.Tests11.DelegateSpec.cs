@@ -303,5 +303,96 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                     throw new Exception($"StridedBroadcast Div failed at {i}. Expected {expected}, got {result[i]}");
             }
         });
+
+        // ═══════════════════════════════════════════════════════════
+        //  Exact reproduction of SpawnDev.ILGPU.ML BroadcastBinaryKernel.
+        //  This is the pattern that crashed on WebGPU due to the
+        //  DelegateSpecializationRewriter skipNextStore bug.
+        //  The for loop + stride computation + op.Value() is the key pattern.
+        // ═══════════════════════════════════════════════════════════
+
+        static float BroadcastSub(float a, float b) => a - b;
+
+        /// <summary>
+        /// Mirrors the exact BroadcastBinaryKernel from SpawnDev.ILGPU.ML.
+        /// For loop over rank, stride-based index computation, op.Value() at the end.
+        /// This was the kernel that crashed on WebGPU.
+        /// </summary>
+        static void FullBroadcastBinaryKernel(Index1D idx,
+            ArrayView1D<float, Stride1D.Dense> a,
+            ArrayView1D<float, Stride1D.Dense> b,
+            ArrayView1D<float, Stride1D.Dense> output,
+            ArrayView1D<int, Stride1D.Dense> strides,
+            DelegateSpecialization<Func<float, float, float>> op)
+        {
+            // strides layout: [rank, aStrides[0..rank], bStrides[0..rank], outStrides[0..rank]]
+            int rank = strides[0];
+            int aIdx = 0, bIdx = 0, remaining = idx;
+            for (int d = 0; d < rank; d++)
+            {
+                int outStride = strides[1 + 2 * rank + d];
+                int coord = outStride > 0 ? remaining / outStride : 0;
+                remaining = outStride > 0 ? remaining % outStride : remaining;
+                aIdx += coord * strides[1 + d];
+                bIdx += coord * strides[1 + rank + d];
+            }
+            output[idx] = op.Value(a[aIdx], b[bIdx]);
+        }
+
+        [TestMethod]
+        public async Task DelegateSpecialization_FullBroadcast_Sub() => await RunTest(async accelerator =>
+        {
+            // Test: [4,3] - [4,1] = per-row scalar broadcast
+            // a = [[1,2,3],[4,5,6],[7,8,9],[10,11,12]]
+            // b = [[10],[20],[30],[40]]
+            // result = [[-9,-8,-7],[-16,-15,-14],[-23,-22,-21],[-30,-29,-28]]
+            int rows = 4, cols = 3;
+            int totalA = rows * cols;
+            int totalB = rows; // broadcast: b has 1 col per row
+            var aData = new float[totalA];
+            var bData = new float[totalB];
+            for (int r = 0; r < rows; r++)
+            {
+                for (int c = 0; c < cols; c++)
+                    aData[r * cols + c] = r * cols + c + 1;
+                bData[r] = (r + 1) * 10;
+            }
+
+            using var aBuf = accelerator.Allocate1D(aData);
+            using var bBuf = accelerator.Allocate1D(bData);
+            using var outBuf = accelerator.Allocate1D<float>(totalA);
+
+            // strides: [rank=2, aStrides=[cols,1], bStrides=[1,0], outStrides=[cols,1]]
+            var stridesData = new int[]
+            {
+                2,          // rank
+                cols, 1,    // aStrides: [3, 1]
+                1, 0,       // bStrides: [1, 0] — b broadcasts along cols
+                cols, 1,    // outStrides: [3, 1]
+            };
+            using var stridesBuf = accelerator.Allocate1D(stridesData);
+
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<
+                Index1D, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>,
+                ArrayView1D<float, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>,
+                DelegateSpecialization<Func<float, float, float>>>(FullBroadcastBinaryKernel);
+
+            kernel((Index1D)totalA, aBuf.View, bBuf.View, outBuf.View, stridesBuf.View,
+                new DelegateSpecialization<Func<float, float, float>>(BroadcastSub));
+            await accelerator.SynchronizeAsync();
+
+            var result = await outBuf.CopyToHostAsync<float>();
+            for (int r = 0; r < rows; r++)
+            {
+                for (int c = 0; c < cols; c++)
+                {
+                    int i = r * cols + c;
+                    float expected = aData[i] - bData[r];
+                    if (MathF.Abs(result[i] - expected) > 0.001f)
+                        throw new Exception(
+                            $"FullBroadcast Sub failed at [{r},{c}]. Expected {expected}, got {result[i]}");
+                }
+            }
+        });
     }
 }

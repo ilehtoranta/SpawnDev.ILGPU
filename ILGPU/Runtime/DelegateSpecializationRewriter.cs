@@ -12,6 +12,7 @@
 using ILGPU.Util;
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Reflection;
 using System.Reflection.Emit;
 
@@ -116,6 +117,7 @@ namespace ILGPU.Runtime
             // State for tracking delegate spec pattern
             bool skipNextCall = false; // true after ldarga of a delegate param
             bool skipNextStore = false; // true after get_Value skip (compiler stored delegate in local)
+            int lastDelegateArgIdx = -1; // which delegate param was last loaded (for Invoke resolution)
             var delegateLocals = new HashSet<int>(); // locals that hold skipped delegates
 
             // Pre-mark locals that had DelegateSpecialization or delegate types
@@ -153,6 +155,7 @@ namespace ILGPU.Runtime
                         // and mark that the next call (get_Value) should
                         // also be skipped
                         skipNextCall = true;
+                        lastDelegateArgIdx = argIdx;
                         continue;
                     }
                     // Remap arg index
@@ -179,9 +182,21 @@ namespace ILGPU.Runtime
                         {
                             // Skip get_Value() — delegate is resolved
                             // at dispatch time, not in the kernel IL.
-                            // If the compiler stores this in a local,
-                            // the next stloc should also be skipped.
-                            skipNextStore = true;
+                            // Only set skipNextStore if the NEXT instruction
+                            // is actually a stloc. If the result is used
+                            // directly (e.g. for callvirt Invoke), we must
+                            // NOT leave skipNextStore dangling — it would
+                            // incorrectly skip a later unrelated stloc.
+                            if (pos < ilBytes.Length)
+                            {
+                                var peekOp = PeekOpCode(ilBytes, pos);
+                                if (peekOp == OpCodes.Stloc_0 || peekOp == OpCodes.Stloc_1 ||
+                                    peekOp == OpCodes.Stloc_2 || peekOp == OpCodes.Stloc_3 ||
+                                    peekOp == OpCodes.Stloc_S || peekOp == OpCodes.Stloc)
+                                {
+                                    skipNextStore = true;
+                                }
+                            }
                             continue;
                         }
                     }
@@ -278,13 +293,22 @@ namespace ILGPU.Runtime
                             calledMethod.DeclaringType != null &&
                             calledMethod.DeclaringType.IsSubclassOf(typeof(Delegate)))
                         {
-                            // Find which delegate param this corresponds to
-                            // For simplicity, use the first target method
-                            var targetMethod = targetMethods.Values
-                                .GetEnumerator();
-                            targetMethod.MoveNext();
-                            il.EmitCall(OpCodes.Call,
-                                targetMethod.Current, null);
+                            // Use the tracked delegate arg index to pick
+                            // the correct target method. Falls back to first
+                            // target if tracking lost (single-delegate case).
+                            MethodInfo resolvedTarget;
+                            if (lastDelegateArgIdx >= 0 &&
+                                targetMethods.TryGetValue(lastDelegateArgIdx, out var tracked))
+                            {
+                                resolvedTarget = tracked;
+                            }
+                            else
+                            {
+                                // Fallback: first target (works for single-delegate kernels)
+                                resolvedTarget = targetMethods.Values.First();
+                            }
+                            il.EmitCall(OpCodes.Call, resolvedTarget, null);
+                            lastDelegateArgIdx = -1; // reset after use
                             continue;
                         }
                     }
@@ -341,6 +365,15 @@ namespace ILGPU.Runtime
             return bakedType.GetMethod(
                 originalMethod.Name + "_Specialized",
                 BindingFlags.Public | BindingFlags.Static)!;
+        }
+
+        /// <summary>
+        /// Peek at the next opcode without advancing the position.
+        /// </summary>
+        private static OpCode PeekOpCode(byte[] il, int pos)
+        {
+            int tempPos = pos;
+            return ReadOpCode(il, ref tempPos);
         }
 
         private static OpCode ReadOpCode(byte[] il, ref int pos)
