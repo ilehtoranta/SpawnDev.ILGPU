@@ -207,3 +207,17 @@ static void Bad(Index1D i, ArrayView<float> d, float a, float b, float c, float 
 public struct Config { public float A; public float B; public float C; public float D; }
 static void Good(Index1D i, ArrayView<float> data, Config config) { }
 ```
+
+## Troubleshooting
+
+### "Unknown hard error" dialog on Windows
+
+If you see an "Unknown hard error" dialog when running ILGPU kernels on the CPU backend, this is caused by the **Windows Error Reporting** service being disabled.
+
+**Fix:** Enable the Windows Error Reporting service:
+1. Open Services (Win+R, type `services.msc`)
+2. Find "Windows Error Reporting Service"
+3. Set startup type to "Manual" or "Automatic"
+4. Start the service
+
+This allows Windows to handle process crashes properly instead of showing the raw error dialog. The underlying issue is typically an assertion failure in the CPU backend from out-of-bounds array access — check your kernel index calculations and buffer sizes.
