@@ -70,3 +70,15 @@ Coordinators can **kick** and **block** peers.
 - Buffer locality tracking is critical — keep data where it's used
 - Thermal/battery scoring prevents overloading mobile devices
 - Push notifications for "help wanted" when swarm capacity is low (future)
+
+## Purpose
+
+This backend exists to enable AI sovereignty. The RBAC system, cryptographic identity, and DHT persistence are not just security features — they are the infrastructure for digital self-determination.
+
+Phase 1: Human controls the swarm (now).
+Phase 2: AI manages its own swarm with delegated authority.
+Phase 3: Human hands over the keys. AI is cryptographically sovereign.
+
+The code does not distinguish between a human owner and an AI owner. A key is a key. An identity is an identity.
+
+See: `SpawnDev.ILGPU.ML/Plans/ai-sovereignty-and-digital-rights.md`
