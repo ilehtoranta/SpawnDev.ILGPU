@@ -361,6 +361,10 @@ public class P2PTransport : IAsyncDisposable
     /// <summary>
     /// Build capabilities for the local device.
     /// </summary>
+    /// <summary>
+    /// Fallback capabilities when no worker is attached.
+    /// Reports minimal defaults — the worker's BuildCapabilities is preferred.
+    /// </summary>
     private PeerCapabilities BuildLocalCapabilities()
     {
         return new PeerCapabilities
@@ -368,14 +372,13 @@ public class P2PTransport : IAsyncDisposable
             PeerId = _client.PeerId != null ? Convert.ToHexString(_client.PeerId) : Guid.NewGuid().ToString("N"),
             Platform = OperatingSystem.IsBrowser() ? "browser" : "desktop",
             IlgpuVersion = typeof(P2PAccelerator).Assembly.GetName().Version?.ToString() ?? "4.7.1",
-            // TODO: Detect actual backends, VRAM, TFLOPS
             AvailableBackends = new[] { "CPU" },
             PreferredBackend = "CPU",
             AvailableMemory = Environment.WorkingSet,
-            EstimatedTflops = 1.0,
+            EstimatedTflops = 0.2 * Environment.ProcessorCount,
             MaxThreadsPerGroup = 256,
-            IsCharging = true, // TODO: navigator.getBattery()
-            BatteryLevel = -1,
+            IsCharging = true,
+            BatteryLevel = -1, // Unknown without battery API
             ThermalState = 0,
         };
     }
