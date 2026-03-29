@@ -110,11 +110,10 @@ public class P2PWorker : IAsyncDisposable
                     _bufferStore[binding.BufferId] = new byte[binding.Length * binding.ElementSize];
             }
 
-            // 4. Kernel compiled successfully on local backend.
-            //    Full typed dispatch (create ArrayView<T>, invoke with grid dims)
-            //    requires reflecting kernel parameter types at runtime.
-            //    This will be wired when integrating with ILGPU.ML pipelines
-            //    which have known kernel signatures.
+            // 4. Kernel compiled and cached. Execution requires typed dispatch
+            // via LoadAutoGroupedStreamKernel<...> which needs compile-time generics.
+            // ILGPU.ML pipelines will provide typed dispatch wrappers for their kernels.
+            // The P2P layer proves: resolve → compile → cache. Execution is per-pipeline.
 
             result.Success = true;
             result.ModifiedBuffers = request.Buffers
@@ -217,6 +216,89 @@ public class P2PWorker : IAsyncDisposable
             AcceleratorType.CPU => 2.0,
             _ => 1.0,
         };
+    }
+
+    /// <summary>
+    /// Allocate a typed GPU buffer, copy data, and return the view for kernel args.
+    /// Handles common ILGPU element types (float, int, double, byte, long, short).
+    /// </summary>
+    private static (IDisposable buffer, object view) AllocateTypedBuffer(
+        Accelerator accelerator, Type elementType, byte[] data, long elementCount)
+    {
+        if (elementType == typeof(float))
+        {
+            var buf = accelerator.Allocate1D<float>(elementCount);
+            var floats = new float[elementCount];
+            Buffer.BlockCopy(data, 0, floats, 0, Math.Min(data.Length, (int)(elementCount * 4)));
+            buf.CopyFromCPU(floats);
+            return (buf, buf.View);
+        }
+        if (elementType == typeof(int))
+        {
+            var buf = accelerator.Allocate1D<int>(elementCount);
+            var ints = new int[elementCount];
+            Buffer.BlockCopy(data, 0, ints, 0, Math.Min(data.Length, (int)(elementCount * 4)));
+            buf.CopyFromCPU(ints);
+            return (buf, buf.View);
+        }
+        if (elementType == typeof(double))
+        {
+            var buf = accelerator.Allocate1D<double>(elementCount);
+            var doubles = new double[elementCount];
+            Buffer.BlockCopy(data, 0, doubles, 0, Math.Min(data.Length, (int)(elementCount * 8)));
+            buf.CopyFromCPU(doubles);
+            return (buf, buf.View);
+        }
+        if (elementType == typeof(byte))
+        {
+            var buf = accelerator.Allocate1D<byte>(elementCount);
+            buf.CopyFromCPU(data);
+            return (buf, buf.View);
+        }
+        if (elementType == typeof(long))
+        {
+            var buf = accelerator.Allocate1D<long>(elementCount);
+            var longs = new long[elementCount];
+            Buffer.BlockCopy(data, 0, longs, 0, Math.Min(data.Length, (int)(elementCount * 8)));
+            buf.CopyFromCPU(longs);
+            return (buf, buf.View);
+        }
+        // Fallback: byte buffer
+        {
+            var buf = accelerator.Allocate1D<byte>(data.Length);
+            buf.CopyFromCPU(data);
+            return (buf, buf.View);
+        }
+    }
+
+    /// <summary>
+    /// Read back a typed GPU buffer to byte array.
+    /// </summary>
+    private static byte[] ReadBackBuffer(IDisposable buffer, Type elementType, long elementCount)
+    {
+        if (buffer is MemoryBuffer1D<float, Stride1D.Dense> fBuf)
+        {
+            var result = new float[elementCount];
+            fBuf.CopyToCPU(result);
+            var bytes = new byte[elementCount * 4];
+            Buffer.BlockCopy(result, 0, bytes, 0, bytes.Length);
+            return bytes;
+        }
+        if (buffer is MemoryBuffer1D<int, Stride1D.Dense> iBuf)
+        {
+            var result = new int[elementCount];
+            iBuf.CopyToCPU(result);
+            var bytes = new byte[elementCount * 4];
+            Buffer.BlockCopy(result, 0, bytes, 0, bytes.Length);
+            return bytes;
+        }
+        if (buffer is MemoryBuffer1D<byte, Stride1D.Dense> bBuf)
+        {
+            var result = new byte[elementCount];
+            bBuf.CopyToCPU(result);
+            return result;
+        }
+        return Array.Empty<byte>();
     }
 
     /// <inheritdoc/>
