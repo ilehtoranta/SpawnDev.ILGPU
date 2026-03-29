@@ -163,11 +163,65 @@
                     }
                 </div>
 
+                <!-- Pending Approvals (Coordinator only, Approval mode) -->
+                @if (_compute.Role == P2PRole.Coordinator && _compute.Coordinator.PendingApproval.Count > 0)
+                {
+                    <div style="background: #1e293b; border: 1px solid #f59e0b; padding: 16px; border-radius: 8px; margin-bottom: 20px;">
+                        <div style="font-size: 14px; color: #f59e0b; font-weight: bold; margin-bottom: 12px;">
+                            Pending Approval (@_compute.Coordinator.PendingApproval.Count)
+                        </div>
+                        @foreach (var pending in _compute.Coordinator.PendingApproval.Values)
+                        {
+                            <div style="display: flex; justify-content: space-between; align-items: center; padding: 8px; background: #0f172a; border-radius: 4px; margin-bottom: 4px;">
+                                <div>
+                                    <span style="font-family: monospace; font-size: 12px; color: #94a3b8;">@pending.PeerId[..Math.Min(16, pending.PeerId.Length)]...</span>
+                                    <span style="font-size: 11px; color: #64748b; margin-left: 8px;">@(pending.Capabilities?.PreferredBackend ?? "?") | @(pending.Capabilities?.EstimatedTflops.ToString("N1") ?? "?") TFLOPS</span>
+                                </div>
+                                <div style="display: flex; gap: 4px;">
+                                    <button @onclick="() => ApprovePeer(pending.PeerId)" style="background: #10b981; color: white; border: none; padding: 4px 10px; border-radius: 4px; cursor: pointer; font-size: 11px;">Approve</button>
+                                    <button @onclick="() => RejectPeer(pending.PeerId)" style="background: #ef4444; color: white; border: none; padding: 4px 10px; border-radius: 4px; cursor: pointer; font-size: 11px;">Reject</button>
+                                </div>
+                            </div>
+                        }
+                    </div>
+                }
+
+                <!-- Swarm Settings (Coordinator only) -->
+                @if (_compute.Role == P2PRole.Coordinator)
+                {
+                    <div style="background: #1e293b; padding: 16px; border-radius: 8px; margin-bottom: 20px;">
+                        <div style="font-size: 14px; color: #f1f5f9; font-weight: bold; margin-bottom: 12px;">Swarm Settings</div>
+                        <div style="display: flex; gap: 16px; flex-wrap: wrap;">
+                            <div>
+                                <label style="font-size: 11px; color: #64748b;">Join Mode</label>
+                                <select @bind="_compute.Coordinator.Policy.JoinPermission" style="background: #0f172a; color: #94a3b8; border: 1px solid #334155; padding: 4px 8px; border-radius: 4px; font-size: 12px; display: block; margin-top: 2px;">
+                                    <option value="@JoinMode.Open">Open</option>
+                                    <option value="@JoinMode.Approval">Approval Required</option>
+                                    <option value="@JoinMode.KnownOnly">Known Devices Only</option>
+                                    <option value="@JoinMode.InviteOnly">Invite Only</option>
+                                </select>
+                            </div>
+                            <div>
+                                <label style="font-size: 11px; color: #64748b;">Max Peers</label>
+                                <input type="number" @bind="_compute.Coordinator.Policy.MaxPeers" min="0" style="background: #0f172a; color: #94a3b8; border: 1px solid #334155; padding: 4px 8px; border-radius: 4px; font-size: 12px; width: 60px; display: block; margin-top: 2px;" />
+                            </div>
+                            <div style="display: flex; align-items: end;">
+                                <label style="font-size: 11px; color: #64748b;">
+                                    <input type="checkbox" @bind="_compute.Coordinator.Policy.AllowAnonymous" /> Allow Anonymous
+                                </label>
+                            </div>
+                        </div>
+                    </div>
+                }
+
                 <!-- Identity -->
                 <div style="background: #1e293b; padding: 16px; border-radius: 8px;">
                     <div style="font-size: 14px; color: #f1f5f9; font-weight: bold; margin-bottom: 8px;">Identity</div>
                     <div style="font-family: monospace; font-size: 11px; color: #475569;">
                         Fingerprint: @_compute.Identity.Fingerprint
+                    </div>
+                    <div style="font-family: monospace; font-size: 11px; color: #334155; margin-top: 2px;">
+                        Label: @_compute.Identity.Label
                     </div>
                 </div>
             }
@@ -301,6 +355,18 @@
     private void KickPeer(string peerId)
     {
         _compute?.Coordinator.KickPeer(peerId, "Kicked by coordinator");
+        StateHasChanged();
+    }
+
+    private void ApprovePeer(string peerId)
+    {
+        _compute?.Coordinator.ApprovePeer(peerId);
+        StateHasChanged();
+    }
+
+    private void RejectPeer(string peerId)
+    {
+        _compute?.Coordinator.RejectPendingPeer(peerId, "Rejected by coordinator");
         StateHasChanged();
     }
 
