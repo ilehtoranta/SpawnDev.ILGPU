@@ -148,6 +148,32 @@ public class P2PAccelerator : KernelAccelerator<P2PCompiledKernel, P2PKernel>
     }
 
     /// <summary>
+    /// Dispatch a kernel and await the result from the remote peer.
+    /// </summary>
+    public async Task<KernelDispatchResult> DispatchAsync(MethodInfo kernelMethod, long gridDimX,
+        params (string bufferId, byte[]? data, int elementSize)[] buffers)
+    {
+        if (Dispatcher == null)
+            throw new InvalidOperationException("Dispatcher not set. Use P2PCompute facade.");
+
+        var request = P2PKernelSerializer.CreateDispatch(kernelMethod, gridDimX);
+        var bindings = new BufferBinding[buffers.Length];
+        for (int i = 0; i < buffers.Length; i++)
+        {
+            bindings[i] = new BufferBinding
+            {
+                ParameterIndex = i + 1,
+                BufferId = buffers[i].bufferId,
+                Length = buffers[i].data?.Length / buffers[i].elementSize ?? 0,
+                ElementSize = buffers[i].elementSize,
+            };
+        }
+        request.Buffers = bindings;
+
+        return await Dispatcher.DispatchAsync(request);
+    }
+
+    /// <summary>
     /// Create a typed dispatch helper for a specific kernel method.
     /// Caches the method reference for repeated dispatch.
     ///

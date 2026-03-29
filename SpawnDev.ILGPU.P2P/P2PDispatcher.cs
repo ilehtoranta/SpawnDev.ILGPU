@@ -102,6 +102,50 @@ public class P2PDispatcher
     }
 
     /// <summary>
+    /// Dispatch a kernel and await the result.
+    /// Returns the dispatch result when the peer completes execution.
+    /// Throws on timeout or permanent failure.
+    /// </summary>
+    public async Task<KernelDispatchResult> DispatchAsync(
+        KernelDispatchRequest request, string[]? preferredBufferIds = null)
+    {
+        var peer = SelectHealthyPeer(preferredBufferIds);
+        if (peer == null)
+            throw new InvalidOperationException("No healthy peers available for dispatch");
+
+        var tcs = new TaskCompletionSource<KernelDispatchResult>();
+        var pending = new PendingDispatch
+        {
+            DispatchId = request.DispatchId,
+            Request = request,
+            AssignedPeer = peer,
+            StartTime = DateTime.UtcNow,
+            Attempts = 1,
+            CompletionSource = tcs,
+        };
+
+        lock (_lock)
+        {
+            _pending[request.DispatchId] = pending;
+        }
+
+        peer.IncrementPending();
+        SendDispatchToPeer(peer, request);
+
+        // Await with timeout
+        using var cts = new CancellationTokenSource(DispatchTimeoutMs * MaxRetries);
+        try
+        {
+            return await tcs.Task.WaitAsync(cts.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            throw new TimeoutException(
+                $"P2P dispatch {request.DispatchId} timed out after {DispatchTimeoutMs * MaxRetries}ms");
+        }
+    }
+
+    /// <summary>
     /// Handle a peer reporting kernel completion.
     /// </summary>
     public void HandleResult(string dispatchId, KernelDispatchResult result)
