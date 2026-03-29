@@ -191,6 +191,20 @@
         {
             _computeHash = hash;
             _swarmName = name ?? "Unknown Swarm";
+
+            // Check saved consent
+            try
+            {
+                var consent = JS.Call<string>("localStorage.getItem", $"p2p-consent-{hash}");
+                if (consent == "always")
+                {
+                    _state = SwarmPageState.Dashboard;
+                    await JoinSwarm(); // Auto-join
+                    return;
+                }
+            }
+            catch { }
+
             _state = SwarmPageState.JoinConsent;
         }
         else
@@ -204,9 +218,48 @@
         _refreshTimer.Start();
     }
 
+    /// <summary>
+    /// Get or create a persistent device identity.
+    /// First visit: generate ECDSA key pair, store in localStorage.
+    /// Subsequent visits: import from localStorage.
+    /// </summary>
+    private async Task<SwarmIdentity> GetOrCreateIdentityAsync()
+    {
+        var crypto = new DotNetCrypto();
+
+        try
+        {
+            // Try to load from localStorage
+            var pubB64 = JS.Call<string>("localStorage.getItem", "p2p-identity-pub");
+            var privB64 = JS.Call<string>("localStorage.getItem", "p2p-identity-priv");
+
+            if (!string.IsNullOrEmpty(pubB64) && !string.IsNullOrEmpty(privB64))
+            {
+                var pub = Convert.FromBase64String(pubB64);
+                var priv = Convert.FromBase64String(privB64);
+                return await SwarmIdentity.ImportAsync(crypto, pub, priv);
+            }
+        }
+        catch { }
+
+        // Generate new identity
+        var identity = await SwarmIdentity.CreateAsync(crypto, "Device-" + Guid.NewGuid().ToString("N")[..6]);
+
+        // Persist to localStorage
+        try
+        {
+            var priv = await identity.ExportPrivateKeyAsync();
+            JS.CallVoid("localStorage.setItem", "p2p-identity-pub", Convert.ToBase64String(identity.PublicKeySpki));
+            JS.CallVoid("localStorage.setItem", "p2p-identity-priv", Convert.ToBase64String(priv));
+        }
+        catch { }
+
+        return identity;
+    }
+
     private async Task CreateSwarm()
     {
-        var crypto = new DotNetCrypto(); // Browser would use BrowserCrypto
+        var crypto = new DotNetCrypto();
         var client = new SpawnDev.WebTorrent.WebTorrentClient();
         _compute = await P2PCompute.CreateSwarmAsync(crypto, client, "Demo Compute Swarm");
         StateHasChanged();
@@ -214,7 +267,8 @@
 
     private async Task JoinAlways()
     {
-        // TODO: save consent to localStorage
+        // Save consent to localStorage
+        try { JS.CallVoid("localStorage.setItem", $"p2p-consent-{_computeHash}", "always"); } catch { }
         await JoinSwarm();
     }
 
