@@ -23,6 +23,26 @@ public class P2PSwarmCoordinator : IAsyncDisposable
     private P2PAccelerator? _accelerator;
 
     /// <summary>
+    /// This node's cryptographic identity (ECDSA key pair).
+    /// Null until CreateSwarmAsync or SetIdentity is called.
+    /// </summary>
+    public SwarmIdentity? Identity { get; private set; }
+
+    /// <summary>
+    /// The swarm's key registry (authorized keys + roles).
+    /// </summary>
+    public KeyRegistry? Registry { get; private set; }
+
+    /// <summary>
+    /// Set the cryptographic identity for this node.
+    /// Call before CreateSwarmAsync for owner identity, or after JoinSwarmAsync for worker identity.
+    /// </summary>
+    public void SetIdentity(SwarmIdentity identity)
+    {
+        Identity = identity;
+    }
+
+    /// <summary>
     /// This node's current role in the swarm.
     /// </summary>
     public P2PRole Role { get; private set; } = P2PRole.Worker;
@@ -125,6 +145,13 @@ public class P2PSwarmCoordinator : IAsyncDisposable
         }
 
         Role = P2PRole.Coordinator; // Creator is initial coordinator
+
+        // Initialize key registry with owner's identity (if set)
+        if (Identity != null)
+        {
+            Registry = new KeyRegistry();
+            Registry.AddKey(Identity.PublicKeySpki, SwarmRole.Owner, Identity.Label);
+        }
     }
 
     /// <summary>
