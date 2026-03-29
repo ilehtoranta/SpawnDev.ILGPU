@@ -1,3 +1,4 @@
+using ILGPU.Runtime;
 using SpawnDev.ILGPU.P2P;
 using SpawnDev.UnitTesting;
 
@@ -2764,5 +2765,133 @@ public abstract partial class BackendTestBase
             throw new Exception($"Should have 1 cached launcher, got {launcher.CachedCount}");
 
         Console.WriteLine("[P2P] KernelLauncher cache reuse: 5 runs, 1 compilation ✓");
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    //  Coordinator Dispatch — Full Round-Trip
+    //  Coordinator dispatches via DispatchToSwarm → worker executes → result
+    // ═══════════════════════════════════════════════════════════
+
+    [TestMethod]
+    public async Task P2P_Coordinator_DispatchToSwarm()
+    {
+        // Full coordinator → worker round-trip with real kernel execution
+        using var context = global::ILGPU.Context.CreateDefault();
+        using var cpuAccel = global::ILGPU.Runtime.CPU.CPUDevice.Default.CreateAccelerator(context);
+
+        await using var client = new SpawnDev.WebTorrent.WebTorrentClient();
+        await using var coordinator = new P2PSwarmCoordinator(client);
+        await coordinator.CreateSwarmAsync("coord-dispatch-test");
+
+        var p2pAccel = coordinator.CreateAccelerator(context);
+        p2pAccel.Dispatcher = new P2PDispatcher(p2pAccel);
+        var transport = new P2PTransport(client, coordinator, p2pAccel.Dispatcher);
+
+        // Wire dispatcher → transport
+        p2pAccel.Dispatcher.OnSendMessage += (peerId, msg) =>
+        {
+            _ = transport.SendMessageAsync(peerId, msg);
+        };
+
+        // Create worker on same process (simulated remote)
+        var worker = new P2PWorker(transport);
+        worker.Initialize(context, cpuAccel);
+        transport.SetWorker(worker);
+
+        // Wire mock transport: coordinator ↔ worker
+        transport.RegisterPeer("worker-1", async (data) =>
+        {
+            await transport.HandleIncomingDataAsync("worker-1", data);
+        });
+
+        // Register peer
+        var caps = worker.BuildCapabilities("worker-1");
+        coordinator.HandlePeerConnected("worker-1", caps);
+        p2pAccel.AddPeer(new RemotePeer
+        {
+            PeerId = "worker-1",
+            IsConnected = true,
+            Capabilities = caps,
+            LastHeartbeat = DateTime.UtcNow,
+        });
+
+        // Register kernel type
+        P2PKernelSerializer.RegisterKernelType(typeof(BackendTestBase));
+
+        // Prepare input data
+        var inputFloats = new float[] { 5.0f, 10.0f, 15.0f, 20.0f };
+        var inputBytes = new byte[16];
+        Buffer.BlockCopy(inputFloats, 0, inputBytes, 0, 16);
+        worker.ReceiveBuffer("data", inputBytes);
+
+        // Coordinator dispatches to swarm
+        var dispatchId = p2pAccel.DispatchToSwarm(
+            typeof(BackendTestBase).GetMethod(nameof(KernelMultiplyBy2),
+                System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!,
+            4,
+            ("data", inputBytes, 4));
+
+        if (string.IsNullOrEmpty(dispatchId))
+            throw new Exception("DispatchToSwarm returned empty ID");
+
+        // Verify the worker received and processed the dispatch
+        var result = worker.GetBuffer("data");
+        if (result == null)
+            throw new Exception("Worker buffer not updated");
+
+        var outFloats = new float[4];
+        Buffer.BlockCopy(result, 0, outFloats, 0, 16);
+
+        for (int i = 0; i < 4; i++)
+        {
+            float expected = inputFloats[i] * 2.0f;
+            if (Math.Abs(outFloats[i] - expected) > 0.001f)
+                throw new Exception($"[{i}] expected {expected}, got {outFloats[i]}");
+        }
+
+        Console.WriteLine($"[P2P] Coordinator DispatchToSwarm: [{string.Join(", ", outFloats)}] ✓");
+
+        P2PKernelSerializer.ClearAllowlist();
+    }
+
+    [TestMethod]
+    public async Task P2P_Coordinator_CreateDispatcher_Helper()
+    {
+        using var context = global::ILGPU.Context.CreateDefault();
+        var device = new P2PDevice();
+        var p2pAccel = (P2PAccelerator)device.CreateAccelerator(context);
+        p2pAccel.Dispatcher = new P2PDispatcher(p2pAccel);
+
+        // CreateDispatcher should find the method
+        var helper = p2pAccel.CreateDispatcher(typeof(BackendTestBase), "KernelMultiplyBy2");
+        if (helper.MethodName != "KernelMultiplyBy2")
+            throw new Exception($"Method name: {helper.MethodName}");
+        if (helper.TypeName != "BackendTestBase")
+            throw new Exception($"Type name: {helper.TypeName}");
+
+        Console.WriteLine("[P2P] CreateDispatcher helper: OK ✓");
+    }
+
+    [TestMethod]
+    public async Task P2P_Coordinator_NotSupportedException_LoadKernel()
+    {
+        using var context = global::ILGPU.Context.CreateDefault();
+        var device = new P2PDevice();
+        var p2pAccel = (P2PAccelerator)device.CreateAccelerator(context);
+
+        // LoadAutoGroupedStreamKernel should throw NotSupportedException with helpful message
+        try
+        {
+            var kernel = p2pAccel.LoadAutoGroupedStreamKernel<
+                global::ILGPU.Index1D, global::ILGPU.ArrayView<float>>(KernelMultiplyBy2);
+            throw new Exception("Should have thrown NotSupportedException");
+        }
+        catch (NotSupportedException ex)
+        {
+            if (!ex.Message.Contains("DispatchAsync"))
+                throw new Exception($"Error should mention DispatchAsync: {ex.Message}");
+        }
+
+        Console.WriteLine("[P2P] LoadAutoGroupedStreamKernel correctly throws with guidance ✓");
     }
 }
