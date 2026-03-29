@@ -18,8 +18,8 @@ namespace SpawnDev.ILGPU.P2P;
 public class P2PSwarmCoordinator : IAsyncDisposable
 {
     private readonly WebTorrentClient _client;
-    private readonly Dictionary<string, RemotePeer> _peers = new();
-    private readonly HashSet<string> _blockedPeers = new();
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, RemotePeer> _peers = new();
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, bool> _blockedPeers = new();
     private P2PAccelerator? _accelerator;
 
     /// <summary>
@@ -72,6 +72,11 @@ public class P2PSwarmCoordinator : IAsyncDisposable
     /// Total available memory across all connected peers (bytes).
     /// </summary>
     public long TotalMemory => _peers.Values.Sum(p => p.Capabilities?.AvailableMemory ?? 0);
+
+    /// <summary>
+    /// Get a snapshot of all connected peers (for state persistence).
+    /// </summary>
+    public IReadOnlyList<RemotePeer> GetPeerList() => _peers.Values.ToList();
 
     /// <summary>
     /// Fired when a new peer joins the compute swarm.
@@ -159,7 +164,7 @@ public class P2PSwarmCoordinator : IAsyncDisposable
     /// </summary>
     public bool HandlePeerConnected(string peerId, PeerCapabilities capabilities)
     {
-        if (_blockedPeers.Contains(peerId))
+        if (_blockedPeers.ContainsKey(peerId))
         {
             OnPeerRejected?.Invoke(peerId, "blocked");
             return false;
@@ -189,7 +194,7 @@ public class P2PSwarmCoordinator : IAsyncDisposable
         if (_peers.TryGetValue(peerId, out var peer))
         {
             peer.IsConnected = false;
-            _peers.Remove(peerId);
+            _peers.TryRemove(peerId, out _);
             _accelerator?.RemovePeer(peer);
 
             OnPeerLeft?.Invoke(peer);
@@ -220,7 +225,7 @@ public class P2PSwarmCoordinator : IAsyncDisposable
     {
         if (Role != P2PRole.Coordinator) return false;
 
-        _blockedPeers.Add(peerId);
+        _blockedPeers.TryAdd(peerId, true);
 
         // Kick if currently connected
         if (_peers.ContainsKey(peerId))
@@ -235,18 +240,18 @@ public class P2PSwarmCoordinator : IAsyncDisposable
     /// </summary>
     public bool UnblockPeer(string peerId)
     {
-        return _blockedPeers.Remove(peerId);
+        return _blockedPeers.TryRemove(peerId, out _);
     }
 
     /// <summary>
     /// Check if a peer is blocked.
     /// </summary>
-    public bool IsPeerBlocked(string peerId) => _blockedPeers.Contains(peerId);
+    public bool IsPeerBlocked(string peerId) => _blockedPeers.ContainsKey(peerId);
 
     /// <summary>
     /// Get all blocked peer IDs.
     /// </summary>
-    public IReadOnlyCollection<string> BlockedPeers => _blockedPeers;
+    public IReadOnlyCollection<string> BlockedPeers => (IReadOnlyCollection<string>)_blockedPeers.Keys;
 
     /// <summary>
     /// Fired when a peer is kicked from the swarm.

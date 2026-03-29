@@ -205,7 +205,14 @@ public class RemotePeer
     public AcceleratorType RemoteBackend { get; set; }
     public long MemorySize { get; set; }
     public bool IsConnected { get; set; }
-    public int PendingOperations { get; set; }
+    private int _pendingOperations;
+    public int PendingOperations
+    {
+        get => _pendingOperations;
+        set => Interlocked.Exchange(ref _pendingOperations, value);
+    }
+    public void IncrementPending() => Interlocked.Increment(ref _pendingOperations);
+    public void DecrementPending() => Interlocked.Decrement(ref _pendingOperations);
     public PeerCapabilities? Capabilities { get; set; }
     public DateTime LastHeartbeat { get; set; } = DateTime.MinValue;
     internal P2PAccelerator? Accelerator { get; set; }

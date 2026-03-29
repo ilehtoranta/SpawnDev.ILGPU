@@ -3,23 +3,52 @@ using System.Reflection;
 namespace SpawnDev.ILGPU.P2P;
 
 /// <summary>
-/// Serializes kernel references for P2P dispatch.
+/// Serializes kernel references for P2P dispatch with security restrictions.
 ///
-/// Key insight: we don't serialize IL or IR across the wire.
-/// Both coordinator and worker run the same app (same Blazor WASM bundle
-/// or same .NET assemblies). We just send the method reference (type + name)
-/// and the worker compiles locally with its own best backend.
-///
-/// This means:
-///   - Zero overhead for kernel "transfer" — just a string
-///   - Worker picks its own backend (WebGPU, CUDA, etc.)
-///   - Same NuGet package = same kernel code on both sides
-///   - No IR serialization format to maintain
+/// SECURITY: Only methods on explicitly registered types can be resolved.
+/// This prevents arbitrary code execution via malicious dispatch requests.
+/// Both coordinator and worker must register the same kernel types.
 /// </summary>
 public static class P2PKernelSerializer
 {
+    private static readonly HashSet<Type> _allowedTypes = new();
+
+    /// <summary>
+    /// Register a type whose static methods can be dispatched via P2P.
+    /// Both coordinator and worker must register the same types.
+    /// </summary>
+    public static void RegisterKernelType(Type type)
+    {
+        _allowedTypes.Add(type);
+    }
+
+    /// <summary>
+    /// Register multiple kernel types at once.
+    /// </summary>
+    public static void RegisterKernelTypes(params Type[] types)
+    {
+        foreach (var type in types)
+            _allowedTypes.Add(type);
+    }
+
+    /// <summary>
+    /// Check if a type is registered for P2P dispatch.
+    /// </summary>
+    public static bool IsTypeAllowed(Type type) => _allowedTypes.Contains(type);
+
+    /// <summary>
+    /// Clear the allowlist (allows all types again). For testing only.
+    /// </summary>
+    public static void ClearAllowlist() => _allowedTypes.Clear();
+
+    /// <summary>
+    /// Number of registered kernel types.
+    /// </summary>
+    public static int AllowedTypeCount => _allowedTypes.Count;
+
     /// <summary>
     /// Serialize a kernel method reference to a dispatch request.
+    /// The method's declaring type must be registered via RegisterKernelType.
     /// </summary>
     public static KernelDispatchRequest CreateDispatch(
         MethodInfo kernelMethod,
@@ -41,14 +70,14 @@ public static class P2PKernelSerializer
 
     /// <summary>
     /// Resolve a kernel method on the worker side from the dispatch request.
-    /// Looks up the type and method in loaded assemblies.
+    /// SECURITY: Only resolves methods on registered types.
+    /// Returns null if the type is not in the allowlist.
     /// </summary>
     public static MethodInfo? ResolveKernel(KernelDispatchRequest request)
     {
         var type = Type.GetType(request.KernelType);
         if (type == null)
         {
-            // Try all loaded assemblies
             foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
             {
                 type = assembly.GetType(request.KernelType);
@@ -57,13 +86,16 @@ public static class P2PKernelSerializer
         }
         if (type == null) return null;
 
+        // SECURITY: Only allow registered types
+        if (_allowedTypes.Count > 0 && !_allowedTypes.Contains(type))
+            return null;
+
         return type.GetMethod(request.KernelMethod,
-            BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static);
+            BindingFlags.Public | BindingFlags.Static);
     }
 
     /// <summary>
-    /// Check if this worker can execute the requested kernel
-    /// (i.e., the type and method exist in our loaded assemblies).
+    /// Check if this worker can execute the requested kernel.
     /// </summary>
     public static bool CanExecute(KernelDispatchRequest request)
     {

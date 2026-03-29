@@ -58,8 +58,28 @@ public class P2PBufferTransfer
     /// <summary>
     /// Process a received chunk. Returns true if the buffer is now complete.
     /// </summary>
+    /// <summary>
+    /// Maximum allowed total chunks per transfer (prevents OOM from malicious headers).
+    /// 1GB / 64KB = 16384 chunks max.
+    /// </summary>
+    public int MaxTotalChunks { get; set; } = 16384;
+
+    /// <summary>
+    /// Maximum allowed total bytes per transfer (prevents OOM).
+    /// Default: 1GB.
+    /// </summary>
+    public long MaxTotalBytes { get; set; } = 1L * 1024 * 1024 * 1024;
+
     public bool ReceiveChunk(BufferChunk chunk)
     {
+        // SECURITY: Bounds check to prevent OOM from malicious chunk headers
+        if (chunk.TotalChunks <= 0 || chunk.TotalChunks > MaxTotalChunks)
+            return false;
+        if (chunk.TotalBytes <= 0 || chunk.TotalBytes > MaxTotalBytes)
+            return false;
+        if (chunk.ChunkIndex < 0 || chunk.ChunkIndex >= chunk.TotalChunks)
+            return false;
+
         if (!_inProgress.TryGetValue(chunk.BufferId, out var state))
         {
             state = new BufferTransferState

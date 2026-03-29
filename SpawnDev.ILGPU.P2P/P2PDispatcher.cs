@@ -95,7 +95,7 @@ public class P2PDispatcher
             _pending[request.DispatchId] = pending;
         }
 
-        peer.PendingOperations++;
+        peer.IncrementPending();
         SendDispatchToPeer(peer, request);
 
         return request.DispatchId;
@@ -113,7 +113,7 @@ public class P2PDispatcher
                 return;
         }
 
-        pending.AssignedPeer.PendingOperations--;
+        pending.AssignedPeer.DecrementPending();
 
         if (result.Success)
         {
@@ -142,7 +142,7 @@ public class P2PDispatcher
 
         foreach (var dispatch in affected)
         {
-            dispatch.AssignedPeer.PendingOperations--;
+            dispatch.AssignedPeer.DecrementPending();
             RetryDispatch(dispatch, $"Peer {peerId} disconnected");
         }
     }
@@ -194,7 +194,7 @@ public class P2PDispatcher
         dispatch.Attempts++;
         dispatch.AssignedPeer = newPeer;
         dispatch.StartTime = DateTime.UtcNow;
-        newPeer.PendingOperations++;
+        newPeer.IncrementPending();
 
         OnDispatchRetried?.Invoke(dispatch.DispatchId, dispatch.AssignedPeer.PeerId, newPeer.PeerId);
         SendDispatchToPeer(newPeer, dispatch.Request);
@@ -303,7 +303,7 @@ public class P2PDispatcher
 
         foreach (var dispatch in timedOut)
         {
-            dispatch.AssignedPeer.PendingOperations--;
+            dispatch.AssignedPeer.DecrementPending();
             RetryDispatch(dispatch, "Dispatch timed out");
         }
 
@@ -365,7 +365,7 @@ public class P2PDispatcher
 
         foreach (var dispatch in toMove)
         {
-            dispatch.AssignedPeer.PendingOperations--;
+            dispatch.AssignedPeer.DecrementPending();
             RetryDispatch(dispatch, $"Graceful handoff from {evictedPeer.PeerId} (thermal/battery)");
         }
     }

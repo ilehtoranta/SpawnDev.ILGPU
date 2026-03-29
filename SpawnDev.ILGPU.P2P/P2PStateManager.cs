@@ -90,14 +90,24 @@ public class P2PStateManager
 
     private SwarmState BuildCurrentState()
     {
+        // Include full peer table so all nodes have the same view for elections
+        var peers = _coordinator.GetPeerList().Select(p => new PeerInfo
+        {
+            PeerId = p.PeerId,
+            EstimatedTflops = p.Capabilities?.EstimatedTflops ?? 0,
+            AvailableMemory = p.Capabilities?.AvailableMemory ?? 0,
+            IsConnected = p.IsConnected,
+        }).ToList();
+
         return new SwarmState
         {
-            SwarmName = "compute-swarm", // TODO: from coordinator config
+            SwarmName = "compute-swarm",
             CoordinatorPeerId = _coordinator.CoordinatorPeerId,
             Timestamp = DateTimeOffset.UtcNow,
             PeerCount = _coordinator.PeerCount,
             TotalTflops = _coordinator.TotalTflops,
             TotalMemory = _coordinator.TotalMemory,
+            Peers = peers,
         };
     }
 
@@ -105,12 +115,31 @@ public class P2PStateManager
     {
         try
         {
-            var state = JsonSerializer.Deserialize<SwarmState>(value, _jsonOptions);
-            if (state != null)
-                OnStateUpdated?.Invoke(state);
+            // Check discriminator to determine message type
+            var doc = JsonDocument.Parse(value);
+            var type = doc.RootElement.TryGetProperty("type", out var typeProp)
+                ? typeProp.GetString() : null;
+
+            if (type == "SwarmState")
+            {
+                var state = JsonSerializer.Deserialize<SwarmState>(value, _jsonOptions);
+                if (state != null)
+                    OnStateUpdated?.Invoke(state);
+            }
+            else if (type == "CoordinatorAnnouncement")
+            {
+                var announcement = JsonSerializer.Deserialize<CoordinatorAnnouncement>(value, _jsonOptions);
+                if (announcement != null)
+                    OnCoordinatorAnnounced?.Invoke(announcement);
+            }
         }
         catch { }
     }
+
+    /// <summary>
+    /// Fired when a coordinator announcement is received from the DHT.
+    /// </summary>
+    public event Action<CoordinatorAnnouncement>? OnCoordinatorAnnounced;
 
     private static readonly JsonSerializerOptions _jsonOptions = new()
     {
@@ -123,12 +152,27 @@ public class P2PStateManager
 /// </summary>
 public class SwarmState
 {
+    /// <summary>Type discriminator — prevents deserialization confusion with other message types on same DHT key.</summary>
+    public string Type { get; set; } = "SwarmState";
     public string SwarmName { get; set; } = "";
     public string? CoordinatorPeerId { get; set; }
     public DateTimeOffset Timestamp { get; set; }
     public int PeerCount { get; set; }
     public double TotalTflops { get; set; }
     public long TotalMemory { get; set; }
+    /// <summary>Full peer table for election consistency (prevents split-brain).</summary>
+    public List<PeerInfo> Peers { get; set; } = new();
+}
+
+/// <summary>
+/// Peer info stored in swarm state for consistent election.
+/// </summary>
+public class PeerInfo
+{
+    public string PeerId { get; set; } = "";
+    public double EstimatedTflops { get; set; }
+    public long AvailableMemory { get; set; }
+    public bool IsConnected { get; set; }
 }
 
 /// <summary>
@@ -136,6 +180,8 @@ public class SwarmState
 /// </summary>
 public class CoordinatorAnnouncement
 {
+    /// <summary>Type discriminator.</summary>
+    public string Type { get; set; } = "CoordinatorAnnouncement";
     public string CoordinatorPeerId { get; set; } = "";
     public DateTimeOffset Timestamp { get; set; }
 }

@@ -1884,4 +1884,112 @@ public abstract partial class BackendTestBase
 
         Console.WriteLine($"[P2P TwoNode] Coordinator → Worker → Compile({accelerator.AcceleratorType}) → Result. PASS.");
     });
+
+    // ═══════════════════════════════════════════════════════════
+    //  Security Tests
+    // ═══════════════════════════════════════════════════════════
+
+    [TestMethod]
+    public async Task P2P_Security_AllowlistBlocksUnauthorized()
+    {
+        // Register only our test kernel type
+        P2PKernelSerializer.RegisterKernelType(typeof(BackendTestBase));
+
+        try
+        {
+            // Trying to dispatch System.IO.File should be blocked
+            var malicious = new KernelDispatchRequest
+            {
+                KernelType = typeof(System.IO.File).AssemblyQualifiedName ?? "",
+                KernelMethod = "Delete",
+            };
+            if (P2PKernelSerializer.CanExecute(malicious))
+                throw new Exception("SECURITY FAIL: System.IO.File.Delete should be blocked by allowlist");
+
+            // Our registered type should work
+            var legitimate = P2PKernelSerializer.CreateDispatch(
+                typeof(BackendTestBase).GetMethod(nameof(TestVectorAdd),
+                    System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)!,
+                gridDimX: 64);
+            if (!P2PKernelSerializer.CanExecute(legitimate))
+                throw new Exception("Registered type should be allowed");
+        }
+        finally
+        {
+            P2PKernelSerializer.ClearAllowlist();
+        }
+    }
+
+    [TestMethod]
+    public async Task P2P_Security_BufferTransfer_RejectsOversized()
+    {
+        var transfer = new P2PBufferTransfer { MaxTotalChunks = 100, MaxTotalBytes = 1024 * 1024 };
+
+        // Malicious chunk claiming absurd size
+        var malicious = new BufferChunk
+        {
+            BufferId = "evil",
+            ChunkIndex = 0,
+            TotalChunks = int.MaxValue, // would OOM without bounds check
+            TotalBytes = int.MaxValue,
+            Data = new byte[1],
+        };
+
+        var accepted = transfer.ReceiveChunk(malicious);
+        if (accepted)
+            throw new Exception("SECURITY FAIL: Oversized chunk should be rejected");
+        if (transfer.ActiveTransfers != 0)
+            throw new Exception("Rejected chunk should not create a transfer");
+    }
+
+    [TestMethod]
+    public async Task P2P_Security_BufferTransfer_RejectsNegativeIndex()
+    {
+        var transfer = new P2PBufferTransfer();
+
+        var badIndex = new BufferChunk
+        {
+            BufferId = "bad",
+            ChunkIndex = -1,
+            TotalChunks = 5,
+            TotalBytes = 5000,
+            Data = new byte[1000],
+        };
+
+        var accepted = transfer.ReceiveChunk(badIndex);
+        if (accepted)
+            throw new Exception("SECURITY FAIL: Negative chunk index should be rejected");
+    }
+
+    [TestMethod]
+    public async Task P2P_Security_BufferTransfer_RejectsOutOfRangeIndex()
+    {
+        var transfer = new P2PBufferTransfer();
+
+        var outOfRange = new BufferChunk
+        {
+            BufferId = "oor",
+            ChunkIndex = 10, // only 5 chunks total
+            TotalChunks = 5,
+            TotalBytes = 5000,
+            Data = new byte[1000],
+        };
+
+        var accepted = transfer.ReceiveChunk(outOfRange);
+        if (accepted)
+            throw new Exception("SECURITY FAIL: Out-of-range chunk index should be rejected");
+    }
+
+    [TestMethod]
+    public async Task P2P_Security_KickRequiresCoordinator()
+    {
+        await using var client = new SpawnDev.WebTorrent.WebTorrentClient();
+        await using var coordinator = new P2PSwarmCoordinator(client);
+        // Default role is Worker — should not be able to kick
+        coordinator.HandlePeerConnected("target", new PeerCapabilities { PeerId = "target" });
+
+        var result = coordinator.KickPeer("target");
+        if (result)
+            throw new Exception("SECURITY FAIL: Worker should not be able to kick peers");
+    }
 }
