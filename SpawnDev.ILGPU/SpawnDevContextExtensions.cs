@@ -169,6 +169,26 @@ namespace SpawnDev.ILGPU
         }
 
         /// <summary>
+        /// Copies a range of data from any ILGPU buffer back to the host.
+        /// Works on all backends (WebGPU, WebGL, Wasm, CUDA, OpenCL, CPU).
+        /// For small reads (≤64 elements), the overhead of reading the full buffer is negligible.
+        /// </summary>
+        /// <typeparam name="T">The element type of the buffer.</typeparam>
+        /// <param name="buffer">The MemoryBuffer1D to read from.</param>
+        /// <param name="offset">Start offset in elements.</param>
+        /// <param name="count">Number of elements to read.</param>
+        /// <returns>An array containing the requested range.</returns>
+        public static async Task<T[]> CopyToHostAsync<T>(
+            this MemoryBuffer1D<T, Stride1D.Dense> buffer, long offset, long count) where T : unmanaged
+        {
+            var all = await CopyToHostAsync<T>(buffer);
+            if (offset == 0 && count == all.Length) return all;
+            var result = new T[count];
+            System.Array.Copy(all, offset, result, 0, count);
+            return result;
+        }
+
+        /// <summary>
         /// Copies data from any ILGPU buffer (WebGPU, WebGL, Workers, or CPU) back to the host.
         /// Automatically detects the underlying buffer type and uses the appropriate method.
         /// Use this instead of backend-specific CopyToHostAsync to avoid ambiguity.
