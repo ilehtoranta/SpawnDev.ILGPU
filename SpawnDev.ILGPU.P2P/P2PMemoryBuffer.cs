@@ -29,6 +29,7 @@ public class P2PMemoryBuffer : MemoryBuffer
 
     /// <summary>
     /// Local shadow copy of the buffer data (for send/receive staging).
+    /// Access must be synchronized via ShadowLock.
     /// </summary>
     internal byte[] ShadowData { get; set; }
 
@@ -36,6 +37,9 @@ public class P2PMemoryBuffer : MemoryBuffer
     /// Whether the shadow has been modified locally and needs to be sent to the peer.
     /// </summary>
     internal bool IsDirty { get; set; }
+
+    /// <summary>Lock for thread-safe shadow data access.</summary>
+    internal readonly object ShadowLock = new();
 
     /// <summary>
     /// Unique buffer ID for transport-level tracking.
@@ -53,10 +57,12 @@ public class P2PMemoryBuffer : MemoryBuffer
     protected override void MemSet(
         AcceleratorStream stream, byte value, in ArrayView<byte> targetView)
     {
-        // Fill the local shadow copy with the specified byte value
-        Array.Fill(ShadowData, value, 0, (int)Math.Min(targetView.Length, ShadowData.Length));
-        IsDirty = true;
-        IsLocalCurrent = true;
+        lock (ShadowLock)
+        {
+            Array.Fill(ShadowData, value, 0, (int)Math.Min(targetView.Length, ShadowData.Length));
+            IsDirty = true;
+            IsLocalCurrent = true;
+        }
     }
 
     /// <inheritdoc/>
@@ -65,21 +71,22 @@ public class P2PMemoryBuffer : MemoryBuffer
         in ArrayView<byte> sourceView,
         in ArrayView<byte> targetView)
     {
-        // Host → P2P buffer: store in local shadow for later transmission
-        // The source is a host memory view — copy its data to our shadow
-        if (sourceView.Length > 0 && sourceView.Length <= ShadowData.Length)
+        lock (ShadowLock)
         {
-            unsafe
+            if (sourceView.Length > 0 && sourceView.Length <= ShadowData.Length)
             {
-                var srcPtr = sourceView.LoadEffectiveAddressAsPtr();
-                if (srcPtr != IntPtr.Zero)
+                unsafe
                 {
-                    System.Runtime.InteropServices.Marshal.Copy(
-                        srcPtr, ShadowData, 0, (int)Math.Min(sourceView.Length, ShadowData.Length));
+                    var srcPtr = sourceView.LoadEffectiveAddressAsPtr();
+                    if (srcPtr != IntPtr.Zero)
+                    {
+                        System.Runtime.InteropServices.Marshal.Copy(
+                            srcPtr, ShadowData, 0, (int)Math.Min(sourceView.Length, ShadowData.Length));
+                    }
                 }
+                IsDirty = true;
+                IsLocalCurrent = true;
             }
-            IsDirty = true;
-            IsLocalCurrent = true;
         }
     }
 
@@ -89,16 +96,18 @@ public class P2PMemoryBuffer : MemoryBuffer
         in ArrayView<byte> sourceView,
         in ArrayView<byte> targetView)
     {
-        // P2P buffer → host: copy from local shadow to the target host memory
-        if (targetView.Length > 0 && ShadowData.Length > 0)
+        lock (ShadowLock)
         {
-            unsafe
+            if (targetView.Length > 0 && ShadowData.Length > 0)
             {
-                var dstPtr = targetView.LoadEffectiveAddressAsPtr();
-                if (dstPtr != IntPtr.Zero)
+                unsafe
                 {
-                    System.Runtime.InteropServices.Marshal.Copy(
-                        ShadowData, 0, dstPtr, (int)Math.Min(targetView.Length, ShadowData.Length));
+                    var dstPtr = targetView.LoadEffectiveAddressAsPtr();
+                    if (dstPtr != IntPtr.Zero)
+                    {
+                        System.Runtime.InteropServices.Marshal.Copy(
+                            ShadowData, 0, dstPtr, (int)Math.Min(targetView.Length, ShadowData.Length));
+                    }
                 }
             }
         }
@@ -109,9 +118,12 @@ public class P2PMemoryBuffer : MemoryBuffer
     /// </summary>
     internal void UpdateFromRemote(byte[] data)
     {
-        Array.Copy(data, ShadowData, Math.Min(data.Length, ShadowData.Length));
-        IsDirty = false;
-        IsLocalCurrent = true;
+        lock (ShadowLock)
+        {
+            Array.Copy(data, ShadowData, Math.Min(data.Length, ShadowData.Length));
+            IsDirty = false;
+            IsLocalCurrent = true;
+        }
     }
 
     /// <summary>
@@ -119,8 +131,11 @@ public class P2PMemoryBuffer : MemoryBuffer
     /// </summary>
     internal byte[] GetShadowForTransmission()
     {
-        IsDirty = false;
-        return ShadowData.ToArray();
+        lock (ShadowLock)
+        {
+            IsDirty = false;
+            return ShadowData.ToArray();
+        }
     }
 
     /// <inheritdoc/>

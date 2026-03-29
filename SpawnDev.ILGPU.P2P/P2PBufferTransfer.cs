@@ -79,6 +79,8 @@ public class P2PBufferTransfer
             return false;
         if (chunk.ChunkIndex < 0 || chunk.ChunkIndex >= chunk.TotalChunks)
             return false;
+        if (chunk.Data == null || chunk.Data.Length == 0 || chunk.Data.Length > MaxChunkSize)
+            return false;
 
         var state = _inProgress.GetOrAdd(chunk.BufferId, _ => new BufferTransferState
         {
@@ -165,11 +167,11 @@ public class P2PBufferTransfer
         for (int i = 0; i < state.TotalChunks; i++)
         {
             var chunk = state.ReceivedChunks[i];
-            if (chunk != null)
-            {
-                Array.Copy(chunk, 0, result, pos, chunk.Length);
-                pos += chunk.Length;
-            }
+            if (chunk == null)
+                throw new InvalidOperationException(
+                    $"Buffer {state.BufferId} missing chunk {i}/{state.TotalChunks}");
+            Array.Copy(chunk, 0, result, pos, chunk.Length);
+            pos += chunk.Length;
         }
         return result;
     }

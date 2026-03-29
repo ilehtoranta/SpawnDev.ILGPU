@@ -286,7 +286,9 @@ public class P2PCompute : IAsyncDisposable
     public async ValueTask DisposeAsync()
     {
         if (Worker != null) await Worker.DisposeAsync();
+        if (Bridge != null) await Bridge.DisposeAsync();
         if (Transport != null) await Transport.DisposeAsync();
+        Dispatcher?.Dispose();
         await Coordinator.DisposeAsync();
         await Identity.DisposeAsync();
     }

@@ -55,6 +55,8 @@ public class P2PKernelLauncher
         long gridDim,
         Dictionary<int, BufferData> bufferBindings)
     {
+        ArgumentNullException.ThrowIfNull(kernelMethod);
+        ArgumentNullException.ThrowIfNull(bufferBindings);
         var launcher = LoadAndCache(kernelMethod);
         var paramInfos = kernelMethod.GetParameters();
         var args = new object[paramInfos.Length];

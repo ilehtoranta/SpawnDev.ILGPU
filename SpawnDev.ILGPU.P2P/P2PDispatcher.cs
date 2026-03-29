@@ -11,8 +11,9 @@ namespace SpawnDev.ILGPU.P2P;
 ///   - New peers are picked up on next dispatch (no mid-kernel rebalancing)
 ///   - Heartbeat monitoring detects stale peers before they fail
 /// </summary>
-public class P2PDispatcher
+public class P2PDispatcher : IDisposable
 {
+    private bool _disposed;
     private readonly P2PAccelerator _accelerator;
     private readonly Dictionary<string, PendingDispatch> _pending = new();
     private readonly object _lock = new();
@@ -452,6 +453,14 @@ public class P2PDispatcher
     /// Wire this to P2PTransport.SendMessageAsync.
     /// </summary>
     public event Action<string, P2PMessage>? OnSendMessage;
+
+    /// <inheritdoc/>
+    public void Dispose()
+    {
+        if (_disposed) return;
+        _disposed = true;
+        StopMonitoring();
+    }
 
     /// <summary>
     /// Get a snapshot of all pending dispatches (for coordinator transfer).

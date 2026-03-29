@@ -18,7 +18,7 @@ namespace SpawnDev.ILGPU.P2P;
 ///   bridge.AttachToSwarm(torrentSwarm);
 ///   // Automatically wires sd_compute to every peer that connects.
 /// </summary>
-public class P2PWebRtcBridge
+public class P2PWebRtcBridge : IAsyncDisposable
 {
     private readonly P2PTransport _transport;
     private readonly System.Collections.Concurrent.ConcurrentDictionary<string, SdComputeExtension> _extensions = new();
@@ -101,5 +101,13 @@ public class P2PWebRtcBridge
     public bool IsComputeCapable(string peerId)
     {
         return _extensions.TryGetValue(peerId, out var ext) && ext.IsSupported;
+    }
+
+    /// <inheritdoc/>
+    public ValueTask DisposeAsync()
+    {
+        _extensions.Clear();
+        _notified.Clear();
+        return ValueTask.CompletedTask;
     }
 }
