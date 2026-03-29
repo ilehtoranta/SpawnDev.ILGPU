@@ -1789,4 +1789,99 @@ public abstract partial class BackendTestBase
         if (!handshake.ContainsKey("sd_compute_version"))
             throw new Exception("Should include version");
     }
+
+    // ═══════════════════════════════════════════════════════════
+    //  Two-Node Integration: Coordinator + Worker via Mock Transport
+    // ═══════════════════════════════════════════════════════════
+
+    [TestMethod]
+    public async Task P2P_TwoNode_FullCycle() => await RunTest(async accelerator =>
+    {
+        // === NODE 1: Coordinator ===
+        await using var coordClient = new SpawnDev.WebTorrent.WebTorrentClient();
+        await using var coordinator = new P2PSwarmCoordinator(coordClient);
+        await coordinator.CreateSwarmAsync("two-node-test");
+        using var coordCtx = global::ILGPU.Context.CreateDefault();
+        var coordAccel = coordinator.CreateAccelerator(coordCtx);
+        var dispatcher = new P2PDispatcher(coordAccel);
+        await using var coordTransport = new P2PTransport(coordClient, coordinator, dispatcher);
+
+        // === NODE 2: Worker ===
+        await using var workerClient = new SpawnDev.WebTorrent.WebTorrentClient();
+        await using var workerCoord = new P2PSwarmCoordinator(workerClient);
+        var workerP2PAccel = workerCoord.CreateAccelerator(coordCtx);
+        var workerDispatcher = new P2PDispatcher(workerP2PAccel);
+        await using var workerTransport = new P2PTransport(workerClient, workerCoord, workerDispatcher);
+        await using var worker = new P2PWorker(workerTransport);
+        // Worker uses the REAL backend (CPU/CUDA/WebGPU — whatever this test class runs)
+        worker.Initialize(accelerator.Context, accelerator);
+
+        // === Wire mock transport: bidirectional ===
+        // Coordinator → Worker
+        coordTransport.RegisterPeer("worker-node", async (data) =>
+        {
+            await workerTransport.HandleIncomingDataAsync("coord-node", data);
+        });
+        // Worker → Coordinator
+        workerTransport.RegisterPeer("coord-node", async (data) =>
+        {
+            await coordTransport.HandleIncomingDataAsync("worker-node", data);
+        });
+
+        // === Connect worker as peer ===
+        var caps = worker.BuildCapabilities("worker-node");
+        coordinator.HandlePeerConnected("worker-node", caps);
+        coordAccel.AddPeer(new RemotePeer
+        {
+            PeerId = "worker-node",
+            IsConnected = true,
+            Capabilities = caps,
+        });
+
+        // === Send buffer data to worker ===
+        var tensorA = new byte[4096]; // 1024 floats
+        var tensorB = new byte[4096];
+        for (int i = 0; i < 4096; i++) { tensorA[i] = (byte)(i % 256); tensorB[i] = 1; }
+        worker.ReceiveBuffer("a", tensorA);
+        worker.ReceiveBuffer("b", tensorB);
+
+        // === Dispatch kernel ===
+        var method = typeof(BackendTestBase).GetMethod(nameof(TestVectorAdd),
+            System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)!;
+        var request = P2PKernelSerializer.CreateDispatch(method, gridDimX: 1024);
+        request.Buffers = new[]
+        {
+            new BufferBinding { ParameterIndex = 0, BufferId = "a", Length = 1024, ElementSize = 4 },
+            new BufferBinding { ParameterIndex = 1, BufferId = "b", Length = 1024, ElementSize = 4 },
+            new BufferBinding { ParameterIndex = 2, BufferId = "result", Length = 1024, ElementSize = 4 },
+        };
+
+        // === Worker handles dispatch ===
+        string? completedId = null;
+        bool? completedSuccess = null;
+        string? compiledKernel = null;
+        worker.OnKernelCompleted += (id, success, ms) =>
+        {
+            completedId = id;
+            completedSuccess = success;
+        };
+        worker.OnKernelCompiled += name => compiledKernel = name;
+
+        await worker.HandleDispatchAsync("coord-node", request);
+
+        // === Verify ===
+        if (compiledKernel == null)
+            throw new Exception($"Worker should compile kernel on {accelerator.AcceleratorType}");
+        if (completedSuccess != true)
+            throw new Exception($"Dispatch should succeed on {accelerator.AcceleratorType}");
+        if (completedId != request.DispatchId)
+            throw new Exception("Dispatch ID mismatch");
+
+        // Worker should have result buffer
+        var resultBuf = worker.GetBuffer("result");
+        if (resultBuf == null)
+            throw new Exception("Worker should have result buffer");
+
+        Console.WriteLine($"[P2P TwoNode] Coordinator → Worker → Compile({accelerator.AcceleratorType}) → Result. PASS.");
+    });
 }
