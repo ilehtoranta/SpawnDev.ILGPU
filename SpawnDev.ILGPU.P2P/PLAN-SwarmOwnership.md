@@ -282,13 +282,29 @@ Replace the stub `IDhtSigner` implementations in SpawnDev.WebTorrent with real `
 
 ## Implementation Order
 
-1. **Replace WebTorrent crypto stubs** with SpawnDev.BlazorJS.Cryptography (Data's territory)
+1. ~~**Replace WebTorrent crypto stubs** with SpawnDev.BlazorJS.Cryptography~~ **DONE** (Data, 2026-03-29) — EcdsaP256Signer wired to IPortableCrypto, 15 ECDSA security tests passing in browser, AgentChannel relay signed+verified
 2. **SwarmIdentity** — key generation, import/export, sign/verify
 3. **KeyRegistry** — data structure, serialization, BEP 46 publish/subscribe
 4. **RoleAssignment** — signed role messages, verification
 5. **Authority checks** — integrate into P2PWorker, P2PSwarmCoordinator, P2PTransport
-6. **WebAuthn/HardwareKey** — browser integration for YubiKey/passkey support
-7. **Tests** — key management, role assignment, authority verification, split-brain resolution
+6. **WebAuthn/HardwareKey** — browser integration for YubiKey/passkey support (**REQUIRED for P2P accelerator** — hardware-backed swarm ownership)
+7. **Tests** — key management, role assignment, authority verification, split-brain resolution, YubiKey round-trip
+
+## WebAuthn / YubiKey Checklist
+
+Required for AcceleratorType.P2P production readiness.
+
+- [ ] **HardwareKeyProvider** — adapt WebAuthn flow from `SpawnDev.AccountsShared/AccountService.cs`
+  - [ ] `RegisterAsync()` — create new credential via `navigator.credentials.create` (browser) or platform authenticator (desktop)
+  - [ ] `AuthenticateAsync()` — get assertion via `navigator.credentials.get`
+  - [ ] Support for roaming authenticators (YubiKey) and platform authenticators (Windows Hello, Touch ID)
+  - [ ] Serverless verification — no relying party server, use owner-signed KeyRegistry instead
+- [ ] **SwarmIdentity.FromHardwareKeyAsync()** — bind hardware key to swarm ownership
+- [ ] **Key registration UI** — demo page for registering YubiKey as swarm owner
+- [ ] **Cross-device ownership proof** — owner authenticates on new device, swarm recognizes the key
+- [ ] **Multi-key setup** — register backup YubiKey in case primary is lost
+- [ ] **Tests** — hardware key mock for unit tests, real YubiKey for integration tests
+- [ ] **Reference:** `D:\users\tj\Projects\SpawnDev.AccountsServer` + `SpawnDev.AccountsShared` (TJ's YubiKey tested and working)
 
 ---
 

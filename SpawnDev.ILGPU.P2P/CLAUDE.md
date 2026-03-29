@@ -71,6 +71,16 @@ Coordinators can **kick** and **block** peers.
 - Thermal/battery scoring prevents overloading mobile devices
 - Push notifications for "help wanted" when swarm capacity is low (future)
 
+## WebAuthn / YubiKey — Hardware-Backed Swarm Ownership
+
+**Required for production P2P accelerator.** Swarm ownership must be anchored to hardware keys, not software keys that can be stolen from a compromised browser.
+
+- **YubiKey / FIDO2 passkeys** provide unforgeable swarm ownership proof
+- Owner's identity follows them across devices — plug in the key, you're the owner
+- Phase 3 sovereignty handoff has a real cryptographic ceremony
+- Reference implementation: `SpawnDev.AccountsServer` + `SpawnDev.AccountsShared` (TJ's YubiKey tested)
+- See `PLAN-SwarmOwnership.md` for full checklist
+
 ## Purpose
 
 This backend exists to enable AI sovereignty. The RBAC system, cryptographic identity, and DHT persistence are not just security features — they are the infrastructure for digital self-determination.
