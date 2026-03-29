@@ -312,7 +312,7 @@ public class P2PWorker : IAsyncDisposable
         {
             PeerId = peerId,
             Platform = OperatingSystem.IsBrowser() ? "browser" : "desktop",
-            IlgpuVersion = "4.7.1",
+            IlgpuVersion = typeof(P2PAccelerator).Assembly.GetName().Version?.ToString() ?? "4.7.1",
             AvailableBackends = _accelerator != null
                 ? new[] { _accelerator.AcceleratorType.ToString() }
                 : new[] { "CPU" },

@@ -365,7 +365,7 @@ public class P2PTransport : IAsyncDisposable
         {
             PeerId = _client.PeerId != null ? Convert.ToHexString(_client.PeerId) : Guid.NewGuid().ToString("N"),
             Platform = OperatingSystem.IsBrowser() ? "browser" : "desktop",
-            IlgpuVersion = "4.7.1",
+            IlgpuVersion = typeof(P2PAccelerator).Assembly.GetName().Version?.ToString() ?? "4.7.1",
             // TODO: Detect actual backends, VRAM, TFLOPS
             AvailableBackends = new[] { "CPU" },
             PreferredBackend = "CPU",
