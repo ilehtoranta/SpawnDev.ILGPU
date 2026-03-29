@@ -290,37 +290,45 @@ public class P2PDispatcher
 
     private void CheckHeartbeats(object? state)
     {
-        var now = DateTime.UtcNow;
-
-        // Check for timed-out dispatches
-        List<PendingDispatch> timedOut;
-        lock (_lock)
+        try
         {
-            timedOut = _pending.Values
-                .Where(p => (now - p.StartTime).TotalMilliseconds > DispatchTimeoutMs)
-                .ToList();
-        }
+            var now = DateTime.UtcNow;
 
-        foreach (var dispatch in timedOut)
-        {
-            dispatch.AssignedPeer.DecrementPending();
-            RetryDispatch(dispatch, "Dispatch timed out");
-        }
-
-        // Check for stale peers
-        foreach (var peer in _accelerator.Peers.Where(p => p.IsConnected && IsStale(p)).ToList())
-        {
-            HandlePeerLost(peer.PeerId);
-        }
-
-        // Proactive thermal eviction: if a peer's capabilities degrade,
-        // move its heavy work to healthier peers before it crashes.
-        foreach (var peer in _accelerator.Peers.Where(p => p.IsConnected).ToList())
-        {
-            if (ShouldEvict(peer))
+            // Check for timed-out dispatches
+            List<PendingDispatch> timedOut;
+            lock (_lock)
             {
-                InitiateGracefulHandoff(peer);
+                timedOut = _pending.Values
+                    .Where(p => (now - p.StartTime).TotalMilliseconds > DispatchTimeoutMs)
+                    .ToList();
             }
+
+            foreach (var dispatch in timedOut)
+            {
+                dispatch.AssignedPeer.DecrementPending();
+                RetryDispatch(dispatch, "Dispatch timed out");
+            }
+
+            // Check for stale peers
+            foreach (var peer in _accelerator.Peers.Where(p => p.IsConnected && IsStale(p)).ToList())
+            {
+                HandlePeerLost(peer.PeerId);
+            }
+
+            // Proactive thermal eviction: if a peer's capabilities degrade,
+            // move its heavy work to healthier peers before it crashes.
+            foreach (var peer in _accelerator.Peers.Where(p => p.IsConnected).ToList())
+            {
+                if (ShouldEvict(peer))
+                {
+                    InitiateGracefulHandoff(peer);
+                }
+            }
+        }
+        catch (Exception)
+        {
+            // Timer callback must never throw — a crash here silently kills heartbeat monitoring.
+            // Swallow and continue; the next tick will retry.
         }
     }
 
@@ -386,14 +394,20 @@ public class P2PDispatcher
 
     private void SendDispatchToPeer(RemotePeer peer, KernelDispatchRequest request)
     {
-        // Serialize and send via WebRTC data channel
         var message = new P2PMessage
         {
             Type = P2PMessageType.KernelDispatch,
             Payload = System.Text.Json.JsonSerializer.SerializeToElement(request),
         };
-        // TODO: Wire to actual WebRTC data channel via WebTorrent peer connection
+        // Fire event for transport layer to send via WebRTC
+        OnSendMessage?.Invoke(peer.PeerId, message);
     }
+
+    /// <summary>
+    /// Fired when the dispatcher needs to send a message to a peer.
+    /// Wire this to P2PTransport.SendMessageAsync.
+    /// </summary>
+    public event Action<string, P2PMessage>? OnSendMessage;
 }
 
 /// <summary>

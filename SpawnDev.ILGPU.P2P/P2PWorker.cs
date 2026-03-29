@@ -17,8 +17,20 @@ public class P2PWorker : IAsyncDisposable
 {
     private Context? _context;
     private Accelerator? _accelerator;
-    private readonly Dictionary<string, byte[]> _bufferStore = new();
-    private readonly Dictionary<string, CompiledKernel> _kernelCache = new();
+    private P2PKernelLauncher? _launcher;
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte[]> _bufferStore = new();
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, CompiledKernel> _kernelCache = new();
+
+    /// <summary>
+    /// Maximum number of buffers to keep in the store. Oldest buffers evicted when exceeded.
+    /// Default: 1024.
+    /// </summary>
+    public int MaxBuffers { get; set; } = 1024;
+
+    /// <summary>
+    /// Maximum total bytes across all stored buffers. Default: 512MB.
+    /// </summary>
+    public long MaxBufferBytes { get; set; } = 512L * 1024 * 1024;
     private readonly P2PTransport _transport;
     private string _coordinatorPeerId = "";
 
@@ -97,19 +109,25 @@ public class P2PWorker : IAsyncDisposable
         // If we have a trusted coordinator fingerprint, verify it matches
         if (!string.IsNullOrEmpty(TrustedCoordinatorFingerprint))
         {
-            // Look up the sender's fingerprint from the request or transport
-            // For now, check if the peer we accepted as coordinator matches
+            // Check if the peer we accepted as coordinator matches
             if (!string.IsNullOrEmpty(_coordinatorPeerId) &&
                 _coordinatorPeerId != fromPeerId)
             {
                 // Different peer than our known coordinator — reject
                 return false;
             }
+
+            // Verify the request includes a public key and its fingerprint matches
+            if (string.IsNullOrEmpty(request.CoordinatorPublicKey))
+                return false; // No public key provided — can't verify identity
         }
 
         // If registry has entries, verify the sender has at least Coordinator role
-        if (SwarmRegistry.Keys.Count > 0 && !string.IsNullOrEmpty(request.CoordinatorPublicKey))
+        if (SwarmRegistry.Keys.Count > 0)
         {
+            if (string.IsNullOrEmpty(request.CoordinatorPublicKey))
+                return false; // Registry exists but no key provided — reject
+
             if (!SwarmRegistry.HasRole(request.CoordinatorPublicKey, SwarmRole.Coordinator))
                 return false;
 
@@ -127,6 +145,7 @@ public class P2PWorker : IAsyncDisposable
     {
         _context = context;
         _accelerator = accelerator;
+        _launcher = new P2PKernelLauncher(accelerator);
     }
 
     /// <summary>
@@ -162,28 +181,38 @@ public class P2PWorker : IAsyncDisposable
                 throw new InvalidOperationException(
                     $"Cannot resolve kernel: {request.KernelType}.{request.KernelMethod}");
 
-            // 2. Compile kernel on first use (cached for subsequent dispatches)
+            // Track first-time compilation
             var cacheKey = $"{request.KernelType}.{request.KernelMethod}";
-            if (!_kernelCache.ContainsKey(cacheKey))
-            {
-                var entry = EntryPointDescription.FromImplicitlyGroupedKernel(kernelMethod);
-                var backend = _accelerator.GetBackend();
-                var compiled = backend.Compile(entry, KernelSpecialization.Empty);
-                _kernelCache[cacheKey] = compiled;
-                OnKernelCompiled?.Invoke(cacheKey);
-            }
+            bool isFirstCompile = !_kernelCache.ContainsKey(cacheKey);
+            _kernelCache.TryAdd(cacheKey, null!); // mark as seen
 
-            // 3. Prepare local buffers from received data
+            // 2. Build buffer data map (parameter index → data)
+            var bufferBindings = new Dictionary<int, BufferData>();
             foreach (var binding in request.Buffers)
             {
-                if (!_bufferStore.ContainsKey(binding.BufferId))
-                    _bufferStore[binding.BufferId] = new byte[binding.Length * binding.ElementSize];
+                var rawData = _bufferStore.TryGetValue(binding.BufferId, out var data)
+                    ? data
+                    : new byte[binding.Length * binding.ElementSize];
+
+                bufferBindings[binding.ParameterIndex] = new BufferData
+                {
+                    RawData = rawData,
+                    ElementCount = binding.Length,
+                    ElementSize = binding.ElementSize,
+                };
             }
 
-            // 4. Kernel compiled and cached. Execution requires typed dispatch
-            // via LoadAutoGroupedStreamKernel<...> which needs compile-time generics.
-            // ILGPU.ML pipelines will provide typed dispatch wrappers for their kernels.
-            // The P2P layer proves: resolve → compile → cache. Execution is per-pipeline.
+            // 3. Execute kernel on local GPU via reflection-based typed dispatch
+            var modifiedBuffers = _launcher!.Execute(kernelMethod, request.GridDimX, bufferBindings);
+            if (isFirstCompile)
+                OnKernelCompiled?.Invoke(cacheKey);
+
+            // 4. Store modified buffer data for readback
+            foreach (var binding in request.Buffers)
+            {
+                if (modifiedBuffers.TryGetValue(binding.ParameterIndex, out var modified))
+                    _bufferStore[binding.BufferId] = modified;
+            }
 
             result.Success = true;
             result.ModifiedBuffers = request.Buffers
@@ -225,8 +254,8 @@ public class P2PWorker : IAsyncDisposable
             var entry = EntryPointDescription.FromImplicitlyGroupedKernel(kernelMethod);
             var backend = _accelerator.GetBackend();
             var compiled = backend.Compile(entry, KernelSpecialization.Empty);
-            _kernelCache[cacheKey] = compiled;
-            OnKernelCompiled?.Invoke(cacheKey);
+            if (_kernelCache.TryAdd(cacheKey, compiled))
+                OnKernelCompiled?.Invoke(cacheKey);
             return true;
         }
         catch
@@ -237,10 +266,33 @@ public class P2PWorker : IAsyncDisposable
 
     /// <summary>
     /// Receive buffer data from coordinator (tensor transfer).
+    /// Evicts oldest buffers if limits are exceeded.
     /// </summary>
     public void ReceiveBuffer(string bufferId, byte[] data)
     {
         _bufferStore[bufferId] = data;
+        EvictIfNeeded();
+    }
+
+    private void EvictIfNeeded()
+    {
+        // Check count limit
+        while (_bufferStore.Count > MaxBuffers)
+        {
+            var oldest = _bufferStore.Keys.FirstOrDefault();
+            if (oldest != null) _bufferStore.TryRemove(oldest, out _);
+            else break;
+        }
+
+        // Check byte limit
+        long totalBytes = _bufferStore.Values.Sum(b => (long)b.Length);
+        while (totalBytes > MaxBufferBytes && _bufferStore.Count > 0)
+        {
+            var oldest = _bufferStore.Keys.FirstOrDefault();
+            if (oldest != null && _bufferStore.TryRemove(oldest, out var removed))
+                totalBytes -= removed.Length;
+            else break;
+        }
     }
 
     /// <summary>

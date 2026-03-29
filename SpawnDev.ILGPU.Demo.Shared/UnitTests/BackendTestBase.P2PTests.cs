@@ -1283,11 +1283,13 @@ public abstract partial class BackendTestBase
         var dispatcher = new P2PDispatcher(accelerator);
         await using var transport = new P2PTransport(client, coordinator, dispatcher);
 
-        // Worker side
+        // Worker side — uses a real CPU accelerator for execution
+        var cpuAccel = global::ILGPU.Runtime.CPU.CPUDevice.Default.CreateAccelerator(ctx);
         await using var worker = new P2PWorker(transport);
-        worker.Initialize(ctx, accelerator);
+        worker.Initialize(ctx, cpuAccel);
         worker.ReceiveBuffer("buf-a", new byte[4096]);
         worker.ReceiveBuffer("buf-b", new byte[4096]);
+        worker.ReceiveBuffer("buf-result", new byte[4096]);
 
         // Create dispatch
         var method = typeof(BackendTestBase).GetMethod(nameof(TestVectorAdd),
@@ -1295,9 +1297,9 @@ public abstract partial class BackendTestBase
         var request = P2PKernelSerializer.CreateDispatch(method, gridDimX: 1024);
         request.Buffers = new[]
         {
-            new BufferBinding { ParameterIndex = 0, BufferId = "buf-a", Length = 1024, ElementSize = 4 },
-            new BufferBinding { ParameterIndex = 1, BufferId = "buf-b", Length = 1024, ElementSize = 4 },
-            new BufferBinding { ParameterIndex = 2, BufferId = "buf-result", Length = 1024, ElementSize = 4 },
+            new BufferBinding { ParameterIndex = 1, BufferId = "buf-a", Length = 1024, ElementSize = 4 },
+            new BufferBinding { ParameterIndex = 2, BufferId = "buf-b", Length = 1024, ElementSize = 4 },
+            new BufferBinding { ParameterIndex = 3, BufferId = "buf-result", Length = 1024, ElementSize = 4 },
         };
 
         // Simulate the full chain: serialize dispatch, worker handles, returns result
@@ -1332,10 +1334,11 @@ public abstract partial class BackendTestBase
         await using var coordinator = new P2PSwarmCoordinator(client);
         using var ctx = global::ILGPU.Context.CreateDefault();
         var accelerator = coordinator.CreateAccelerator(ctx);
+        var cpuAccel = global::ILGPU.Runtime.CPU.CPUDevice.Default.CreateAccelerator(ctx);
         var dispatcher = new P2PDispatcher(accelerator);
         await using var transport = new P2PTransport(client, coordinator, dispatcher);
         await using var worker = new P2PWorker(transport);
-        worker.Initialize(ctx, accelerator);
+        worker.Initialize(ctx, cpuAccel);
 
         // Track worker events
         string? startedId = null;
@@ -1352,6 +1355,15 @@ public abstract partial class BackendTestBase
         var method = typeof(BackendTestBase).GetMethod(nameof(TestVectorAdd),
             System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)!;
         var request = P2PKernelSerializer.CreateDispatch(method, gridDimX: 512);
+        request.Buffers = new[]
+        {
+            new BufferBinding { ParameterIndex = 1, BufferId = "a", Length = 512, ElementSize = 4 },
+            new BufferBinding { ParameterIndex = 2, BufferId = "b", Length = 512, ElementSize = 4 },
+            new BufferBinding { ParameterIndex = 3, BufferId = "r", Length = 512, ElementSize = 4 },
+        };
+        worker.ReceiveBuffer("a", new byte[2048]);
+        worker.ReceiveBuffer("b", new byte[2048]);
+        worker.ReceiveBuffer("r", new byte[2048]);
 
         // Worker handles dispatch directly
         await worker.HandleDispatchAsync("coordinator", request);
@@ -1371,10 +1383,11 @@ public abstract partial class BackendTestBase
         await using var coordinator = new P2PSwarmCoordinator(client);
         using var ctx = global::ILGPU.Context.CreateDefault();
         var accelerator = coordinator.CreateAccelerator(ctx);
+        var cpuAccel = global::ILGPU.Runtime.CPU.CPUDevice.Default.CreateAccelerator(ctx);
         var dispatcher = new P2PDispatcher(accelerator);
         await using var transport = new P2PTransport(client, coordinator, dispatcher);
         await using var worker = new P2PWorker(transport);
-        worker.Initialize(ctx, accelerator);
+        worker.Initialize(ctx, cpuAccel);
 
         bool? completedSuccess = null;
         worker.OnKernelCompleted += (id, success, ms) => completedSuccess = success;
@@ -1448,6 +1461,15 @@ public abstract partial class BackendTestBase
         var method = typeof(BackendTestBase).GetMethod(nameof(TestVectorAdd),
             System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)!;
         var request = P2PKernelSerializer.CreateDispatch(method, gridDimX: 64);
+        request.Buffers = new[]
+        {
+            new BufferBinding { ParameterIndex = 1, BufferId = "a", Length = 64, ElementSize = 4 },
+            new BufferBinding { ParameterIndex = 2, BufferId = "b", Length = 64, ElementSize = 4 },
+            new BufferBinding { ParameterIndex = 3, BufferId = "r", Length = 64, ElementSize = 4 },
+        };
+        worker.ReceiveBuffer("a", new byte[256]);
+        worker.ReceiveBuffer("b", new byte[256]);
+        worker.ReceiveBuffer("r", new byte[256]);
 
         await worker.HandleDispatchAsync("coordinator", request);
 
@@ -1669,7 +1691,7 @@ public abstract partial class BackendTestBase
     {
         await using var client = new SpawnDev.WebTorrent.WebTorrentClient();
         var dht = new SpawnDev.WebTorrent.Discovery.DhtDiscovery();
-        var channel = new SpawnDev.WebTorrent.AgentChannel(dht);
+        var channel = new SpawnDev.WebTorrent.AgentChannel(dht, new SpawnDev.WebTorrent.Discovery.HmacFallbackSigner());
         await using var coordinator = new P2PSwarmCoordinator(client);
         await coordinator.CreateSwarmAsync("state-test");
 
@@ -1686,7 +1708,7 @@ public abstract partial class BackendTestBase
     {
         await using var client = new SpawnDev.WebTorrent.WebTorrentClient();
         var dht = new SpawnDev.WebTorrent.Discovery.DhtDiscovery();
-        var channel = new SpawnDev.WebTorrent.AgentChannel(dht);
+        var channel = new SpawnDev.WebTorrent.AgentChannel(dht, new SpawnDev.WebTorrent.Discovery.HmacFallbackSigner());
         await using var coordinator = new P2PSwarmCoordinator(client);
         await coordinator.CreateSwarmAsync("publish-test");
 
@@ -1708,7 +1730,7 @@ public abstract partial class BackendTestBase
     {
         await using var client = new SpawnDev.WebTorrent.WebTorrentClient();
         var dht = new SpawnDev.WebTorrent.Discovery.DhtDiscovery();
-        var channel = new SpawnDev.WebTorrent.AgentChannel(dht);
+        var channel = new SpawnDev.WebTorrent.AgentChannel(dht, new SpawnDev.WebTorrent.Discovery.HmacFallbackSigner());
         await using var coordinator = new P2PSwarmCoordinator(client);
         // Don't call CreateSwarmAsync — stays as Worker role
 
@@ -1723,7 +1745,7 @@ public abstract partial class BackendTestBase
     {
         await using var client = new SpawnDev.WebTorrent.WebTorrentClient();
         var dht = new SpawnDev.WebTorrent.Discovery.DhtDiscovery();
-        var channel = new SpawnDev.WebTorrent.AgentChannel(dht);
+        var channel = new SpawnDev.WebTorrent.AgentChannel(dht, new SpawnDev.WebTorrent.Discovery.HmacFallbackSigner());
         await using var coordinator = new P2PSwarmCoordinator(client);
 
         var stateManager = new P2PStateManager(channel, coordinator);
@@ -1844,6 +1866,7 @@ public abstract partial class BackendTestBase
         for (int i = 0; i < 4096; i++) { tensorA[i] = (byte)(i % 256); tensorB[i] = 1; }
         worker.ReceiveBuffer("a", tensorA);
         worker.ReceiveBuffer("b", tensorB);
+        worker.ReceiveBuffer("result", new byte[4096]);
 
         // === Dispatch kernel ===
         var method = typeof(BackendTestBase).GetMethod(nameof(TestVectorAdd),
@@ -1851,9 +1874,9 @@ public abstract partial class BackendTestBase
         var request = P2PKernelSerializer.CreateDispatch(method, gridDimX: 1024);
         request.Buffers = new[]
         {
-            new BufferBinding { ParameterIndex = 0, BufferId = "a", Length = 1024, ElementSize = 4 },
-            new BufferBinding { ParameterIndex = 1, BufferId = "b", Length = 1024, ElementSize = 4 },
-            new BufferBinding { ParameterIndex = 2, BufferId = "result", Length = 1024, ElementSize = 4 },
+            new BufferBinding { ParameterIndex = 1, BufferId = "a", Length = 1024, ElementSize = 4 },
+            new BufferBinding { ParameterIndex = 2, BufferId = "b", Length = 1024, ElementSize = 4 },
+            new BufferBinding { ParameterIndex = 3, BufferId = "result", Length = 1024, ElementSize = 4 },
         };
 
         // === Worker handles dispatch ===
@@ -2302,5 +2325,444 @@ public abstract partial class BackendTestBase
             coordinator.HandlePeerConnected($"peer-{i}", new PeerCapabilities { PeerId = $"peer-{i}" });
 
         if (coordinator.PeerCount != 10) throw new Exception($"Count: {coordinator.PeerCount}");
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    //  Real Kernel Execution — P2PKernelLauncher
+    //  These tests prove actual GPU dispatch through the P2P system.
+    //  No mocks. Real accelerator, real kernels, real data.
+    // ═══════════════════════════════════════════════════════════
+
+    /// <summary>Test kernel: multiply each element by 2.</summary>
+    static void KernelMultiplyBy2(global::ILGPU.Index1D index, global::ILGPU.ArrayView<float> data)
+    {
+        data[index] = data[index] * 2.0f;
+    }
+
+    /// <summary>Test kernel: add two arrays.</summary>
+    static void KernelAddArrays(
+        global::ILGPU.Index1D index,
+        global::ILGPU.ArrayView<float> a,
+        global::ILGPU.ArrayView<float> b,
+        global::ILGPU.ArrayView<float> result)
+    {
+        result[index] = a[index] + b[index];
+    }
+
+    /// <summary>Test kernel: fill with constant value.</summary>
+    static void KernelFillConstant(
+        global::ILGPU.Index1D index,
+        global::ILGPU.ArrayView<int> data)
+    {
+        data[index] = 42;
+    }
+
+    [TestMethod]
+    public async Task P2P_KernelLauncher_LoadAndCache()
+    {
+        using var context = global::ILGPU.Context.CreateDefault();
+        using var accelerator = global::ILGPU.Runtime.CPU.CPUDevice.Default.CreateAccelerator(context);
+        var launcher = new P2PKernelLauncher(accelerator);
+
+        var method = typeof(BackendTestBase).GetMethod(
+            nameof(KernelMultiplyBy2),
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!;
+
+        var cached = launcher.LoadAndCache(method);
+        if (cached == null) throw new Exception("LoadAndCache returned null");
+        if (cached.Launcher == null) throw new Exception("Launcher delegate is null");
+        if (cached.ParameterTypes.Length != 2) throw new Exception($"Expected 2 params, got {cached.ParameterTypes.Length}");
+        if (launcher.CachedCount != 1) throw new Exception($"Cache count: {launcher.CachedCount}");
+
+        // Loading same method again should return cached
+        var cached2 = launcher.LoadAndCache(method);
+        if (launcher.CachedCount != 1) throw new Exception($"Should still be 1, got {launcher.CachedCount}");
+
+        Console.WriteLine("[P2P] KernelLauncher load + cache: OK");
+    }
+
+    [TestMethod]
+    public async Task P2P_KernelLauncher_Execute_MultiplyBy2()
+    {
+        using var context = global::ILGPU.Context.CreateDefault();
+        using var accelerator = global::ILGPU.Runtime.CPU.CPUDevice.Default.CreateAccelerator(context);
+        var launcher = new P2PKernelLauncher(accelerator);
+
+        var method = typeof(BackendTestBase).GetMethod(
+            nameof(KernelMultiplyBy2),
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!;
+
+        // Create input data: [1.0, 2.0, 3.0, 4.0]
+        var inputFloats = new float[] { 1.0f, 2.0f, 3.0f, 4.0f };
+        var inputBytes = new byte[inputFloats.Length * 4];
+        Buffer.BlockCopy(inputFloats, 0, inputBytes, 0, inputBytes.Length);
+
+        var bufferBindings = new Dictionary<int, BufferData>
+        {
+            [1] = new BufferData { RawData = inputBytes, ElementCount = 4, ElementSize = 4 }
+        };
+
+        var results = launcher.Execute(method, 4, bufferBindings);
+
+        if (!results.ContainsKey(1)) throw new Exception("Missing result for param 1");
+
+        // Verify output: [2.0, 4.0, 6.0, 8.0]
+        var outputFloats = new float[4];
+        Buffer.BlockCopy(results[1], 0, outputFloats, 0, 16);
+
+        for (int i = 0; i < 4; i++)
+        {
+            float expected = inputFloats[i] * 2.0f;
+            if (Math.Abs(outputFloats[i] - expected) > 0.001f)
+                throw new Exception($"[{i}] expected {expected}, got {outputFloats[i]}");
+        }
+
+        Console.WriteLine($"[P2P] KernelLauncher MultiplyBy2: [{string.Join(", ", outputFloats)}] ✓");
+    }
+
+    [TestMethod]
+    public async Task P2P_KernelLauncher_Execute_AddArrays()
+    {
+        using var context = global::ILGPU.Context.CreateDefault();
+        using var accelerator = global::ILGPU.Runtime.CPU.CPUDevice.Default.CreateAccelerator(context);
+        var launcher = new P2PKernelLauncher(accelerator);
+
+        var method = typeof(BackendTestBase).GetMethod(
+            nameof(KernelAddArrays),
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!;
+
+        int count = 1024;
+        var aFloats = new float[count];
+        var bFloats = new float[count];
+        for (int i = 0; i < count; i++)
+        {
+            aFloats[i] = i;
+            bFloats[i] = i * 10.0f;
+        }
+
+        var aBytes = new byte[count * 4];
+        var bBytes = new byte[count * 4];
+        var rBytes = new byte[count * 4]; // zero-init output
+        Buffer.BlockCopy(aFloats, 0, aBytes, 0, aBytes.Length);
+        Buffer.BlockCopy(bFloats, 0, bBytes, 0, bBytes.Length);
+
+        var bufferBindings = new Dictionary<int, BufferData>
+        {
+            [1] = new BufferData { RawData = aBytes, ElementCount = count, ElementSize = 4 },
+            [2] = new BufferData { RawData = bBytes, ElementCount = count, ElementSize = 4 },
+            [3] = new BufferData { RawData = rBytes, ElementCount = count, ElementSize = 4 },
+        };
+
+        var results = launcher.Execute(method, count, bufferBindings);
+
+        var outFloats = new float[count];
+        Buffer.BlockCopy(results[3], 0, outFloats, 0, count * 4);
+
+        int errors = 0;
+        for (int i = 0; i < count; i++)
+        {
+            float expected = aFloats[i] + bFloats[i];
+            if (Math.Abs(outFloats[i] - expected) > 0.001f) errors++;
+        }
+
+        if (errors > 0) throw new Exception($"{errors}/{count} elements wrong");
+        Console.WriteLine($"[P2P] KernelLauncher AddArrays: {count} elements verified ✓");
+    }
+
+    [TestMethod]
+    public async Task P2P_KernelLauncher_Execute_IntKernel()
+    {
+        using var context = global::ILGPU.Context.CreateDefault();
+        using var accelerator = global::ILGPU.Runtime.CPU.CPUDevice.Default.CreateAccelerator(context);
+        var launcher = new P2PKernelLauncher(accelerator);
+
+        var method = typeof(BackendTestBase).GetMethod(
+            nameof(KernelFillConstant),
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!;
+
+        int count = 256;
+        var bufferBindings = new Dictionary<int, BufferData>
+        {
+            [1] = new BufferData { RawData = new byte[count * 4], ElementCount = count, ElementSize = 4 }
+        };
+
+        var results = launcher.Execute(method, count, bufferBindings);
+
+        var outInts = new int[count];
+        Buffer.BlockCopy(results[1], 0, outInts, 0, count * 4);
+
+        for (int i = 0; i < count; i++)
+        {
+            if (outInts[i] != 42)
+                throw new Exception($"[{i}] expected 42, got {outInts[i]}");
+        }
+
+        Console.WriteLine($"[P2P] KernelLauncher FillConstant: {count} elements = 42 ✓");
+    }
+
+    [TestMethod]
+    public async Task P2P_KernelLauncher_LargeBuffer()
+    {
+        using var context = global::ILGPU.Context.CreateDefault();
+        using var accelerator = global::ILGPU.Runtime.CPU.CPUDevice.Default.CreateAccelerator(context);
+        var launcher = new P2PKernelLauncher(accelerator);
+
+        var method = typeof(BackendTestBase).GetMethod(
+            nameof(KernelMultiplyBy2),
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!;
+
+        // 1M elements — proves we handle real tensor sizes
+        int count = 1_000_000;
+        var inputFloats = new float[count];
+        for (int i = 0; i < count; i++) inputFloats[i] = i * 0.001f;
+
+        var inputBytes = new byte[count * 4];
+        Buffer.BlockCopy(inputFloats, 0, inputBytes, 0, inputBytes.Length);
+
+        var bufferBindings = new Dictionary<int, BufferData>
+        {
+            [1] = new BufferData { RawData = inputBytes, ElementCount = count, ElementSize = 4 }
+        };
+
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        var results = launcher.Execute(method, count, bufferBindings);
+        sw.Stop();
+
+        var outFloats = new float[count];
+        Buffer.BlockCopy(results[1], 0, outFloats, 0, count * 4);
+
+        // Spot check
+        if (Math.Abs(outFloats[0] - 0.0f) > 0.001f) throw new Exception($"[0] = {outFloats[0]}");
+        if (Math.Abs(outFloats[500000] - 1000.0f) > 0.01f) throw new Exception($"[500000] = {outFloats[500000]}");
+        if (Math.Abs(outFloats[999999] - 1999.998f) > 0.01f) throw new Exception($"[999999] = {outFloats[999999]}");
+
+        Console.WriteLine($"[P2P] KernelLauncher 1M floats: {sw.ElapsedMilliseconds}ms ✓");
+    }
+
+    [TestMethod]
+    public async Task P2P_Worker_RealDispatch()
+    {
+        // Full end-to-end: Worker receives a dispatch request, executes on CPU, returns results
+        using var context = global::ILGPU.Context.CreateDefault();
+        using var accelerator = global::ILGPU.Runtime.CPU.CPUDevice.Default.CreateAccelerator(context);
+
+        await using var client = new SpawnDev.WebTorrent.WebTorrentClient();
+        await using var coordinator = new P2PSwarmCoordinator(client);
+        await coordinator.CreateSwarmAsync("worker-dispatch-test");
+
+        var p2pAccel = coordinator.CreateAccelerator(context);
+        var dispatcher = new P2PDispatcher(p2pAccel);
+        var transport = new P2PTransport(client, coordinator, dispatcher);
+        var worker = new P2PWorker(transport);
+        worker.Initialize(context, accelerator);
+        transport.SetWorker(worker);
+
+        // Register our test kernel type
+        P2PKernelSerializer.RegisterKernelType(typeof(BackendTestBase));
+
+        // Build dispatch request
+        var method = typeof(BackendTestBase).GetMethod(
+            nameof(KernelMultiplyBy2),
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!;
+
+        var request = P2PKernelSerializer.CreateDispatch(method, gridDimX: 4);
+        request.Buffers = new[]
+        {
+            new BufferBinding { ParameterIndex = 1, BufferId = "buf-0", Length = 4, ElementSize = 4 }
+        };
+
+        // Send buffer data to worker
+        var inputFloats = new float[] { 10.0f, 20.0f, 30.0f, 40.0f };
+        var inputBytes = new byte[16];
+        Buffer.BlockCopy(inputFloats, 0, inputBytes, 0, 16);
+        worker.ReceiveBuffer("buf-0", inputBytes);
+
+        // Track completion
+        string? completedId = null;
+        bool? completedSuccess = null;
+        worker.OnKernelCompleted += (id, success, ms) =>
+        {
+            completedId = id;
+            completedSuccess = success;
+        };
+
+        // Dispatch
+        await worker.HandleDispatchAsync("coordinator-peer", request);
+
+        if (completedId != request.DispatchId)
+            throw new Exception($"Wrong dispatch ID: {completedId}");
+        if (completedSuccess != true)
+            throw new Exception("Dispatch failed");
+
+        // Verify buffer was modified
+        var result = worker.GetBuffer("buf-0");
+        if (result == null) throw new Exception("Buffer not found after dispatch");
+
+        var outFloats = new float[4];
+        Buffer.BlockCopy(result, 0, outFloats, 0, 16);
+
+        for (int i = 0; i < 4; i++)
+        {
+            float expected = inputFloats[i] * 2.0f;
+            if (Math.Abs(outFloats[i] - expected) > 0.001f)
+                throw new Exception($"[{i}] expected {expected}, got {outFloats[i]}");
+        }
+
+        Console.WriteLine($"[P2P] Worker real dispatch: [{string.Join(", ", outFloats)}] ✓");
+
+        // Cleanup
+        P2PKernelSerializer.ClearAllowlist();
+    }
+
+    [TestMethod]
+    public async Task P2P_Worker_RealDispatch_AddArrays()
+    {
+        using var context = global::ILGPU.Context.CreateDefault();
+        using var accelerator = global::ILGPU.Runtime.CPU.CPUDevice.Default.CreateAccelerator(context);
+
+        await using var client = new SpawnDev.WebTorrent.WebTorrentClient();
+        await using var coordinator = new P2PSwarmCoordinator(client);
+        await coordinator.CreateSwarmAsync("add-arrays-test");
+
+        var p2pAccel = coordinator.CreateAccelerator(context);
+        var dispatcher = new P2PDispatcher(p2pAccel);
+        var transport = new P2PTransport(client, coordinator, dispatcher);
+        var worker = new P2PWorker(transport);
+        worker.Initialize(context, accelerator);
+        transport.SetWorker(worker);
+
+        P2PKernelSerializer.RegisterKernelType(typeof(BackendTestBase));
+
+        var method = typeof(BackendTestBase).GetMethod(
+            nameof(KernelAddArrays),
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!;
+
+        int count = 512;
+        var request = P2PKernelSerializer.CreateDispatch(method, gridDimX: count);
+        request.Buffers = new[]
+        {
+            new BufferBinding { ParameterIndex = 1, BufferId = "a", Length = count, ElementSize = 4 },
+            new BufferBinding { ParameterIndex = 2, BufferId = "b", Length = count, ElementSize = 4 },
+            new BufferBinding { ParameterIndex = 3, BufferId = "r", Length = count, ElementSize = 4 },
+        };
+
+        // Prepare input buffers
+        var aFloats = new float[count];
+        var bFloats = new float[count];
+        for (int i = 0; i < count; i++) { aFloats[i] = i; bFloats[i] = i * 3.0f; }
+
+        var aBytes = new byte[count * 4];
+        var bBytes = new byte[count * 4];
+        Buffer.BlockCopy(aFloats, 0, aBytes, 0, aBytes.Length);
+        Buffer.BlockCopy(bFloats, 0, bBytes, 0, bBytes.Length);
+
+        worker.ReceiveBuffer("a", aBytes);
+        worker.ReceiveBuffer("b", bBytes);
+        worker.ReceiveBuffer("r", new byte[count * 4]);
+
+        bool success = false;
+        worker.OnKernelCompleted += (_, s, _) => success = s;
+        await worker.HandleDispatchAsync("coordinator", request);
+
+        if (!success) throw new Exception("Dispatch failed");
+
+        var result = worker.GetBuffer("r")!;
+        var outFloats = new float[count];
+        Buffer.BlockCopy(result, 0, outFloats, 0, count * 4);
+
+        int errors = 0;
+        for (int i = 0; i < count; i++)
+        {
+            float expected = aFloats[i] + bFloats[i];
+            if (Math.Abs(outFloats[i] - expected) > 0.01f) errors++;
+        }
+
+        if (errors > 0) throw new Exception($"{errors}/{count} elements wrong");
+        Console.WriteLine($"[P2P] Worker AddArrays dispatch: {count} elements verified ✓");
+
+        P2PKernelSerializer.ClearAllowlist();
+    }
+
+    [TestMethod]
+    public async Task P2P_Worker_RejectsUnregisteredKernel()
+    {
+        using var context = global::ILGPU.Context.CreateDefault();
+        using var accelerator = global::ILGPU.Runtime.CPU.CPUDevice.Default.CreateAccelerator(context);
+
+        await using var client = new SpawnDev.WebTorrent.WebTorrentClient();
+        await using var coordinator = new P2PSwarmCoordinator(client);
+        await coordinator.CreateSwarmAsync("reject-test");
+
+        var p2pAccel = coordinator.CreateAccelerator(context);
+        var dispatcher = new P2PDispatcher(p2pAccel);
+        var transport = new P2PTransport(client, coordinator, dispatcher);
+        var worker = new P2PWorker(transport);
+        worker.Initialize(context, accelerator);
+        transport.SetWorker(worker);
+
+        // Register a DIFFERENT type — our test kernel type is NOT registered
+        P2PKernelSerializer.ClearAllowlist();
+        P2PKernelSerializer.RegisterKernelType(typeof(string)); // arbitrary wrong type
+
+        var request = new KernelDispatchRequest
+        {
+            KernelType = typeof(BackendTestBase).AssemblyQualifiedName!,
+            KernelMethod = nameof(KernelMultiplyBy2),
+            GridDimX = 4,
+            Buffers = new[]
+            {
+                new BufferBinding { ParameterIndex = 1, BufferId = "buf", Length = 4, ElementSize = 4 }
+            },
+        };
+
+        worker.ReceiveBuffer("buf", new byte[16]);
+
+        bool? success = null;
+        worker.OnKernelCompleted += (_, s, _) => success = s;
+        await worker.HandleDispatchAsync("coordinator", request);
+
+        if (success != false)
+            throw new Exception("Should have rejected unregistered kernel type");
+
+        Console.WriteLine("[P2P] Worker correctly rejects unregistered kernel ✓");
+
+        P2PKernelSerializer.ClearAllowlist();
+    }
+
+    [TestMethod]
+    public async Task P2P_KernelLauncher_CacheReuse()
+    {
+        using var context = global::ILGPU.Context.CreateDefault();
+        using var accelerator = global::ILGPU.Runtime.CPU.CPUDevice.Default.CreateAccelerator(context);
+        var launcher = new P2PKernelLauncher(accelerator);
+
+        var method = typeof(BackendTestBase).GetMethod(
+            nameof(KernelMultiplyBy2),
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!;
+
+        // Execute same kernel 5 times — should compile once, reuse cache
+        for (int run = 0; run < 5; run++)
+        {
+            var data = new float[] { run + 1.0f };
+            var bytes = new byte[4];
+            Buffer.BlockCopy(data, 0, bytes, 0, 4);
+
+            var results = launcher.Execute(method, 1, new Dictionary<int, BufferData>
+            {
+                [1] = new BufferData { RawData = bytes, ElementCount = 1, ElementSize = 4 }
+            });
+
+            var outFloat = new float[1];
+            Buffer.BlockCopy(results[1], 0, outFloat, 0, 4);
+
+            float expected = (run + 1.0f) * 2.0f;
+            if (Math.Abs(outFloat[0] - expected) > 0.001f)
+                throw new Exception($"Run {run}: expected {expected}, got {outFloat[0]}");
+        }
+
+        if (launcher.CachedCount != 1)
+            throw new Exception($"Should have 1 cached launcher, got {launcher.CachedCount}");
+
+        Console.WriteLine("[P2P] KernelLauncher cache reuse: 5 runs, 1 compilation ✓");
     }
 }

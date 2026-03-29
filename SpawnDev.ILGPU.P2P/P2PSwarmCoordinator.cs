@@ -1,5 +1,6 @@
 using global::ILGPU;
 using SpawnDev.WebTorrent;
+using SpawnDev.WebTorrent.Torrent;
 
 namespace SpawnDev.ILGPU.P2P;
 
@@ -21,6 +22,11 @@ public class P2PSwarmCoordinator : IAsyncDisposable
     private readonly System.Collections.Concurrent.ConcurrentDictionary<string, RemotePeer> _peers = new();
     private readonly System.Collections.Concurrent.ConcurrentDictionary<string, bool> _blockedPeers = new();
     private P2PAccelerator? _accelerator;
+
+    /// <summary>
+    /// The underlying WebTorrent swarm (for bridge attachment).
+    /// </summary>
+    public TorrentSwarm? Swarm { get; private set; }
 
     /// <summary>
     /// This node's cryptographic identity (ECDSA key pair).
@@ -145,6 +151,7 @@ public class P2PSwarmCoordinator : IAsyncDisposable
         // Create a small data payload that identifies this compute swarm
         var swarmId = System.Text.Encoding.UTF8.GetBytes($"p2p-compute:{name}:{Guid.NewGuid():N}");
         var swarm = await _client.SeedAsync(swarmId, $"{name}.p2p");
+        Swarm = swarm;
 
         // Build magnet link with tracker info
         var hashHex = Convert.ToHexString(swarm.InfoHash).ToLowerInvariant();
@@ -178,6 +185,7 @@ public class P2PSwarmCoordinator : IAsyncDisposable
         MagnetLink = magnetLink;
         Role = P2PRole.Worker;
         var swarm = await _client.AddAsync(magnetLink);
+        Swarm = swarm;
         // Swarm connection happens through the tracker
         // Peers are discovered and capabilities exchanged
     }

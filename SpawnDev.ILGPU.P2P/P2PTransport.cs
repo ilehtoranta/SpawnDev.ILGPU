@@ -19,6 +19,7 @@ public class P2PTransport : IAsyncDisposable
     private readonly P2PDispatcher _dispatcher;
     private readonly ConcurrentDictionary<string, PeerChannel> _channels = new();
     private readonly P2PBufferTransfer _bufferTransfer = new();
+    private P2PWorker? _worker;
 
     /// <summary>
     /// Fired when a compute message is received from a peer.
@@ -33,6 +34,14 @@ public class P2PTransport : IAsyncDisposable
         _client = client;
         _coordinator = coordinator;
         _dispatcher = dispatcher;
+    }
+
+    /// <summary>
+    /// Set the worker for handling kernel dispatch on this node.
+    /// </summary>
+    public void SetWorker(P2PWorker worker)
+    {
+        _worker = worker;
     }
 
     /// <summary>
@@ -100,6 +109,7 @@ public class P2PTransport : IAsyncDisposable
 
             case P2PMessageType.Heartbeat:
                 _dispatcher.HandleHeartbeat(peerId);
+                _bufferTransfer.CleanupStaleTransfers();
                 break;
 
             case P2PMessageType.StatusUpdate:
@@ -229,24 +239,29 @@ public class P2PTransport : IAsyncDisposable
 
     private async Task HandleKernelDispatchRequest(string peerId, P2PMessage message)
     {
-        // TODO: Deserialize kernel dispatch, compile locally, execute, return result
-        // This is where the peer uses its own local ILGPU backend
         if (message.Payload == null) return;
         var request = message.Payload.Value.Deserialize<KernelDispatchRequest>();
         if (request == null) return;
 
-        // For now, report not implemented
-        await SendMessageAsync(peerId, new P2PMessage
+        // Route to the worker for local execution
+        if (_worker != null)
         {
-            Type = P2PMessageType.KernelResult,
-            ReplyTo = message.MessageId,
-            Payload = JsonSerializer.SerializeToElement(new KernelDispatchResult
+            await _worker.HandleDispatchAsync(peerId, request);
+        }
+        else
+        {
+            await SendMessageAsync(peerId, new P2PMessage
             {
-                DispatchId = request.DispatchId,
-                Success = false,
-                Error = "Worker-side kernel execution not yet implemented",
-            }),
-        });
+                Type = P2PMessageType.KernelResult,
+                ReplyTo = message.MessageId,
+                Payload = JsonSerializer.SerializeToElement(new KernelDispatchResult
+                {
+                    DispatchId = request.DispatchId,
+                    Success = false,
+                    Error = "No worker initialized on this peer",
+                }),
+            });
+        }
     }
 
     private void HandleBufferReceive(string peerId, P2PMessage message)

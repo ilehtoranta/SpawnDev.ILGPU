@@ -11,7 +11,8 @@ namespace SpawnDev.ILGPU.P2P;
 /// </summary>
 public static class P2PKernelSerializer
 {
-    private static readonly HashSet<Type> _allowedTypes = new();
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<Type, bool> _allowedTypes = new();
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, MethodInfo?> _resolveCache = new();
 
     /// <summary>
     /// Register a type whose static methods can be dispatched via P2P.
@@ -19,7 +20,7 @@ public static class P2PKernelSerializer
     /// </summary>
     public static void RegisterKernelType(Type type)
     {
-        _allowedTypes.Add(type);
+        _allowedTypes[type] = true;
     }
 
     /// <summary>
@@ -28,18 +29,22 @@ public static class P2PKernelSerializer
     public static void RegisterKernelTypes(params Type[] types)
     {
         foreach (var type in types)
-            _allowedTypes.Add(type);
+            _allowedTypes[type] = true;
     }
 
     /// <summary>
     /// Check if a type is registered for P2P dispatch.
     /// </summary>
-    public static bool IsTypeAllowed(Type type) => _allowedTypes.Contains(type);
+    public static bool IsTypeAllowed(Type type) => _allowedTypes.ContainsKey(type);
 
     /// <summary>
     /// Clear the allowlist (allows all types again). For testing only.
     /// </summary>
-    public static void ClearAllowlist() => _allowedTypes.Clear();
+    public static void ClearAllowlist()
+    {
+        _allowedTypes.Clear();
+        _resolveCache.Clear();
+    }
 
     /// <summary>
     /// Number of registered kernel types.
@@ -75,23 +80,27 @@ public static class P2PKernelSerializer
     /// </summary>
     public static MethodInfo? ResolveKernel(KernelDispatchRequest request)
     {
-        var type = Type.GetType(request.KernelType);
-        if (type == null)
+        var cacheKey = $"{request.KernelType}::{request.KernelMethod}";
+        return _resolveCache.GetOrAdd(cacheKey, _ =>
         {
-            foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
+            var type = Type.GetType(request.KernelType);
+            if (type == null)
             {
-                type = assembly.GetType(request.KernelType);
-                if (type != null) break;
+                foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
+                {
+                    type = assembly.GetType(request.KernelType);
+                    if (type != null) break;
+                }
             }
-        }
-        if (type == null) return null;
+            if (type == null) return null;
 
-        // SECURITY: Only allow registered types
-        if (_allowedTypes.Count > 0 && !_allowedTypes.Contains(type))
-            return null;
+            // SECURITY: Only allow registered types
+            if (_allowedTypes.Count > 0 && !_allowedTypes.ContainsKey(type))
+                return null;
 
-        return type.GetMethod(request.KernelMethod,
-            BindingFlags.Public | BindingFlags.Static);
+            return type.GetMethod(request.KernelMethod,
+                BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static);
+        });
     }
 
     /// <summary>

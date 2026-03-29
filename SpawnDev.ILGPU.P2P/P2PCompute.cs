@@ -36,6 +36,9 @@ public class P2PCompute : IAsyncDisposable
     /// <summary>The transport layer.</summary>
     public P2PTransport? Transport { get; }
 
+    /// <summary>The WebRTC bridge — auto-wires sd_compute to real peer connections.</summary>
+    public P2PWebRtcBridge? Bridge { get; }
+
     /// <summary>The worker (worker side).</summary>
     public P2PWorker? Worker { get; }
 
@@ -67,6 +70,7 @@ public class P2PCompute : IAsyncDisposable
         P2PAccelerator? accelerator = null,
         P2PDispatcher? dispatcher = null,
         P2PTransport? transport = null,
+        P2PWebRtcBridge? bridge = null,
         P2PWorker? worker = null,
         global::ILGPU.Context? context = null)
     {
@@ -77,6 +81,7 @@ public class P2PCompute : IAsyncDisposable
         Accelerator = accelerator;
         Dispatcher = dispatcher;
         Transport = transport;
+        Bridge = bridge;
         Worker = worker;
     }
 
@@ -115,7 +120,18 @@ public class P2PCompute : IAsyncDisposable
             await transport.SendMessageAsync(peerId, msg);
         };
 
-        return new P2PCompute(client, identity, coordinator, accelerator, dispatcher, transport, context: context);
+        // Wire dispatcher dispatch messages to transport
+        dispatcher.OnSendMessage += (peerId, msg) =>
+        {
+            _ = transport.SendMessageAsync(peerId, msg);
+        };
+
+        // Bridge WebRTC peer connections to sd_compute extension
+        var bridge = new P2PWebRtcBridge(transport);
+        if (coordinator.Swarm != null)
+            bridge.AttachToSwarm(coordinator.Swarm);
+
+        return new P2PCompute(client, identity, coordinator, accelerator, dispatcher, transport, bridge, context: context);
     }
 
     /// <summary>
@@ -136,9 +152,19 @@ public class P2PCompute : IAsyncDisposable
         coordinator.SetIdentity(identity);
 
         // Extract magnet from join link if needed
-        var magnet = magnetOrJoinLink.StartsWith("magnet:")
-            ? magnetOrJoinLink
-            : magnetOrJoinLink; // TODO: fetch magnet from join URL
+        string magnet;
+        if (magnetOrJoinLink.StartsWith("magnet:"))
+        {
+            magnet = magnetOrJoinLink;
+        }
+        else
+        {
+            // Parse HTTP join link → build magnet from hash
+            var (hash, name) = ParseJoinLink(magnetOrJoinLink);
+            magnet = hash != null
+                ? BuildMagnetFromHash(hash, name)
+                : magnetOrJoinLink; // fallback: treat as raw magnet
+        }
         await coordinator.JoinSwarmAsync(magnet);
 
         var p2pAccel = coordinator.CreateAccelerator(accelerator.Context);
@@ -146,11 +172,14 @@ public class P2PCompute : IAsyncDisposable
         var transport = new P2PTransport(client, coordinator, dispatcher);
         var worker = new P2PWorker(transport);
         worker.Initialize(accelerator.Context, accelerator);
+        transport.SetWorker(worker);
 
-        // Register kernel types that this worker can execute
-        // (caller should call P2PKernelSerializer.RegisterKernelType before joining)
+        // Bridge WebRTC peer connections to sd_compute extension
+        var bridge = new P2PWebRtcBridge(transport);
+        if (coordinator.Swarm != null)
+            bridge.AttachToSwarm(coordinator.Swarm);
 
-        return new P2PCompute(client, identity, coordinator, p2pAccel, dispatcher, transport, worker);
+        return new P2PCompute(client, identity, coordinator, p2pAccel, dispatcher, transport, bridge, worker);
     }
 
     /// <summary>
@@ -167,6 +196,7 @@ public class P2PCompute : IAsyncDisposable
         // Create worker in same process
         var worker = new P2PWorker(compute.Transport!);
         worker.Initialize(context, accelerator);
+        compute.Transport!.SetWorker(worker);
 
         // Connect worker as peer
         var caps = worker.BuildCapabilities("self-worker");
@@ -179,7 +209,7 @@ public class P2PCompute : IAsyncDisposable
         });
 
         return new P2PCompute(client, compute.Identity, compute.Coordinator,
-            compute.Accelerator, compute.Dispatcher, compute.Transport, worker, context);
+            compute.Accelerator, compute.Dispatcher, compute.Transport, compute.Bridge, worker, context);
     }
 
     /// <summary>

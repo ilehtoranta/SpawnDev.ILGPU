@@ -16,12 +16,12 @@ namespace SpawnDev.ILGPU.P2P;
 public class P2PAccelerator : KernelAccelerator<P2PCompiledKernel, P2PKernel>
 {
     private readonly P2PDevice _device;
-    private readonly List<RemotePeer> _peers = new();
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, RemotePeer> _peers = new();
 
     /// <summary>
     /// Connected remote peers.
     /// </summary>
-    public IReadOnlyList<RemotePeer> Peers => _peers;
+    public IReadOnlyList<RemotePeer> Peers => _peers.Values.ToList();
 
     /// <summary>
     /// The WebTorrent client used for P2P communication.
@@ -44,7 +44,7 @@ public class P2PAccelerator : KernelAccelerator<P2PCompiledKernel, P2PKernel>
     /// </summary>
     public void AddPeer(RemotePeer peer)
     {
-        _peers.Add(peer);
+        _peers[peer.PeerId] = peer;
         peer.Accelerator = this;
     }
 
@@ -53,7 +53,7 @@ public class P2PAccelerator : KernelAccelerator<P2PCompiledKernel, P2PKernel>
     /// </summary>
     public void RemovePeer(RemotePeer peer)
     {
-        _peers.Remove(peer);
+        _peers.TryRemove(peer.PeerId, out _);
         peer.Accelerator = null;
     }
 
@@ -62,16 +62,17 @@ public class P2PAccelerator : KernelAccelerator<P2PCompiledKernel, P2PKernel>
     /// </summary>
     public RemotePeer? SelectPeer(P2PMemoryBuffer[]? dataBuffers = null)
     {
-        if (_peers.Count == 0) return null;
+        var peers = _peers.Values.ToList();
+        if (peers.Count == 0) return null;
         if (dataBuffers != null)
         {
-            foreach (var peer in _peers)
+            foreach (var peer in peers)
             {
                 if (dataBuffers.All(b => b.ResidentPeer == peer))
                     return peer;
             }
         }
-        return _peers[Random.Shared.Next(_peers.Count)];
+        return peers[Random.Shared.Next(peers.Count)];
     }
 
     #region KernelAccelerator Implementation
@@ -168,7 +169,7 @@ public class P2PAccelerator : KernelAccelerator<P2PCompiledKernel, P2PKernel>
     {
         if (disposing)
         {
-            foreach (var peer in _peers)
+            foreach (var peer in _peers.Values)
                 peer.Disconnect();
             _peers.Clear();
         }
@@ -193,9 +194,6 @@ public class P2PKernel : Kernel
     protected override void DisposeAcceleratorObject(bool disposing) { }
 }
 
-/// <summary>
-/// Represents a remote peer device connected via WebRTC.
-/// </summary>
 /// <summary>
 /// Represents a remote peer device connected via WebRTC.
 /// </summary>

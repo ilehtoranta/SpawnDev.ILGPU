@@ -21,7 +21,7 @@ namespace SpawnDev.ILGPU.P2P;
 public class P2PWebRtcBridge
 {
     private readonly P2PTransport _transport;
-    private readonly Dictionary<string, SdComputeExtension> _extensions = new();
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, SdComputeExtension> _extensions = new();
 
     /// <summary>
     /// Number of peers with sd_compute wired.
@@ -61,16 +61,15 @@ public class P2PWebRtcBridge
         // Notify when compute handshake completes
         ext.OnComputeMessage += (msg) =>
         {
-            if (msg.Type == P2PMessageType.CapabilityResponse && !_notified.Contains(peerId))
+            if (msg.Type == P2PMessageType.CapabilityResponse && _notified.TryAdd(peerId, true))
             {
-                _notified.Add(peerId);
                 OnComputePeerConnected?.Invoke(peerId);
             }
         };
 
         return ext;
     }
-    private readonly HashSet<string> _notified = new();
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, bool> _notified = new();
 
     /// <summary>
     /// Attach to a TorrentSwarm — automatically wires sd_compute

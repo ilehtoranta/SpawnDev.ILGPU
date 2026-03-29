@@ -20,7 +20,7 @@ public class P2PBufferTransfer
     /// </summary>
     public int MaxChunkSize { get; set; } = 64 * 1024;
 
-    private readonly Dictionary<string, BufferTransferState> _inProgress = new();
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, BufferTransferState> _inProgress = new();
 
     /// <summary>
     /// Fired when a complete buffer has been received.
@@ -80,33 +80,32 @@ public class P2PBufferTransfer
         if (chunk.ChunkIndex < 0 || chunk.ChunkIndex >= chunk.TotalChunks)
             return false;
 
-        if (!_inProgress.TryGetValue(chunk.BufferId, out var state))
+        var state = _inProgress.GetOrAdd(chunk.BufferId, _ => new BufferTransferState
         {
-            state = new BufferTransferState
+            BufferId = chunk.BufferId,
+            TotalChunks = chunk.TotalChunks,
+            TotalBytes = chunk.TotalBytes,
+            ReceivedChunks = new byte[chunk.TotalChunks][],
+            ReceivedCount = 0,
+        });
+
+        // Store chunk (idempotent — handles retransmits). Lock per-state for chunk assembly.
+        lock (state)
+        {
+            if (state.ReceivedChunks[chunk.ChunkIndex] == null)
             {
-                BufferId = chunk.BufferId,
-                TotalChunks = chunk.TotalChunks,
-                TotalBytes = chunk.TotalBytes,
-                ReceivedChunks = new byte[chunk.TotalChunks][],
-                ReceivedCount = 0,
-            };
-            _inProgress[chunk.BufferId] = state;
-        }
+                state.ReceivedChunks[chunk.ChunkIndex] = chunk.Data;
+                state.ReceivedCount++;
+            }
 
-        // Store chunk (idempotent — handles retransmits)
-        if (state.ReceivedChunks[chunk.ChunkIndex] == null)
-        {
-            state.ReceivedChunks[chunk.ChunkIndex] = chunk.Data;
-            state.ReceivedCount++;
-        }
-
-        // Check if complete
-        if (state.ReceivedCount >= state.TotalChunks)
-        {
-            var assembled = Assemble(state);
-            _inProgress.Remove(chunk.BufferId);
-            OnBufferReceived?.Invoke(chunk.BufferId, assembled);
-            return true;
+            // Check if complete
+            if (state.ReceivedCount >= state.TotalChunks)
+            {
+                var assembled = Assemble(state);
+                _inProgress.TryRemove(chunk.BufferId, out _);
+                OnBufferReceived?.Invoke(chunk.BufferId, assembled);
+                return true;
+            }
         }
 
         return false;
@@ -127,13 +126,37 @@ public class P2PBufferTransfer
     /// </summary>
     public void CancelTransfer(string bufferId)
     {
-        _inProgress.Remove(bufferId);
+        _inProgress.TryRemove(bufferId, out _);
     }
 
     /// <summary>
     /// Number of in-progress transfers.
     /// </summary>
     public int ActiveTransfers => _inProgress.Count;
+
+    /// <summary>
+    /// Maximum time (seconds) a transfer can be in progress before cleanup. Default: 120s.
+    /// </summary>
+    public int TransferTimeoutSeconds { get; set; } = 120;
+
+    /// <summary>
+    /// Clean up stale transfers that have exceeded the timeout.
+    /// Returns the number of transfers cleaned up.
+    /// </summary>
+    public int CleanupStaleTransfers()
+    {
+        var now = DateTime.UtcNow;
+        int cleaned = 0;
+        foreach (var kvp in _inProgress)
+        {
+            if ((now - kvp.Value.StartTime).TotalSeconds > TransferTimeoutSeconds)
+            {
+                if (_inProgress.TryRemove(kvp.Key, out _))
+                    cleaned++;
+            }
+        }
+        return cleaned;
+    }
 
     private byte[] Assemble(BufferTransferState state)
     {
@@ -174,4 +197,5 @@ internal class BufferTransferState
     public int TotalBytes { get; set; }
     public byte[][] ReceivedChunks { get; set; } = Array.Empty<byte[]>();
     public int ReceivedCount { get; set; }
+    public DateTime StartTime { get; set; } = DateTime.UtcNow;
 }
