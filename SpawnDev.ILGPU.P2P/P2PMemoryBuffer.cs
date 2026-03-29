@@ -20,7 +20,7 @@ public class P2PMemoryBuffer : MemoryBuffer
     /// <summary>
     /// Which peer this buffer's data currently resides on (null = local/host).
     /// </summary>
-    public RemotePeer? ResidentPeer { get; internal set; }
+    public RemotePeer? ResidentPeer { get; set; }
 
     /// <summary>
     /// Whether the local copy is current (not stale from remote writes).
@@ -31,12 +31,12 @@ public class P2PMemoryBuffer : MemoryBuffer
     /// Local shadow copy of the buffer data (for send/receive staging).
     /// Access must be synchronized via ShadowLock.
     /// </summary>
-    internal byte[] ShadowData { get; set; }
+    public byte[] ShadowData { get; set; }
 
     /// <summary>
     /// Whether the shadow has been modified locally and needs to be sent to the peer.
     /// </summary>
-    internal bool IsDirty { get; set; }
+    public bool IsDirty { get; set; }
 
     /// <summary>Lock for thread-safe shadow data access.</summary>
     internal readonly object ShadowLock = new();
@@ -116,7 +116,7 @@ public class P2PMemoryBuffer : MemoryBuffer
     /// <summary>
     /// Update the shadow data from bytes received from a remote peer (after kernel execution).
     /// </summary>
-    internal void UpdateFromRemote(byte[] data)
+    public void UpdateFromRemote(byte[] data)
     {
         lock (ShadowLock)
         {
@@ -129,7 +129,7 @@ public class P2PMemoryBuffer : MemoryBuffer
     /// <summary>
     /// Get the current shadow data for transmission to a remote peer.
     /// </summary>
-    internal byte[] GetShadowForTransmission()
+    public byte[] GetShadowForTransmission()
     {
         lock (ShadowLock)
         {

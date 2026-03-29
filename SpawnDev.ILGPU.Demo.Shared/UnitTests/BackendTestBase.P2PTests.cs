@@ -3304,4 +3304,395 @@ public abstract partial class BackendTestBase
 
         P2PKernelSerializer.ClearAllowlist();
     }
+
+    // ═══════════════════════════════════════════════════════════
+    //  Coverage Gap Tests — Every Class Tested
+    //  Tuvok audit: 6 untested P2P classes + missing scenarios
+    // ═══════════════════════════════════════════════════════════
+
+    [TestMethod]
+    public async Task P2P_Backend_Create()
+    {
+        using var context = global::ILGPU.Context.CreateDefault();
+        var backend = new P2PBackend(context);
+        if (backend.BackendType != global::ILGPU.Backends.BackendType.Wasm) // placeholder
+            throw new Exception($"BackendType: {backend.BackendType}");
+    }
+
+    [TestMethod]
+    public async Task P2P_Backend_Properties()
+    {
+        using var context = global::ILGPU.Context.CreateDefault();
+        var backend = new P2PBackend(context);
+        if (backend == null) throw new Exception("Backend creation failed");
+        // P2PBackend is a thin wrapper — verify it doesn't crash on property access
+        var type = backend.BackendType;
+        Console.WriteLine($"[P2P] Backend properties: type={type} ✓");
+    }
+
+    [TestMethod]
+    public async Task P2P_Stream_Create()
+    {
+        using var context = global::ILGPU.Context.CreateDefault();
+        var device = new P2PDevice();
+        using var accel = (P2PAccelerator)device.CreateAccelerator(context);
+        var stream = accel.DefaultStream;
+        if (stream == null) throw new Exception("DefaultStream is null");
+        // Synchronize is a no-op for P2P — should not throw
+        stream.Synchronize();
+        Console.WriteLine("[P2P] Stream create + synchronize: OK ✓");
+    }
+
+    [TestMethod]
+    public async Task P2P_MemoryBuffer_Create()
+    {
+        using var context = global::ILGPU.Context.CreateDefault();
+        var device = new P2PDevice();
+        using var accel = (P2PAccelerator)device.CreateAccelerator(context);
+        var buffer = new P2PMemoryBuffer(accel, 1024, 4);
+        if (buffer.Length != 1024) throw new Exception($"Length: {buffer.Length}");
+        if (buffer.ElementSize != 4) throw new Exception($"ElementSize: {buffer.ElementSize}");
+        if (buffer.ResidentPeer != null) throw new Exception("ResidentPeer should be null initially");
+        if (!buffer.IsLocalCurrent) throw new Exception("IsLocalCurrent should be true initially");
+        if (buffer.ShadowData.Length != 4096) throw new Exception($"ShadowData: {buffer.ShadowData.Length}");
+        if (string.IsNullOrEmpty(buffer.BufferId)) throw new Exception("BufferId should not be empty");
+        Console.WriteLine("[P2P] MemoryBuffer create: OK ✓");
+    }
+
+    [TestMethod]
+    public async Task P2P_MemoryBuffer_ShadowOperations()
+    {
+        using var context = global::ILGPU.Context.CreateDefault();
+        var device = new P2PDevice();
+        using var accel = (P2PAccelerator)device.CreateAccelerator(context);
+        var buffer = new P2PMemoryBuffer(accel, 16, 4);
+
+        // Test UpdateFromRemote
+        var remoteData = new byte[] { 1, 2, 3, 4, 5, 6, 7, 8 };
+        buffer.UpdateFromRemote(remoteData);
+        if (buffer.IsDirty) throw new Exception("Should not be dirty after remote update");
+        if (!buffer.IsLocalCurrent) throw new Exception("Should be local current after remote update");
+        if (buffer.ShadowData[0] != 1 || buffer.ShadowData[7] != 8)
+            throw new Exception("Shadow data not updated from remote");
+
+        // Test GetShadowForTransmission
+        buffer.IsDirty = true;
+        var transmission = buffer.GetShadowForTransmission();
+        if (buffer.IsDirty) throw new Exception("Should be clean after transmission");
+        if (transmission.Length != buffer.ShadowData.Length)
+            throw new Exception("Transmission should be a copy of shadow");
+        if (transmission[0] != 1) throw new Exception("Transmission data wrong");
+
+        // Verify it's a copy, not a reference
+        transmission[0] = 99;
+        if (buffer.ShadowData[0] == 99)
+            throw new Exception("GetShadowForTransmission should return a copy");
+
+        Console.WriteLine("[P2P] MemoryBuffer shadow operations: OK ✓");
+    }
+
+    [TestMethod]
+    public async Task P2P_MemoryBuffer_ResidentPeer()
+    {
+        using var context = global::ILGPU.Context.CreateDefault();
+        var device = new P2PDevice();
+        using var accel = (P2PAccelerator)device.CreateAccelerator(context);
+        var buffer = new P2PMemoryBuffer(accel, 64, 4);
+
+        var peer = new RemotePeer { PeerId = "gpu-node", IsConnected = true };
+        buffer.ResidentPeer = peer;
+        if (buffer.ResidentPeer?.PeerId != "gpu-node")
+            throw new Exception("ResidentPeer not set");
+
+        // Dispose should clear residency
+        buffer.Dispose();
+        if (buffer.ResidentPeer != null)
+            throw new Exception("Dispose should clear ResidentPeer");
+
+        Console.WriteLine("[P2P] MemoryBuffer resident peer: OK ✓");
+    }
+
+    [TestMethod]
+    public async Task P2P_MemoryBuffer_DirtyTracking()
+    {
+        using var context = global::ILGPU.Context.CreateDefault();
+        var device = new P2PDevice();
+        using var accel = (P2PAccelerator)device.CreateAccelerator(context);
+        var buffer = new P2PMemoryBuffer(accel, 32, 1);
+
+        // Initially clean
+        if (buffer.IsDirty) throw new Exception("Should start clean");
+
+        // Manual dirty set
+        buffer.IsDirty = true;
+        if (!buffer.IsDirty) throw new Exception("Should be dirty");
+
+        // GetShadowForTransmission clears dirty
+        buffer.GetShadowForTransmission();
+        if (buffer.IsDirty) throw new Exception("Transmission should clear dirty");
+
+        // UpdateFromRemote clears dirty
+        buffer.IsDirty = true;
+        buffer.UpdateFromRemote(new byte[32]);
+        if (buffer.IsDirty) throw new Exception("Remote update should clear dirty");
+
+        Console.WriteLine("[P2P] MemoryBuffer dirty tracking: OK ✓");
+    }
+
+    [TestMethod]
+    public async Task P2P_Dispatcher_StartStopMonitoring()
+    {
+        using var context = global::ILGPU.Context.CreateDefault();
+        var device = new P2PDevice();
+        using var accel = (P2PAccelerator)device.CreateAccelerator(context);
+        var dispatcher = new P2PDispatcher(accel);
+
+        // Should not throw
+        dispatcher.StartMonitoring();
+        await Task.Delay(50); // Let timer tick once
+        dispatcher.StopMonitoring();
+
+        // Start/stop again
+        dispatcher.StartMonitoring();
+        dispatcher.StopMonitoring();
+
+        // Dispose should also stop
+        dispatcher.StartMonitoring();
+        dispatcher.Dispose();
+
+        Console.WriteLine("[P2P] Dispatcher start/stop monitoring: OK ✓");
+    }
+
+    [TestMethod]
+    public async Task P2P_Dispatcher_PendingSnapshot()
+    {
+        using var context = global::ILGPU.Context.CreateDefault();
+        await using var client = new SpawnDev.WebTorrent.WebTorrentClient();
+        await using var coordinator = new P2PSwarmCoordinator(client);
+        await coordinator.CreateSwarmAsync("snapshot-test");
+        var p2pAccel = coordinator.CreateAccelerator(context);
+        var dispatcher = new P2PDispatcher(p2pAccel);
+
+        // Add a black hole peer
+        coordinator.HandlePeerConnected("w1", new PeerCapabilities { PeerId = "w1", EstimatedTflops = 5 });
+        p2pAccel.AddPeer(new RemotePeer
+        {
+            PeerId = "w1", IsConnected = true, LastHeartbeat = DateTime.UtcNow,
+            Capabilities = new PeerCapabilities { PeerId = "w1", EstimatedTflops = 5 },
+        });
+
+        if (dispatcher.PendingCount != 0) throw new Exception("Should start with 0 pending");
+
+        var request = new KernelDispatchRequest { DispatchId = "test-1", GridDimX = 64 };
+        dispatcher.Dispatch(request);
+
+        if (dispatcher.PendingCount != 1) throw new Exception($"Should have 1 pending, got {dispatcher.PendingCount}");
+
+        var snapshot = dispatcher.GetPendingSnapshot();
+        if (snapshot.Length != 1) throw new Exception($"Snapshot: {snapshot.Length}");
+        if (snapshot[0].DispatchId != "test-1") throw new Exception($"ID: {snapshot[0].DispatchId}");
+        if (snapshot[0].AssignedPeerId != "w1") throw new Exception($"Peer: {snapshot[0].AssignedPeerId}");
+
+        Console.WriteLine("[P2P] Dispatcher pending snapshot: OK ✓");
+    }
+
+    [TestMethod]
+    public async Task P2P_Dispatcher_HandlePendingTransfer()
+    {
+        using var context = global::ILGPU.Context.CreateDefault();
+        await using var client = new SpawnDev.WebTorrent.WebTorrentClient();
+        await using var coordinator = new P2PSwarmCoordinator(client);
+        await coordinator.CreateSwarmAsync("transfer-accept-test");
+        var p2pAccel = coordinator.CreateAccelerator(context);
+        var dispatcher = new P2PDispatcher(p2pAccel);
+
+        // Add peer that the transferred dispatch is assigned to
+        coordinator.HandlePeerConnected("w1", new PeerCapabilities { PeerId = "w1", EstimatedTflops = 5 });
+        p2pAccel.AddPeer(new RemotePeer
+        {
+            PeerId = "w1", IsConnected = true, LastHeartbeat = DateTime.UtcNow,
+            Capabilities = new PeerCapabilities { PeerId = "w1", EstimatedTflops = 5 },
+        });
+
+        // Accept pending state from old coordinator
+        var info = new PendingDispatchInfo
+        {
+            DispatchId = "transferred-1",
+            Request = new KernelDispatchRequest { GridDimX = 128 },
+            AssignedPeerId = "w1",
+            Attempts = 1,
+        };
+        dispatcher.HandlePendingTransfer(info);
+
+        if (dispatcher.PendingCount != 1) throw new Exception($"Should have 1 pending after transfer");
+        var snapshot = dispatcher.GetPendingSnapshot();
+        if (snapshot[0].DispatchId != "transferred-1") throw new Exception("Wrong dispatch ID");
+
+        Console.WriteLine("[P2P] Dispatcher accept pending transfer: OK ✓");
+    }
+
+    [TestMethod]
+    public async Task P2P_BufferTransfer_CreateChunks()
+    {
+        var transfer = new P2PBufferTransfer { MaxChunkSize = 100 };
+        var data = new byte[350];
+        for (int i = 0; i < data.Length; i++) data[i] = (byte)(i % 256);
+
+        var chunks = transfer.CreateChunks("buf-1", data);
+        if (chunks.Length != 4) throw new Exception($"350 bytes / 100 = 4 chunks, got {chunks.Length}");
+        if (chunks[0].Data.Length != 100) throw new Exception($"Chunk 0 size: {chunks[0].Data.Length}");
+        if (chunks[3].Data.Length != 50) throw new Exception($"Last chunk size: {chunks[3].Data.Length}");
+        if (chunks[0].TotalBytes != 350) throw new Exception($"TotalBytes: {chunks[0].TotalBytes}");
+        if (chunks[2].ChunkIndex != 2) throw new Exception($"ChunkIndex: {chunks[2].ChunkIndex}");
+
+        Console.WriteLine("[P2P] BufferTransfer CreateChunks: OK ✓");
+    }
+
+    [TestMethod]
+    public async Task P2P_BufferTransfer_CleanupStale()
+    {
+        var transfer = new P2PBufferTransfer { TransferTimeoutSeconds = 0 };
+
+        // Start a transfer by receiving first chunk
+        transfer.ReceiveChunk(new BufferChunk
+        {
+            BufferId = "stale-1", ChunkIndex = 0, TotalChunks = 3, TotalBytes = 300,
+            Data = new byte[100]
+        });
+
+        if (transfer.ActiveTransfers != 1) throw new Exception($"Active: {transfer.ActiveTransfers}");
+
+        // Cleanup with 0 second timeout — should remove the stale transfer
+        await Task.Delay(10);
+        int cleaned = transfer.CleanupStaleTransfers();
+        if (cleaned != 1) throw new Exception($"Should clean 1, got {cleaned}");
+        if (transfer.ActiveTransfers != 0) throw new Exception($"Active after cleanup: {transfer.ActiveTransfers}");
+
+        Console.WriteLine("[P2P] BufferTransfer cleanup stale: OK ✓");
+    }
+
+    [TestMethod]
+    public async Task P2P_BufferTransfer_RejectsInvalidChunks()
+    {
+        var transfer = new P2PBufferTransfer();
+
+        // Null data
+        var result1 = transfer.ReceiveChunk(new BufferChunk
+        {
+            BufferId = "bad", ChunkIndex = 0, TotalChunks = 1, TotalBytes = 10,
+            Data = Array.Empty<byte>()
+        });
+        if (result1) throw new Exception("Should reject empty data");
+
+        // Oversized data
+        var result2 = transfer.ReceiveChunk(new BufferChunk
+        {
+            BufferId = "bad2", ChunkIndex = 0, TotalChunks = 1, TotalBytes = 10,
+            Data = new byte[transfer.MaxChunkSize + 1]
+        });
+        if (result2) throw new Exception("Should reject oversized chunk");
+
+        // Negative index
+        var result3 = transfer.ReceiveChunk(new BufferChunk
+        {
+            BufferId = "bad3", ChunkIndex = -1, TotalChunks = 1, TotalBytes = 10,
+            Data = new byte[10]
+        });
+        if (result3) throw new Exception("Should reject negative index");
+
+        Console.WriteLine("[P2P] BufferTransfer rejects invalid chunks: OK ✓");
+    }
+
+    [TestMethod]
+    public async Task P2P_Compute_CreateSwarmAsync_SubsystemsWired()
+    {
+        var crypto = new SpawnDev.BlazorJS.Cryptography.DotNetCrypto();
+        await using var client = new SpawnDev.WebTorrent.WebTorrentClient();
+
+        await using var compute = await P2PCompute.CreateSwarmAsync(crypto, client, "wiring-test");
+
+        if (compute.Coordinator == null) throw new Exception("Coordinator null");
+        if (compute.Accelerator == null) throw new Exception("Accelerator null");
+        if (compute.Dispatcher == null) throw new Exception("Dispatcher null");
+        if (compute.Transport == null) throw new Exception("Transport null");
+        if (compute.Bridge == null) throw new Exception("Bridge null");
+        if (compute.Identity == null) throw new Exception("Identity null");
+        if (compute.Role != P2PRole.Coordinator) throw new Exception($"Role: {compute.Role}");
+        if (string.IsNullOrEmpty(compute.MagnetLink)) throw new Exception("MagnetLink empty");
+
+        Console.WriteLine("[P2P] Compute CreateSwarmAsync: all subsystems wired ✓");
+    }
+
+    [TestMethod]
+    public async Task P2P_Policy_InviteOnly_RequiresRegistry()
+    {
+        await using var client = new SpawnDev.WebTorrent.WebTorrentClient();
+        var crypto = new SpawnDev.BlazorJS.Cryptography.DotNetCrypto();
+        await using var coordinator = new P2PSwarmCoordinator(client);
+        var identity = await SwarmIdentity.CreateAsync(crypto, "owner");
+        coordinator.SetIdentity(identity);
+        await coordinator.CreateSwarmAsync("invite-only-test");
+        coordinator.Policy = new SwarmPolicy { JoinPermission = JoinMode.InviteOnly };
+
+        // Anonymous peer should be rejected
+        string? rejectedReason = null;
+        coordinator.OnPeerRejected += (id, reason) => rejectedReason = reason;
+        coordinator.HandlePeerConnected("anon-peer", new PeerCapabilities { PeerId = "anon-peer" });
+
+        if (rejectedReason == null) throw new Exception("Should reject anonymous peer in InviteOnly mode");
+        if (coordinator.PeerCount != 0) throw new Exception($"Peer count: {coordinator.PeerCount}");
+
+        Console.WriteLine($"[P2P] InviteOnly rejects anonymous: '{rejectedReason}' ✓");
+        await identity.DisposeAsync();
+    }
+
+    [TestMethod]
+    public async Task P2P_Transport_WorkerHandlesKernelDispatch()
+    {
+        // Verify the transport routes KernelDispatch to the worker
+        using var context = global::ILGPU.Context.CreateDefault();
+        using var cpuAccel = global::ILGPU.Runtime.CPU.CPUDevice.Default.CreateAccelerator(context);
+
+        await using var client = new SpawnDev.WebTorrent.WebTorrentClient();
+        await using var coordinator = new P2PSwarmCoordinator(client);
+        await coordinator.CreateSwarmAsync("transport-dispatch-test");
+        var p2pAccel = coordinator.CreateAccelerator(context);
+        var dispatcher = new P2PDispatcher(p2pAccel);
+        await using var transport = new P2PTransport(client, coordinator, dispatcher);
+
+        var worker = new P2PWorker(transport);
+        worker.Initialize(context, cpuAccel);
+        transport.SetWorker(worker);
+
+        P2PKernelSerializer.RegisterKernelType(typeof(BackendTestBase));
+        worker.ReceiveBuffer("data", new byte[16]);
+
+        var method = typeof(BackendTestBase).GetMethod(nameof(KernelFillConstant),
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!;
+        var request = P2PKernelSerializer.CreateDispatch(method, gridDimX: 4);
+        request.Buffers = new[]
+        {
+            new BufferBinding { ParameterIndex = 1, BufferId = "data", Length = 4, ElementSize = 4 }
+        };
+
+        // Serialize dispatch and feed through transport's incoming handler
+        var msg = new P2PMessage
+        {
+            Type = P2PMessageType.KernelDispatch,
+            Payload = JsonSerializer.SerializeToElement(request),
+        };
+        var serialized = P2PProtocol.Serialize(msg);
+        await transport.HandleIncomingDataAsync("coordinator", serialized);
+
+        // Worker should have executed
+        var result = worker.GetBuffer("data");
+        if (result == null) throw new Exception("Worker should have buffer after transport dispatch");
+
+        var ints = new int[4];
+        Buffer.BlockCopy(result, 0, ints, 0, 16);
+        if (ints[0] != 42) throw new Exception($"Expected 42, got {ints[0]}");
+
+        Console.WriteLine("[P2P] Transport routes KernelDispatch to worker: OK ✓");
+        P2PKernelSerializer.ClearAllowlist();
+    }
 }
