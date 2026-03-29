@@ -227,25 +227,35 @@ public class P2PSwarmCoordinator : IAsyncDisposable
             return false;
         }
 
+        // Identity check: use cryptographic fingerprint if available, fall back to peerId
+        var fingerprint = capabilities.Fingerprint ?? "";
+        var isAnonymous = string.IsNullOrEmpty(capabilities.PublicKey);
+
+        // Anonymous peer check
+        if (!Policy.AllowAnonymous && isAnonymous)
+        {
+            OnPeerRejected?.Invoke(peerId, "anonymous peers not allowed");
+            return false;
+        }
+
+        // Identity key for known-peer lookups: fingerprint if available, else peerId
+        var identityKey = !string.IsNullOrEmpty(fingerprint) ? fingerprint : peerId;
+
         // Check join mode
         switch (Policy.JoinPermission)
         {
             case JoinMode.InviteOnly:
-                // Must have key in registry
-                if (Registry != null)
+                // Must have key in registry (requires non-anonymous)
+                if (isAnonymous || Registry == null ||
+                    !Registry.HasRole(capabilities.PublicKey!, SwarmRole.Worker))
                 {
-                    var keyB64 = Convert.ToBase64String(
-                        System.Text.Encoding.UTF8.GetBytes(peerId));
-                    if (!Registry.HasRole(keyB64, SwarmRole.Worker))
-                    {
-                        OnPeerRejected?.Invoke(peerId, "invite only");
-                        return false;
-                    }
+                    OnPeerRejected?.Invoke(peerId, "invite only");
+                    return false;
                 }
                 break;
 
             case JoinMode.KnownOnly:
-                if (!_knownPeers.Contains(peerId))
+                if (!_knownPeers.Contains(identityKey))
                 {
                     OnPeerRejected?.Invoke(peerId, "unknown device");
                     return false;
@@ -253,7 +263,7 @@ public class P2PSwarmCoordinator : IAsyncDisposable
                 break;
 
             case JoinMode.Approval:
-                if (!_knownPeers.Contains(peerId))
+                if (!_knownPeers.Contains(identityKey))
                 {
                     // Add to pending — owner must approve
                     var pendingPeer = new RemotePeer
@@ -283,9 +293,9 @@ public class P2PSwarmCoordinator : IAsyncDisposable
         _peers[peerId] = peer;
         _accelerator?.AddPeer(peer);
 
-        // Remember this peer for future joins
+        // Remember this peer for future joins (by fingerprint if available, else peerId)
         if (Policy.RememberPeers)
-            _knownPeers.Add(peerId);
+            _knownPeers.Add(identityKey);
 
         OnPeerJoined?.Invoke(peer);
         OnCapacityChanged?.Invoke();

@@ -23,6 +23,32 @@ public class P2PWorker : IAsyncDisposable
     private string _coordinatorPeerId = "";
 
     /// <summary>
+    /// The swarm's KeyRegistry for verifying coordinator authority.
+    /// Set via SetKeyRegistry when joining a swarm.
+    /// </summary>
+    public KeyRegistry? SwarmRegistry { get; private set; }
+
+    /// <summary>
+    /// The expected coordinator's public key fingerprint.
+    /// When set, dispatches from other peers are rejected.
+    /// </summary>
+    public string? TrustedCoordinatorFingerprint { get; private set; }
+
+    /// <summary>
+    /// Set the swarm's key registry and trusted coordinator for authority verification.
+    /// </summary>
+    /// <param name="registry">The owner-signed key registry.</param>
+    /// <param name="coordinatorFingerprint">
+    /// The expected coordinator's fingerprint. If null, any peer with
+    /// Coordinator role in the registry is accepted.
+    /// </param>
+    public void SetKeyRegistry(KeyRegistry registry, string? coordinatorFingerprint = null)
+    {
+        SwarmRegistry = registry;
+        TrustedCoordinatorFingerprint = coordinatorFingerprint;
+    }
+
+    /// <summary>
     /// The local accelerator type being used for compute.
     /// </summary>
     public AcceleratorType LocalBackend => _accelerator?.AcceleratorType ?? AcceleratorType.CPU;
@@ -58,6 +84,43 @@ public class P2PWorker : IAsyncDisposable
     }
 
     /// <summary>
+    /// Verify that a dispatch request comes from an authorized coordinator.
+    /// </summary>
+    /// <param name="fromPeerId">The peer ID that sent the request.</param>
+    /// <param name="request">The dispatch request.</param>
+    /// <returns>True if the sender is authorized to dispatch work.</returns>
+    private bool VerifyCoordinatorAuthority(string fromPeerId, KernelDispatchRequest request)
+    {
+        // If no registry is set, accept from anyone (backward compat / open swarms)
+        if (SwarmRegistry == null) return true;
+
+        // If we have a trusted coordinator fingerprint, verify it matches
+        if (!string.IsNullOrEmpty(TrustedCoordinatorFingerprint))
+        {
+            // Look up the sender's fingerprint from the request or transport
+            // For now, check if the peer we accepted as coordinator matches
+            if (!string.IsNullOrEmpty(_coordinatorPeerId) &&
+                _coordinatorPeerId != fromPeerId)
+            {
+                // Different peer than our known coordinator — reject
+                return false;
+            }
+        }
+
+        // If registry has entries, verify the sender has at least Coordinator role
+        if (SwarmRegistry.Keys.Count > 0 && !string.IsNullOrEmpty(request.CoordinatorPublicKey))
+        {
+            if (!SwarmRegistry.HasRole(request.CoordinatorPublicKey, SwarmRole.Coordinator))
+                return false;
+
+            if (SwarmRegistry.IsRevoked(request.CoordinatorPublicKey))
+                return false;
+        }
+
+        return true;
+    }
+
+    /// <summary>
     /// Initialize the worker with the best available local accelerator.
     /// </summary>
     public void Initialize(Context context, Accelerator accelerator)
@@ -72,6 +135,13 @@ public class P2PWorker : IAsyncDisposable
     /// </summary>
     public async Task HandleDispatchAsync(string fromPeerId, KernelDispatchRequest request)
     {
+        // Verify coordinator authority
+        if (!VerifyCoordinatorAuthority(fromPeerId, request))
+        {
+            OnKernelCompleted?.Invoke(request.DispatchId, false, 0);
+            return;
+        }
+
         _coordinatorPeerId = fromPeerId;
         OnKernelStarted?.Invoke(request.DispatchId);
 

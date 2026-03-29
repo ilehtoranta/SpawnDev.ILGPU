@@ -2195,4 +2195,112 @@ public abstract partial class BackendTestBase
         if (registry.HasRole(workerKeyB64, SwarmRole.Worker))
             throw new Exception("Revoked worker should not have Worker role");
     }
+
+    // ═══════════════════════════════════════════════════════════
+    //  SwarmPolicy Enforcement
+    // ═══════════════════════════════════════════════════════════
+
+    [TestMethod]
+    public async Task P2P_Policy_MaxPeers()
+    {
+        await using var client = new SpawnDev.WebTorrent.WebTorrentClient();
+        await using var coordinator = new P2PSwarmCoordinator(client);
+        await coordinator.CreateSwarmAsync("max-peers");
+        coordinator.Policy.MaxPeers = 2;
+
+        coordinator.HandlePeerConnected("p1", new PeerCapabilities { PeerId = "p1" });
+        coordinator.HandlePeerConnected("p2", new PeerCapabilities { PeerId = "p2" });
+
+        string? rejected = null;
+        coordinator.OnPeerRejected += (id, reason) => rejected = reason;
+        var accepted = coordinator.HandlePeerConnected("p3", new PeerCapabilities { PeerId = "p3" });
+
+        if (accepted) throw new Exception("Should reject — swarm full");
+        if (rejected != "swarm full") throw new Exception($"Reason: {rejected}");
+        if (coordinator.PeerCount != 2) throw new Exception($"Count: {coordinator.PeerCount}");
+    }
+
+    [TestMethod]
+    public async Task P2P_Policy_ApprovalMode()
+    {
+        await using var client = new SpawnDev.WebTorrent.WebTorrentClient();
+        await using var coordinator = new P2PSwarmCoordinator(client);
+        await coordinator.CreateSwarmAsync("approval-test");
+        coordinator.Policy.JoinPermission = JoinMode.Approval;
+
+        RemotePeer? pending = null;
+        coordinator.OnPeerPendingApproval += p => pending = p;
+
+        var accepted = coordinator.HandlePeerConnected("new-device", new PeerCapabilities { PeerId = "new-device" });
+
+        if (accepted) throw new Exception("New device should be pending, not accepted");
+        if (pending == null) throw new Exception("OnPeerPendingApproval should fire");
+        if (coordinator.PeerCount != 0) throw new Exception("Pending peer should not be counted");
+        if (coordinator.PendingApproval.Count != 1) throw new Exception($"Pending: {coordinator.PendingApproval.Count}");
+
+        // Owner approves
+        var approved = coordinator.ApprovePeer("new-device");
+        if (!approved) throw new Exception("Approval should succeed");
+        if (coordinator.PeerCount != 1) throw new Exception("Approved peer should be counted");
+        if (coordinator.PendingApproval.Count != 0) throw new Exception("Pending should be empty");
+    }
+
+    [TestMethod]
+    public async Task P2P_Policy_ApprovalMode_KnownPeerAutoAdmit()
+    {
+        await using var client = new SpawnDev.WebTorrent.WebTorrentClient();
+        await using var coordinator = new P2PSwarmCoordinator(client);
+        await coordinator.CreateSwarmAsync("approval-known");
+        coordinator.Policy.JoinPermission = JoinMode.Approval;
+
+        // First visit — goes to pending, gets approved
+        coordinator.HandlePeerConnected("returning-device", new PeerCapabilities { PeerId = "returning-device" });
+        coordinator.ApprovePeer("returning-device");
+        coordinator.HandlePeerDisconnected("returning-device");
+
+        // Second visit — should auto-admit (known peer)
+        var accepted = coordinator.HandlePeerConnected("returning-device", new PeerCapabilities { PeerId = "returning-device" });
+        if (!accepted) throw new Exception("Known device should auto-admit");
+        if (coordinator.PeerCount != 1) throw new Exception($"Count: {coordinator.PeerCount}");
+    }
+
+    [TestMethod]
+    public async Task P2P_Policy_KnownOnly()
+    {
+        await using var client = new SpawnDev.WebTorrent.WebTorrentClient();
+        await using var coordinator = new P2PSwarmCoordinator(client);
+        await coordinator.CreateSwarmAsync("known-only");
+
+        // First: admit in Open mode to establish known peers
+        coordinator.HandlePeerConnected("known-peer", new PeerCapabilities { PeerId = "known-peer" });
+        coordinator.HandlePeerDisconnected("known-peer");
+
+        // Switch to KnownOnly
+        coordinator.Policy.JoinPermission = JoinMode.KnownOnly;
+
+        // Known peer can rejoin
+        var accepted = coordinator.HandlePeerConnected("known-peer", new PeerCapabilities { PeerId = "known-peer" });
+        if (!accepted) throw new Exception("Known peer should be accepted");
+
+        // Unknown peer rejected
+        string? rejected = null;
+        coordinator.OnPeerRejected += (id, reason) => rejected = reason;
+        var unknown = coordinator.HandlePeerConnected("stranger", new PeerCapabilities { PeerId = "stranger" });
+        if (unknown) throw new Exception("Unknown peer should be rejected");
+        if (rejected != "unknown device") throw new Exception($"Reason: {rejected}");
+    }
+
+    [TestMethod]
+    public async Task P2P_Policy_Open_Default()
+    {
+        await using var client = new SpawnDev.WebTorrent.WebTorrentClient();
+        await using var coordinator = new P2PSwarmCoordinator(client);
+        await coordinator.CreateSwarmAsync("open-default");
+
+        // Default policy is Open — everyone gets in
+        for (int i = 0; i < 10; i++)
+            coordinator.HandlePeerConnected($"peer-{i}", new PeerCapabilities { PeerId = $"peer-{i}" });
+
+        if (coordinator.PeerCount != 10) throw new Exception($"Count: {coordinator.PeerCount}");
+    }
 }

@@ -182,6 +182,18 @@ public class PeerCapabilities
 
     /// <summary>Thermal state (0=nominal, 1=fair, 2=serious, 3=critical).</summary>
     public int ThermalState { get; set; } = 0;
+
+    /// <summary>
+    /// Peer's ECDSA public key in SPKI format (base64).
+    /// Null/empty = anonymous peer (no cryptographic identity).
+    /// </summary>
+    public string? PublicKey { get; set; }
+
+    /// <summary>
+    /// SHA-256 fingerprint of the peer's public key (hex, lowercase).
+    /// Used for quick identity lookups without full key comparison.
+    /// </summary>
+    public string? Fingerprint { get; set; }
 }
 
 /// <summary>
@@ -194,6 +206,9 @@ public class KernelDispatchRequest
 
     /// <summary>Kernel entry point method name (for the peer to compile from its own assembly).</summary>
     public string KernelMethod { get; set; } = "";
+
+    /// <summary>Coordinator's public key (base64 SPKI) for authority verification.</summary>
+    public string? CoordinatorPublicKey { get; set; }
 
     /// <summary>Kernel entry point type name.</summary>
     public string KernelType { get; set; } = "";
