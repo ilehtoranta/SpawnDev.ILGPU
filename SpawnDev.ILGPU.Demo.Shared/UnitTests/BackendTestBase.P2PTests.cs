@@ -1992,4 +1992,63 @@ public abstract partial class BackendTestBase
         if (result)
             throw new Exception("SECURITY FAIL: Worker should not be able to kick peers");
     }
+
+    // ═══════════════════════════════════════════════════════════
+    //  Transfer Notification + Dispose
+    // ═══════════════════════════════════════════════════════════
+
+    [TestMethod]
+    public async Task P2P_Transfer_SendsNotification()
+    {
+        await using var client = new SpawnDev.WebTorrent.WebTorrentClient();
+        await using var coordinator = new P2PSwarmCoordinator(client);
+        await coordinator.CreateSwarmAsync("transfer-notify");
+
+        coordinator.HandlePeerConnected("target-peer", new PeerCapabilities
+        {
+            PeerId = "target-peer", EstimatedTflops = 10.0,
+        });
+        coordinator.HandlePeerConnected("other-peer", new PeerCapabilities
+        {
+            PeerId = "other-peer", EstimatedTflops = 5.0,
+        });
+
+        var sentMessages = new List<(string peerId, P2PMessageType type)>();
+        coordinator.OnSendMessage += (peerId, msg) =>
+            sentMessages.Add((peerId, msg.Type));
+
+        coordinator.TransferCoordinator("target-peer");
+
+        // Target should receive CoordinatorTransfer
+        if (!sentMessages.Any(m => m.peerId == "target-peer" && m.type == P2PMessageType.CoordinatorTransfer))
+            throw new Exception("Target should receive CoordinatorTransfer");
+
+        // Other peer should receive CoordinatorAnnounce
+        if (!sentMessages.Any(m => m.peerId == "other-peer" && m.type == P2PMessageType.CoordinatorAnnounce))
+            throw new Exception("Other peers should receive CoordinatorAnnounce");
+    }
+
+    [TestMethod]
+    public async Task P2P_Dispose_SendsDisconnect()
+    {
+        var client = new SpawnDev.WebTorrent.WebTorrentClient();
+        var coordinator = new P2PSwarmCoordinator(client);
+        await coordinator.CreateSwarmAsync("dispose-notify");
+
+        coordinator.HandlePeerConnected("peer-1", new PeerCapabilities { PeerId = "peer-1" });
+        coordinator.HandlePeerConnected("peer-2", new PeerCapabilities { PeerId = "peer-2" });
+
+        var disconnectsSent = 0;
+        coordinator.OnSendMessage += (peerId, msg) =>
+        {
+            if (msg.Type == P2PMessageType.Disconnect)
+                disconnectsSent++;
+        };
+
+        await coordinator.DisposeAsync();
+        await client.DisposeAsync();
+
+        if (disconnectsSent != 2)
+            throw new Exception($"Should send 2 disconnect messages: {disconnectsSent}");
+    }
 }
