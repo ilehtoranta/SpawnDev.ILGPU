@@ -317,7 +317,9 @@ public class P2PWorker : IAsyncDisposable
                 ? new[] { _accelerator.AcceleratorType.ToString() }
                 : new[] { "CPU" },
             PreferredBackend = _accelerator?.AcceleratorType.ToString() ?? "CPU",
-            AvailableMemory = _accelerator is P2PAccelerator ? 0 : Environment.WorkingSet,
+            AvailableMemory = _accelerator?.AcceleratorType == AcceleratorType.CPU
+                ? Environment.WorkingSet
+                : _accelerator?.MemorySize ?? Environment.WorkingSet,
             EstimatedTflops = EstimateLocalTflops(),
             MaxThreadsPerGroup = _accelerator?.MaxNumThreadsPerGroup ?? 256,
             MaxSharedMemory = _accelerator?.Device?.MaxSharedMemoryPerGroup ?? 0,
@@ -329,15 +331,24 @@ public class P2PWorker : IAsyncDisposable
 
     private double EstimateLocalTflops()
     {
-        return _accelerator?.AcceleratorType switch
+        if (_accelerator == null) return 1.0;
+
+        // Use multiprocessor count as a rough scaling factor when available
+        int processors = _accelerator.Device?.NumMultiprocessors ?? 1;
+        int threadsPerGroup = _accelerator.MaxNumThreadsPerGroup;
+
+        // Base estimate per backend, scaled by actual hardware
+        double baseEstimate = _accelerator.AcceleratorType switch
         {
-            AcceleratorType.Cuda => 15.0,
-            AcceleratorType.OpenCL => 8.0,
-            AcceleratorType.WebGPU => 5.0,
-            AcceleratorType.Wasm => 1.0,
-            AcceleratorType.CPU => 2.0,
+            AcceleratorType.Cuda => 2.0 * processors, // ~2 TFLOPS per SM
+            AcceleratorType.OpenCL => 1.0 * processors,
+            AcceleratorType.WebGPU => 0.5 * Math.Max(processors, 8),
+            AcceleratorType.Wasm => 0.1 * Environment.ProcessorCount,
+            AcceleratorType.CPU => 0.2 * Environment.ProcessorCount,
             _ => 1.0,
         };
+
+        return Math.Max(0.1, baseEstimate);
     }
 
     /// <summary>

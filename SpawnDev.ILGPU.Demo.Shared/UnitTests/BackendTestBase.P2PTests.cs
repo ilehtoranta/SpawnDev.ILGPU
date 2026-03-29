@@ -3695,4 +3695,79 @@ public abstract partial class BackendTestBase
         Console.WriteLine("[P2P] Transport routes KernelDispatch to worker: OK ✓");
         P2PKernelSerializer.ClearAllowlist();
     }
+
+    [TestMethod]
+    public async Task P2P_Transport_CapabilityResponse_UsesWorkerBackend()
+    {
+        // When worker is attached, capability response should report the worker's real backend
+        using var context = global::ILGPU.Context.CreateDefault();
+        using var cpuAccel = global::ILGPU.Runtime.CPU.CPUDevice.Default.CreateAccelerator(context);
+
+        await using var client = new SpawnDev.WebTorrent.WebTorrentClient();
+        await using var coordinator = new P2PSwarmCoordinator(client);
+        await coordinator.CreateSwarmAsync("caps-backend-test");
+        var p2pAccel = coordinator.CreateAccelerator(context);
+        var dispatcher = new P2PDispatcher(p2pAccel);
+        await using var transport = new P2PTransport(client, coordinator, dispatcher);
+
+        var worker = new P2PWorker(transport);
+        worker.Initialize(context, cpuAccel);
+        transport.SetWorker(worker);
+
+        // Capture the capability response message
+        PeerCapabilities? receivedCaps = null;
+        transport.RegisterPeer("coordinator-node", async (data) =>
+        {
+            // Parse the response
+            var msg = P2PProtocol.Deserialize(data);
+            if (msg?.Type == P2PMessageType.CapabilityResponse && msg.Payload != null)
+                receivedCaps = msg.Payload.Value.Deserialize<PeerCapabilities>();
+        });
+
+        // Simulate capability request
+        var requestMsg = new P2PMessage { Type = P2PMessageType.CapabilityRequest };
+        var serialized = P2PProtocol.Serialize(requestMsg);
+        await transport.HandleIncomingDataAsync("coordinator-node", serialized);
+
+        // Give async response a moment
+        await Task.Delay(50);
+
+        if (receivedCaps == null) throw new Exception("Should receive capability response");
+        if (receivedCaps.PreferredBackend != "CPU")
+            throw new Exception($"Should report CPU backend, got: {receivedCaps.PreferredBackend}");
+        if (receivedCaps.MaxThreadsPerGroup <= 0)
+            throw new Exception($"MaxThreadsPerGroup: {receivedCaps.MaxThreadsPerGroup}");
+        if (receivedCaps.EstimatedTflops <= 0)
+            throw new Exception($"EstimatedTflops: {receivedCaps.EstimatedTflops}");
+
+        Console.WriteLine($"[P2P] Capability response uses worker backend: {receivedCaps.PreferredBackend}, {receivedCaps.EstimatedTflops:F1} TFLOPS ✓");
+    }
+
+    [TestMethod]
+    public async Task P2P_Worker_EstimateTflops_ScalesWithHardware()
+    {
+        // TFLOPS estimate should scale with processor count (for CPU backend)
+        using var context = global::ILGPU.Context.CreateDefault();
+        using var cpuAccel = global::ILGPU.Runtime.CPU.CPUDevice.Default.CreateAccelerator(context);
+
+        await using var client = new SpawnDev.WebTorrent.WebTorrentClient();
+        await using var coordinator = new P2PSwarmCoordinator(client);
+        var p2pAccel = coordinator.CreateAccelerator(context);
+        var dispatcher = new P2PDispatcher(p2pAccel);
+        await using var transport = new P2PTransport(client, coordinator, dispatcher);
+        var worker = new P2PWorker(transport);
+        worker.Initialize(context, cpuAccel);
+
+        var caps = worker.BuildCapabilities("test-node");
+
+        // TFLOPS should be > 0 and scale with CPU count
+        if (caps.EstimatedTflops <= 0)
+            throw new Exception($"TFLOPS should be positive: {caps.EstimatedTflops}");
+
+        // Memory should be reported (from accelerator or system)
+        if (caps.AvailableMemory <= 0)
+            throw new Exception($"Memory should be positive: {caps.AvailableMemory}");
+
+        Console.WriteLine($"[P2P] Worker TFLOPS estimate: {caps.EstimatedTflops:F1}, memory: {caps.AvailableMemory / 1024 / 1024}MB ✓");
+    }
 }

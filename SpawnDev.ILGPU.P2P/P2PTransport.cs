@@ -245,8 +245,10 @@ public class P2PTransport : IAsyncDisposable
 
     private async Task HandleCapabilityRequest(string peerId)
     {
-        // Report our capabilities to the requesting coordinator
-        var caps = BuildLocalCapabilities();
+        // Use worker's real capabilities if available, otherwise fallback
+        var caps = _worker != null
+            ? _worker.BuildCapabilities(peerId)
+            : BuildLocalCapabilities();
         await SendMessageAsync(peerId, new P2PMessage
         {
             Type = P2PMessageType.CapabilityResponse,
