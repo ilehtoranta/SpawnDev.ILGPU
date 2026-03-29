@@ -289,11 +289,41 @@ public class P2PSwarmCoordinator : IAsyncDisposable
 
         if (target == null) return null;
 
+        // Notify the target peer that they are the new coordinator
+        OnSendMessage?.Invoke(target.PeerId, new P2PMessage
+        {
+            Type = P2PMessageType.CoordinatorTransfer,
+            Payload = System.Text.Json.JsonSerializer.SerializeToElement(new
+            {
+                newCoordinatorPeerId = target.PeerId,
+                timestamp = DateTimeOffset.UtcNow,
+            }),
+        });
+
+        // Announce to all peers
+        foreach (var peer in _peers.Values.Where(p => p.IsConnected && p.PeerId != target.PeerId))
+        {
+            OnSendMessage?.Invoke(peer.PeerId, new P2PMessage
+            {
+                Type = P2PMessageType.CoordinatorAnnounce,
+                Payload = System.Text.Json.JsonSerializer.SerializeToElement(new
+                {
+                    newCoordinatorPeerId = target.PeerId,
+                }),
+            });
+        }
+
         Role = P2PRole.Worker;
         CoordinatorPeerId = target.PeerId;
         OnCoordinatorChanged?.Invoke(target.PeerId);
         return target.PeerId;
     }
+
+    /// <summary>
+    /// Fired when the coordinator needs to send a message to a peer.
+    /// Hook this to the P2PTransport for actual delivery.
+    /// </summary>
+    public event Action<string, P2PMessage>? OnSendMessage;
 
     /// <summary>
     /// Elect a new coordinator after the current one drops unexpectedly.
@@ -336,6 +366,14 @@ public class P2PSwarmCoordinator : IAsyncDisposable
     /// <inheritdoc/>
     public ValueTask DisposeAsync()
     {
+        // Notify all peers we're leaving
+        foreach (var peer in _peers.Values.Where(p => p.IsConnected))
+        {
+            OnSendMessage?.Invoke(peer.PeerId, new P2PMessage
+            {
+                Type = P2PMessageType.Disconnect,
+            });
+        }
         _peers.Clear();
         return ValueTask.CompletedTask;
     }
