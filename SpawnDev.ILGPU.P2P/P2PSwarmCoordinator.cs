@@ -29,6 +29,21 @@ public class P2PSwarmCoordinator : IAsyncDisposable
     public SwarmIdentity? Identity { get; private set; }
 
     /// <summary>
+    /// Swarm access policy (join permissions, limits).
+    /// </summary>
+    public SwarmPolicy Policy { get; set; } = new();
+
+    /// <summary>
+    /// Set of peer fingerprints that have been seen before (for KnownOnly mode).
+    /// </summary>
+    private readonly HashSet<string> _knownPeers = new();
+
+    /// <summary>
+    /// Peers waiting for owner approval (Approval mode).
+    /// </summary>
+    public System.Collections.Concurrent.ConcurrentDictionary<string, RemotePeer> PendingApproval { get; } = new();
+
+    /// <summary>
     /// The swarm's key registry (authorized keys + roles).
     /// </summary>
     public KeyRegistry? Registry { get; private set; }
@@ -191,10 +206,70 @@ public class P2PSwarmCoordinator : IAsyncDisposable
     /// </summary>
     public bool HandlePeerConnected(string peerId, PeerCapabilities capabilities)
     {
+        // Check block list
         if (_blockedPeers.ContainsKey(peerId))
         {
             OnPeerRejected?.Invoke(peerId, "blocked");
             return false;
+        }
+
+        // Check peer limit
+        if (Policy.MaxPeers > 0 && _peers.Count >= Policy.MaxPeers)
+        {
+            OnPeerRejected?.Invoke(peerId, "swarm full");
+            return false;
+        }
+
+        // Check TFLOPS limit
+        if (Policy.MaxTflops > 0 && TotalTflops >= Policy.MaxTflops)
+        {
+            OnPeerRejected?.Invoke(peerId, "TFLOPS limit reached");
+            return false;
+        }
+
+        // Check join mode
+        switch (Policy.JoinPermission)
+        {
+            case JoinMode.InviteOnly:
+                // Must have key in registry
+                if (Registry != null)
+                {
+                    var keyB64 = Convert.ToBase64String(
+                        System.Text.Encoding.UTF8.GetBytes(peerId));
+                    if (!Registry.HasRole(keyB64, SwarmRole.Worker))
+                    {
+                        OnPeerRejected?.Invoke(peerId, "invite only");
+                        return false;
+                    }
+                }
+                break;
+
+            case JoinMode.KnownOnly:
+                if (!_knownPeers.Contains(peerId))
+                {
+                    OnPeerRejected?.Invoke(peerId, "unknown device");
+                    return false;
+                }
+                break;
+
+            case JoinMode.Approval:
+                if (!_knownPeers.Contains(peerId))
+                {
+                    // Add to pending — owner must approve
+                    var pendingPeer = new RemotePeer
+                    {
+                        PeerId = peerId,
+                        IsConnected = true,
+                        MemorySize = capabilities.AvailableMemory,
+                        Capabilities = capabilities,
+                    };
+                    PendingApproval[peerId] = pendingPeer;
+                    OnPeerPendingApproval?.Invoke(pendingPeer);
+                    return false; // Not admitted yet
+                }
+                break;
+
+            // JoinMode.Open — always admit
         }
 
         var peer = new RemotePeer
@@ -208,10 +283,47 @@ public class P2PSwarmCoordinator : IAsyncDisposable
         _peers[peerId] = peer;
         _accelerator?.AddPeer(peer);
 
+        // Remember this peer for future joins
+        if (Policy.RememberPeers)
+            _knownPeers.Add(peerId);
+
         OnPeerJoined?.Invoke(peer);
         OnCapacityChanged?.Invoke();
         return true;
     }
+
+    /// <summary>
+    /// Approve a pending peer (Approval mode).
+    /// Moves them from pending to active.
+    /// </summary>
+    public bool ApprovePeer(string peerId)
+    {
+        if (Role != P2PRole.Coordinator) return false;
+        if (!PendingApproval.TryRemove(peerId, out var pending)) return false;
+
+        _knownPeers.Add(peerId);
+        _peers[peerId] = pending;
+        _accelerator?.AddPeer(pending);
+
+        OnPeerJoined?.Invoke(pending);
+        OnCapacityChanged?.Invoke();
+        return true;
+    }
+
+    /// <summary>
+    /// Reject a pending peer (Approval mode).
+    /// </summary>
+    public bool RejectPendingPeer(string peerId, string reason = "")
+    {
+        if (!PendingApproval.TryRemove(peerId, out _)) return false;
+        OnPeerRejected?.Invoke(peerId, reason);
+        return true;
+    }
+
+    /// <summary>
+    /// Fired when a peer is waiting for approval (Approval mode).
+    /// </summary>
+    public event Action<RemotePeer>? OnPeerPendingApproval;
 
     /// <summary>
     /// Handle a peer disconnecting.
