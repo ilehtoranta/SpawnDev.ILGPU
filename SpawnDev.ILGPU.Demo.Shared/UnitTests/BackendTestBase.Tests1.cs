@@ -373,5 +373,48 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                     throw new Exception($"Nested struct scalar arg failed at {i}. Expected {expected}, got {result[i]}");
             }
         });
+
+        [TestMethod]
+        public async Task CopyToHostPartialReadback() => await RunTest(async accelerator =>
+        {
+            int len = 64;
+            using var buf = accelerator.Allocate1D<int>(len);
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<int>, int>(MyKernel);
+            kernel((Index1D)len, buf.View, 0); // buf[i] = i + 0 = i
+            await accelerator.SynchronizeAsync();
+
+            // Full readback
+            var full = await buf.CopyToHostAsync<int>();
+            if (full.Length != 64) throw new Exception($"Full readback should be 64, got {full.Length}");
+
+            // Partial readback: offset=10, count=5
+            var partial = await buf.CopyToHostAsync<int>(10, 5);
+            if (partial.Length != 5) throw new Exception($"Partial should be 5, got {partial.Length}");
+            for (int i = 0; i < 5; i++)
+            {
+                if (partial[i] != i + 10)
+                    throw new Exception($"Partial[{i}] expected {i + 10}, got {partial[i]}");
+            }
+
+            // Partial readback: first 3 elements
+            var first3 = await buf.CopyToHostAsync<int>(0, 3);
+            if (first3.Length != 3) throw new Exception($"First3 should be 3, got {first3.Length}");
+            if (first3[0] != 0 || first3[1] != 1 || first3[2] != 2)
+                throw new Exception($"First3 values wrong: {first3[0]},{first3[1]},{first3[2]}");
+
+            // Partial readback: last element
+            var last = await buf.CopyToHostAsync<int>(63, 1);
+            if (last.Length != 1) throw new Exception($"Last should be 1, got {last.Length}");
+            if (last[0] != 63) throw new Exception($"Last[0] expected 63, got {last[0]}");
+
+            // Full range (offset=0, count=len) should equal full readback
+            var fullRange = await buf.CopyToHostAsync<int>(0, 64);
+            if (fullRange.Length != 64) throw new Exception($"FullRange should be 64, got {fullRange.Length}");
+            for (int i = 0; i < 64; i++)
+            {
+                if (fullRange[i] != full[i])
+                    throw new Exception($"FullRange[{i}] mismatch: {fullRange[i]} != {full[i]}");
+            }
+        });
     }
 }
