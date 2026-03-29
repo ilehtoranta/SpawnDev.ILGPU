@@ -1659,4 +1659,134 @@ public abstract partial class BackendTestBase
         if (!reassembled.SequenceEqual(tensorData))
             throw new Exception("Buffer data corruption through transport");
     }
+
+    // ═══════════════════════════════════════════════════════════
+    //  BEP 46 State Manager
+    // ═══════════════════════════════════════════════════════════
+
+    [TestMethod]
+    public async Task P2P_StateManager_Create()
+    {
+        await using var client = new SpawnDev.WebTorrent.WebTorrentClient();
+        var dht = new SpawnDev.WebTorrent.Discovery.DhtDiscovery();
+        var channel = new SpawnDev.WebTorrent.AgentChannel(dht);
+        await using var coordinator = new P2PSwarmCoordinator(client);
+        await coordinator.CreateSwarmAsync("state-test");
+
+        var stateManager = new P2PStateManager(channel, coordinator);
+
+        if (stateManager.PublicKey == null || stateManager.PublicKey.Length == 0)
+            throw new Exception("PublicKey should not be empty");
+        if (string.IsNullOrEmpty(stateManager.PublicKeyHex))
+            throw new Exception("PublicKeyHex should not be empty");
+    }
+
+    [TestMethod]
+    public async Task P2P_StateManager_PublishState()
+    {
+        await using var client = new SpawnDev.WebTorrent.WebTorrentClient();
+        var dht = new SpawnDev.WebTorrent.Discovery.DhtDiscovery();
+        var channel = new SpawnDev.WebTorrent.AgentChannel(dht);
+        await using var coordinator = new P2PSwarmCoordinator(client);
+        await coordinator.CreateSwarmAsync("publish-test");
+
+        // Add some peers for state content
+        coordinator.HandlePeerConnected("peer-1", new PeerCapabilities
+        {
+            PeerId = "peer-1", EstimatedTflops = 10.0,
+            AvailableMemory = 8L * 1024 * 1024 * 1024,
+        });
+
+        var stateManager = new P2PStateManager(channel, coordinator);
+
+        // Should not throw — publishes state to DHT
+        await stateManager.PublishStateAsync();
+    }
+
+    [TestMethod]
+    public async Task P2P_StateManager_WorkerCantPublish()
+    {
+        await using var client = new SpawnDev.WebTorrent.WebTorrentClient();
+        var dht = new SpawnDev.WebTorrent.Discovery.DhtDiscovery();
+        var channel = new SpawnDev.WebTorrent.AgentChannel(dht);
+        await using var coordinator = new P2PSwarmCoordinator(client);
+        // Don't call CreateSwarmAsync — stays as Worker role
+
+        var stateManager = new P2PStateManager(channel, coordinator);
+
+        // Workers can't publish — should be a no-op, not throw
+        await stateManager.PublishStateAsync();
+    }
+
+    [TestMethod]
+    public async Task P2P_StateManager_OnStateUpdated()
+    {
+        await using var client = new SpawnDev.WebTorrent.WebTorrentClient();
+        var dht = new SpawnDev.WebTorrent.Discovery.DhtDiscovery();
+        var channel = new SpawnDev.WebTorrent.AgentChannel(dht);
+        await using var coordinator = new P2PSwarmCoordinator(client);
+
+        var stateManager = new P2PStateManager(channel, coordinator);
+
+        SwarmState? received = null;
+        stateManager.OnStateUpdated += state => received = state;
+
+        // Simulate a state update from DHT
+        var testState = new SwarmState
+        {
+            SwarmName = "test-swarm",
+            PeerCount = 5,
+            TotalTflops = 42.0,
+        };
+        var json = System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(testState,
+            new System.Text.Json.JsonSerializerOptions { PropertyNamingPolicy = System.Text.Json.JsonNamingPolicy.CamelCase });
+
+        // Simulate DHT delivering the update through the channel
+        // AgentChannel fires OnAgentUpdate which StateManager handles
+        // For this test, we verify the deserialization path
+        if (received != null)
+            throw new Exception("Should not have received state yet (no DHT delivery in test)");
+
+        // Verify state model serializes correctly
+        var roundTripped = System.Text.Json.JsonSerializer.Deserialize<SwarmState>(json,
+            new System.Text.Json.JsonSerializerOptions { PropertyNamingPolicy = System.Text.Json.JsonNamingPolicy.CamelCase });
+        if (roundTripped?.TotalTflops != 42.0)
+            throw new Exception($"State round-trip failed: {roundTripped?.TotalTflops}");
+        if (roundTripped?.PeerCount != 5)
+            throw new Exception($"PeerCount: {roundTripped?.PeerCount}");
+    }
+
+    [TestMethod]
+    public async Task P2P_SdComputeExtension_Name()
+    {
+        await using var client = new SpawnDev.WebTorrent.WebTorrentClient();
+        await using var coordinator = new P2PSwarmCoordinator(client);
+        using var ctx = global::ILGPU.Context.CreateDefault();
+        var accelerator = coordinator.CreateAccelerator(ctx);
+        var dispatcher = new P2PDispatcher(accelerator);
+        await using var transport = new P2PTransport(client, coordinator, dispatcher);
+
+        var ext = new SdComputeExtension(transport);
+        if (ext.Name != "sd_compute")
+            throw new Exception($"Extension name: {ext.Name}");
+    }
+
+    [TestMethod]
+    public async Task P2P_SdComputeExtension_HandshakeData()
+    {
+        await using var client = new SpawnDev.WebTorrent.WebTorrentClient();
+        await using var coordinator = new P2PSwarmCoordinator(client);
+        using var ctx = global::ILGPU.Context.CreateDefault();
+        var accelerator = coordinator.CreateAccelerator(ctx);
+        var dispatcher = new P2PDispatcher(accelerator);
+        await using var transport = new P2PTransport(client, coordinator, dispatcher);
+
+        var ext = new SdComputeExtension(transport);
+        var handshake = ext.GetHandshakeData();
+
+        if (handshake == null)
+            throw new Exception("Should include handshake data");
+        if (!handshake.ContainsKey("sd_compute_version"))
+            throw new Exception("Should include version");
+    }
 }
