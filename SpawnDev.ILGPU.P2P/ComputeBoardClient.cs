@@ -1,12 +1,16 @@
 using System.Net.Http.Json;
+using System.Text;
+using System.Text.Json;
 
 namespace SpawnDev.ILGPU.P2P;
 
 /// <summary>
 /// Client for the compute request board on hub.spawndev.com.
-/// Posts "need TFLOPS" requests and browses available swarms.
+/// Posts signed "need TFLOPS" requests and browses available swarms.
 ///
-/// Used by both the demo UI and sovereign AI swarms.
+/// Authentication:
+///   POST requires SwarmIdentity signature (OwnerFingerprint + PublicKey + Signature)
+///   DELETE requires fingerprint query parameter matching the owner
 /// </summary>
 public class ComputeBoardClient
 {
@@ -24,7 +28,7 @@ public class ComputeBoardClient
     }
 
     /// <summary>
-    /// Post a compute request to the board.
+    /// Post a signed compute request to the board.
     /// </summary>
     public async Task<ComputeBoardRequest?> PostRequestAsync(ComputeBoardRequest request)
     {
@@ -63,34 +67,51 @@ public class ComputeBoardClient
     }
 
     /// <summary>
-    /// Remove a compute request.
+    /// Remove a compute request. Requires the owner's fingerprint.
     /// </summary>
-    public async Task<bool> RemoveRequestAsync(string id)
+    public async Task<bool> RemoveRequestAsync(string id, string ownerFingerprint)
     {
         try
         {
-            var response = await _http.DeleteAsync($"{BaseUrl}/compute/request/{id}");
+            var response = await _http.DeleteAsync(
+                $"{BaseUrl}/compute/request/{id}?fingerprint={Uri.EscapeDataString(ownerFingerprint)}");
             return response.IsSuccessStatusCode;
         }
         catch { return false; }
     }
 
     /// <summary>
-    /// Post a request for the given P2PCompute instance.
+    /// Post a signed request for the given P2PCompute instance.
+    /// Signs the request payload with the swarm's identity.
     /// </summary>
-    public async Task<ComputeBoardRequest?> PostFromComputeAsync(P2PCompute compute, string purpose, double tflopsNeeded)
+    public async Task<ComputeBoardRequest?> PostFromComputeAsync(
+        P2PCompute compute, string purpose, double tflopsNeeded)
     {
-        return await PostRequestAsync(new ComputeBoardRequest
+        var request = new ComputeBoardRequest
         {
             SwarmName = "Compute Swarm",
             Purpose = purpose,
             OwnerFingerprint = compute.Identity.Fingerprint,
+            PublicKey = Convert.ToBase64String(compute.Identity.PublicKeySpki),
             TflopsNeeded = tflopsNeeded,
             TflopsAvailable = compute.TotalTflops,
             PeerCount = compute.PeerCount,
             MagnetLink = compute.MagnetLink,
             JoinLink = compute.JoinLink,
+        };
+
+        // Sign the request payload
+        var payload = JsonSerializer.SerializeToUtf8Bytes(new
+        {
+            request.SwarmName,
+            request.Purpose,
+            request.OwnerFingerprint,
+            request.TflopsNeeded,
         });
+        var signature = await compute.Identity.SignAsync(payload);
+        request.Signature = Convert.ToBase64String(signature);
+
+        return await PostRequestAsync(request);
     }
 }
 
@@ -104,6 +125,8 @@ public class ComputeBoardRequest
     public string SwarmName { get; set; } = "";
     public string Purpose { get; set; } = "";
     public string? OwnerFingerprint { get; set; }
+    public string? PublicKey { get; set; }
+    public string? Signature { get; set; }
     public double TflopsNeeded { get; set; }
     public double TflopsAvailable { get; set; }
     public int PeerCount { get; set; }
