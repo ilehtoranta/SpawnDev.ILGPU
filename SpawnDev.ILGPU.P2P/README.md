@@ -29,7 +29,9 @@ var compute = await P2PCompute.JoinSwarmAsync(crypto, client, accelerator, magne
 
 ## Features
 
-- **93 unit tests** — device, dispatch, transport, crypto, policy, security, buffer transfer, integration
+- **105 unit tests** — real kernel execution, coordinator dispatch, crypto, policy, security, buffer transfer
+- **Real kernel execution** — P2PKernelLauncher: reflection-based typed dispatch via LoadAutoGroupedStreamKernel. Verified on CPU and CUDA.
+- **Coordinator dispatch API** — `DispatchToSwarm()` routes to best peer, worker executes, results returned
 - **Real ECDSA-P256 crypto** — SwarmIdentity, KeyRegistry, RoleAssignment via SpawnDev.BlazorJS.Cryptography
 - **Fault-tolerant dispatch** — peer scoring (TFLOPS/load/thermal/battery), automatic retry, graceful handoff
 - **Coordinator roles** — transfer, deterministic election, kick/block. Survives coordinator loss via BEP 46 DHT
