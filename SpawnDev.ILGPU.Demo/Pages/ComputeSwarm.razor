@@ -1,0 +1,274 @@
+@page "/compute"
+@page "/compute/join"
+@using SpawnDev.ILGPU.P2P
+@using SpawnDev.BlazorJS
+@using SpawnDev.BlazorJS.Cryptography
+@inject NavigationManager Nav
+@inject BlazorJSRuntime JS
+@implements IAsyncDisposable
+
+<PageTitle>P2P Compute Swarm</PageTitle>
+
+<div style="background: #0f172a; color: #e2e8f0; min-height: 100vh; padding: 20px; font-family: -apple-system, sans-serif;">
+
+    @if (_state == SwarmPageState.Loading)
+    {
+        <h2 style="color: #94a3b8;">Initializing P2P Compute...</h2>
+    }
+    else if (_state == SwarmPageState.JoinConsent)
+    {
+        <!-- Join Consent Dialog -->
+        <div style="max-width: 500px; margin: 80px auto; background: #1e293b; border-radius: 12px; padding: 32px; text-align: center;">
+            <h2 style="color: #f1f5f9; margin-bottom: 8px;">Join Compute Swarm?</h2>
+            <p style="color: #94a3b8; font-size: 14px; margin-bottom: 24px;">
+                <strong style="color: #10b981;">@_swarmName</strong> wants to use your device for distributed GPU computing.
+            </p>
+            <div style="display: flex; flex-direction: column; gap: 10px;">
+                <button @onclick="JoinAlways" style="background: #10b981; color: white; border: none; padding: 12px; border-radius: 8px; font-size: 16px; cursor: pointer; font-weight: bold;">
+                    Always Join This Swarm
+                </button>
+                <button @onclick="JoinOnce" style="background: #3b82f6; color: white; border: none; padding: 12px; border-radius: 8px; font-size: 16px; cursor: pointer;">
+                    Join This Time
+                </button>
+                <button @onclick="Decline" style="background: #334155; color: #94a3b8; border: none; padding: 12px; border-radius: 8px; font-size: 16px; cursor: pointer;">
+                    Not Now
+                </button>
+            </div>
+        </div>
+    }
+    else if (_state == SwarmPageState.Dashboard)
+    {
+        <!-- Swarm Dashboard -->
+        <div style="max-width: 1000px; margin: 0 auto;">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
+                <h2 style="color: #f1f5f9; margin: 0;">
+                    @if (_compute?.Role == P2PRole.Coordinator)
+                    {
+                        <span style="color: #10b981;">&#9679;</span>
+                    }
+                    else
+                    {
+                        <span style="color: #3b82f6;">&#9679;</span>
+                    }
+                    P2P Compute — @(_compute?.Role.ToString() ?? "Disconnected")
+                </h2>
+                @if (_compute == null)
+                {
+                    <button @onclick="CreateSwarm" style="background: #10b981; color: white; border: none; padding: 10px 20px; border-radius: 6px; cursor: pointer; font-weight: bold;">
+                        Create Swarm
+                    </button>
+                }
+            </div>
+
+            @if (_compute != null)
+            {
+                <!-- Stats Bar -->
+                <div style="display: flex; gap: 16px; margin-bottom: 20px;">
+                    <div style="background: #1e293b; padding: 16px 24px; border-radius: 8px; flex: 1; text-align: center;">
+                        <div style="font-size: 28px; font-weight: bold; color: #10b981;">@_compute.PeerCount</div>
+                        <div style="font-size: 12px; color: #64748b;">Peers</div>
+                    </div>
+                    <div style="background: #1e293b; padding: 16px 24px; border-radius: 8px; flex: 1; text-align: center;">
+                        <div style="font-size: 28px; font-weight: bold; color: #3b82f6;">@_compute.TotalTflops.ToString("N1")</div>
+                        <div style="font-size: 12px; color: #64748b;">TFLOPS</div>
+                    </div>
+                    <div style="background: #1e293b; padding: 16px 24px; border-radius: 8px; flex: 1; text-align: center;">
+                        <div style="font-size: 28px; font-weight: bold; color: #f59e0b;">@_compute.Role</div>
+                        <div style="font-size: 12px; color: #64748b;">Role</div>
+                    </div>
+                </div>
+
+                <!-- Join Link -->
+                @if (!string.IsNullOrEmpty(_compute.JoinLink))
+                {
+                    <div style="background: #1e293b; padding: 16px; border-radius: 8px; margin-bottom: 20px;">
+                        <div style="font-size: 12px; color: #64748b; margin-bottom: 4px;">Share this link — anyone can join:</div>
+                        <div style="font-family: monospace; font-size: 13px; color: #10b981; word-break: break-all; background: #0f172a; padding: 8px; border-radius: 4px;">
+                            @_compute.JoinLink
+                        </div>
+                        <button @onclick="CopyJoinLink" style="background: #334155; color: #94a3b8; border: none; padding: 6px 12px; border-radius: 4px; margin-top: 8px; cursor: pointer; font-size: 12px;">
+                            Copy Link
+                        </button>
+                    </div>
+                }
+
+                <!-- Magnet Link -->
+                @if (!string.IsNullOrEmpty(_compute.MagnetLink))
+                {
+                    <div style="background: #1e293b; padding: 16px; border-radius: 8px; margin-bottom: 20px;">
+                        <div style="font-size: 12px; color: #64748b; margin-bottom: 4px;">Magnet link (for desktop apps):</div>
+                        <div style="font-family: monospace; font-size: 11px; color: #475569; word-break: break-all; background: #0f172a; padding: 8px; border-radius: 4px; max-height: 60px; overflow: hidden;">
+                            @_compute.MagnetLink
+                        </div>
+                    </div>
+                }
+
+                <!-- Peer List -->
+                <div style="background: #1e293b; padding: 16px; border-radius: 8px; margin-bottom: 20px;">
+                    <div style="font-size: 14px; color: #f1f5f9; font-weight: bold; margin-bottom: 12px;">Connected Peers</div>
+                    @if (_compute.Coordinator.GetPeerList().Count == 0)
+                    {
+                        <div style="color: #475569; font-size: 13px; padding: 20px; text-align: center;">
+                            No peers connected. Share the join link to invite devices.
+                        </div>
+                    }
+                    else
+                    {
+                        <table style="width: 100%; border-collapse: collapse;">
+                            <thead>
+                                <tr style="border-bottom: 1px solid #334155;">
+                                    <th style="text-align: left; padding: 6px; color: #64748b; font-size: 11px;">Peer</th>
+                                    <th style="text-align: right; padding: 6px; color: #64748b; font-size: 11px;">TFLOPS</th>
+                                    <th style="text-align: right; padding: 6px; color: #64748b; font-size: 11px;">Memory</th>
+                                    <th style="text-align: center; padding: 6px; color: #64748b; font-size: 11px;">Backend</th>
+                                    <th style="text-align: center; padding: 6px; color: #64748b; font-size: 11px;">Status</th>
+                                    @if (_compute.Role == P2PRole.Coordinator)
+                                    {
+                                        <th style="text-align: center; padding: 6px; color: #64748b; font-size: 11px;">Actions</th>
+                                    }
+                                </tr>
+                            </thead>
+                            <tbody>
+                                @foreach (var peer in _compute.Coordinator.GetPeerList())
+                                {
+                                    <tr style="border-bottom: 1px solid #1a2332;">
+                                        <td style="padding: 8px 6px; font-family: monospace; font-size: 12px; color: #94a3b8;">@peer.PeerId[..Math.Min(12, peer.PeerId.Length)]...</td>
+                                        <td style="text-align: right; padding: 8px 6px; color: #10b981; font-weight: bold;">@(peer.Capabilities?.EstimatedTflops.ToString("N1") ?? "-")</td>
+                                        <td style="text-align: right; padding: 8px 6px; color: #94a3b8; font-size: 12px;">@FormatBytes(peer.Capabilities?.AvailableMemory ?? 0)</td>
+                                        <td style="text-align: center; padding: 8px 6px; font-size: 11px;">
+                                            <span style="background: #0d2e24; color: #10b981; padding: 2px 8px; border-radius: 10px;">
+                                                @(peer.Capabilities?.PreferredBackend ?? "?")
+                                            </span>
+                                        </td>
+                                        <td style="text-align: center; padding: 8px 6px;">
+                                            @if (peer.IsConnected)
+                                            {
+                                                <span style="color: #10b981;">&#9679; Online</span>
+                                            }
+                                            else
+                                            {
+                                                <span style="color: #ef4444;">&#9679; Offline</span>
+                                            }
+                                        </td>
+                                        @if (_compute.Role == P2PRole.Coordinator)
+                                        {
+                                            <td style="text-align: center; padding: 8px 6px;">
+                                                <button @onclick="() => KickPeer(peer.PeerId)" style="background: #ef4444; color: white; border: none; padding: 2px 8px; border-radius: 4px; cursor: pointer; font-size: 11px;">Kick</button>
+                                            </td>
+                                        }
+                                    </tr>
+                                }
+                            </tbody>
+                        </table>
+                    }
+                </div>
+
+                <!-- Identity -->
+                <div style="background: #1e293b; padding: 16px; border-radius: 8px;">
+                    <div style="font-size: 14px; color: #f1f5f9; font-weight: bold; margin-bottom: 8px;">Identity</div>
+                    <div style="font-family: monospace; font-size: 11px; color: #475569;">
+                        Fingerprint: @_compute.Identity.Fingerprint
+                    </div>
+                </div>
+            }
+        </div>
+    }
+</div>
+
+@code {
+    private enum SwarmPageState { Loading, JoinConsent, Dashboard }
+    private SwarmPageState _state = SwarmPageState.Loading;
+    private P2PCompute? _compute;
+    private string? _computeHash;
+    private string? _swarmName;
+    private System.Timers.Timer? _refreshTimer;
+
+    protected override async Task OnInitializedAsync()
+    {
+        // Check if this is a join link
+        var (hash, name) = P2PCompute.ParseJoinLink(Nav.Uri);
+        if (hash != null)
+        {
+            _computeHash = hash;
+            _swarmName = name ?? "Unknown Swarm";
+            _state = SwarmPageState.JoinConsent;
+        }
+        else
+        {
+            _state = SwarmPageState.Dashboard;
+        }
+
+        // Start refresh timer for live updates
+        _refreshTimer = new System.Timers.Timer(2000);
+        _refreshTimer.Elapsed += (s, e) => InvokeAsync(StateHasChanged);
+        _refreshTimer.Start();
+    }
+
+    private async Task CreateSwarm()
+    {
+        var crypto = new DotNetCrypto(); // Browser would use BrowserCrypto
+        var client = new SpawnDev.WebTorrent.WebTorrentClient();
+        _compute = await P2PCompute.CreateSwarmAsync(crypto, client, "Demo Compute Swarm");
+        StateHasChanged();
+    }
+
+    private async Task JoinAlways()
+    {
+        // TODO: save consent to localStorage
+        await JoinSwarm();
+    }
+
+    private async Task JoinOnce()
+    {
+        await JoinSwarm();
+    }
+
+    private void Decline()
+    {
+        _state = SwarmPageState.Dashboard;
+        StateHasChanged();
+    }
+
+    private async Task JoinSwarm()
+    {
+        if (_computeHash == null) return;
+        _state = SwarmPageState.Dashboard;
+
+        var crypto = new DotNetCrypto();
+        var client = new SpawnDev.WebTorrent.WebTorrentClient();
+        var magnet = P2PCompute.BuildMagnetFromHash(_computeHash, _swarmName);
+
+        // For browser, would use the WebGPU/Wasm accelerator
+        // For now, create a P2P accelerator (coordinator-less worker)
+        _compute = await P2PCompute.JoinSwarmAsync(crypto, client, null!, magnet);
+        StateHasChanged();
+    }
+
+    private void KickPeer(string peerId)
+    {
+        _compute?.Coordinator.KickPeer(peerId, "Kicked by coordinator");
+        StateHasChanged();
+    }
+
+    private async Task CopyJoinLink()
+    {
+        if (_compute?.JoinLink != null)
+        {
+            try { JS.CallVoid("navigator.clipboard.writeText", _compute.JoinLink); }
+            catch { }
+        }
+    }
+
+    private static string FormatBytes(long bytes)
+    {
+        if (bytes >= 1024L * 1024 * 1024) return $"{bytes / (1024.0 * 1024 * 1024):N1} GB";
+        if (bytes >= 1024L * 1024) return $"{bytes / (1024.0 * 1024):N0} MB";
+        return $"{bytes / 1024.0:N0} KB";
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        _refreshTimer?.Dispose();
+        if (_compute != null) await _compute.DisposeAsync();
+    }
+}
