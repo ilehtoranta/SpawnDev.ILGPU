@@ -132,6 +132,23 @@ public class P2PTransport : IAsyncDisposable
             case P2PMessageType.BufferSend:
                 HandleBufferReceive(peerId, message);
                 break;
+
+            // Coordinator role management:
+            case P2PMessageType.CoordinatorTransfer:
+                HandleCoordinatorTransfer(peerId, message);
+                break;
+
+            case P2PMessageType.CoordinatorAnnounce:
+                HandleCoordinatorAnnounce(peerId, message);
+                break;
+
+            case P2PMessageType.Kick:
+                HandleKick(peerId, message);
+                break;
+
+            case P2PMessageType.GracefulHandoff:
+                HandleGracefulHandoff(peerId, message);
+                break;
         }
     }
 
@@ -273,6 +290,69 @@ public class P2PTransport : IAsyncDisposable
             _bufferTransfer.ReceiveChunk(chunk);
         }
     }
+
+    #endregion
+
+    #region Message Handlers — Coordinator Role Management
+
+    private void HandleCoordinatorTransfer(string peerId, P2PMessage message)
+    {
+        if (message.Payload == null) return;
+
+        // We've been told we're the new coordinator
+        _coordinator.BecomeCoordinator();
+
+        // Accept pending dispatch state if included in the transfer
+        var transferData = message.Payload.Value.Deserialize<CoordinatorTransferData>();
+        if (transferData?.PendingDispatches != null)
+        {
+            foreach (var pending in transferData.PendingDispatches)
+            {
+                // Re-register pending dispatches in our dispatcher
+                _dispatcher.HandlePendingTransfer(pending);
+            }
+        }
+
+        OnCoordinatorTransferred?.Invoke(peerId);
+    }
+
+    private void HandleCoordinatorAnnounce(string peerId, P2PMessage message)
+    {
+        if (message.Payload == null) return;
+        var data = message.Payload.Value.Deserialize<CoordinatorAnnounceData>();
+        if (data?.NewCoordinatorPeerId != null)
+        {
+            _coordinator.CoordinatorPeerId = data.NewCoordinatorPeerId;
+            _coordinator.Role = P2PRole.Worker;
+        }
+    }
+
+    private void HandleKick(string peerId, P2PMessage message)
+    {
+        // Only accept kicks from the coordinator
+        if (peerId != _coordinator.CoordinatorPeerId && _coordinator.Role != P2PRole.Worker)
+            return;
+
+        // We've been kicked — disconnect from the swarm
+        OnKicked?.Invoke(peerId);
+    }
+
+    private void HandleGracefulHandoff(string peerId, P2PMessage message)
+    {
+        if (message.Payload == null) return;
+        // A peer is handing off its pending work to us (thermal/battery eviction)
+        var handoff = message.Payload.Value.Deserialize<KernelDispatchRequest>();
+        if (handoff != null && _worker != null)
+        {
+            _ = _worker.HandleDispatchAsync(peerId, handoff);
+        }
+    }
+
+    /// <summary>Fired when this node becomes coordinator via transfer.</summary>
+    public event Action<string>? OnCoordinatorTransferred; // fromPeerId
+
+    /// <summary>Fired when this node is kicked from the swarm.</summary>
+    public event Action<string>? OnKicked; // byPeerId
 
     #endregion
 

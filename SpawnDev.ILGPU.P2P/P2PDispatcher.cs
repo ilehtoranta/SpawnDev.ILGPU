@@ -452,6 +452,55 @@ public class P2PDispatcher
     /// Wire this to P2PTransport.SendMessageAsync.
     /// </summary>
     public event Action<string, P2PMessage>? OnSendMessage;
+
+    /// <summary>
+    /// Get a snapshot of all pending dispatches (for coordinator transfer).
+    /// </summary>
+    public PendingDispatchInfo[] GetPendingSnapshot()
+    {
+        lock (_lock)
+        {
+            return _pending.Values.Select(p => new PendingDispatchInfo
+            {
+                DispatchId = p.DispatchId,
+                Request = p.Request,
+                AssignedPeerId = p.AssignedPeer.PeerId,
+                Attempts = p.Attempts,
+            }).ToArray();
+        }
+    }
+
+    /// <summary>
+    /// Accept pending dispatch state from a coordinator transfer.
+    /// The new coordinator takes over tracking these dispatches.
+    /// </summary>
+    public void HandlePendingTransfer(PendingDispatchInfo info)
+    {
+        var peer = _accelerator.Peers.FirstOrDefault(p => p.PeerId == info.AssignedPeerId);
+        if (peer == null) return; // Peer not connected to us — will be retried when they reconnect
+
+        var pending = new PendingDispatch
+        {
+            DispatchId = info.DispatchId,
+            Request = info.Request,
+            AssignedPeer = peer,
+            StartTime = DateTime.UtcNow,
+            Attempts = info.Attempts,
+        };
+
+        lock (_lock)
+        {
+            _pending[info.DispatchId] = pending;
+        }
+    }
+
+    /// <summary>
+    /// Number of pending dispatches currently tracked.
+    /// </summary>
+    public int PendingCount
+    {
+        get { lock (_lock) { return _pending.Count; } }
+    }
 }
 
 /// <summary>

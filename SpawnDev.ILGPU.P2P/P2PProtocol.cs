@@ -271,3 +271,45 @@ public class KernelDispatchResult
     /// <summary>IDs of buffers that were modified (need to be read back).</summary>
     public string[] ModifiedBuffers { get; set; } = Array.Empty<string>();
 }
+
+/// <summary>
+/// Data included in a CoordinatorTransfer message — pending state for the new coordinator.
+/// </summary>
+public class CoordinatorTransferData
+{
+    /// <summary>Peer ID of the new coordinator.</summary>
+    public string NewCoordinatorPeerId { get; set; } = "";
+
+    /// <summary>Timestamp of the transfer.</summary>
+    public DateTimeOffset Timestamp { get; set; }
+
+    /// <summary>Pending dispatch requests that the new coordinator must track.</summary>
+    public PendingDispatchInfo[]? PendingDispatches { get; set; }
+}
+
+/// <summary>
+/// Serializable snapshot of a pending dispatch (for coordinator transfer).
+/// </summary>
+public class PendingDispatchInfo
+{
+    /// <summary>The dispatch ID.</summary>
+    public string DispatchId { get; set; } = "";
+
+    /// <summary>The original dispatch request.</summary>
+    public KernelDispatchRequest Request { get; set; } = new();
+
+    /// <summary>Peer currently executing this dispatch.</summary>
+    public string AssignedPeerId { get; set; } = "";
+
+    /// <summary>Number of retry attempts so far.</summary>
+    public int Attempts { get; set; }
+}
+
+/// <summary>
+/// Data in a CoordinatorAnnounce message.
+/// </summary>
+public class CoordinatorAnnounceData
+{
+    /// <summary>Peer ID of the new coordinator.</summary>
+    public string NewCoordinatorPeerId { get; set; } = "";
+}

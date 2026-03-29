@@ -66,12 +66,12 @@ public class P2PSwarmCoordinator : IAsyncDisposable
     /// <summary>
     /// This node's current role in the swarm.
     /// </summary>
-    public P2PRole Role { get; private set; } = P2PRole.Worker;
+    public P2PRole Role { get; internal set; } = P2PRole.Worker;
 
     /// <summary>
     /// PeerId of the current coordinator (null if this node is coordinator).
     /// </summary>
-    public string? CoordinatorPeerId { get; private set; }
+    public string? CoordinatorPeerId { get; internal set; }
 
     /// <summary>
     /// Magnet link for joining this compute swarm (BitTorrent protocol).
@@ -446,14 +446,20 @@ public class P2PSwarmCoordinator : IAsyncDisposable
 
         if (target == null) return null;
 
-        // Notify the target peer that they are the new coordinator
+        // Get pending dispatch state from the accelerator's dispatcher
+        PendingDispatchInfo[]? pendingState = null;
+        if (_accelerator?.Dispatcher != null)
+            pendingState = _accelerator.Dispatcher.GetPendingSnapshot();
+
+        // Notify the target peer that they are the new coordinator (with pending state)
         OnSendMessage?.Invoke(target.PeerId, new P2PMessage
         {
             Type = P2PMessageType.CoordinatorTransfer,
-            Payload = System.Text.Json.JsonSerializer.SerializeToElement(new
+            Payload = System.Text.Json.JsonSerializer.SerializeToElement(new CoordinatorTransferData
             {
-                newCoordinatorPeerId = target.PeerId,
-                timestamp = DateTimeOffset.UtcNow,
+                NewCoordinatorPeerId = target.PeerId,
+                Timestamp = DateTimeOffset.UtcNow,
+                PendingDispatches = pendingState,
             }),
         });
 
