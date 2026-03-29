@@ -236,12 +236,13 @@ public class P2PDispatcher : IDisposable
             return;
         }
 
+        var failedPeerId = dispatch.AssignedPeer.PeerId;
         dispatch.Attempts++;
         dispatch.AssignedPeer = newPeer;
         dispatch.StartTime = DateTime.UtcNow;
         newPeer.IncrementPending();
 
-        OnDispatchRetried?.Invoke(dispatch.DispatchId, dispatch.AssignedPeer.PeerId, newPeer.PeerId);
+        OnDispatchRetried?.Invoke(dispatch.DispatchId, failedPeerId, newPeer.PeerId);
         SendDispatchToPeer(newPeer, dispatch.Request);
     }
 
