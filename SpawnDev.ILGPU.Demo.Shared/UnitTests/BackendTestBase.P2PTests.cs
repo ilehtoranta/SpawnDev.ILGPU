@@ -2051,4 +2051,148 @@ public abstract partial class BackendTestBase
         if (disconnectsSent != 2)
             throw new Exception($"Should send 2 disconnect messages: {disconnectsSent}");
     }
+
+    // ═══════════════════════════════════════════════════════════
+    //  SwarmIdentity — Real ECDSA Crypto
+    // ═══════════════════════════════════════════════════════════
+
+    [TestMethod]
+    public async Task P2P_SwarmIdentity_Create()
+    {
+        if (OperatingSystem.IsBrowser())
+            throw new SpawnDev.UnitTesting.UnsupportedTestException("DotNetCrypto requires desktop");
+
+        var crypto = new SpawnDev.BlazorJS.Cryptography.DotNetCrypto();
+        await using var identity = await SwarmIdentity.CreateAsync(crypto, "test-identity");
+
+        if (identity.PublicKeySpki.Length == 0)
+            throw new Exception("PublicKeySpki should not be empty");
+        if (string.IsNullOrEmpty(identity.Fingerprint))
+            throw new Exception("Fingerprint should not be empty");
+        if (identity.Label != "test-identity")
+            throw new Exception($"Label: {identity.Label}");
+    }
+
+    [TestMethod]
+    public async Task P2P_SwarmIdentity_SignAndVerify()
+    {
+        if (OperatingSystem.IsBrowser())
+            throw new SpawnDev.UnitTesting.UnsupportedTestException("DotNetCrypto requires desktop");
+
+        var crypto = new SpawnDev.BlazorJS.Cryptography.DotNetCrypto();
+        await using var identity = await SwarmIdentity.CreateAsync(crypto, "signer");
+
+        var message = System.Text.Encoding.UTF8.GetBytes("Hello P2P World");
+        var signature = await identity.SignAsync(message);
+
+        if (signature == null || signature.Length == 0)
+            throw new Exception("Signature should not be empty");
+
+        var valid = await identity.VerifyAsync(message, signature);
+        if (!valid)
+            throw new Exception("Signature should verify against own public key");
+
+        // Tampered message should fail
+        var tampered = System.Text.Encoding.UTF8.GetBytes("Tampered message");
+        var invalidVerify = await identity.VerifyAsync(tampered, signature);
+        if (invalidVerify)
+            throw new Exception("Tampered message should NOT verify");
+    }
+
+    [TestMethod]
+    public async Task P2P_SwarmIdentity_ExportImport()
+    {
+        if (OperatingSystem.IsBrowser())
+            throw new SpawnDev.UnitTesting.UnsupportedTestException("DotNetCrypto requires desktop");
+
+        var crypto = new SpawnDev.BlazorJS.Cryptography.DotNetCrypto();
+        await using var original = await SwarmIdentity.CreateAsync(crypto, "exportable");
+
+        // Sign something
+        var message = System.Text.Encoding.UTF8.GetBytes("Persistent identity");
+        var signature = await original.SignAsync(message);
+
+        // Export keys
+        var privateKey = await original.ExportPrivateKeyAsync();
+        var publicKey = original.PublicKeySpki;
+
+        // Import into new identity
+        await using var imported = await SwarmIdentity.ImportAsync(crypto, publicKey, privateKey);
+
+        // Fingerprint should match
+        if (imported.Fingerprint != original.Fingerprint)
+            throw new Exception($"Fingerprint mismatch: {imported.Fingerprint} vs {original.Fingerprint}");
+
+        // Imported identity should verify original's signature
+        var valid = await imported.VerifyAsync(message, signature);
+        if (!valid)
+            throw new Exception("Imported identity should verify original signature");
+    }
+
+    [TestMethod]
+    public async Task P2P_SwarmIdentity_CrossVerify()
+    {
+        if (OperatingSystem.IsBrowser())
+            throw new SpawnDev.UnitTesting.UnsupportedTestException("DotNetCrypto requires desktop");
+
+        var crypto = new SpawnDev.BlazorJS.Cryptography.DotNetCrypto();
+        await using var alice = await SwarmIdentity.CreateAsync(crypto, "Alice");
+        await using var bob = await SwarmIdentity.CreateAsync(crypto, "Bob");
+
+        // Alice signs
+        var message = System.Text.Encoding.UTF8.GetBytes("Alice's message");
+        var aliceSig = await alice.SignAsync(message);
+
+        // Bob verifies Alice's signature using static verify
+        var valid = await SwarmIdentity.VerifyAsync(crypto, alice.PublicKeySpki, message, aliceSig);
+        if (!valid)
+            throw new Exception("Bob should verify Alice's signature");
+
+        // Bob's key should NOT verify Alice's signature
+        var invalid = await SwarmIdentity.VerifyAsync(crypto, bob.PublicKeySpki, message, aliceSig);
+        if (invalid)
+            throw new Exception("Bob's key should NOT verify Alice's signature");
+    }
+
+    [TestMethod]
+    public async Task P2P_KeyRegistry_AddAndCheck()
+    {
+        if (OperatingSystem.IsBrowser())
+            throw new SpawnDev.UnitTesting.UnsupportedTestException("DotNetCrypto requires desktop");
+
+        var crypto = new SpawnDev.BlazorJS.Cryptography.DotNetCrypto();
+        await using var owner = await SwarmIdentity.CreateAsync(crypto, "Owner");
+
+        var registry = new KeyRegistry();
+        registry.AddKey(owner.PublicKeySpki, SwarmRole.Owner, "Owner Key");
+        var ownerKeyB64 = Convert.ToBase64String(owner.PublicKeySpki);
+
+        if (!registry.HasRole(ownerKeyB64, SwarmRole.Owner))
+            throw new Exception("Owner should have Owner role");
+        if (!registry.HasRole(ownerKeyB64, SwarmRole.Coordinator))
+            throw new Exception("Owner should have Coordinator role (Owner > Coordinator)");
+    }
+
+    [TestMethod]
+    public async Task P2P_KeyRegistry_Revoke()
+    {
+        if (OperatingSystem.IsBrowser())
+            throw new SpawnDev.UnitTesting.UnsupportedTestException("DotNetCrypto requires desktop");
+
+        var crypto = new SpawnDev.BlazorJS.Cryptography.DotNetCrypto();
+        await using var owner = await SwarmIdentity.CreateAsync(crypto, "Owner");
+        await using var worker = await SwarmIdentity.CreateAsync(crypto, "Worker");
+
+        var registry = new KeyRegistry();
+        registry.AddKey(owner.PublicKeySpki, SwarmRole.Owner, "Owner");
+        registry.AddKey(worker.PublicKeySpki, SwarmRole.Worker, "Worker");
+        var workerKeyB64 = Convert.ToBase64String(worker.PublicKeySpki);
+
+        registry.RevokeKey(worker.PublicKeySpki, "Misbehaving");
+
+        if (!registry.IsRevoked(workerKeyB64))
+            throw new Exception("Worker should be revoked");
+        if (registry.HasRole(workerKeyB64, SwarmRole.Worker))
+            throw new Exception("Revoked worker should not have Worker role");
+    }
 }
