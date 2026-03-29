@@ -96,8 +96,12 @@ public class P2PCompute : IAsyncDisposable
         var identity = await SwarmIdentity.CreateAsync(crypto, name + "-owner");
         var coordinator = new P2PSwarmCoordinator(client);
         coordinator.SetIdentity(identity);
+
+        // Auto-detect join link URL: explicit > browser location > null (desktop)
         if (joinLinkBaseUrl != null)
             coordinator.JoinLinkBaseUrl = joinLinkBaseUrl;
+        else if (OperatingSystem.IsBrowser())
+            coordinator.JoinLinkBaseUrl = GetBrowserBaseUrl();
         await coordinator.CreateSwarmAsync(name);
 
         var context = global::ILGPU.Context.CreateDefault();
@@ -176,6 +180,58 @@ public class P2PCompute : IAsyncDisposable
 
         return new P2PCompute(client, compute.Identity, compute.Coordinator,
             compute.Accelerator, compute.Dispatcher, compute.Transport, worker, context);
+    }
+
+    /// <summary>
+    /// Get the current browser URL (origin + path) for auto-detecting join link base.
+    /// Returns null on desktop.
+    /// </summary>
+    private static string? GetBrowserBaseUrl()
+    {
+        try
+        {
+            if (!OperatingSystem.IsBrowser()) return null;
+            // In Blazor WASM: window.location.origin + window.location.pathname
+            // Access via SpawnDev.BlazorJS if available, fallback to null
+            var origin = SpawnDev.BlazorJS.BlazorJSRuntime.JS?.Get<string>("window.location.origin");
+            var path = SpawnDev.BlazorJS.BlazorJSRuntime.JS?.Get<string>("window.location.pathname");
+            if (!string.IsNullOrEmpty(origin))
+                return origin + (path ?? "");
+        }
+        catch { }
+        return null;
+    }
+
+    /// <summary>
+    /// Parse a join link URL to extract the compute hash and swarm name.
+    /// Returns (hash, name) or (null, null) if not a join link.
+    /// </summary>
+    public static (string? computeHash, string? swarmName) ParseJoinLink(string url)
+    {
+        try
+        {
+            var uri = new Uri(url);
+            var query = System.Web.HttpUtility.ParseQueryString(uri.Query);
+            var hash = query["compute"];
+            var name = query["n"];
+            return (hash, name);
+        }
+        catch
+        {
+            return (null, null);
+        }
+    }
+
+    /// <summary>
+    /// Build a magnet link from a compute hash and default tracker.
+    /// Used by workers joining via HTTP join link.
+    /// </summary>
+    public static string BuildMagnetFromHash(string computeHash, string? swarmName = null,
+        string tracker = "wss://hub.spawndev.com:44365/announce")
+    {
+        var dn = !string.IsNullOrEmpty(swarmName)
+            ? $"&dn={Uri.EscapeDataString(swarmName)}" : "";
+        return $"magnet:?xt=urn:btih:{computeHash}{dn}&tr={Uri.EscapeDataString(tracker)}";
     }
 
     /// <inheritdoc/>
