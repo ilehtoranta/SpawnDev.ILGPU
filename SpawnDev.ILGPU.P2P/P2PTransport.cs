@@ -18,6 +18,7 @@ public class P2PTransport : IAsyncDisposable
     private readonly P2PSwarmCoordinator _coordinator;
     private readonly P2PDispatcher _dispatcher;
     private readonly ConcurrentDictionary<string, PeerChannel> _channels = new();
+    private readonly P2PBufferTransfer _bufferTransfer = new();
 
     /// <summary>
     /// Fired when a compute message is received from a peer.
@@ -172,9 +173,34 @@ public class P2PTransport : IAsyncDisposable
 
     private void HandleBufferData(string peerId, P2PMessage message)
     {
-        // Buffer data received from peer — store in local buffer cache
-        // TODO: Wire to P2PMemoryBuffer for tensor transfer
+        if (message.Payload == null) return;
+        var chunk = message.Payload.Value.Deserialize<BufferChunk>();
+        if (chunk != null)
+        {
+            _bufferTransfer.ReceiveChunk(chunk);
+        }
     }
+
+    /// <summary>
+    /// Send buffer data to a peer in chunks.
+    /// </summary>
+    public async Task SendBufferAsync(string peerId, string bufferId, byte[] data)
+    {
+        var chunks = _bufferTransfer.CreateChunks(bufferId, data);
+        foreach (var chunk in chunks)
+        {
+            await SendMessageAsync(peerId, new P2PMessage
+            {
+                Type = P2PMessageType.BufferSend,
+                Payload = JsonSerializer.SerializeToElement(chunk),
+            });
+        }
+    }
+
+    /// <summary>
+    /// Access the buffer transfer for progress tracking and events.
+    /// </summary>
+    public P2PBufferTransfer BufferTransfer => _bufferTransfer;
 
     private void HandleStatusUpdate(string peerId, P2PMessage message)
     {
@@ -225,8 +251,12 @@ public class P2PTransport : IAsyncDisposable
 
     private void HandleBufferReceive(string peerId, P2PMessage message)
     {
-        // Buffer data received — store locally for kernel execution
-        // TODO: Wire to local buffer management
+        if (message.Payload == null) return;
+        var chunk = message.Payload.Value.Deserialize<BufferChunk>();
+        if (chunk != null)
+        {
+            _bufferTransfer.ReceiveChunk(chunk);
+        }
     }
 
     #endregion

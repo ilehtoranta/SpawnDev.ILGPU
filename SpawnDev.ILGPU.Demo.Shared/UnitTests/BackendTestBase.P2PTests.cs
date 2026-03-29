@@ -1613,4 +1613,50 @@ public abstract partial class BackendTestBase
         if (!received.SequenceEqual(tensorData))
             throw new Exception("1MB tensor data corruption");
     }
+
+    // ═══════════════════════════════════════════════════════════
+    //  Buffer Transfer via Transport Layer
+    // ═══════════════════════════════════════════════════════════
+
+    [TestMethod]
+    public async Task P2P_Transport_SendBuffer_ChunkedDelivery()
+    {
+        await using var client = new SpawnDev.WebTorrent.WebTorrentClient();
+        await using var coordinator = new P2PSwarmCoordinator(client);
+        using var ctx = global::ILGPU.Context.CreateDefault();
+        var accelerator = coordinator.CreateAccelerator(ctx);
+        var dispatcher = new P2PDispatcher(accelerator);
+        await using var transport = new P2PTransport(client, coordinator, dispatcher);
+
+        // Track messages sent to worker
+        var sentMessages = new List<byte[]>();
+        transport.RegisterPeer("worker-1", async (data) =>
+        {
+            sentMessages.Add(data);
+        });
+
+        // Send a buffer that requires multiple chunks
+        var tensorData = new byte[200_000]; // ~3 chunks at 64KB
+        Random.Shared.NextBytes(tensorData);
+        await transport.SendBufferAsync("worker-1", "tensor-a", tensorData);
+
+        // Should have sent multiple messages (capability request + buffer chunks)
+        // RegisterPeer sends a capability request, then SendBufferAsync sends chunks
+        // 200KB / 64KB = 4 chunks (rounded up) + 1 capability request = 5 messages
+        if (sentMessages.Count < 4)
+            throw new Exception($"Should send multiple chunk messages: {sentMessages.Count}");
+
+        // Verify the transport's buffer transfer can reassemble on the receiving end
+        byte[]? reassembled = null;
+        transport.BufferTransfer.OnBufferReceived += (id, data) => reassembled = data;
+
+        // Simulate receiving the chunks on the other end
+        var chunks = transport.BufferTransfer.CreateChunks("tensor-roundtrip", tensorData);
+        foreach (var chunk in chunks)
+            transport.BufferTransfer.ReceiveChunk(chunk);
+
+        if (reassembled == null) throw new Exception("Should reassemble");
+        if (!reassembled.SequenceEqual(tensorData))
+            throw new Exception("Buffer data corruption through transport");
+    }
 }
