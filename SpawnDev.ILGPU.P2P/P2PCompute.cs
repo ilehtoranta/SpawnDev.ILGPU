@@ -60,6 +60,23 @@ public class P2PCompute : IAsyncDisposable
     /// <summary>This node's role.</summary>
     public P2PRole Role => Coordinator.Role;
 
+    /// <summary>
+    /// Dispatch a kernel to the swarm. Coordinator-side convenience method.
+    ///
+    /// Usage:
+    ///   compute.DispatchToSwarm(typeof(MyKernels), "VectorAdd", 1024,
+    ///       ("a", aData, 4), ("b", bData, 4), ("result", null, 4));
+    /// </summary>
+    public string DispatchToSwarm(Type kernelType, string methodName, long gridDimX,
+        params (string bufferId, byte[]? data, int elementSize)[] buffers)
+    {
+        if (Accelerator == null)
+            throw new InvalidOperationException("Not a coordinator node");
+
+        var helper = Accelerator.CreateDispatcher(kernelType, methodName);
+        return helper.Execute(gridDimX, buffers);
+    }
+
     private readonly WebTorrentClient _client;
     private readonly global::ILGPU.Context? _context;
 
@@ -111,7 +128,8 @@ public class P2PCompute : IAsyncDisposable
 
         var context = global::ILGPU.Context.CreateDefault();
         var accelerator = coordinator.CreateAccelerator(context);
-        var dispatcher = new P2PDispatcher(accelerator);
+        accelerator.Dispatcher = new P2PDispatcher(accelerator);
+        var dispatcher = accelerator.Dispatcher;
         var transport = new P2PTransport(client, coordinator, dispatcher);
 
         // Wire coordinator messages to transport
