@@ -2,8 +2,10 @@
 @page "/compute/join"
 @using SpawnDev.ILGPU
 @using SpawnDev.ILGPU.P2P
+@using SpawnDev.ILGPU.QR
 @using SpawnDev.BlazorJS
 @using SpawnDev.BlazorJS.Cryptography
+@using SpawnDev.BlazorJS.JSObjects
 @inject NavigationManager Nav
 @inject BlazorJSRuntime JS
 @inject IPortableCrypto Crypto
@@ -91,6 +93,15 @@
                         <button @onclick="CopyJoinLink" style="background: #334155; color: #94a3b8; border: none; padding: 6px 12px; border-radius: 4px; margin-top: 8px; cursor: pointer; font-size: 12px;">
                             Copy Link
                         </button>
+                    </div>
+                }
+
+                <!-- QR Code -->
+                @if (!string.IsNullOrEmpty(_qrDataUrl))
+                {
+                    <div style="background: #1e293b; padding: 16px; border-radius: 8px; margin-bottom: 20px; text-align: center;">
+                        <div style="font-size: 12px; color: #64748b; margin-bottom: 8px;">Scan to join from any device:</div>
+                        <img src="@_qrDataUrl" style="width: 200px; height: 200px; image-rendering: pixelated; border-radius: 4px;" alt="QR Code" />
                     </div>
                 }
 
@@ -299,6 +310,7 @@
     private bool _registeringKey;
     private string? _lastKeyStatus;
     private bool _lastKeyError;
+    private string? _qrDataUrl;
 
     protected override async Task OnInitializedAsync()
     {
@@ -378,6 +390,7 @@
     {
         var client = new SpawnDev.WebTorrent.WebTorrentClient();
         _compute = await P2PCompute.CreateSwarmAsync(Crypto, client, "Demo Compute Swarm");
+        await GenerateQRCode();
         StateHasChanged();
     }
 
@@ -487,6 +500,38 @@
 
         _registeringKey = false;
         StateHasChanged();
+    }
+
+    private async Task GenerateQRCode()
+    {
+        var link = _compute?.JoinLink ?? _compute?.MagnetLink;
+        if (string.IsNullOrEmpty(link)) return;
+
+        try
+        {
+            // Generate QR code pixels (CPU — fast for small images)
+            var (pixels, w, h) = QRCode.Generate(link, QRTables.ECLevel.H, moduleSize: 6, quietZone: 2);
+
+            // QR renderer outputs ARGB (uint layout), canvas needs RGBA byte order
+            // On little-endian (which WASM is), uint ARGB = bytes [B, G, R, A]
+            // Canvas ImageData expects [R, G, B, A]
+            // Swap R and B channels
+            for (int i = 0; i < pixels.Length; i += 4)
+            {
+                (pixels[i], pixels[i + 2]) = (pixels[i + 2], pixels[i]); // swap B↔R
+            }
+
+            // Render to offscreen canvas → data URL
+            using var canvas = new OffscreenCanvas(w, h);
+            using var ctx = canvas.Get2DContext();
+            ctx.PutImageBytes(pixels, w, h);
+            using var blob = await canvas.ConvertToBlob();
+            _qrDataUrl = await blob.ToDataURLAsync();
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[QR] Error generating QR code: {ex.Message}");
+        }
     }
 
     private async Task CopyJoinLink()
