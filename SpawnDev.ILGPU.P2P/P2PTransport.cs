@@ -524,6 +524,8 @@ public class P2PTransport : IAsyncDisposable
     /// Fallback capabilities when no worker is attached.
     /// Reports minimal defaults — the worker's BuildCapabilities is preferred.
     /// </summary>
+    public PeerCapabilities GetLocalCapabilities() => _worker?.BuildCapabilities("local") ?? BuildLocalCapabilities();
+
     private PeerCapabilities BuildLocalCapabilities()
     {
         return new PeerCapabilities

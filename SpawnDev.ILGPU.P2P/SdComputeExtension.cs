@@ -84,6 +84,22 @@ public class SdComputeExtension : WireExtension
                 // Send via the wire protocol's extension message system
                 await SendComputeMessageAsync(data);
             });
+
+            // Initiate capability exchange — send our capabilities to the peer
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    var capMsg = new P2PMessage
+                    {
+                        Type = P2PMessageType.CapabilityResponse,
+                        Payload = System.Text.Json.JsonSerializer.SerializeToElement(
+                            _transport.GetLocalCapabilities()),
+                    };
+                    await SendAsync(capMsg);
+                }
+                catch { }
+            });
         }
     }
 

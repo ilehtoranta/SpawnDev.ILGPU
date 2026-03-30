@@ -151,6 +151,14 @@ public class P2PCompute : IAsyncDisposable
         if (coordinator.Swarm != null)
             bridge.AttachToSwarm(coordinator.Swarm);
 
+        // Wire bridge peer discovery to coordinator — when a compute peer connects
+        // via WebRTC + sd_compute handshake, register them with capabilities
+        bridge.OnComputePeerCapabilities += (peerId, caps) =>
+        {
+            caps ??= new PeerCapabilities { PreferredBackend = "remote" };
+            coordinator.HandlePeerConnected(peerId, caps);
+        };
+
         return new P2PCompute(client, identity, coordinator, accelerator, dispatcher, transport, bridge, context: context);
     }
 
@@ -199,6 +207,13 @@ public class P2PCompute : IAsyncDisposable
         var bridge = new P2PWebRtcBridge(transport);
         if (coordinator.Swarm != null)
             bridge.AttachToSwarm(coordinator.Swarm);
+
+        // Wire bridge peer discovery to coordinator
+        bridge.OnComputePeerCapabilities += (peerId, caps) =>
+        {
+            caps ??= worker.BuildCapabilities(peerId);
+            coordinator.HandlePeerConnected(peerId, caps);
+        };
 
         return new P2PCompute(client, identity, coordinator, p2pAccel, dispatcher, transport, bridge, worker);
     }

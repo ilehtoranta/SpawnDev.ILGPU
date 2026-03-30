@@ -33,6 +33,11 @@ public class P2PWebRtcBridge : IAsyncDisposable
     /// </summary>
     public event Action<string>? OnComputePeerConnected;
 
+    /// <summary>
+    /// Fired when a peer's capabilities are received.
+    /// </summary>
+    public event Action<string, PeerCapabilities?>? OnComputePeerCapabilities;
+
     public P2PWebRtcBridge(P2PTransport transport)
     {
         _transport = transport;
@@ -58,12 +63,21 @@ public class P2PWebRtcBridge : IAsyncDisposable
 
         _extensions[peerId] = ext;
 
-        // Notify when compute handshake completes
+        // Notify when compute peer sends capabilities
         ext.OnComputeMessage += (msg) =>
         {
             if (msg.Type == P2PMessageType.CapabilityResponse && _notified.TryAdd(peerId, true))
             {
+                // Extract capabilities from the message
+                PeerCapabilities? caps = null;
+                try
+                {
+                    if (msg.Payload.HasValue)
+                        caps = System.Text.Json.JsonSerializer.Deserialize<PeerCapabilities>(msg.Payload.Value);
+                }
+                catch { }
                 OnComputePeerConnected?.Invoke(peerId);
+                OnComputePeerCapabilities?.Invoke(peerId, caps);
             }
         };
 
