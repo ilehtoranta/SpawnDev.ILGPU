@@ -118,6 +118,26 @@ public static class QRCode
     }
 
     /// <summary>
+    /// Decode a QR code from RGBA pixel data (CPU).
+    /// </summary>
+    /// <param name="pixels">RGBA pixel buffer (4 bytes per pixel).</param>
+    /// <param name="width">Image width.</param>
+    /// <param name="height">Image height.</param>
+    /// <returns>Decoded text, or null if no QR code found.</returns>
+    public static string? Decode(byte[] pixels, int width, int height)
+    {
+        return QRDecoder.Decode(pixels, width, height);
+    }
+
+    /// <summary>
+    /// Decode a QR code from RGBA pixel data (GPU-accelerated).
+    /// </summary>
+    public static async Task<string?> DecodeAsync(Accelerator accelerator, byte[] pixels, int width, int height)
+    {
+        return await QRDecoder.DecodeAsync(accelerator, pixels, width, height);
+    }
+
+    /// <summary>
     /// Encode text to a QR code module matrix (no rendering).
     /// Returns true = dark, false = light.
     /// </summary>

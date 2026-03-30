@@ -279,6 +279,58 @@ public abstract partial class BackendTestBase
     });
 
     [TestMethod]
+    public Task QR_Decode_RoundTrip()
+    {
+        string original = "https://hub.spawndev.com";
+
+        // Encode → render → decode
+        var (pixels, w, h) = QRCode.Generate(original, ECLevel.M, moduleSize: 8, quietZone: 4);
+
+        // The renderer outputs ARGB as uint (little-endian: BGRA in bytes)
+        // The decoder expects RGBA. Swap B↔R.
+        for (int i = 0; i < pixels.Length; i += 4)
+            (pixels[i], pixels[i + 2]) = (pixels[i + 2], pixels[i]);
+
+        var decoded = QRDecoder.Decode(pixels, w, h);
+
+        if (decoded == null)
+            throw new Exception("QR decode returned null — could not read the QR code");
+        if (decoded != original)
+            throw new Exception($"QR round-trip mismatch: encoded '{original}', decoded '{decoded}'");
+
+        Console.WriteLine($"[QR] Round-trip: '{original}' → encode → render → decode → '{decoded}' ✓");
+        return Task.CompletedTask;
+    }
+
+    [TestMethod]
+    public Task QR_Decode_RoundTrip_WithLogo()
+    {
+        string original = "https://spawndev.com/p2p";
+
+        // Create a small logo (white square)
+        int logoSize = 16;
+        var logo = new byte[logoSize * logoSize * 4];
+        for (int i = 0; i < logo.Length; i++) logo[i] = 0xFF; // white
+
+        var (pixels, w, h) = QRCode.GenerateWithLogo(
+            original, logo, logoSize, logoSize, moduleSize: 8, quietZone: 4);
+
+        // Swap B↔R for decoder
+        for (int i = 0; i < pixels.Length; i += 4)
+            (pixels[i], pixels[i + 2]) = (pixels[i + 2], pixels[i]);
+
+        var decoded = QRDecoder.Decode(pixels, w, h);
+
+        if (decoded == null)
+            throw new Exception("QR decode with logo returned null — logo may be too large or EC level insufficient");
+        if (decoded != original)
+            throw new Exception($"QR logo round-trip mismatch: encoded '{original}', decoded '{decoded}'");
+
+        Console.WriteLine($"[QR] Logo round-trip: '{original}' → encode(H) → logo → decode → '{decoded}' ✓");
+        return Task.CompletedTask;
+    }
+
+    [TestMethod]
     public Task QR_Encode_LongURL()
     {
         // Test with a realistic P2P join link
