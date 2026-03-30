@@ -384,9 +384,10 @@ public static class QRDecoder
 
     private static double EstimateModuleSize(FinderPattern tl, FinderPattern tr, FinderPattern bl)
     {
-        double distTR = Distance(tl, tr);
-        double distBL = Distance(tl, bl);
-        return (distTR + distBL) / 2.0 / 10.0; // 10 modules between finder centers (7 + 3 separator/timing)
+        // Distance between finder centers spans (qrSize - 7) modules.
+        // We don't know qrSize yet, but we can estimate module size from the
+        // finder patterns' own ModuleSize property (detected during scanning).
+        return (tl.ModuleSize + tr.ModuleSize + bl.ModuleSize) / 3.0;
     }
 
     private static bool[,]? SampleGrid(bool[] binary, int width, int height,
@@ -394,24 +395,36 @@ public static class QRDecoder
     {
         var modules = new bool[qrSize, qrSize];
 
-        // Estimate bottom-right corner from the triangle
-        double brX = tr.X + (bl.X - tl.X);
-        double brY = tr.Y + (bl.Y - tl.Y);
+        // Finder pattern centers are at module (3.5, 3.5) from each corner.
+        // We need to map from module coords to image coords.
+        // The three finder centers define a coordinate system:
+        //   tl = module (3.5, 3.5)
+        //   tr = module (qrSize - 3.5, 3.5)
+        //   bl = module (3.5, qrSize - 3.5)
 
-        // Finder pattern centers are at (3.5, 3.5) modules from their corner
-        // Map QR module coordinates to image coordinates using bilinear transform
+        // Module span between tl and tr: (qrSize - 7) modules
+        double span = qrSize - 7.0;
+
+        // Unit vectors in image space per module
+        double uxX = (tr.X - tl.X) / span; // x component of rightward unit
+        double uxY = (tr.Y - tl.Y) / span;
+        double uyX = (bl.X - tl.X) / span; // x component of downward unit
+        double uyY = (bl.Y - tl.Y) / span;
+
+        // Origin in image space: tl is at module (3.5, 3.5)
+        // So module (0, 0) maps to tl - 3.5 * ux - 3.5 * uy
+        double originX = tl.X - 3.5 * uxX - 3.5 * uyX;
+        double originY = tl.Y - 3.5 * uxY - 3.5 * uyY;
+
         for (int r = 0; r < qrSize; r++)
         {
             for (int c = 0; c < qrSize; c++)
             {
-                double u = (c + 0.5) / qrSize;
-                double v = (r + 0.5) / qrSize;
-
-                // Bilinear interpolation of image coordinates
-                double x = tl.X * (1 - u) * (1 - v) + tr.X * u * (1 - v)
-                         + bl.X * (1 - u) * v + brX * u * v;
-                double y = tl.Y * (1 - u) * (1 - v) + tr.Y * u * (1 - v)
-                         + bl.Y * (1 - u) * v + brY * u * v;
+                // Map module center (c + 0.5, r + 0.5) to image coordinates
+                double mc = c + 0.5;
+                double mr = r + 0.5;
+                double x = originX + mc * uxX + mr * uyX;
+                double y = originY + mc * uxY + mr * uyY;
 
                 int ix = (int)Math.Round(x);
                 int iy = (int)Math.Round(y);
@@ -441,10 +454,8 @@ public static class QRDecoder
                 bits |= 1 << (14 - i);
         }
 
-        // XOR with mask pattern 101010000010010
-        bits ^= 0x5412;
-
-        // Try to match against known format info strings
+        // Match directly against stored format info strings
+        // (QRTables.FormatInfo already includes BCH + XOR mask)
         int bestEc = -1, bestMask = -1, bestDist = int.MaxValue;
         for (int ec = 0; ec < 4; ec++)
         {
