@@ -150,7 +150,8 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
         [TestMethod]
         public async Task SharedMemSingleAllocTest() => await RunTest(async accelerator =>
         {
-            int n = 256;
+            int groupSize = Math.Min(256, accelerator.MaxNumThreadsPerGroup);
+            int n = groupSize;
             var input = new int[n];
             for (int i = 0; i < n; i++) input[i] = 1;
 
@@ -159,7 +160,7 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
 
             var kernel = accelerator.LoadStreamKernel<
                 ArrayView<int>, ArrayView<int>, int>(SingleSharedMemKernel);
-            kernel(new KernelConfig(1, 256), inputBuf.View, outputBuf.View, n);
+            kernel(new KernelConfig(1, groupSize), inputBuf.View, outputBuf.View, n);
             await accelerator.SynchronizeAsync();
 
             var result = await outputBuf.CopyToHostAsync<int>();
@@ -174,7 +175,9 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
         [TestMethod]
         public async Task SharedMemDualDiffTypeTest() => await RunTest(async accelerator =>
         {
-            int n = 256;
+            int groupSize = Math.Min(256, accelerator.MaxNumThreadsPerGroup);
+            int n = groupSize;
+            int floatSharedSize = Math.Min(128, groupSize);
             var intInput = new int[n];
             var floatInput = new float[n];
             for (int i = 0; i < n; i++)
@@ -191,7 +194,7 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             var kernel = accelerator.LoadStreamKernel<
                 ArrayView<int>, ArrayView<float>, ArrayView<int>, ArrayView<float>, int>(
                 DualSharedMemKernel);
-            kernel(new KernelConfig(1, 256),
+            kernel(new KernelConfig(1, groupSize),
                 intInputBuf.View, floatInputBuf.View,
                 intOutputBuf.View, floatOutputBuf.View, n);
             await accelerator.SynchronizeAsync();
@@ -199,13 +202,13 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             var intResult = await intOutputBuf.CopyToHostAsync<int>();
             var floatResult = await floatOutputBuf.CopyToHostAsync<float>();
 
-            // Expected: intOutput[0] = intInput[0] + intInput[255] = 0 + 255 = 255
-            int expectedInt = 0 + 255;
+            // intOutput[0] = intInput[0] + intInput[groupSize-1]
+            int expectedInt = 0 + (groupSize - 1);
             if (intResult[0] != expectedInt)
                 throw new Exception($"SharedMemDualDiffType int: expected {expectedInt}, got {intResult[0]}");
 
-            // Expected: floatOutput[0] = floatInput[0] + floatInput[127] = 0 + 190.5 = 190.5
-            float expectedFloat = 0f + 127f * 1.5f;
+            // floatOutput[0] = floatInput[0] + floatInput[floatSharedSize-1]
+            float expectedFloat = 0f + (floatSharedSize - 1) * 1.5f;
             if (MathF.Abs(floatResult[0] - expectedFloat) > 0.01f)
                 throw new Exception($"SharedMemDualDiffType float: expected {expectedFloat}, got {floatResult[0]}");
         });
@@ -220,7 +223,8 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
         [TestMethod]
         public async Task SharedMemSameTypeDiffSizeTest() => await RunTest(async accelerator =>
         {
-            int n = 256;
+            int groupSize = Math.Min(256, accelerator.MaxNumThreadsPerGroup);
+            int n = groupSize;
             var input = new int[n];
             for (int i = 0; i < n; i++) input[i] = 100 + i;
 
@@ -229,13 +233,14 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
 
             var kernel = accelerator.LoadStreamKernel<
                 ArrayView<int>, ArrayView<int>, int>(SameTypeDualSharedMemKernel);
-            kernel(new KernelConfig(1, 256), inputBuf.View, outputBuf.View, n);
+            kernel(new KernelConfig(1, groupSize), inputBuf.View, outputBuf.View, n);
             await accelerator.SynchronizeAsync();
 
             var result = await outputBuf.CopyToHostAsync<int>();
-            // For threads 0..63: result[i] = input[i] + i = (100 + i) + i = 100 + 2*i
+            // For threads 0..63 (or fewer if groupSize < 64): result[i] = input[i] + i = (100 + i) + i = 100 + 2*i
+            int checkCount = Math.Min(64, groupSize);
             int errors = 0;
-            for (int i = 0; i < 64; i++)
+            for (int i = 0; i < checkCount; i++)
             {
                 int expected = (100 + i) + i;
                 if (result[i] != expected)
@@ -245,7 +250,7 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                 }
             }
             if (errors > 0)
-                throw new Exception($"SharedMemSameTypeDiffSize: {errors}/64 mismatches");
+                throw new Exception($"SharedMemSameTypeDiffSize: {errors}/{checkCount} mismatches");
         });
 
         /// <summary>
@@ -255,7 +260,8 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
         [TestMethod]
         public async Task SharedMemTileScanTest() => await RunTest(async accelerator =>
         {
-            int n = 256;
+            int groupSize = Math.Min(256, accelerator.MaxNumThreadsPerGroup);
+            int n = groupSize;
             var input = new int[n];
             for (int i = 0; i < n; i++) input[i] = 1;
 
@@ -264,7 +270,7 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
 
             var kernel = accelerator.LoadStreamKernel<
                 ArrayView<int>, ArrayView<int>, int>(SharedMemTileScanKernel);
-            kernel(new KernelConfig(1, 256), inputBuf.View, outputBuf.View, n);
+            kernel(new KernelConfig(1, groupSize), inputBuf.View, outputBuf.View, n);
             await accelerator.SynchronizeAsync();
 
             var result = await outputBuf.CopyToHostAsync<int>();
@@ -291,7 +297,7 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
         [TestMethod]
         public async Task SharedMemMultiGroupTest() => await RunTest(async accelerator =>
         {
-            int groupSize = 256;
+            int groupSize = Math.Min(256, accelerator.MaxNumThreadsPerGroup);
             int numGroups = 4;
             int n = groupSize * numGroups;
             var input = new int[n];

@@ -949,26 +949,28 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
         [TestMethod]
         public async Task AllReducePerGroupDiagTest() => await RunTest(async accelerator =>
         {
-            int n = 4096;
+            int groupSize = Math.Min(256, accelerator.MaxNumThreadsPerGroup);
+            int numGroups = 16;
+            int n = groupSize * numGroups;
             var input = new int[n];
             for (int i = 0; i < n; i++)
-                input[i] = (i / 256) + 1;
+                input[i] = (i / groupSize) + 1;
 
             using var inputBuf = accelerator.Allocate1D(input);
-            using var outputBuf = accelerator.Allocate1D<int>(16);
+            using var outputBuf = accelerator.Allocate1D<int>(numGroups);
 
             var kernel = accelerator.LoadStreamKernel<ArrayView<int>, ArrayView<int>, int>(
                 AllReducePerGroupDiagKernel);
-            kernel(new KernelConfig(16, 256), inputBuf.View, outputBuf.View, n);
+            kernel(new KernelConfig(numGroups, groupSize), inputBuf.View, outputBuf.View, n);
             await accelerator.SynchronizeAsync();
 
             var result = await outputBuf.CopyToHostAsync<int>();
 
             string details = "";
             int errors = 0;
-            for (int g = 0; g < 16; g++)
+            for (int g = 0; g < numGroups; g++)
             {
-                int expected = 256 * (g + 1);
+                int expected = groupSize * (g + 1);
                 int actual = result[g];
                 if (actual != expected)
                 {
@@ -979,7 +981,7 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
 
             if (errors > 0)
                 throw new Exception(
-                    $"AllReducePerGroupDiag: {errors}/16 wrong reductions.\n" +
+                    $"AllReducePerGroupDiag: {errors}/{numGroups} wrong reductions.\n" +
                     $"Bug is in AllReduce (pass 1).\n{details}");
         });
 
@@ -1032,19 +1034,17 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
         public async Task DualScanKernelTest() => await RunTest(async accelerator =>
         {
             int numGroups = 16;
-            int groupSize = 256;
-            int n = numGroups * groupSize; // 4096
+            int groupSize = Math.Min(256, accelerator.MaxNumThreadsPerGroup);
+            int n = numGroups * groupSize;
 
-            // Right boundary values: same as GlobalInclusiveScan4160Test
-            int numBoundaries = numGroups + 1; // 17
+            int numBoundaries = numGroups + 1;
             var boundaries = new int[numBoundaries];
             for (int g = 0; g < numGroups; g++)
-                boundaries[g + 1] = 256 * (g + 1);
+                boundaries[g + 1] = groupSize * (g + 1);
 
-            // Input data: same as GlobalInclusiveScan4160Test
             var input = new int[n];
             for (int i = 0; i < n; i++)
-                input[i] = (i / 256) + 1;
+                input[i] = (i / groupSize) + 1;
 
             using var boundaryBuf = accelerator.Allocate1D(boundaries);
             using var inputBuf = accelerator.Allocate1D(input);
@@ -1068,7 +1068,7 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                 {
                     if (errors < 20)
                     {
-                        int grp = i / 256;
+                        int grp = i / groupSize;
                         details += $"  [{i}] (group {grp}): got={result[i]}, expected={runningSum}, diff={result[i] - runningSum}\n";
                     }
                     errors++;
@@ -1081,9 +1081,9 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             for (int i = 0; i < n; i++)
             {
                 rSum += input[i];
-                if (i % 256 == 0)
+                if (i % groupSize == 0)
                 {
-                    int grp = i / 256;
+                    int grp = i / groupSize;
                     boundaryDetails += $"  Group {grp} [{i}]: got={result[i]}, expected={rSum}, diff={result[i] - rSum}\n";
                 }
             }
@@ -1106,13 +1106,12 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
         public async Task TwoPassScanSimulationTest() => await RunTest(async accelerator =>
         {
             int numGroups = 16;
-            int groupSize = 256;
-            int n = numGroups * groupSize; // 4096
+            int groupSize = Math.Min(256, accelerator.MaxNumThreadsPerGroup);
+            int n = numGroups * groupSize;
 
-            // Input data
             var input = new int[n];
             for (int i = 0; i < n; i++)
-                input[i] = (i / 256) + 1;
+                input[i] = (i / groupSize) + 1;
 
             using var inputBuf = accelerator.Allocate1D(input);
             using var outputBuf = accelerator.Allocate1D<int>(n);
@@ -1159,7 +1158,7 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                 {
                     if (errors < 20)
                     {
-                        int grp = i / 256;
+                        int grp = i / groupSize;
                         details += $"  [{i}] (group {grp}): got={result[i]}, expected={runningSum}, diff={result[i] - runningSum}\n";
                     }
                     errors++;
@@ -1171,9 +1170,9 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             for (int i = 0; i < n; i++)
             {
                 rSum += input[i];
-                if (i % 256 == 0)
+                if (i % groupSize == 0)
                 {
-                    int grp = i / 256;
+                    int grp = i / groupSize;
                     boundaryDetails += $"  Group {grp} [{i}]: got={result[i]}, expected={rSum}, diff={result[i] - rSum}\n";
                 }
             }
