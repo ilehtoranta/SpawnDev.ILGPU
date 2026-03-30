@@ -295,18 +295,58 @@
                         @if (_compute.Coordinator.Registry?.Keys.Count > 0)
                         {
                             <div style="margin-top: 12px;">
-                                <div style="font-size: 11px; color: #64748b; margin-bottom: 4px;">Authorized Keys:</div>
+                                <div style="font-size: 11px; color: #64748b; margin-bottom: 4px;">Authorized Keys (@_compute.Coordinator.Registry.Keys.Count):</div>
                                 @foreach (var key in _compute.Coordinator.Registry.Keys)
                                 {
-                                    <div style="display: flex; justify-content: space-between; align-items: center; padding: 6px 8px; background: #0f172a; border-radius: 4px; margin-bottom: 2px;">
-                                        <div>
-                                            <span style="font-size: 12px; color: #94a3b8;">@key.Label</span>
-                                            <span style="font-size: 10px; color: #475569; margin-left: 6px;">@key.Role</span>
+                                    var keyPub = key.PublicKey;
+                                    var isOwnKey = _compute.Identity != null && keyPub == Convert.ToBase64String(_compute.Identity.PublicKeySpki);
+                                    var isLastOwner = key.Role == SwarmRole.Owner && _compute.Coordinator.Registry.Keys.Count(k => k.Role == SwarmRole.Owner) <= 1;
+                                    <div style="display: flex; justify-content: space-between; align-items: center; padding: 8px; background: #0f172a; border-radius: 4px; margin-bottom: 3px;">
+                                        <div style="flex: 1;">
+                                            <div>
+                                                <span style="font-size: 12px; color: #f1f5f9; font-weight: @(key.Role == SwarmRole.Owner ? "bold" : "normal");">@key.Label</span>
+                                                @if (isOwnKey) { <span style="font-size: 10px; color: #10b981; margin-left: 4px;">(you)</span> }
+                                            </div>
+                                            <div style="display: flex; gap: 8px; align-items: center; margin-top: 2px;">
+                                                <span style="font-size: 10px; padding: 1px 6px; border-radius: 8px; background: @RoleColor(key.Role); color: white;">@key.Role</span>
+                                                <span style="font-family: monospace; font-size: 9px; color: #334155;">@keyPub[..Math.Min(20, keyPub.Length)]...</span>
+                                            </div>
                                         </div>
-                                        <span style="font-family: monospace; font-size: 10px; color: #334155;">@key.PublicKey[..Math.Min(16, key.PublicKey.Length)]...</span>
+                                        <div style="display: flex; gap: 4px; align-items: center;">
+                                            @if (!isOwnKey && !isLastOwner)
+                                            {
+                                                <select @onchange="e => ChangeKeyRole(keyPub, e)" style="background: #1e293b; color: #94a3b8; border: 1px solid #334155; padding: 2px 4px; border-radius: 3px; font-size: 10px;">
+                                                    <option value="" disabled selected>Role</option>
+                                                    <option value="Worker">Worker</option>
+                                                    <option value="Coordinator">Coordinator</option>
+                                                    <option value="Admin">Admin</option>
+                                                    <option value="Owner">Owner</option>
+                                                </select>
+                                                <button @onclick="() => RevokeKey(keyPub)" style="background: #7f1d1d; color: white; border: none; padding: 2px 6px; border-radius: 3px; cursor: pointer; font-size: 10px;">Revoke</button>
+                                            }
+                                            @if (isLastOwner)
+                                            {
+                                                <span style="font-size: 9px; color: #f59e0b;" title="Cannot revoke the last owner key">&#128274; Last Owner</span>
+                                            }
+                                        </div>
                                     </div>
                                 }
                             </div>
+
+                            <!-- Revoked Keys -->
+                            @if (_compute.Coordinator.Registry.Revocations.Count > 0)
+                            {
+                                <div style="margin-top: 8px;">
+                                    <div style="font-size: 11px; color: #ef4444; margin-bottom: 4px;">Revoked Keys (@_compute.Coordinator.Registry.Revocations.Count):</div>
+                                    @foreach (var rev in _compute.Coordinator.Registry.Revocations)
+                                    {
+                                        <div style="padding: 4px 8px; background: #1a0505; border-radius: 4px; margin-bottom: 2px; font-size: 10px; color: #64748b;">
+                                            <span style="font-family: monospace;">@rev.PublicKey[..Math.Min(16, rev.PublicKey.Length)]...</span>
+                                            <span style="margin-left: 6px;">@rev.Reason</span>
+                                        </div>
+                                    }
+                                </div>
+                            }
                         }
                     </div>
                 }
@@ -677,6 +717,41 @@
             catch { }
         }
     }
+
+    private async Task ChangeKeyRole(string publicKey, ChangeEventArgs e)
+    {
+        if (_compute?.Coordinator.Registry == null || e.Value == null) return;
+        var roleName = e.Value.ToString();
+        if (string.IsNullOrEmpty(roleName)) return;
+
+        var newRole = Enum.Parse<SwarmRole>(roleName);
+        var key = _compute.Coordinator.Registry.Keys.FirstOrDefault(k => k.PublicKey == publicKey);
+        if (key != null)
+        {
+            key.Role = newRole;
+            if (_compute.Identity != null)
+                await _compute.Coordinator.Registry.SignAsync(_compute.Identity);
+            StateHasChanged();
+        }
+    }
+
+    private async Task RevokeKey(string publicKey)
+    {
+        if (_compute?.Coordinator.Registry == null) return;
+        _compute.Coordinator.Registry.RevokeKey(Convert.FromBase64String(publicKey), "Revoked by coordinator");
+        if (_compute.Identity != null)
+            await _compute.Coordinator.Registry.SignAsync(_compute.Identity);
+        StateHasChanged();
+    }
+
+    private static string RoleColor(SwarmRole role) => role switch
+    {
+        SwarmRole.Owner => "#7c3aed",
+        SwarmRole.Admin => "#3b82f6",
+        SwarmRole.Coordinator => "#10b981",
+        SwarmRole.Worker => "#64748b",
+        _ => "#334155",
+    };
 
     private static string FormatBytes(long bytes)
     {
