@@ -203,7 +203,7 @@ public class P2PWorker : IAsyncDisposable
             }
 
             // 3. Execute kernel on local GPU via reflection-based typed dispatch
-            var modifiedBuffers = _launcher!.Execute(kernelMethod, request.GridDimX, bufferBindings);
+            var modifiedBuffers = await _launcher!.ExecuteAsync(kernelMethod, request.GridDimX, bufferBindings);
             if (isFirstCompile)
                 OnKernelCompiled?.Invoke(cacheKey);
 
@@ -317,9 +317,7 @@ public class P2PWorker : IAsyncDisposable
                 ? new[] { _accelerator.AcceleratorType.ToString() }
                 : new[] { "CPU" },
             PreferredBackend = _accelerator?.AcceleratorType.ToString() ?? "CPU",
-            AvailableMemory = _accelerator?.AcceleratorType == AcceleratorType.CPU
-                ? Environment.WorkingSet
-                : _accelerator?.MemorySize ?? Environment.WorkingSet,
+            AvailableMemory = _accelerator?.MemorySize ?? Environment.WorkingSet,
             EstimatedTflops = EstimateLocalTflops(),
             MaxThreadsPerGroup = _accelerator?.MaxNumThreadsPerGroup ?? 256,
             MaxSharedMemory = _accelerator?.Device?.MaxSharedMemoryPerGroup ?? 0,

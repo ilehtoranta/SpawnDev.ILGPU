@@ -239,9 +239,7 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             radixSort(accelerator.DefaultStream, keysBuf.View, valuesBuf.View, tempBuf.View.AsContiguous());
             await accelerator.SynchronizeAsync();
 
-            var sortedKeys = await keysBuf.CopyToHostAsync<int>();
-            var sortedValues = await valuesBuf.CopyToHostAsync<int>();
-            VerifyDescendingSortIntegrity(sortedKeys, sortedValues, n, "RadixSortBoundary16K");
+            await VerifyDescendingSortOnGpu(accelerator, keysBuf, valuesBuf, n, "RadixSortBoundary16K");
         });
 
         /// <summary>
@@ -269,9 +267,7 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             radixSort(accelerator.DefaultStream, keysBuf.View, valuesBuf.View, tempBuf.View.AsContiguous());
             await accelerator.SynchronizeAsync();
 
-            var sortedKeys = await keysBuf.CopyToHostAsync<int>();
-            var sortedValues = await valuesBuf.CopyToHostAsync<int>();
-            VerifyDescendingSortIntegrity(sortedKeys, sortedValues, n, "RadixSortBoundary20K");
+            await VerifyDescendingSortOnGpu(accelerator, keysBuf, valuesBuf, n, "RadixSortBoundary20K");
         });
 
         // ═══════════════════════════════════════════════════════════
@@ -402,6 +398,7 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             }
 
             using var keysBuf = accelerator.Allocate1D(keys);
+            using var originalKeysBuf = accelerator.Allocate1D(keys);
             using var valuesBuf = accelerator.Allocate1D(values);
             var tempSize = accelerator.ComputeRadixSortPairsTempStorageSize<int, int, DescendingInt32>(n);
             using var tempBuf = accelerator.Allocate1D<int>(tempSize);
@@ -415,23 +412,8 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                 tempBuf.View.AsContiguous());
             await accelerator.SynchronizeAsync();
 
-            var sortedKeys = await keysBuf.CopyToHostAsync<int>();
-            var sortedValues = await valuesBuf.CopyToHostAsync<int>();
-
-            VerifyDescendingSortIntegrity(sortedKeys, sortedValues, n, "RadixSortDescending1.4M");
-
-            // Check 3: value tracking — each sorted key matches the original key at that index
-            int trackingErrors = 0;
-            for (int i = 0; i < n && trackingErrors < 10; i++)
-            {
-                int origIdx = sortedValues[i];
-                if (sortedKeys[i] != keys[origIdx])
-                    trackingErrors++;
-            }
-            if (trackingErrors > 0)
-                throw new Exception(
-                    $"RadixSortDescending1.4M: {trackingErrors} key-value tracking errors " +
-                    $"(sorted key doesn't match original key at tracked index).");
+            await VerifyDescendingSortOnGpu(accelerator, keysBuf, valuesBuf, n,
+                "RadixSortDescending1.4M", originalKeysBuf: originalKeysBuf);
         });
 
         // ═══════════════════════════════════════════════════════════
@@ -490,14 +472,12 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                 tempBuf.View.AsContiguous());
             await accelerator.SynchronizeAsync();
 
+            // GPU verification for sort order + index integrity
+            await VerifyDescendingSortOnGpu(accelerator, keysBuf, valuesBuf, n, "RadixSortSentinels");
+
+            // Sentinel boundary check — needs actual values, fine on CPU for this smaller check
             var sortedKeys = await keysBuf.CopyToHostAsync<int>();
-            var sortedValues = await valuesBuf.CopyToHostAsync<int>();
 
-            // Check descending order and index integrity
-            VerifyDescendingSortIntegrity(sortedKeys, sortedValues, n, "RadixSortSentinels");
-
-            // Check sentinel boundary: first visibleCount keys should be >= 0,
-            // remaining cullCount keys should be int.MinValue
             int actualVisible = 0;
             for (int i = 0; i < n; i++)
             {
@@ -573,11 +553,8 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                     tempBuf.View.AsContiguous());
                 await accelerator.SynchronizeAsync();
 
-                var sortedKeys = await keysBuf.CopyToHostAsync<int>();
-                var sortedValues = await valuesBuf.CopyToHostAsync<int>();
-
-                VerifyDescendingSortIntegrity(
-                    sortedKeys, sortedValues, n, $"RadixSortResort_Frame{frame}");
+                await VerifyDescendingSortOnGpu(accelerator, keysBuf, valuesBuf, n,
+                    $"RadixSortResort_Frame{frame}");
             }
         });
 
@@ -618,10 +595,7 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                 tempBuf.View.AsContiguous());
             await accelerator.SynchronizeAsync();
 
-            var sortedKeys = await keysBuf.CopyToHostAsync<int>();
-            var sortedValues = await valuesBuf.CopyToHostAsync<int>();
-
-            VerifyDescendingSortIntegrity(sortedKeys, sortedValues, n, "RadixSortDescending2M");
+            await VerifyDescendingSortOnGpu(accelerator, keysBuf, valuesBuf, n, "RadixSortDescending2M");
         });
 
         // ═══════════════════════════════════════════════════════════
@@ -651,6 +625,7 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             }
 
             using var keysBuf = accelerator.Allocate1D(keys);
+            using var originalKeysBuf = accelerator.Allocate1D(keys); // preserve for tracking check
             using var valuesBuf = accelerator.Allocate1D(values);
             var tempSize = accelerator.ComputeRadixSortPairsTempStorageSize<int, int, DescendingInt32>(n);
             using var tempBuf = accelerator.Allocate1D<int>(tempSize);
@@ -664,10 +639,9 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                 tempBuf.View.AsContiguous());
             await accelerator.SynchronizeAsync();
 
-            var sortedKeys = await keysBuf.CopyToHostAsync<int>();
-            var sortedValues = await valuesBuf.CopyToHostAsync<int>();
-
-            VerifyDescendingSortIntegrity(sortedKeys, sortedValues, n, "RadixSortDescending4M");
+            // GPU verification — data stays on GPU, CPU reads back only violation counts
+            await VerifyDescendingSortOnGpu(accelerator, keysBuf, valuesBuf, n,
+                "RadixSortDescending4M", originalKeysBuf: originalKeysBuf);
         });
 
         // ═══════════════════════════════════════════════════════════
@@ -711,10 +685,7 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                 tempBuf.View.AsContiguous());
             await accelerator.SynchronizeAsync();
 
-            var sortedKeys = await keysBuf.CopyToHostAsync<int>();
-            var sortedValues = await valuesBuf.CopyToHostAsync<int>();
-
-            VerifyDescendingSortIntegrity(sortedKeys, sortedValues, n, "RadixSortHeavyDuplicates");
+            await VerifyDescendingSortOnGpu(accelerator, keysBuf, valuesBuf, n, "RadixSortHeavyDuplicates");
         });
 
         // ═══════════════════════════════════════════════════════════
@@ -756,10 +727,7 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                 tempBuf.View.AsContiguous());
             await accelerator.SynchronizeAsync();
 
-            var sortedKeys = await keysBuf.CopyToHostAsync<int>();
-            var sortedValues = await valuesBuf.CopyToHostAsync<int>();
-
-            VerifyDescendingSortIntegrity(sortedKeys, sortedValues, n, "RadixSortDescendingOddCount");
+            await VerifyDescendingSortOnGpu(accelerator, keysBuf, valuesBuf, n, "RadixSortDescendingOddCount");
         });
 
         // ═══════════════════════════════════════════════════════════
@@ -894,15 +862,12 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                     tempBuf.View.AsContiguous());
                 await accelerator.SynchronizeAsync();
 
-                var sortedKeys = await keysBuf.CopyToHostAsync<int>();
-                var sortedValues = await valuesBuf.CopyToHostAsync<int>();
-
-                // Order + index integrity
-                VerifyDescendingSortIntegrity(
-                    sortedKeys, sortedValues, n,
+                // GPU verification for sort order + index integrity
+                await VerifyDescendingSortOnGpu(accelerator, keysBuf, valuesBuf, n,
                     $"SpawnSceneSim_Frame{frame}(cull={cullRatio:P0})");
 
-                // Sentinel boundary check
+                // Sentinel boundary check — small sequential scan, fine on CPU
+                var sortedKeys = await keysBuf.CopyToHostAsync<int>();
                 int actualVisible = 0;
                 while (actualVisible < n && sortedKeys[actualVisible] != int.MinValue)
                     actualVisible++;

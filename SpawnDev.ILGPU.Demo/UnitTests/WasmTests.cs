@@ -2,6 +2,7 @@ using ILGPU;
 using ILGPU.Algorithms;
 using ILGPU.Algorithms.RadixSortOperations;
 using ILGPU.Runtime;
+using SpawnDev.BlazorJS.Cryptography;
 using SpawnDev.UnitTesting;
 using SpawnDev.ILGPU.Demo.Shared.UnitTests;
 using SpawnDev.ILGPU.Wasm;
@@ -15,6 +16,7 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
     /// </summary>
     public class WasmTests : BackendTestBase
     {
+        public WasmTests(IPortableCrypto crypto) : base(crypto) { }
         protected override string BackendName => "Wasm";
 
         protected override async Task<(Context context, Accelerator accelerator)> CreateAcceleratorAsync()

@@ -62,14 +62,15 @@ namespace ILGPU.Runtime.CPU
         #region Constants
 
         /// <summary>
-        /// The default warp size of 4 threads per group.
+        /// The default warp size of 8 threads per warp.
+        /// Matches the Wasm backend's proven group size of 64 (8 warps x 8 threads).
         /// </summary>
-        private const int DefaultWarpSize = 4;
+        private const int DefaultWarpSize = 8;
 
         /// <summary>
-        /// The default number of 4 warps per multiprocessor.
+        /// The default number of 8 warps per multiprocessor.
         /// </summary>
-        private const int DefaultNumWarpsPerMultiprocessor = 4;
+        private const int DefaultNumWarpsPerMultiprocessor = 8;
 
         /// <summary>
         /// The default number of 1 multiprocessor.

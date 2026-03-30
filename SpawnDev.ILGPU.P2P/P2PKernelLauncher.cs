@@ -3,6 +3,7 @@ using System.Linq.Expressions;
 using System.Reflection;
 using ILGPU;
 using ILGPU.Runtime;
+using SpawnDev.ILGPU;
 
 namespace SpawnDev.ILGPU.P2P;
 
@@ -45,12 +46,13 @@ public class P2PKernelLauncher
     /// <summary>
     /// Execute a kernel with the given buffer data.
     /// Allocates GPU buffers, launches the kernel, reads back results.
+    /// Uses async sync/readback for cross-backend compatibility (WebGPU, WebGL, Wasm, CPU, CUDA).
     /// </summary>
     /// <param name="kernelMethod">The kernel method to execute.</param>
     /// <param name="gridDim">Total work items (Index1D extent).</param>
     /// <param name="bufferBindings">Buffer data keyed by parameter index.</param>
     /// <returns>Modified buffer data keyed by parameter index.</returns>
-    public Dictionary<int, byte[]> Execute(
+    public async Task<Dictionary<int, byte[]>> ExecuteAsync(
         MethodInfo kernelMethod,
         long gridDim,
         Dictionary<int, BufferData> bufferBindings)
@@ -93,14 +95,14 @@ public class P2PKernelLauncher
             // Launch the kernel
             launcher.Launcher.DynamicInvoke(args);
 
-            // Synchronize to ensure kernel completion
-            _accelerator.Synchronize();
+            // Async sync — flushes queue and waits for completion on all backends
+            await _accelerator.SynchronizeAsync();
 
-            // Read back modified buffers
+            // Read back modified buffers using backend-agnostic async readback
             var results = new Dictionary<int, byte[]>();
             foreach (var (paramIdx, buffer, elemType, count) in allocatedBuffers)
             {
-                results[paramIdx] = ReadBack(buffer, elemType, count);
+                results[paramIdx] = await ReadBackAsync(buffer, elemType, count);
             }
 
             return results;
@@ -225,37 +227,35 @@ public class P2PKernelLauncher
         return (buffer, view, typeof(T));
     }
 
-    private byte[] ReadBack(MemoryBuffer buffer, Type elementType, long count)
+    private async Task<byte[]> ReadBackAsync(MemoryBuffer buffer, Type elementType, long count)
     {
         if (elementType == typeof(float))
-            return ReadBackTyped<float>((MemoryBuffer1D<float, Stride1D.Dense>)buffer, count, 4);
+            return ReadBackFromHost(await buffer.CopyToHostAsync<float>(), count, 4);
         if (elementType == typeof(int))
-            return ReadBackTyped<int>((MemoryBuffer1D<int, Stride1D.Dense>)buffer, count, 4);
+            return ReadBackFromHost(await buffer.CopyToHostAsync<int>(), count, 4);
         if (elementType == typeof(double))
-            return ReadBackTyped<double>((MemoryBuffer1D<double, Stride1D.Dense>)buffer, count, 8);
+            return ReadBackFromHost(await buffer.CopyToHostAsync<double>(), count, 8);
         if (elementType == typeof(byte))
-            return ReadBackTyped<byte>((MemoryBuffer1D<byte, Stride1D.Dense>)buffer, count, 1);
+            return ReadBackFromHost(await buffer.CopyToHostAsync<byte>(), count, 1);
         if (elementType == typeof(long))
-            return ReadBackTyped<long>((MemoryBuffer1D<long, Stride1D.Dense>)buffer, count, 8);
+            return ReadBackFromHost(await buffer.CopyToHostAsync<long>(), count, 8);
         if (elementType == typeof(short))
-            return ReadBackTyped<short>((MemoryBuffer1D<short, Stride1D.Dense>)buffer, count, 2);
+            return ReadBackFromHost(await buffer.CopyToHostAsync<short>(), count, 2);
         if (elementType == typeof(uint))
-            return ReadBackTyped<uint>((MemoryBuffer1D<uint, Stride1D.Dense>)buffer, count, 4);
+            return ReadBackFromHost(await buffer.CopyToHostAsync<uint>(), count, 4);
         if (elementType == typeof(ulong))
-            return ReadBackTyped<ulong>((MemoryBuffer1D<ulong, Stride1D.Dense>)buffer, count, 8);
+            return ReadBackFromHost(await buffer.CopyToHostAsync<ulong>(), count, 8);
         if (elementType == typeof(System.Half))
-            return ReadBackTyped<System.Half>((MemoryBuffer1D<System.Half, Stride1D.Dense>)buffer, count, 2);
+            return ReadBackFromHost(await buffer.CopyToHostAsync<System.Half>(), count, 2);
 
         return Array.Empty<byte>();
     }
 
-    private static byte[] ReadBackTyped<T>(MemoryBuffer1D<T, Stride1D.Dense> buffer, long count, int elemSize)
+    private static byte[] ReadBackFromHost<T>(T[] hostArray, long count, int elemSize)
         where T : unmanaged
     {
-        var hostArray = new T[count];
-        buffer.CopyToCPU(hostArray);
         var bytes = new byte[count * elemSize];
-        Buffer.BlockCopy(hostArray, 0, bytes, 0, bytes.Length);
+        Buffer.BlockCopy(hostArray, 0, bytes, 0, Math.Min(bytes.Length, hostArray.Length * elemSize));
         return bytes;
     }
 

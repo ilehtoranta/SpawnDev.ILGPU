@@ -5,6 +5,7 @@
 @using SpawnDev.BlazorJS.Cryptography
 @inject NavigationManager Nav
 @inject BlazorJSRuntime JS
+@inject IPortableCrypto Crypto
 @implements IAsyncDisposable
 
 <PageTitle>P2P Compute Swarm</PageTitle>
@@ -279,7 +280,7 @@
     /// </summary>
     private async Task<SwarmIdentity> GetOrCreateIdentityAsync()
     {
-        var crypto = new DotNetCrypto();
+        var crypto = Crypto;
 
         try
         {
@@ -313,7 +314,7 @@
 
     private async Task CreateSwarm()
     {
-        var crypto = new DotNetCrypto();
+        var crypto = Crypto;
         var client = new SpawnDev.WebTorrent.WebTorrentClient();
         _compute = await P2PCompute.CreateSwarmAsync(crypto, client, "Demo Compute Swarm");
         StateHasChanged();
@@ -342,7 +343,7 @@
         if (_computeHash == null) return;
         _state = SwarmPageState.Dashboard;
 
-        var crypto = new DotNetCrypto();
+        var crypto = Crypto;
         var client = new SpawnDev.WebTorrent.WebTorrentClient();
         var magnet = P2PCompute.BuildMagnetFromHash(_computeHash, _swarmName);
 

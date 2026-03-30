@@ -1,11 +1,13 @@
 using ILGPU;
 using ILGPU.Runtime;
 using ILGPU.Runtime.OpenCL;
+using SpawnDev.BlazorJS.Cryptography;
 using SpawnDev.UnitTesting;
 using SpawnDev.ILGPU.Demo.Shared.UnitTests;
 
 public class OpenCLTests : BackendTestBase
 {
+    public OpenCLTests(IPortableCrypto crypto) : base(crypto) { }
     protected override string BackendName => "OpenCL";
 
     protected override Task<(Context context, Accelerator accelerator)> CreateAcceleratorAsync()

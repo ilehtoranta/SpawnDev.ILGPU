@@ -1,5 +1,6 @@
 using ILGPU;
 using ILGPU.Runtime;
+using SpawnDev.BlazorJS.Cryptography;
 using SpawnDev.UnitTesting;
 using SpawnDev.ILGPU.Demo.Shared.UnitTests;
 using SpawnDev.ILGPU.WebGL;
@@ -14,6 +15,7 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
     /// </summary>
     public class WebGLTests : BackendTestBase
     {
+        public WebGLTests(IPortableCrypto crypto) : base(crypto) { }
         protected override string BackendName => "WebGL";
 
         protected override async Task<(Context context, Accelerator accelerator)> CreateAcceleratorAsync()

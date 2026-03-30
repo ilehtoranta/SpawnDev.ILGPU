@@ -1,5 +1,6 @@
 using ILGPU;
 using ILGPU.Runtime;
+using SpawnDev.BlazorJS.Cryptography;
 using SpawnDev.UnitTesting;
 
 namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
@@ -10,6 +11,14 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
     /// </summary>
     public abstract partial class BackendTestBase : IDisposable
     {
+        /// <summary>Platform-appropriate crypto provider (injected via DI).</summary>
+        protected IPortableCrypto Crypto { get; }
+
+        protected BackendTestBase(IPortableCrypto crypto)
+        {
+            Crypto = crypto;
+        }
+
         /// <summary>Creates the backend-specific accelerator. Caller is responsible for disposing both.</summary>
         protected abstract Task<(Context context, Accelerator accelerator)> CreateAcceleratorAsync();
 
@@ -123,6 +132,55 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
         {
             // No-op by default. Backend-specific subclasses can override.
         }
+
+        #region GPU Verification Helper
+
+        /// <summary>
+        /// Verify descending sort order and index integrity on GPU via GpuTestVerify.
+        /// Throws on any violations.
+        /// </summary>
+        protected static async Task VerifyDescendingSortOnGpu(
+            Accelerator accelerator,
+            MemoryBuffer1D<int, Stride1D.Dense> keysBuf,
+            MemoryBuffer1D<int, Stride1D.Dense> valuesBuf,
+            int n,
+            string testName,
+            int[]? originalKeys = null,
+            MemoryBuffer1D<int, Stride1D.Dense>? originalKeysBuf = null)
+        {
+            bool disposeOrigBuf = false;
+            var origBuf = originalKeysBuf;
+            if (origBuf == null && originalKeys != null)
+            {
+                origBuf = accelerator.Allocate1D(originalKeys);
+                disposeOrigBuf = true;
+            }
+
+            try
+            {
+                var (orderViolations, duplicates, outOfRange, trackingErrors) =
+                    await GpuTestVerify.VerifyDescendingSort(accelerator, keysBuf, valuesBuf, n, origBuf);
+
+                if (orderViolations > 0)
+                    throw new Exception(
+                        $"{testName}: Descending order violated {orderViolations} times out of {n} elements.");
+                if (outOfRange > 0 || duplicates > 0)
+                    throw new Exception(
+                        $"{testName}: Index integrity failure — {duplicates} duplicates, {outOfRange} out-of-range out of {n} elements.");
+                if (trackingErrors > 0)
+                    throw new Exception(
+                        $"{testName}: Key-value tracking failed — {trackingErrors} mismatches out of {n} elements.");
+
+                Console.WriteLine($"[GPU Verify] {testName}: {n} elements — order ✓, integrity ✓" +
+                    (origBuf != null ? ", tracking ✓" : ""));
+            }
+            finally
+            {
+                if (disposeOrigBuf) origBuf?.Dispose();
+            }
+        }
+
+        #endregion
 
         #region Structs
 

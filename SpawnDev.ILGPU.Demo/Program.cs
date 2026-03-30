@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Components.Web;
 using Microsoft.AspNetCore.Components.WebAssembly.Hosting;
 
 using SpawnDev.BlazorJS;
+using SpawnDev.BlazorJS.Cryptography;
 using SpawnDev.ILGPU.Demo;
 using SpawnDev.ILGPU.Demo.UnitTests;
 using SpawnDev.ILGPU.WebGPU.Backend;
@@ -14,6 +15,7 @@ var builder = WebAssemblyHostBuilder.CreateDefault(args);
 // Ensure WebGPU verbose logging is disabled during Blazor unit tests
 WebGPUBackend.VerboseLogging = false;
 builder.Services.AddBlazorJSRuntime();
+builder.Services.AddPlatformCrypto();
 builder.Services.AddSingleton<WebGPUTests>();
 builder.Services.AddSingleton<WebGPUNoSubgroupsTests>();
 

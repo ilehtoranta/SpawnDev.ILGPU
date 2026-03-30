@@ -1,11 +1,13 @@
 using ILGPU;
 using ILGPU.Runtime;
 using ILGPU.Runtime.Cuda;
+using SpawnDev.BlazorJS.Cryptography;
 using SpawnDev.UnitTesting;
 using SpawnDev.ILGPU.Demo.Shared.UnitTests;
 
 public class CudaTests : BackendTestBase
 {
+    public CudaTests(IPortableCrypto crypto) : base(crypto) { }
     protected override string BackendName => "CUDA";
 
     protected override Task<(Context context, Accelerator accelerator)> CreateAcceleratorAsync()

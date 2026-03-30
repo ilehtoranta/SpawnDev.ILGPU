@@ -1,9 +1,14 @@
-﻿using SpawnDev.UnitTesting;
-using System.Reflection;
+﻿using Microsoft.Extensions.DependencyInjection;
+using SpawnDev.BlazorJS.Cryptography;
+using SpawnDev.UnitTesting;
 
 try
 {
-    await ConsoleRunner.Run(args);
+    var services = new ServiceCollection();
+    services.AddPlatformCrypto();
+    var sp = services.BuildServiceProvider();
+    var runner = new UnitTestRunner(sp, true);
+    await ConsoleRunner.Run(args, runner);
 }
 catch (Exception ex)
 {

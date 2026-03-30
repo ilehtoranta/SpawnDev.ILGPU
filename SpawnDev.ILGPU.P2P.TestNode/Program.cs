@@ -85,7 +85,7 @@ async Task RunWorker(string magnetLink)
 
     Console.WriteLine("[Worker] Joined swarm. Waiting for dispatches...");
 
-    using var context = Context.Create(builder => builder.CPU(CPUDevice.Nvidia));
+    using var context = Context.Create(builder => builder.CPU());
     using var accelerator = context.CreateCPUAccelerator(0);
 
     var p2pAccel = coordinator.CreateAccelerator(context);
@@ -111,7 +111,7 @@ async Task RunSelfTest()
     await using var coordinator = new P2PSwarmCoordinator(client);
     await coordinator.CreateSwarmAsync("SelfTest");
 
-    using var context = Context.Create(builder => builder.CPU(CPUDevice.Nvidia));
+    using var context = Context.Create(builder => builder.CPU());
     using var accelerator = context.CreateCPUAccelerator(0);
 
     var p2pAccel = coordinator.CreateAccelerator(context);

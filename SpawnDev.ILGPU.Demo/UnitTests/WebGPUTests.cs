@@ -1,5 +1,6 @@
 using ILGPU;
 using ILGPU.Runtime;
+using SpawnDev.BlazorJS.Cryptography;
 using SpawnDev.UnitTesting;
 using SpawnDev.ILGPU.Demo.Shared.UnitTests;
 using SpawnDev.ILGPU.WebGPU;
@@ -13,6 +14,7 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
     /// </summary>
     public class WebGPUTests : BackendTestBase
     {
+        public WebGPUTests(IPortableCrypto crypto) : base(crypto) { }
         protected override string BackendName => "WebGPU";
 
         protected override async Task<(Context context, Accelerator accelerator)> CreateAcceleratorAsync()
@@ -390,6 +392,7 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
     /// </summary>
     public class WebGPUNoSubgroupsTests : BackendTestBase
     {
+        public WebGPUNoSubgroupsTests(IPortableCrypto crypto) : base(crypto) { }
         protected override string BackendName => "WebGPU (No Subgroups)";
 
         protected override void RequireFeature(Accelerator accelerator, string featureName, string? reason = null)
