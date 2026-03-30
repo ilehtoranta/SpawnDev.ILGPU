@@ -16,6 +16,17 @@ var builder = WebAssemblyHostBuilder.CreateDefault(args);
 WebGPUBackend.VerboseLogging = false;
 builder.Services.AddBlazorJSRuntime();
 builder.Services.AddPlatformCrypto();
+
+// P2P: WebTorrent client with tracker discovery pre-configured
+builder.Services.AddSingleton(sp =>
+{
+    var client = new SpawnDev.WebTorrent.WebTorrentClient();
+    var tracker = new SpawnDev.WebTorrent.Discovery.WebSocketTrackerClient(
+        SpawnDev.ILGPU.P2P.P2PCompute.DefaultTrackerUrl, client.PeerId);
+    client.AddDiscovery(tracker);
+    return client;
+});
+
 builder.Services.AddSingleton<WebGPUTests>();
 builder.Services.AddSingleton<WebGPUNoSubgroupsTests>();
 

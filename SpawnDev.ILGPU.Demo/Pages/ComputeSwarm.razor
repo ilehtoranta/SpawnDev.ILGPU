@@ -9,6 +9,7 @@
 @inject NavigationManager Nav
 @inject BlazorJSRuntime JS
 @inject IPortableCrypto Crypto
+@inject SpawnDev.WebTorrent.WebTorrentClient WebTorrentClient
 @implements IAsyncDisposable
 
 <PageTitle>P2P Compute Swarm</PageTitle>
@@ -465,7 +466,7 @@
 
     private async Task CreateSwarm()
     {
-        var client = new SpawnDev.WebTorrent.WebTorrentClient();
+        var client = WebTorrentClient;
         _compute = await P2PCompute.CreateSwarmAsync(Crypto, client, "Demo Compute Swarm");
         await GenerateQRCode();
         StateHasChanged();
@@ -500,7 +501,7 @@
         var context = builder.ToContext();
         var accelerator = await context.CreatePreferredAcceleratorAsync();
 
-        var client = new SpawnDev.WebTorrent.WebTorrentClient();
+        var client = WebTorrentClient;
         var magnet = P2PCompute.BuildMagnetFromHash(_computeHash, _swarmName);
         _compute = await P2PCompute.JoinSwarmAsync(Crypto, client, accelerator, magnet);
         StateHasChanged();

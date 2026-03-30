@@ -122,11 +122,6 @@ public class P2PCompute : IAsyncDisposable
         var coordinator = new P2PSwarmCoordinator(client);
         coordinator.SetIdentity(identity);
 
-        // Register tracker for peer discovery
-        var tracker = new SpawnDev.WebTorrent.Discovery.WebSocketTrackerClient(
-            DefaultTrackerUrl, client.PeerId);
-        client.AddDiscovery(tracker);
-
         // Auto-detect join link URL: explicit > browser location > null (desktop)
         if (joinLinkBaseUrl != null)
             coordinator.JoinLinkBaseUrl = joinLinkBaseUrl;
@@ -186,11 +181,6 @@ public class P2PCompute : IAsyncDisposable
         var identity = await SwarmIdentity.CreateAsync(crypto, "worker");
         var coordinator = new P2PSwarmCoordinator(client);
         coordinator.SetIdentity(identity);
-
-        // Register tracker for peer discovery
-        var tracker = new SpawnDev.WebTorrent.Discovery.WebSocketTrackerClient(
-            DefaultTrackerUrl, client.PeerId);
-        client.AddDiscovery(tracker);
 
         // Extract magnet from join link if needed
         string magnet;
