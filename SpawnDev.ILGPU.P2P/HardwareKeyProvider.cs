@@ -23,10 +23,21 @@ public class HardwareKeyProvider
 {
     /// <summary>
     /// Relying party ID — used by WebAuthn to scope credentials.
-    /// For P2P, this is the origin domain (e.g., "hub.spawndev.com").
+    /// Must match the origin domain. Auto-detected from window.location.hostname
+    /// in browser, defaults to "localhost" on desktop.
     /// Credentials created under one rpId cannot be used under another.
     /// </summary>
-    public string RpId { get; set; } = "hub.spawndev.com";
+    public string RpId { get; set; } = GetDefaultRpId();
+
+    private static string GetDefaultRpId()
+    {
+        if (!OperatingSystem.IsBrowser()) return "localhost";
+        try
+        {
+            return BlazorJSRuntime.JS.Get<string>("window.location.hostname");
+        }
+        catch { return "localhost"; }
+    }
 
     /// <summary>
     /// Relying party display name shown in the browser's WebAuthn prompt.

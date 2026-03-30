@@ -137,7 +137,7 @@ namespace SpawnDev.ILGPU.P2P
             IPortableCrypto crypto,
             HardwareKeyCredential credential)
         {
-            // Import only the public key — the private key lives in the authenticator
+            // Import the public key for verification — the private key lives in the authenticator
             var key = await crypto.ImportECDSAKey(credential.PublicKeySpki,
                 PortableCrypto.NamedCurve.P256, extractable: false);
             var identity = new SwarmIdentity(crypto, key, PortableCrypto.NamedCurve.P256)
@@ -145,8 +145,12 @@ namespace SpawnDev.ILGPU.P2P
                 Label = credential.Label,
                 HardwareCredentialId = credential.CredentialId,
                 IsHardwareBacked = true,
+                // Set directly from the credential — no re-export needed
+                // (the key is not extractable since the private key is in the authenticator)
+                PublicKeySpki = credential.PublicKeySpki,
             };
-            await identity.InitializeAsync();
+            var hash = await crypto.Digest("SHA-256", credential.PublicKeySpki);
+            identity.Fingerprint = Convert.ToHexString(hash).ToLowerInvariant();
             return identity;
         }
 
