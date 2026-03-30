@@ -395,18 +395,21 @@
             _computeHash = hash;
             _swarmName = name ?? "Unknown Swarm";
 
-            // Check saved consent
+            // Auto-join if URL has autojoin=1 parameter or saved consent
+            bool autoJoin = Nav.Uri.Contains("autojoin=1", StringComparison.OrdinalIgnoreCase);
             try
             {
                 var consent = JS.Call<string>("localStorage.getItem", $"p2p-consent-{hash}");
-                if (consent == "always")
-                {
-                    _state = SwarmPageState.Dashboard;
-                    await JoinSwarm(); // Auto-join
-                    return;
-                }
+                if (consent == "always") autoJoin = true;
             }
             catch { }
+
+            if (autoJoin)
+            {
+                _state = SwarmPageState.Dashboard;
+                await JoinSwarm();
+                return;
+            }
 
             _state = SwarmPageState.JoinConsent;
         }
