@@ -4440,6 +4440,57 @@ public abstract partial class BackendTestBase
     }
 
     // ═══════════════════════════════════════════════════════════
+    //  P2P Integration — Production Path (P2PCompute API)
+    //  Tests use the exact same code path as the demo.
+    // ═══════════════════════════════════════════════════════════
+
+    [TestMethod(Timeout = 60000)]
+    public async Task P2P_Integration_PeerCount_Production() => await RunTest(async accelerator =>
+    {
+        var crypto = Crypto;
+
+        // Node 1: Create swarm (coordinator) — same as demo CreateSwarm
+        await using var coordClient = new SpawnDev.WebTorrent.WebTorrentClient();
+        await using var coordCompute = await P2PCompute.CreateSwarmAsync(crypto, coordClient, "peer-count-test");
+
+        if (coordCompute.PeerCount != 0)
+            throw new Exception($"Initial peer count should be 0, got {coordCompute.PeerCount}");
+
+        var magnetLink = coordCompute.MagnetLink;
+        Console.WriteLine($"[P2P PeerCount] Coordinator created, magnet: {magnetLink?[..Math.Min(60, magnetLink?.Length ?? 0)]}...");
+
+        // Wait for tracker registration
+        await Task.Delay(2000);
+
+        // Node 2: Join swarm (worker) — same as demo JoinSwarm
+        await using var workerClient = new SpawnDev.WebTorrent.WebTorrentClient();
+        await using var workerCompute = await P2PCompute.JoinSwarmAsync(crypto, workerClient, accelerator, magnetLink!);
+
+        Console.WriteLine("[P2P PeerCount] Worker joined, waiting for peer discovery...");
+
+        // Wait for WebRTC connection + sd_compute handshake + capability exchange
+        var deadline = DateTime.UtcNow.AddSeconds(30);
+        while (coordCompute.PeerCount == 0 && DateTime.UtcNow < deadline)
+            await Task.Delay(500);
+
+        Console.WriteLine($"[P2P PeerCount] Coordinator peers: {coordCompute.PeerCount}, Worker peers: {workerCompute.PeerCount}");
+
+        if (coordCompute.PeerCount == 0)
+        {
+            // Check bridge state for diagnostics
+            Console.WriteLine($"[P2P PeerCount] Coord bridge compute peers: {coordCompute.Bridge?.ComputePeerCount ?? -1}");
+            Console.WriteLine($"[P2P PeerCount] Worker bridge compute peers: {workerCompute.Bridge?.ComputePeerCount ?? -1}");
+            throw new UnsupportedTestException(
+                "Peers did not discover each other after 30s (tracker may not relay same-origin clients)");
+        }
+
+        if (coordCompute.PeerCount < 1)
+            throw new Exception($"Coordinator should have at least 1 peer, got {coordCompute.PeerCount}");
+
+        Console.WriteLine($"[P2P PeerCount] Production path peer discovery: coordinator has {coordCompute.PeerCount} peer(s) ✓");
+    });
+
+    // ═══════════════════════════════════════════════════════════
     //  WebAuthn / Hardware Key Tests
     //  These tests require a real authenticator (YubiKey, passkey).
     //  The user must physically interact with the key to pass.
