@@ -1,5 +1,6 @@
 @page "/compute"
 @page "/compute/join"
+@using SpawnDev.ILGPU
 @using SpawnDev.ILGPU.P2P
 @using SpawnDev.BlazorJS
 @using SpawnDev.BlazorJS.Cryptography
@@ -155,6 +156,7 @@
                                         {
                                             <td style="text-align: center; padding: 8px 6px;">
                                                 <button @onclick="() => KickPeer(peer.PeerId)" style="background: #ef4444; color: white; border: none; padding: 2px 8px; border-radius: 4px; cursor: pointer; font-size: 11px;">Kick</button>
+                                                <button @onclick="() => BlockPeer(peer.PeerId)" style="background: #7f1d1d; color: white; border: none; padding: 2px 8px; border-radius: 4px; cursor: pointer; font-size: 11px; margin-left: 4px;">Block</button>
                                             </td>
                                         }
                                     </tr>
@@ -216,7 +218,7 @@
                 }
 
                 <!-- Identity -->
-                <div style="background: #1e293b; padding: 16px; border-radius: 8px;">
+                <div style="background: #1e293b; padding: 16px; border-radius: 8px; margin-bottom: 20px;">
                     <div style="font-size: 14px; color: #f1f5f9; font-weight: bold; margin-bottom: 8px;">Identity</div>
                     <div style="font-family: monospace; font-size: 11px; color: #475569;">
                         Fingerprint: @_compute.Identity.Fingerprint
@@ -224,7 +226,64 @@
                     <div style="font-family: monospace; font-size: 11px; color: #334155; margin-top: 2px;">
                         Label: @_compute.Identity.Label
                     </div>
+                    @if (_compute.Identity.IsHardwareBacked)
+                    {
+                        <div style="margin-top: 4px; font-size: 11px; color: #10b981;">&#128273; Hardware-backed (YubiKey/Passkey)</div>
+                    }
                 </div>
+
+                <!-- Hardware Key Management (Owner only) -->
+                @if (_compute.Role == P2PRole.Coordinator)
+                {
+                    <div style="background: #1e293b; padding: 16px; border-radius: 8px; margin-bottom: 20px;">
+                        <div style="font-size: 14px; color: #f1f5f9; font-weight: bold; margin-bottom: 12px;">Hardware Keys</div>
+                        @if (HardwareKeyProvider.IsAvailable)
+                        {
+                            <button @onclick="RegisterHardwareKey" disabled="@_registeringKey" style="background: #7c3aed; color: white; border: none; padding: 8px 16px; border-radius: 6px; cursor: pointer; font-size: 13px; font-weight: bold;">
+                                @if (_registeringKey) { <span>Tap your key...</span> } else { <span>Register YubiKey / Passkey</span> }
+                            </button>
+                            @if (_lastKeyStatus != null)
+                            {
+                                <div style="margin-top: 8px; font-size: 12px; color: @(_lastKeyError ? "#ef4444" : "#10b981");">@_lastKeyStatus</div>
+                            }
+                        }
+                        else
+                        {
+                            <div style="font-size: 12px; color: #64748b;">Hardware key registration requires a browser environment.</div>
+                        }
+
+                        <!-- Registered Keys in Registry -->
+                        @if (_compute.Coordinator.Registry?.Keys.Count > 0)
+                        {
+                            <div style="margin-top: 12px;">
+                                <div style="font-size: 11px; color: #64748b; margin-bottom: 4px;">Authorized Keys:</div>
+                                @foreach (var key in _compute.Coordinator.Registry.Keys)
+                                {
+                                    <div style="display: flex; justify-content: space-between; align-items: center; padding: 6px 8px; background: #0f172a; border-radius: 4px; margin-bottom: 2px;">
+                                        <div>
+                                            <span style="font-size: 12px; color: #94a3b8;">@key.Label</span>
+                                            <span style="font-size: 10px; color: #475569; margin-left: 6px;">@key.Role</span>
+                                        </div>
+                                        <span style="font-family: monospace; font-size: 10px; color: #334155;">@key.PublicKey[..Math.Min(16, key.PublicKey.Length)]...</span>
+                                    </div>
+                                }
+                            </div>
+                        }
+                    </div>
+                }
+
+                <!-- Key Registry (visible to all) -->
+                @if (_compute.Coordinator.Registry != null)
+                {
+                    <div style="background: #1e293b; padding: 16px; border-radius: 8px;">
+                        <div style="font-size: 14px; color: #f1f5f9; font-weight: bold; margin-bottom: 8px;">Key Registry</div>
+                        <div style="font-size: 11px; color: #64748b;">
+                            Sequence: @_compute.Coordinator.Registry.Sequence |
+                            Keys: @_compute.Coordinator.Registry.Keys.Count |
+                            Revoked: @_compute.Coordinator.Registry.Revocations.Count
+                        </div>
+                    </div>
+                }
             }
         </div>
     }
@@ -237,6 +296,9 @@
     private string? _computeHash;
     private string? _swarmName;
     private System.Timers.Timer? _refreshTimer;
+    private bool _registeringKey;
+    private string? _lastKeyStatus;
+    private bool _lastKeyError;
 
     protected override async Task OnInitializedAsync()
     {
@@ -314,9 +376,8 @@
 
     private async Task CreateSwarm()
     {
-        var crypto = Crypto;
         var client = new SpawnDev.WebTorrent.WebTorrentClient();
-        _compute = await P2PCompute.CreateSwarmAsync(crypto, client, "Demo Compute Swarm");
+        _compute = await P2PCompute.CreateSwarmAsync(Crypto, client, "Demo Compute Swarm");
         StateHasChanged();
     }
 
@@ -343,13 +404,15 @@
         if (_computeHash == null) return;
         _state = SwarmPageState.Dashboard;
 
-        var crypto = Crypto;
+        // Create a real accelerator using the best available backend
+        var builder = global::ILGPU.Context.Create();
+        await builder.AllAcceleratorsAsync();
+        var context = builder.ToContext();
+        var accelerator = await context.CreatePreferredAcceleratorAsync();
+
         var client = new SpawnDev.WebTorrent.WebTorrentClient();
         var magnet = P2PCompute.BuildMagnetFromHash(_computeHash, _swarmName);
-
-        // For browser, would use the WebGPU/Wasm accelerator
-        // For now, create a P2P accelerator (coordinator-less worker)
-        _compute = await P2PCompute.JoinSwarmAsync(crypto, client, null!, magnet);
+        _compute = await P2PCompute.JoinSwarmAsync(Crypto, client, accelerator, magnet);
         StateHasChanged();
     }
 
@@ -368,6 +431,61 @@
     private void RejectPeer(string peerId)
     {
         _compute?.Coordinator.RejectPendingPeer(peerId, "Rejected by coordinator");
+        StateHasChanged();
+    }
+
+    private void BlockPeer(string peerId)
+    {
+        _compute?.Coordinator.BlockPeer(peerId, "Blocked by coordinator");
+        StateHasChanged();
+    }
+
+    private async Task RegisterHardwareKey()
+    {
+        if (_compute == null) return;
+        _registeringKey = true;
+        _lastKeyStatus = null;
+        _lastKeyError = false;
+        StateHasChanged();
+
+        try
+        {
+            var provider = new HardwareKeyProvider();
+            var credential = await provider.RegisterAsync("Owner Key " + DateTime.Now.ToString("MMdd-HHmm"));
+
+            if (credential == null)
+            {
+                _lastKeyStatus = "Registration cancelled.";
+                _lastKeyError = true;
+            }
+            else
+            {
+                // Create hardware-backed identity
+                var hwIdentity = await SwarmIdentity.FromHardwareKeyAsync(Crypto, credential);
+
+                // Add to registry as Owner
+                if (_compute.Coordinator.Registry == null)
+                    throw new InvalidOperationException("KeyRegistry not initialized — create a swarm first");
+                _compute.Coordinator.Registry.AddKey(
+                    hwIdentity.PublicKeySpki, SwarmRole.Owner, credential.Label);
+
+                // Sign the updated registry
+                if (_compute.Identity != null)
+                    await _compute.Coordinator.Registry.SignAsync(_compute.Identity);
+
+                _lastKeyStatus = $"Registered: {credential.Label} ({string.Join(", ", credential.Transports)})";
+                _lastKeyError = false;
+
+                await hwIdentity.DisposeAsync();
+            }
+        }
+        catch (Exception ex)
+        {
+            _lastKeyStatus = $"Error: {ex.Message}";
+            _lastKeyError = true;
+        }
+
+        _registeringKey = false;
         StateHasChanged();
     }
 
