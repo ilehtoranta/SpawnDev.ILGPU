@@ -283,12 +283,12 @@ Replace the stub `IDhtSigner` implementations in SpawnDev.WebTorrent with real `
 ## Implementation Order
 
 1. ~~**Replace WebTorrent crypto stubs** with SpawnDev.BlazorJS.Cryptography~~ **DONE** (Data, 2026-03-29) — EcdsaP256Signer wired to IPortableCrypto, 15 ECDSA security tests passing in browser, AgentChannel relay signed+verified
-2. **SwarmIdentity** — key generation, import/export, sign/verify
-3. **KeyRegistry** — data structure, serialization, BEP 46 publish/subscribe
-4. **RoleAssignment** — signed role messages, verification
-5. **Authority checks** — integrate into P2PWorker, P2PSwarmCoordinator, P2PTransport
+2. ~~**SwarmIdentity** — key generation, import/export, sign/verify~~ **DONE** (Data, 2026-03-29) — Full ECDSA-P256 identity with fingerprinting, sign/verify, export/import
+3. ~~**KeyRegistry** — data structure, serialization, BEP 46 publish/subscribe~~ **DONE** (Data, 2026-03-29) — Add/revoke keys, sign/verify, last-owner protection, sequence-protected updates
+4. ~~**RoleAssignment** — signed role messages, verification~~ **DONE** (Data, 2026-03-29) — Signed assignments with expiration, tamper detection
+5. ~~**Authority checks** — integrate into P2PWorker, P2PSwarmCoordinator, P2PTransport~~ **DONE** (Data, 2026-03-29) — RBAC enforcement on kick/block/transfer, signed authority messages, registry distribution on peer join, election prefers registry-assigned coordinators
 6. **WebAuthn/HardwareKey** — browser integration for YubiKey/passkey support (**REQUIRED for P2P accelerator** — hardware-backed swarm ownership)
-7. **Tests** — key management, role assignment, authority verification, split-brain resolution, YubiKey round-trip
+7. ~~**Tests** — key management, role assignment, authority verification, split-brain resolution~~ **DONE** (Data, 2026-03-29) — 18 new RBAC/ownership tests (146 total P2P tests). Covers: registry sign/verify, last-owner protection, multi-owner revoke, role assignment create/verify/tamper/expire, message signing/tamper/impersonation/round-trip, RBAC kick/transfer enforcement, role assignment via coordinator, key revocation, registry-aware election, TFLOPS fallback election, sequence protection
 
 ## WebAuthn / YubiKey Checklist
 

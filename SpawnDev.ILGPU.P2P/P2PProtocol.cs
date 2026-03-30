@@ -1,5 +1,6 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using SpawnDev.BlazorJS.Cryptography;
 
 namespace SpawnDev.ILGPU.P2P;
 
@@ -13,7 +14,7 @@ namespace SpawnDev.ILGPU.P2P;
 /// </summary>
 public static class P2PProtocol
 {
-    public const string Version = "1.0";
+    public const string Version = "1.1";
 
     /// <summary>
     /// Serialize a message to JSON bytes for transmission over WebRTC.
@@ -29,6 +30,68 @@ public static class P2PProtocol
     public static P2PMessage? Deserialize(byte[] data)
     {
         return JsonSerializer.Deserialize<P2PMessage>(data, _jsonOptions);
+    }
+
+    /// <summary>
+    /// Message types that require cryptographic signing for authority verification.
+    /// Unsigned messages of these types are rejected by compliant peers.
+    /// </summary>
+    public static bool RequiresSignature(P2PMessageType type) => type switch
+    {
+        P2PMessageType.Kick => true,
+        P2PMessageType.Block => true,
+        P2PMessageType.CoordinatorTransfer => true,
+        P2PMessageType.CoordinatorAnnounce => true,
+        P2PMessageType.RoleAssign => true,
+        P2PMessageType.RegistryUpdate => true,
+        _ => false,
+    };
+
+    /// <summary>
+    /// Signs a message using the sender's identity.
+    /// Sets SenderPublicKey and Signature fields on the message.
+    /// </summary>
+    public static async Task SignMessageAsync(P2PMessage message, SwarmIdentity identity)
+    {
+        message.SenderPublicKey = Convert.ToBase64String(identity.PublicKeySpki);
+        message.SenderFingerprint = identity.Fingerprint;
+        message.Signature = ""; // Clear before signing
+        var bytes = JsonSerializer.SerializeToUtf8Bytes(new
+        {
+            message.Type,
+            message.Version,
+            message.MessageId,
+            message.ReplyTo,
+            message.SenderPublicKey,
+            message.SenderFingerprint,
+            message.Payload,
+        }, _jsonOptions);
+        var sig = await identity.SignAsync(bytes);
+        message.Signature = Convert.ToBase64String(sig);
+    }
+
+    /// <summary>
+    /// Verifies a message's signature against the sender's public key.
+    /// </summary>
+    /// <returns>True if the signature is valid.</returns>
+    public static async Task<bool> VerifyMessageAsync(P2PMessage message, IPortableCrypto crypto)
+    {
+        if (string.IsNullOrEmpty(message.SenderPublicKey) || string.IsNullOrEmpty(message.Signature))
+            return false;
+
+        var publicKeySpki = Convert.FromBase64String(message.SenderPublicKey);
+        var sigBytes = Convert.FromBase64String(message.Signature);
+        var dataBytes = JsonSerializer.SerializeToUtf8Bytes(new
+        {
+            message.Type,
+            message.Version,
+            message.MessageId,
+            message.ReplyTo,
+            message.SenderPublicKey,
+            message.SenderFingerprint,
+            message.Payload,
+        }, _jsonOptions);
+        return await SwarmIdentity.VerifyAsync(crypto, publicKeySpki, dataBytes, sigBytes);
     }
 
     private static readonly JsonSerializerOptions _jsonOptions = new()
@@ -62,6 +125,24 @@ public class P2PMessage
     /// ID of the message this is responding to (for responses).
     /// </summary>
     public string? ReplyTo { get; set; }
+
+    /// <summary>
+    /// Sender's ECDSA public key in SPKI format (base64).
+    /// Present on signed messages for authority verification.
+    /// </summary>
+    public string? SenderPublicKey { get; set; }
+
+    /// <summary>
+    /// SHA-256 fingerprint of the sender's public key (hex, lowercase).
+    /// Quick identity lookup without full key comparison.
+    /// </summary>
+    public string? SenderFingerprint { get; set; }
+
+    /// <summary>
+    /// ECDSA signature of the message (base64).
+    /// Covers Type, Version, MessageId, ReplyTo, SenderPublicKey, SenderFingerprint, and Payload.
+    /// </summary>
+    public string? Signature { get; set; }
 
     /// <summary>
     /// JSON payload (message-type-specific).
@@ -121,6 +202,12 @@ public enum P2PMessageType
 
     /// <summary>Coordinator blocks a peer from the swarm (permanent until unblocked).</summary>
     Block,
+
+    /// <summary>Owner or admin assigns a role to a peer (signed RoleAssignment).</summary>
+    RoleAssign,
+
+    /// <summary>Owner publishes an updated KeyRegistry to all peers.</summary>
+    RegistryUpdate,
 }
 
 /// <summary>

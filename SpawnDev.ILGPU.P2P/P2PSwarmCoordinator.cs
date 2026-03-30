@@ -313,10 +313,11 @@ public class P2PSwarmCoordinator : IAsyncDisposable
     /// <summary>
     /// Approve a pending peer (Approval mode).
     /// Moves them from pending to active.
+    /// Requires Coordinator or higher authority.
     /// </summary>
     public bool ApprovePeer(string peerId)
     {
-        if (Role != P2PRole.Coordinator) return false;
+        if (!HasLocalAuthority(SwarmRole.Coordinator)) return false;
         if (!PendingApproval.TryRemove(peerId, out var pending)) return false;
 
         _knownPeers.Add(peerId);
@@ -360,12 +361,30 @@ public class P2PSwarmCoordinator : IAsyncDisposable
     }
 
     /// <summary>
+    /// Check if the local identity has at least the given role in the registry.
+    /// Falls back to P2PRole check for backward compatibility with open swarms.
+    /// </summary>
+    private bool HasLocalAuthority(SwarmRole minimumRole)
+    {
+        // If we have a registry and identity, use RBAC
+        if (Registry != null && Identity != null)
+        {
+            var pubKey = Convert.ToBase64String(Identity.PublicKeySpki);
+            return Registry.HasRole(pubKey, minimumRole);
+        }
+        // Fallback: coordinator role implies Coordinator authority, but not Owner
+        if (minimumRole <= SwarmRole.Coordinator)
+            return Role == P2PRole.Coordinator;
+        return false;
+    }
+
+    /// <summary>
     /// Kick a peer from the swarm. They can reconnect unless blocked.
-    /// Coordinator-only operation.
+    /// Requires Coordinator or higher authority in the registry.
     /// </summary>
     public bool KickPeer(string peerId, string reason = "")
     {
-        if (Role != P2PRole.Coordinator) return false;
+        if (!HasLocalAuthority(SwarmRole.Coordinator)) return false;
         if (!_peers.ContainsKey(peerId)) return false;
 
         HandlePeerDisconnected(peerId);
@@ -376,11 +395,11 @@ public class P2PSwarmCoordinator : IAsyncDisposable
     /// <summary>
     /// Block a peer from the swarm. They cannot reconnect until unblocked.
     /// If currently connected, they are kicked first.
-    /// Coordinator-only operation.
+    /// Requires Coordinator or higher authority in the registry.
     /// </summary>
     public bool BlockPeer(string peerId, string reason = "")
     {
-        if (Role != P2PRole.Coordinator) return false;
+        if (!HasLocalAuthority(SwarmRole.Coordinator)) return false;
 
         _blockedPeers.TryAdd(peerId, true);
 
@@ -429,10 +448,11 @@ public class P2PSwarmCoordinator : IAsyncDisposable
     /// Transfer the coordinator role to another peer.
     /// Called when this coordinator is leaving gracefully (battery dying, tab closing).
     /// The new coordinator inherits pending dispatch state via BEP 46 signed transfer.
+    /// Requires Coordinator or higher authority (Owner/Admin can always transfer).
     /// </summary>
     public string? TransferCoordinator(string? preferredPeerId = null)
     {
-        if (Role != P2PRole.Coordinator) return null;
+        if (!HasLocalAuthority(SwarmRole.Coordinator)) return null;
 
         // Pick the healthiest peer, or the preferred one if specified
         var target = preferredPeerId != null
@@ -490,24 +510,50 @@ public class P2PSwarmCoordinator : IAsyncDisposable
 
     /// <summary>
     /// Elect a new coordinator after the current one drops unexpectedly.
-    /// Uses deterministic selection: highest score wins.
+    /// Prefers registry-assigned coordinators (Owner > Admin > Coordinator).
+    /// Falls back to TFLOPS-based election if no registry assignments match.
     /// All peers run the same algorithm so they converge on the same choice.
     /// </summary>
     public string? ElectCoordinator()
     {
-        var candidates = _peers.Values
-            .Where(p => p.IsConnected)
+        var connected = _peers.Values.Where(p => p.IsConnected).ToList();
+        if (connected.Count == 0) return null;
+
+        RemotePeer? winner = null;
+
+        // Phase 1: Prefer registry-assigned peers (highest role first)
+        if (Registry != null)
+        {
+            winner = connected
+                .Where(p => !string.IsNullOrEmpty(p.Capabilities?.PublicKey) &&
+                            Registry.HasRole(p.Capabilities!.PublicKey!, SwarmRole.Coordinator))
+                .OrderByDescending(p => GetRegistryRole(p))
+                .ThenByDescending(p => p.Capabilities?.EstimatedTflops ?? 0)
+                .ThenBy(p => p.PeerId)
+                .FirstOrDefault();
+        }
+
+        // Phase 2: Fallback to TFLOPS-based election
+        winner ??= connected
             .OrderByDescending(p => p.Capabilities?.EstimatedTflops ?? 0)
             .ThenByDescending(p => p.Capabilities?.AvailableMemory ?? 0)
-            .ThenBy(p => p.PeerId) // deterministic tiebreaker
-            .ToList();
+            .ThenBy(p => p.PeerId)
+            .First();
 
-        if (candidates.Count == 0) return null;
-
-        var winner = candidates[0];
         CoordinatorPeerId = winner.PeerId;
         OnCoordinatorChanged?.Invoke(winner.PeerId);
         return winner.PeerId;
+    }
+
+    /// <summary>
+    /// Get a peer's role from the registry (for election ordering).
+    /// </summary>
+    private SwarmRole GetRegistryRole(RemotePeer peer)
+    {
+        if (Registry == null || string.IsNullOrEmpty(peer.Capabilities?.PublicKey))
+            return SwarmRole.Worker;
+        var key = Registry.Keys.FirstOrDefault(k => k.PublicKey == peer.Capabilities!.PublicKey);
+        return key?.Role ?? SwarmRole.Worker;
     }
 
     /// <summary>
@@ -519,6 +565,75 @@ public class P2PSwarmCoordinator : IAsyncDisposable
         CoordinatorPeerId = null; // we ARE the coordinator
         OnCoordinatorChanged?.Invoke(null); // null = self
     }
+
+    /// <summary>
+    /// Assign a role to a peer. Creates a signed RoleAssignment and updates the registry.
+    /// Requires the granter to have a higher role than the one being assigned.
+    /// </summary>
+    /// <param name="peerId">The peer to assign the role to.</param>
+    /// <param name="peerPublicKeySpki">The peer's public key (SPKI bytes).</param>
+    /// <param name="role">The role to assign.</param>
+    /// <returns>The signed assignment, or null if authority check fails.</returns>
+    public async Task<RoleAssignment?> AssignRoleAsync(
+        string peerId, byte[] peerPublicKeySpki, SwarmRole role)
+    {
+        if (Identity == null || Registry == null) return null;
+
+        // Granter must have higher authority than the role being assigned
+        var granterKey = Convert.ToBase64String(Identity.PublicKeySpki);
+        var granterEntry = Registry.Keys.FirstOrDefault(k => k.PublicKey == granterKey);
+        if (granterEntry == null || granterEntry.Role <= role) return null;
+
+        // Create signed assignment
+        var assignment = await RoleAssignment.CreateAsync(
+            Identity, peerId, peerPublicKeySpki, role);
+
+        // Update registry
+        Registry.AddKey(peerPublicKeySpki, role, peerId);
+        await Registry.SignAsync(Identity);
+
+        return assignment;
+    }
+
+    /// <summary>
+    /// Revoke a peer's key from the registry. Requires Owner authority.
+    /// </summary>
+    /// <param name="publicKeySpki">The key to revoke.</param>
+    /// <param name="reason">Reason for revocation.</param>
+    /// <returns>True if revoked, false if denied (last owner, or insufficient authority).</returns>
+    public async Task<bool> RevokeKeyAsync(byte[] publicKeySpki, string reason = "")
+    {
+        if (Identity == null || Registry == null) return false;
+        if (!HasLocalAuthority(SwarmRole.Owner)) return false;
+
+        if (!Registry.RevokeKey(publicKeySpki, reason)) return false;
+
+        await Registry.SignAsync(Identity);
+        return true;
+    }
+
+    /// <summary>
+    /// Get the current registry for distribution to peers.
+    /// </summary>
+    public KeyRegistry? GetRegistry() => Registry;
+
+    /// <summary>
+    /// Update the registry (received from owner or another coordinator).
+    /// Only accepts registries with a higher sequence number than the current one.
+    /// </summary>
+    public void UpdateRegistry(KeyRegistry newRegistry)
+    {
+        if (Registry == null || newRegistry.Sequence > Registry.Sequence)
+        {
+            Registry = newRegistry;
+            OnRegistryUpdated?.Invoke(newRegistry);
+        }
+    }
+
+    /// <summary>
+    /// Fired when the key registry is updated.
+    /// </summary>
+    public event Action<KeyRegistry>? OnRegistryUpdated;
 
     /// <summary>
     /// Fired when the coordinator role changes.

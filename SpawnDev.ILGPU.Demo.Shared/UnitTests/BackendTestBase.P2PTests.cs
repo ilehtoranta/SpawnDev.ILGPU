@@ -3770,4 +3770,546 @@ public abstract partial class BackendTestBase
 
         Console.WriteLine($"[P2P] Worker TFLOPS estimate: {caps.EstimatedTflops:F1}, memory: {caps.AvailableMemory / 1024 / 1024}MB ✓");
     }
+
+    // ═══════════════════════════════════════════════════════════
+    //  Ownership & RBAC — Authority Enforcement
+    // ═══════════════════════════════════════════════════════════
+
+    [TestMethod]
+    public async Task P2P_KeyRegistry_SignAndVerify()
+    {
+        if (OperatingSystem.IsBrowser())
+            throw new SpawnDev.UnitTesting.UnsupportedTestException("DotNetCrypto requires desktop");
+
+        var crypto = new SpawnDev.BlazorJS.Cryptography.DotNetCrypto();
+        await using var owner = await SwarmIdentity.CreateAsync(crypto, "Owner");
+        await using var worker = await SwarmIdentity.CreateAsync(crypto, "Worker");
+
+        var registry = new KeyRegistry();
+        registry.AddKey(owner.PublicKeySpki, SwarmRole.Owner, "Owner");
+        registry.AddKey(worker.PublicKeySpki, SwarmRole.Worker, "Worker");
+        await registry.SignAsync(owner);
+
+        // Verify with owner's public key
+        var valid = await registry.VerifyAsync(crypto, owner.PublicKeySpki);
+        if (!valid) throw new Exception("Registry should verify with owner's key");
+
+        // Verify with wrong key should fail
+        var invalid = await registry.VerifyAsync(crypto, worker.PublicKeySpki);
+        if (invalid) throw new Exception("Registry should NOT verify with worker's key");
+
+        Console.WriteLine("[P2P] KeyRegistry sign/verify ✓");
+    }
+
+    [TestMethod]
+    public async Task P2P_KeyRegistry_LastOwnerProtection()
+    {
+        if (OperatingSystem.IsBrowser())
+            throw new SpawnDev.UnitTesting.UnsupportedTestException("DotNetCrypto requires desktop");
+
+        var crypto = new SpawnDev.BlazorJS.Cryptography.DotNetCrypto();
+        await using var owner = await SwarmIdentity.CreateAsync(crypto, "SoleOwner");
+
+        var registry = new KeyRegistry();
+        registry.AddKey(owner.PublicKeySpki, SwarmRole.Owner, "Sole Owner");
+
+        // Attempt to revoke the last owner — should fail
+        var revoked = registry.RevokeKey(owner.PublicKeySpki, "test");
+        if (revoked) throw new Exception("Should NOT allow revoking the last owner");
+
+        // Confirm still an owner
+        var key64 = Convert.ToBase64String(owner.PublicKeySpki);
+        if (!registry.HasRole(key64, SwarmRole.Owner))
+            throw new Exception("Owner should still be in registry");
+
+        Console.WriteLine("[P2P] Last-owner protection ✓");
+    }
+
+    [TestMethod]
+    public async Task P2P_KeyRegistry_MultiOwnerRevoke()
+    {
+        if (OperatingSystem.IsBrowser())
+            throw new SpawnDev.UnitTesting.UnsupportedTestException("DotNetCrypto requires desktop");
+
+        var crypto = new SpawnDev.BlazorJS.Cryptography.DotNetCrypto();
+        await using var owner1 = await SwarmIdentity.CreateAsync(crypto, "Owner1");
+        await using var owner2 = await SwarmIdentity.CreateAsync(crypto, "Owner2");
+
+        var registry = new KeyRegistry();
+        registry.AddKey(owner1.PublicKeySpki, SwarmRole.Owner, "Owner 1");
+        registry.AddKey(owner2.PublicKeySpki, SwarmRole.Owner, "Owner 2");
+
+        // With 2 owners, one can be revoked
+        var revoked = registry.RevokeKey(owner1.PublicKeySpki, "stepping down");
+        if (!revoked) throw new Exception("Should allow revoking when 2 owners exist");
+
+        var key1 = Convert.ToBase64String(owner1.PublicKeySpki);
+        if (registry.HasRole(key1, SwarmRole.Worker))
+            throw new Exception("Revoked owner should have no role");
+
+        // Now owner2 is the last owner — should NOT be revokable
+        var revoked2 = registry.RevokeKey(owner2.PublicKeySpki, "test");
+        if (revoked2) throw new Exception("Should NOT revoke the last remaining owner");
+
+        Console.WriteLine("[P2P] Multi-owner revoke with last-owner protection ✓");
+    }
+
+    [TestMethod]
+    public async Task P2P_RoleAssignment_CreateAndVerify()
+    {
+        if (OperatingSystem.IsBrowser())
+            throw new SpawnDev.UnitTesting.UnsupportedTestException("DotNetCrypto requires desktop");
+
+        var crypto = new SpawnDev.BlazorJS.Cryptography.DotNetCrypto();
+        await using var owner = await SwarmIdentity.CreateAsync(crypto, "Owner");
+        await using var worker = await SwarmIdentity.CreateAsync(crypto, "Worker");
+
+        var assignment = await RoleAssignment.CreateAsync(
+            owner, "peer-1", worker.PublicKeySpki, SwarmRole.Coordinator);
+
+        if (assignment.Role != SwarmRole.Coordinator)
+            throw new Exception($"Role: {assignment.Role}");
+        if (assignment.PeerId != "peer-1")
+            throw new Exception($"PeerId: {assignment.PeerId}");
+
+        // Verify signature
+        var valid = await assignment.VerifyAsync(crypto);
+        if (!valid) throw new Exception("Assignment should verify");
+
+        Console.WriteLine("[P2P] RoleAssignment create/verify ✓");
+    }
+
+    [TestMethod]
+    public async Task P2P_RoleAssignment_TamperedFails()
+    {
+        if (OperatingSystem.IsBrowser())
+            throw new SpawnDev.UnitTesting.UnsupportedTestException("DotNetCrypto requires desktop");
+
+        var crypto = new SpawnDev.BlazorJS.Cryptography.DotNetCrypto();
+        await using var owner = await SwarmIdentity.CreateAsync(crypto, "Owner");
+        await using var worker = await SwarmIdentity.CreateAsync(crypto, "Worker");
+
+        var assignment = await RoleAssignment.CreateAsync(
+            owner, "peer-1", worker.PublicKeySpki, SwarmRole.Worker);
+
+        // Tamper with the role
+        assignment.Role = SwarmRole.Owner;
+        var valid = await assignment.VerifyAsync(crypto);
+        if (valid) throw new Exception("Tampered assignment should NOT verify");
+
+        Console.WriteLine("[P2P] RoleAssignment tamper detection ✓");
+    }
+
+    [TestMethod]
+    public async Task P2P_RoleAssignment_Expiration()
+    {
+        if (OperatingSystem.IsBrowser())
+            throw new SpawnDev.UnitTesting.UnsupportedTestException("DotNetCrypto requires desktop");
+
+        var crypto = new SpawnDev.BlazorJS.Cryptography.DotNetCrypto();
+        await using var owner = await SwarmIdentity.CreateAsync(crypto, "Owner");
+        await using var worker = await SwarmIdentity.CreateAsync(crypto, "Worker");
+
+        // Create an already-expired assignment
+        var pastTicks = DateTimeOffset.UtcNow.AddHours(-1).Ticks;
+        var assignment = await RoleAssignment.CreateAsync(
+            owner, "peer-1", worker.PublicKeySpki, SwarmRole.Coordinator, pastTicks);
+
+        if (!assignment.IsExpired)
+            throw new Exception("Assignment with past expiration should be expired");
+
+        // Create a future assignment
+        var futureTicks = DateTimeOffset.UtcNow.AddHours(1).Ticks;
+        var futureAssignment = await RoleAssignment.CreateAsync(
+            owner, "peer-2", worker.PublicKeySpki, SwarmRole.Coordinator, futureTicks);
+
+        if (futureAssignment.IsExpired)
+            throw new Exception("Assignment with future expiration should NOT be expired");
+
+        Console.WriteLine("[P2P] RoleAssignment expiration ✓");
+    }
+
+    [TestMethod]
+    public async Task P2P_MessageSigning_SignAndVerify()
+    {
+        if (OperatingSystem.IsBrowser())
+            throw new SpawnDev.UnitTesting.UnsupportedTestException("DotNetCrypto requires desktop");
+
+        var crypto = new SpawnDev.BlazorJS.Cryptography.DotNetCrypto();
+        await using var identity = await SwarmIdentity.CreateAsync(crypto, "Coordinator");
+
+        var message = new P2PMessage
+        {
+            Type = P2PMessageType.Kick,
+            Payload = JsonSerializer.SerializeToElement(new { peerId = "bad-peer", reason = "misbehaving" }),
+        };
+
+        await P2PProtocol.SignMessageAsync(message, identity);
+
+        if (string.IsNullOrEmpty(message.SenderPublicKey))
+            throw new Exception("SenderPublicKey should be set");
+        if (string.IsNullOrEmpty(message.SenderFingerprint))
+            throw new Exception("SenderFingerprint should be set");
+        if (string.IsNullOrEmpty(message.Signature))
+            throw new Exception("Signature should be set");
+
+        // Verify
+        var valid = await P2PProtocol.VerifyMessageAsync(message, crypto);
+        if (!valid) throw new Exception("Signed message should verify");
+
+        Console.WriteLine("[P2P] Message signing ✓");
+    }
+
+    [TestMethod]
+    public async Task P2P_MessageSigning_TamperedPayloadFails()
+    {
+        if (OperatingSystem.IsBrowser())
+            throw new SpawnDev.UnitTesting.UnsupportedTestException("DotNetCrypto requires desktop");
+
+        var crypto = new SpawnDev.BlazorJS.Cryptography.DotNetCrypto();
+        await using var identity = await SwarmIdentity.CreateAsync(crypto, "Coordinator");
+
+        var message = new P2PMessage
+        {
+            Type = P2PMessageType.Kick,
+            Payload = JsonSerializer.SerializeToElement(new { peerId = "peer-1" }),
+        };
+
+        await P2PProtocol.SignMessageAsync(message, identity);
+
+        // Tamper with payload
+        message.Payload = JsonSerializer.SerializeToElement(new { peerId = "peer-2" });
+        var valid = await P2PProtocol.VerifyMessageAsync(message, crypto);
+        if (valid) throw new Exception("Tampered message should NOT verify");
+
+        Console.WriteLine("[P2P] Message tamper detection ✓");
+    }
+
+    [TestMethod]
+    public async Task P2P_MessageSigning_WrongKeyFails()
+    {
+        if (OperatingSystem.IsBrowser())
+            throw new SpawnDev.UnitTesting.UnsupportedTestException("DotNetCrypto requires desktop");
+
+        var crypto = new SpawnDev.BlazorJS.Cryptography.DotNetCrypto();
+        await using var real = await SwarmIdentity.CreateAsync(crypto, "Real");
+        await using var imposter = await SwarmIdentity.CreateAsync(crypto, "Imposter");
+
+        var message = new P2PMessage
+        {
+            Type = P2PMessageType.CoordinatorTransfer,
+        };
+
+        // Sign with imposter's key but claim to be real
+        await P2PProtocol.SignMessageAsync(message, imposter);
+        message.SenderPublicKey = Convert.ToBase64String(real.PublicKeySpki);
+
+        var valid = await P2PProtocol.VerifyMessageAsync(message, crypto);
+        if (valid) throw new Exception("Message signed by imposter with real's public key should NOT verify");
+
+        Console.WriteLine("[P2P] Impersonation detection ✓");
+    }
+
+    [TestMethod]
+    public async Task P2P_RBAC_KickRequiresCoordinator()
+    {
+        if (OperatingSystem.IsBrowser())
+            throw new SpawnDev.UnitTesting.UnsupportedTestException("DotNetCrypto requires desktop");
+
+        var crypto = new SpawnDev.BlazorJS.Cryptography.DotNetCrypto();
+        await using var owner = await SwarmIdentity.CreateAsync(crypto, "Owner");
+        await using var worker = await SwarmIdentity.CreateAsync(crypto, "Worker");
+
+        // Owner's coordinator — created the swarm, has Owner role
+        await using var client = new SpawnDev.WebTorrent.WebTorrentClient();
+        await using var ownerCoordinator = new P2PSwarmCoordinator(client);
+        ownerCoordinator.SetIdentity(owner);
+        await ownerCoordinator.CreateSwarmAsync("rbac-test");
+
+        ownerCoordinator.HandlePeerConnected("peer-1", new PeerCapabilities { PeerId = "peer-1" });
+
+        // Owner should be able to kick
+        var kicked = ownerCoordinator.KickPeer("peer-1");
+        if (!kicked) throw new Exception("Owner should be able to kick");
+
+        // Worker's coordinator — never created a swarm, defaults to Worker role
+        await using var client2 = new SpawnDev.WebTorrent.WebTorrentClient();
+        await using var workerCoordinator = new P2PSwarmCoordinator(client2);
+        workerCoordinator.SetIdentity(worker);
+
+        // Worker has no authority — kick should fail (even with Role fallback)
+        workerCoordinator.HandlePeerConnected("peer-2", new PeerCapabilities { PeerId = "peer-2" });
+        var kickedAsWorker = workerCoordinator.KickPeer("peer-2");
+        if (kickedAsWorker) throw new Exception("Worker should NOT be able to kick");
+
+        Console.WriteLine("[P2P] RBAC kick enforcement ✓");
+    }
+
+    [TestMethod]
+    public async Task P2P_RBAC_TransferRequiresCoordinator()
+    {
+        if (OperatingSystem.IsBrowser())
+            throw new SpawnDev.UnitTesting.UnsupportedTestException("DotNetCrypto requires desktop");
+
+        var crypto = new SpawnDev.BlazorJS.Cryptography.DotNetCrypto();
+        await using var owner = await SwarmIdentity.CreateAsync(crypto, "Owner");
+
+        await using var client = new SpawnDev.WebTorrent.WebTorrentClient();
+        await using var coordinator = new P2PSwarmCoordinator(client);
+        coordinator.SetIdentity(owner);
+        await coordinator.CreateSwarmAsync("transfer-test");
+
+        // Add peers
+        coordinator.HandlePeerConnected("peer-1", new PeerCapabilities
+        {
+            PeerId = "peer-1",
+            EstimatedTflops = 5.0,
+        });
+
+        // Owner can transfer
+        var transferred = coordinator.TransferCoordinator();
+        if (transferred == null) throw new Exception("Owner should be able to transfer");
+
+        // After transfer, we're a worker — can't transfer again
+        var transferredAgain = coordinator.TransferCoordinator();
+        if (transferredAgain != null) throw new Exception("After transfer, should NOT be able to transfer again");
+
+        Console.WriteLine("[P2P] RBAC transfer enforcement ✓");
+    }
+
+    [TestMethod]
+    public async Task P2P_RBAC_AssignRole()
+    {
+        if (OperatingSystem.IsBrowser())
+            throw new SpawnDev.UnitTesting.UnsupportedTestException("DotNetCrypto requires desktop");
+
+        var crypto = new SpawnDev.BlazorJS.Cryptography.DotNetCrypto();
+        await using var owner = await SwarmIdentity.CreateAsync(crypto, "Owner");
+        await using var peer = await SwarmIdentity.CreateAsync(crypto, "Peer");
+
+        await using var client = new SpawnDev.WebTorrent.WebTorrentClient();
+        await using var coordinator = new P2PSwarmCoordinator(client);
+        coordinator.SetIdentity(owner);
+        await coordinator.CreateSwarmAsync("assign-test");
+
+        // Owner assigns Coordinator role to peer
+        var assignment = await coordinator.AssignRoleAsync(
+            "peer-1", peer.PublicKeySpki, SwarmRole.Coordinator);
+        if (assignment == null)
+            throw new Exception("Owner should be able to assign Coordinator role");
+
+        // Verify the assignment
+        var valid = await assignment.VerifyAsync(crypto);
+        if (!valid)
+            throw new Exception("Assignment should verify");
+
+        // Peer should now have Coordinator role in registry
+        var pubKey64 = Convert.ToBase64String(peer.PublicKeySpki);
+        if (!coordinator.GetRegistry()!.HasRole(pubKey64, SwarmRole.Coordinator))
+            throw new Exception("Peer should have Coordinator role in registry");
+
+        // Owner should NOT be able to assign Owner role (can't assign own level)
+        var ownerAssign = await coordinator.AssignRoleAsync(
+            "peer-2", peer.PublicKeySpki, SwarmRole.Owner);
+        if (ownerAssign != null)
+            throw new Exception("Owner should NOT be able to assign Owner role (granter.Role <= role)");
+
+        Console.WriteLine("[P2P] RBAC role assignment ✓");
+    }
+
+    [TestMethod]
+    public async Task P2P_RBAC_RevokeKey()
+    {
+        if (OperatingSystem.IsBrowser())
+            throw new SpawnDev.UnitTesting.UnsupportedTestException("DotNetCrypto requires desktop");
+
+        var crypto = new SpawnDev.BlazorJS.Cryptography.DotNetCrypto();
+        await using var owner = await SwarmIdentity.CreateAsync(crypto, "Owner");
+        await using var worker = await SwarmIdentity.CreateAsync(crypto, "Worker");
+
+        await using var client = new SpawnDev.WebTorrent.WebTorrentClient();
+        await using var coordinator = new P2PSwarmCoordinator(client);
+        coordinator.SetIdentity(owner);
+        await coordinator.CreateSwarmAsync("revoke-test");
+
+        // Add worker to registry
+        coordinator.GetRegistry()!.AddKey(worker.PublicKeySpki, SwarmRole.Worker, "Worker");
+
+        // Owner can revoke worker
+        var revoked = await coordinator.RevokeKeyAsync(worker.PublicKeySpki, "misbehaving");
+        if (!revoked) throw new Exception("Owner should be able to revoke worker");
+
+        var workerKey64 = Convert.ToBase64String(worker.PublicKeySpki);
+        if (!coordinator.GetRegistry()!.IsRevoked(workerKey64))
+            throw new Exception("Worker should be revoked");
+
+        Console.WriteLine("[P2P] RBAC key revocation ✓");
+    }
+
+    [TestMethod]
+    public async Task P2P_Election_PrefersRegistryCoordinator()
+    {
+        if (OperatingSystem.IsBrowser())
+            throw new SpawnDev.UnitTesting.UnsupportedTestException("DotNetCrypto requires desktop");
+
+        var crypto = new SpawnDev.BlazorJS.Cryptography.DotNetCrypto();
+        await using var owner = await SwarmIdentity.CreateAsync(crypto, "Owner");
+        await using var assignedCoord = await SwarmIdentity.CreateAsync(crypto, "AssignedCoord");
+        await using var fastPeer = await SwarmIdentity.CreateAsync(crypto, "FastPeer");
+
+        await using var client = new SpawnDev.WebTorrent.WebTorrentClient();
+        await using var coordinator = new P2PSwarmCoordinator(client);
+        coordinator.SetIdentity(owner);
+        await coordinator.CreateSwarmAsync("election-test");
+
+        // Add assignedCoord to registry as Coordinator
+        coordinator.GetRegistry()!.AddKey(assignedCoord.PublicKeySpki, SwarmRole.Coordinator, "Assigned");
+        await coordinator.GetRegistry()!.SignAsync(owner);
+
+        var assignedKey64 = Convert.ToBase64String(assignedCoord.PublicKeySpki);
+        var fastKey64 = Convert.ToBase64String(fastPeer.PublicKeySpki);
+
+        // Add both peers — fastPeer has more TFLOPS but isn't in the registry
+        coordinator.HandlePeerConnected("assigned-coord", new PeerCapabilities
+        {
+            PeerId = "assigned-coord",
+            EstimatedTflops = 2.0,
+            PublicKey = assignedKey64,
+        });
+        coordinator.HandlePeerConnected("fast-peer", new PeerCapabilities
+        {
+            PeerId = "fast-peer",
+            EstimatedTflops = 10.0,
+            PublicKey = fastKey64,
+        });
+
+        // Simulate coordinator drop — elect new one
+        var elected = coordinator.ElectCoordinator();
+
+        // Registry-assigned coordinator should win over higher-TFLOPS unregistered peer
+        if (elected != "assigned-coord")
+            throw new Exception($"Expected 'assigned-coord', got '{elected}'. Registry should take priority over TFLOPS.");
+
+        Console.WriteLine("[P2P] Election prefers registry-assigned coordinator ✓");
+    }
+
+    [TestMethod]
+    public async Task P2P_Election_FallsBackToTflops()
+    {
+        if (OperatingSystem.IsBrowser())
+            throw new SpawnDev.UnitTesting.UnsupportedTestException("DotNetCrypto requires desktop");
+
+        var crypto = new SpawnDev.BlazorJS.Cryptography.DotNetCrypto();
+        await using var owner = await SwarmIdentity.CreateAsync(crypto, "Owner");
+
+        await using var client = new SpawnDev.WebTorrent.WebTorrentClient();
+        await using var coordinator = new P2PSwarmCoordinator(client);
+        coordinator.SetIdentity(owner);
+        await coordinator.CreateSwarmAsync("election-fallback");
+
+        // No registry-assigned coordinators — add peers with different TFLOPS
+        coordinator.HandlePeerConnected("slow", new PeerCapabilities
+        {
+            PeerId = "slow",
+            EstimatedTflops = 1.0,
+        });
+        coordinator.HandlePeerConnected("fast", new PeerCapabilities
+        {
+            PeerId = "fast",
+            EstimatedTflops = 8.0,
+        });
+
+        var elected = coordinator.ElectCoordinator();
+        if (elected != "fast")
+            throw new Exception($"Expected 'fast', got '{elected}'. TFLOPS fallback should pick highest.");
+
+        Console.WriteLine("[P2P] Election TFLOPS fallback ✓");
+    }
+
+    [TestMethod]
+    public async Task P2P_RegistryUpdate_SequenceProtection()
+    {
+        if (OperatingSystem.IsBrowser())
+            throw new SpawnDev.UnitTesting.UnsupportedTestException("DotNetCrypto requires desktop");
+
+        var crypto = new SpawnDev.BlazorJS.Cryptography.DotNetCrypto();
+        await using var owner = await SwarmIdentity.CreateAsync(crypto, "Owner");
+
+        await using var client = new SpawnDev.WebTorrent.WebTorrentClient();
+        await using var coordinator = new P2PSwarmCoordinator(client);
+        coordinator.SetIdentity(owner);
+        await coordinator.CreateSwarmAsync("seq-test");
+
+        var originalSeq = coordinator.GetRegistry()!.Sequence;
+
+        // Create an older registry (lower sequence)
+        var oldRegistry = new KeyRegistry { Sequence = originalSeq - 1 };
+        coordinator.UpdateRegistry(oldRegistry);
+
+        // Should NOT have accepted the old registry
+        if (coordinator.GetRegistry()!.Sequence != originalSeq)
+            throw new Exception("Should reject registry with lower sequence number");
+
+        // Create a newer registry (higher sequence)
+        var newRegistry = new KeyRegistry { Sequence = originalSeq + 5 };
+        coordinator.UpdateRegistry(newRegistry);
+
+        if (coordinator.GetRegistry()!.Sequence != originalSeq + 5)
+            throw new Exception("Should accept registry with higher sequence number");
+
+        Console.WriteLine("[P2P] Registry sequence protection ✓");
+    }
+
+    [TestMethod]
+    public async Task P2P_Protocol_RequiresSignatureTypes()
+    {
+        // Authority-sensitive message types require signatures
+        if (!P2PProtocol.RequiresSignature(P2PMessageType.Kick))
+            throw new Exception("Kick should require signature");
+        if (!P2PProtocol.RequiresSignature(P2PMessageType.Block))
+            throw new Exception("Block should require signature");
+        if (!P2PProtocol.RequiresSignature(P2PMessageType.CoordinatorTransfer))
+            throw new Exception("CoordinatorTransfer should require signature");
+        if (!P2PProtocol.RequiresSignature(P2PMessageType.RoleAssign))
+            throw new Exception("RoleAssign should require signature");
+        if (!P2PProtocol.RequiresSignature(P2PMessageType.RegistryUpdate))
+            throw new Exception("RegistryUpdate should require signature");
+
+        // Data messages should NOT require signatures
+        if (P2PProtocol.RequiresSignature(P2PMessageType.Heartbeat))
+            throw new Exception("Heartbeat should NOT require signature");
+        if (P2PProtocol.RequiresSignature(P2PMessageType.KernelDispatch))
+            throw new Exception("KernelDispatch should NOT require signature");
+        if (P2PProtocol.RequiresSignature(P2PMessageType.BufferData))
+            throw new Exception("BufferData should NOT require signature");
+
+        Console.WriteLine("[P2P] Protocol signature requirements ✓");
+    }
+
+    [TestMethod]
+    public async Task P2P_MessageSigning_RoundTrip()
+    {
+        if (OperatingSystem.IsBrowser())
+            throw new SpawnDev.UnitTesting.UnsupportedTestException("DotNetCrypto requires desktop");
+
+        var crypto = new SpawnDev.BlazorJS.Cryptography.DotNetCrypto();
+        await using var identity = await SwarmIdentity.CreateAsync(crypto, "Sender");
+
+        // Create, sign, serialize, deserialize, verify — full round trip
+        var message = new P2PMessage
+        {
+            Type = P2PMessageType.RegistryUpdate,
+            Payload = JsonSerializer.SerializeToElement(new { sequence = 42 }),
+        };
+        await P2PProtocol.SignMessageAsync(message, identity);
+
+        var bytes = P2PProtocol.Serialize(message);
+        var deserialized = P2PProtocol.Deserialize(bytes);
+        if (deserialized == null) throw new Exception("Deserialization failed");
+
+        var valid = await P2PProtocol.VerifyMessageAsync(deserialized, crypto);
+        if (!valid) throw new Exception("Round-trip message should verify");
+
+        Console.WriteLine("[P2P] Message signing round-trip ✓");
+    }
 }

@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Text.Json;
+using SpawnDev.BlazorJS.Cryptography;
 using SpawnDev.WebTorrent;
 using SpawnDev.WebTorrent.Torrent;
 
@@ -20,6 +21,7 @@ public class P2PTransport : IAsyncDisposable
     private readonly ConcurrentDictionary<string, PeerChannel> _channels = new();
     private readonly P2PBufferTransfer _bufferTransfer = new();
     private P2PWorker? _worker;
+    private IPortableCrypto? _crypto;
 
     /// <summary>
     /// Fired when a compute message is received from a peer.
@@ -34,6 +36,14 @@ public class P2PTransport : IAsyncDisposable
         _client = client;
         _coordinator = coordinator;
         _dispatcher = dispatcher;
+    }
+
+    /// <summary>
+    /// Set the crypto provider for message signature verification.
+    /// </summary>
+    public void SetCrypto(IPortableCrypto crypto)
+    {
+        _crypto = crypto;
     }
 
     /// <summary>
@@ -76,6 +86,7 @@ public class P2PTransport : IAsyncDisposable
 
     /// <summary>
     /// Handle incoming data from a peer's compute channel.
+    /// Authority-sensitive messages require valid signatures.
     /// </summary>
     public async Task HandleIncomingDataAsync(string peerId, byte[] data)
     {
@@ -90,6 +101,13 @@ public class P2PTransport : IAsyncDisposable
         }
 
         if (message == null) return;
+
+        // Verify signatures on authority-sensitive messages
+        if (P2PProtocol.RequiresSignature(message.Type))
+        {
+            if (_crypto == null || !await VerifyAuthorityAsync(message))
+                return; // Reject unsigned/forged authority messages
+        }
 
         OnMessageReceived?.Invoke(peerId, message);
 
@@ -149,7 +167,90 @@ public class P2PTransport : IAsyncDisposable
             case P2PMessageType.GracefulHandoff:
                 HandleGracefulHandoff(peerId, message);
                 break;
+
+            // Ownership / RBAC:
+            case P2PMessageType.RoleAssign:
+                HandleRoleAssign(peerId, message);
+                break;
+
+            case P2PMessageType.RegistryUpdate:
+                await HandleRegistryUpdateAsync(peerId, message);
+                break;
         }
+    }
+
+    /// <summary>
+    /// Verify that an authority-sensitive message has a valid signature
+    /// and the sender has sufficient authority in the registry.
+    /// </summary>
+    private async Task<bool> VerifyAuthorityAsync(P2PMessage message)
+    {
+        if (_crypto == null) return false;
+
+        // Must have a valid signature
+        if (!await P2PProtocol.VerifyMessageAsync(message, _crypto))
+            return false;
+
+        // If we have a registry, verify the sender's role
+        var registry = _coordinator.GetRegistry();
+        if (registry != null && !string.IsNullOrEmpty(message.SenderPublicKey))
+        {
+            var minRole = message.Type switch
+            {
+                P2PMessageType.CoordinatorTransfer => SwarmRole.Coordinator,
+                P2PMessageType.CoordinatorAnnounce => SwarmRole.Coordinator,
+                P2PMessageType.Kick => SwarmRole.Coordinator,
+                P2PMessageType.Block => SwarmRole.Coordinator,
+                P2PMessageType.RoleAssign => SwarmRole.Admin,
+                P2PMessageType.RegistryUpdate => SwarmRole.Owner,
+                _ => SwarmRole.Worker,
+            };
+            if (!registry.HasRole(message.SenderPublicKey, minRole))
+                return false;
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// Send an authority-sensitive message, auto-signing if identity is available.
+    /// </summary>
+    public async Task SendSignedMessageAsync(string peerId, P2PMessage message)
+    {
+        if (_coordinator.Identity != null && P2PProtocol.RequiresSignature(message.Type))
+            await P2PProtocol.SignMessageAsync(message, _coordinator.Identity);
+        await SendMessageAsync(peerId, message);
+    }
+
+    /// <summary>
+    /// Broadcast an authority-sensitive message to all peers, auto-signing.
+    /// </summary>
+    public async Task BroadcastSignedAsync(P2PMessage message)
+    {
+        if (_coordinator.Identity != null && P2PProtocol.RequiresSignature(message.Type))
+            await P2PProtocol.SignMessageAsync(message, _coordinator.Identity);
+        var data = P2PProtocol.Serialize(message);
+        foreach (var channel in _channels.Values)
+        {
+            try { await channel.SendAsync(data); } catch { }
+        }
+    }
+
+    /// <summary>
+    /// Send the current registry to a specific peer.
+    /// Called when a new peer joins to sync them with the swarm's authority state.
+    /// </summary>
+    public async Task SendRegistryAsync(string peerId)
+    {
+        var registry = _coordinator.GetRegistry();
+        if (registry == null || _coordinator.Identity == null) return;
+
+        var message = new P2PMessage
+        {
+            Type = P2PMessageType.RegistryUpdate,
+            Payload = JsonSerializer.SerializeToElement(registry),
+        };
+        await SendSignedMessageAsync(peerId, message);
     }
 
     /// <summary>
@@ -178,13 +279,18 @@ public class P2PTransport : IAsyncDisposable
 
     #region Message Handlers — Coordinator Side
 
-    private void HandleCapabilityResponse(string peerId, P2PMessage message)
+    private async void HandleCapabilityResponse(string peerId, P2PMessage message)
     {
         if (message.Payload == null) return;
         var caps = message.Payload.Value.Deserialize<PeerCapabilities>();
         if (caps != null)
         {
-            _coordinator.HandlePeerConnected(peerId, caps);
+            var accepted = _coordinator.HandlePeerConnected(peerId, caps);
+            // Send registry to newly accepted peers so they know the authority chain
+            if (accepted && _coordinator.GetRegistry() != null)
+            {
+                await SendRegistryAsync(peerId);
+            }
         }
     }
 
@@ -249,6 +355,14 @@ public class P2PTransport : IAsyncDisposable
         var caps = _worker != null
             ? _worker.BuildCapabilities(peerId)
             : BuildLocalCapabilities();
+
+        // Include cryptographic identity if available
+        if (_coordinator.Identity != null)
+        {
+            caps.PublicKey = Convert.ToBase64String(_coordinator.Identity.PublicKeySpki);
+            caps.Fingerprint = _coordinator.Identity.Fingerprint;
+        }
+
         await SendMessageAsync(peerId, new P2PMessage
         {
             Type = P2PMessageType.CapabilityResponse,
@@ -296,6 +410,51 @@ public class P2PTransport : IAsyncDisposable
     #endregion
 
     #region Message Handlers — Coordinator Role Management
+
+    private void HandleRoleAssign(string peerId, P2PMessage message)
+    {
+        if (message.Payload == null) return;
+        var assignment = message.Payload.Value.Deserialize<RoleAssignment>();
+        if (assignment == null) return;
+
+        // Store the assignment — the worker can use it for self-identification
+        OnRoleAssigned?.Invoke(assignment);
+    }
+
+    private async Task HandleRegistryUpdateAsync(string peerId, P2PMessage message)
+    {
+        if (message.Payload == null || _crypto == null) return;
+        var registry = message.Payload.Value.Deserialize<KeyRegistry>();
+        if (registry == null) return;
+
+        // Verify the registry is signed by a known owner
+        var currentRegistry = _coordinator.GetRegistry();
+        if (currentRegistry != null)
+        {
+            // Only accept if sequence is higher (prevents replay)
+            if (registry.Sequence <= currentRegistry.Sequence) return;
+
+            // Verify against any known owner key
+            var ownerKey = currentRegistry.Keys
+                .FirstOrDefault(k => k.Role == SwarmRole.Owner && !currentRegistry.IsRevoked(k.PublicKey));
+            if (ownerKey != null)
+            {
+                var ownerSpki = Convert.FromBase64String(ownerKey.PublicKey);
+                if (!await registry.VerifyAsync(_crypto, ownerSpki)) return;
+            }
+        }
+
+        // Accept the updated registry
+        _coordinator.UpdateRegistry(registry);
+        _worker?.SetKeyRegistry(registry);
+        OnRegistryUpdated?.Invoke(registry);
+    }
+
+    /// <summary>Fired when a role assignment is received.</summary>
+    public event Action<RoleAssignment>? OnRoleAssigned;
+
+    /// <summary>Fired when the swarm registry is updated.</summary>
+    public event Action<KeyRegistry>? OnRegistryUpdated;
 
     private void HandleCoordinatorTransfer(string peerId, P2PMessage message)
     {

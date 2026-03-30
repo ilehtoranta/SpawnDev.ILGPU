@@ -131,11 +131,12 @@ public class P2PCompute : IAsyncDisposable
         accelerator.Dispatcher = new P2PDispatcher(accelerator);
         var dispatcher = accelerator.Dispatcher;
         var transport = new P2PTransport(client, coordinator, dispatcher);
+        transport.SetCrypto(crypto);
 
-        // Wire coordinator messages to transport
+        // Wire coordinator messages to transport — auto-sign authority messages
         coordinator.OnSendMessage += async (peerId, msg) =>
         {
-            await transport.SendMessageAsync(peerId, msg);
+            await transport.SendSignedMessageAsync(peerId, msg);
         };
 
         // Wire dispatcher dispatch messages to transport
@@ -188,6 +189,7 @@ public class P2PCompute : IAsyncDisposable
         var p2pAccel = coordinator.CreateAccelerator(accelerator.Context);
         var dispatcher = new P2PDispatcher(p2pAccel);
         var transport = new P2PTransport(client, coordinator, dispatcher);
+        transport.SetCrypto(crypto);
         var worker = new P2PWorker(transport);
         worker.Initialize(accelerator.Context, accelerator);
         transport.SetWorker(worker);
