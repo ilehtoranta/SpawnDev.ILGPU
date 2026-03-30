@@ -126,6 +126,43 @@ namespace SpawnDev.ILGPU.P2P
         }
 
         /// <summary>
+        /// Creates an identity backed by a hardware security key (YubiKey, passkey).
+        /// The hardware key holds the private key — signing happens through WebAuthn.
+        /// The public key from registration is used for KeyRegistry verification.
+        /// </summary>
+        /// <param name="crypto">The cross-platform crypto provider.</param>
+        /// <param name="credential">The credential from HardwareKeyProvider.RegisterAsync().</param>
+        /// <returns>An identity whose public key matches the hardware credential.</returns>
+        public static async Task<SwarmIdentity> FromHardwareKeyAsync(
+            IPortableCrypto crypto,
+            HardwareKeyCredential credential)
+        {
+            // Import only the public key — the private key lives in the authenticator
+            var key = await crypto.ImportECDSAKey(credential.PublicKeySpki,
+                PortableCrypto.NamedCurve.P256, extractable: false);
+            var identity = new SwarmIdentity(crypto, key, PortableCrypto.NamedCurve.P256)
+            {
+                Label = credential.Label,
+                HardwareCredentialId = credential.CredentialId,
+                IsHardwareBacked = true,
+            };
+            await identity.InitializeAsync();
+            return identity;
+        }
+
+        /// <summary>
+        /// If true, this identity is backed by a hardware security key.
+        /// Signing must go through HardwareKeyProvider.AuthenticateAsync() instead of SignAsync().
+        /// </summary>
+        public bool IsHardwareBacked { get; private set; }
+
+        /// <summary>
+        /// The WebAuthn credential ID for hardware-backed identities.
+        /// Used to restrict HardwareKeyProvider.AuthenticateAsync() to this specific key.
+        /// </summary>
+        public byte[]? HardwareCredentialId { get; private set; }
+
+        /// <summary>
         /// Exports the private key material for storage.
         /// </summary>
         /// <returns>The private key in PKCS8 format.</returns>

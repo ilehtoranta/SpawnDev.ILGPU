@@ -4438,4 +4438,124 @@ public abstract partial class BackendTestBase
 
         Console.WriteLine("[P2P Integration] ComputeBoard post/browse/remove ✓");
     }
+
+    // ═══════════════════════════════════════════════════════════
+    //  WebAuthn / Hardware Key Tests
+    //  These tests require a real authenticator (YubiKey, passkey).
+    //  The user must physically interact with the key to pass.
+    //  Tests skip gracefully if no authenticator is available.
+    // ═══════════════════════════════════════════════════════════
+
+    [TestMethod(Timeout = 120000)]
+    public async Task P2P_HardwareKey_Register()
+    {
+        if (!HardwareKeyProvider.IsAvailable)
+            throw new UnsupportedTestException("WebAuthn requires a browser");
+
+        var provider = new HardwareKeyProvider();
+        Console.WriteLine("[WebAuthn] Requesting hardware key registration...");
+        Console.WriteLine("[WebAuthn] >>> Please insert and tap your YubiKey <<<");
+
+        var credential = await provider.RegisterAsync("Test Key");
+
+        if (credential == null)
+            throw new UnsupportedTestException("User cancelled or no authenticator available");
+
+        if (credential.PublicKeySpki.Length == 0)
+            throw new Exception("Public key should not be empty");
+        if (credential.CredentialId.Length == 0)
+            throw new Exception("Credential ID should not be empty");
+        if (credential.Algorithm == 0)
+            throw new Exception("Algorithm should be set");
+
+        Console.WriteLine($"[WebAuthn] Registered: algorithm={credential.Algorithm}, " +
+            $"credId={Convert.ToBase64String(credential.CredentialId)[..20]}..., " +
+            $"pubKey={Convert.ToBase64String(credential.PublicKeySpki)[..20]}..., " +
+            $"transports=[{string.Join(",", credential.Transports)}], " +
+            $"attachment={credential.AuthenticatorAttachment}");
+        Console.WriteLine("[WebAuthn] Hardware key registration ✓");
+    }
+
+    [TestMethod(Timeout = 120000)]
+    public async Task P2P_HardwareKey_RegisterAndAuthenticate()
+    {
+        if (!HardwareKeyProvider.IsAvailable)
+            throw new UnsupportedTestException("WebAuthn requires a browser");
+
+        var provider = new HardwareKeyProvider();
+
+        // Step 1: Register
+        Console.WriteLine("[WebAuthn] Step 1: Register hardware key...");
+        Console.WriteLine("[WebAuthn] >>> Please insert and tap your YubiKey <<<");
+        var credential = await provider.RegisterAsync("Auth Test Key");
+        if (credential == null)
+            throw new UnsupportedTestException("User cancelled registration");
+
+        Console.WriteLine($"[WebAuthn] Registered: credId={Convert.ToBase64String(credential.CredentialId)[..20]}...");
+
+        // Step 2: Authenticate with the same key
+        Console.WriteLine("[WebAuthn] Step 2: Authenticate with the same key...");
+        Console.WriteLine("[WebAuthn] >>> Please tap your YubiKey again <<<");
+        var assertion = await provider.AuthenticateAsync(new[]
+        {
+            new HardwareKeyAllowedCredential
+            {
+                CredentialId = credential.CredentialId,
+                Transports = credential.Transports,
+            }
+        });
+        if (assertion == null)
+            throw new UnsupportedTestException("User cancelled authentication");
+
+        if (assertion.Signature.Length == 0)
+            throw new Exception("Signature should not be empty");
+        if (assertion.AuthenticatorData.Length == 0)
+            throw new Exception("AuthenticatorData should not be empty");
+        if (!assertion.CredentialId.SequenceEqual(credential.CredentialId))
+            throw new Exception("Credential ID should match registration");
+
+        Console.WriteLine($"[WebAuthn] Authenticated: sig={Convert.ToBase64String(assertion.Signature)[..20]}...");
+        Console.WriteLine("[WebAuthn] Hardware key register + authenticate ✓");
+    }
+
+    [TestMethod(Timeout = 120000)]
+    public async Task P2P_HardwareKey_SwarmOwnership()
+    {
+        if (!HardwareKeyProvider.IsAvailable)
+            throw new UnsupportedTestException("WebAuthn requires a browser");
+
+        var crypto = Crypto;
+        var provider = new HardwareKeyProvider();
+
+        // Step 1: Register hardware key
+        Console.WriteLine("[WebAuthn] Registering hardware key as swarm owner...");
+        Console.WriteLine("[WebAuthn] >>> Please insert and tap your YubiKey <<<");
+        var credential = await provider.RegisterAsync("Swarm Owner Key");
+        if (credential == null)
+            throw new UnsupportedTestException("User cancelled registration");
+
+        // Step 2: Create SwarmIdentity from hardware credential
+        var identity = await SwarmIdentity.FromHardwareKeyAsync(crypto, credential);
+        if (!identity.IsHardwareBacked)
+            throw new Exception("Identity should be hardware-backed");
+        if (identity.HardwareCredentialId == null)
+            throw new Exception("HardwareCredentialId should be set");
+        if (identity.PublicKeySpki.Length == 0)
+            throw new Exception("PublicKeySpki should not be empty");
+
+        // Step 3: Add to KeyRegistry as Owner
+        var registry = new KeyRegistry();
+        registry.AddKey(identity.PublicKeySpki, SwarmRole.Owner, identity.Label);
+
+        // Step 4: Verify the key is in the registry
+        var pubKeyB64 = Convert.ToBase64String(identity.PublicKeySpki);
+        if (!registry.HasRole(pubKeyB64, SwarmRole.Owner))
+            throw new Exception("Hardware key should be Owner in registry");
+
+        Console.WriteLine($"[WebAuthn] Swarm owner identity: fingerprint={identity.Fingerprint[..16]}...");
+        Console.WriteLine($"[WebAuthn] Registry has {registry.Keys.Count} key(s), owner verified");
+        Console.WriteLine("[WebAuthn] Hardware key → SwarmIdentity → KeyRegistry ✓");
+
+        await identity.DisposeAsync();
+    }
 }
