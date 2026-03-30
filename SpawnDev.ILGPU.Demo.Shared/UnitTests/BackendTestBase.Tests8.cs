@@ -407,13 +407,19 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
         [TestMethod]
         public async Task RadixSortPositionDiagnosticTest() => await RunTest(async accelerator =>
         {
+            // This diagnostic replicates RadixSortKernel1's exact internal logic
+            // with hardcoded 256-wide shared memory layout. Requires group size >= 256.
+            if (accelerator.MaxNumThreadsPerGroup < 256)
+                throw new UnsupportedTestException(
+                    $"RadixSort position diagnostic requires group size >= 256 (this backend supports {accelerator.MaxNumThreadsPerGroup})");
+
             int n = 8;
             var data = new int[] { 3, 2, 1, 0, 3, 2, 1, 0 };
             int outputLen = n * 8 + 4; // 8 ints per thread + 4 counters
             using var inputBuf = accelerator.Allocate1D(data);
             using var outputBuf = accelerator.Allocate1D(new int[outputLen]);
 
-            int groupSize = accelerator.MaxNumThreadsPerGroup; // Use accelerator's actual max
+            int groupSize = 256; // Must match RadixSortKernel1's hardcoded layout
             var kernel = accelerator.LoadStreamKernel<ArrayView<int>, ArrayView<int>, int, int>(
                 RadixSortPositionDiagKernel);
             kernel(new KernelConfig(1, groupSize), inputBuf.View, outputBuf.View, n, 0);
