@@ -413,7 +413,7 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             using var inputBuf = accelerator.Allocate1D(data);
             using var outputBuf = accelerator.Allocate1D(new int[outputLen]);
 
-            int groupSize = 256; // Match RadixSort's workgroup size
+            int groupSize = accelerator.MaxNumThreadsPerGroup; // Use accelerator's actual max
             var kernel = accelerator.LoadStreamKernel<ArrayView<int>, ArrayView<int>, int, int>(
                 RadixSortPositionDiagKernel);
             kernel(new KernelConfig(1, groupSize), inputBuf.View, outputBuf.View, n, 0);
