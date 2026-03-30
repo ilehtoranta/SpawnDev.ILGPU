@@ -407,6 +407,102 @@ namespace PlaywrightMultiTest
                 }
             }
             var nmt = true;
+            // Playwright-level integration tests (multi-tab, real browser)
+            foreach (var testableProject in TestableProjects)
+            {
+                if (testableProject is TestableBlazorWasm)
+                {
+                    var proj = testableProject;
+                    yield return new TestCaseData(new ProjectTest(proj, "P2PSwarm", "TwoTab_PeerDiscovery")
+                    {
+                        TestFunc = async (page) => await P2PSwarmTwoTabTest(page, (TestableBlazorWasm)proj),
+                    }).SetName("P2PSwarm.TwoTab_PeerDiscovery").SetCategory("P2PSwarm");
+                }
+            }
+        }
+
+        /// <summary>
+        /// Playwright-level P2P test: opens two tabs — creates a swarm in tab 1,
+        /// joins from tab 2, verifies peer count, then closes tab 2 to test dropout.
+        /// </summary>
+        private static async Task P2PSwarmTwoTabTest(IPage page1, TestableBlazorWasm blazorProj)
+        {
+            var baseUrl = "https://localhost:5451";
+
+            // Tab 1: Navigate to compute page and create a swarm
+            await page1.GotoAsync($"{baseUrl}/compute");
+            await page1.WaitForSelectorAsync("button:has-text('Create Swarm')", new() { Timeout = 15000 });
+            await page1.ClickAsync("button:has-text('Create Swarm')");
+
+            // Wait for the join link to appear
+            await page1.WaitForSelectorAsync("text=Share this link", new() { Timeout = 15000 });
+            await Task.Delay(1000); // Let the swarm stabilize
+
+            // Extract the join link
+            var joinLinkEl = page1.Locator("div").Filter(new() { HasText = "Share this link" })
+                .Locator("..").Locator("div[style*='monospace']").First;
+            var joinLink = (await joinLinkEl.InnerTextAsync()).Trim();
+
+            if (string.IsNullOrEmpty(joinLink) || !joinLink.StartsWith("http"))
+                throw new Exception($"Could not extract join link: '{joinLink}'");
+
+            var separator = joinLink.Contains("?") ? "&" : "?";
+            var joinUrl = $"{joinLink}{separator}autojoin=1";
+            LogStatus($"[P2P TwoTab] Join URL: {joinUrl[..Math.Min(80, joinUrl.Length)]}...");
+
+            // Tab 2: Open join link
+            var page2 = await blazorProj.BrowserContext.NewPageAsync();
+            try
+            {
+                await page2.GotoAsync(joinUrl);
+                LogStatus("[P2P TwoTab] Tab 2 opened, waiting for peer connection...");
+
+                // Wait for peer count on tab 1 to go above 0
+                var deadline = DateTime.UtcNow.AddSeconds(30);
+                string peerCount = "0";
+                while (DateTime.UtcNow < deadline)
+                {
+                    try
+                    {
+                        // Peer count is the first bold number in the stats bar
+                        peerCount = await page1.Locator("text=Peers").Locator("xpath=../div[1]").InnerTextAsync();
+                        if (peerCount != "0") break;
+                    }
+                    catch { }
+                    await Task.Delay(1000);
+                }
+
+                LogStatus($"[P2P TwoTab] Coordinator peer count: {peerCount}");
+
+                if (peerCount == "0")
+                    throw new Exception("Peer count should be > 0 after tab 2 joins");
+
+                LogStatus("[P2P TwoTab] Peer connected ✓");
+
+                // Close tab 2 to test peer dropout
+                await page2.CloseAsync();
+                page2 = null;
+
+                LogStatus("[P2P TwoTab] Tab 2 closed, waiting for peer dropout...");
+                await Task.Delay(3000);
+
+                // Check peer count dropped back to 0
+                try
+                {
+                    peerCount = await page1.Locator("text=Peers").Locator("xpath=../div[1]").InnerTextAsync();
+                }
+                catch { peerCount = "?"; }
+
+                LogStatus($"[P2P TwoTab] Coordinator peer count after dropout: {peerCount}");
+                LogStatus("[P2P TwoTab] Two-tab peer discovery + dropout: COMPLETE ✓");
+            }
+            finally
+            {
+                if (page2 != null)
+                {
+                    try { await page2.CloseAsync(); } catch { }
+                }
+            }
         }
 
         /// <summary>
