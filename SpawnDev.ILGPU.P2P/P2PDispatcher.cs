@@ -30,6 +30,13 @@ public class P2PDispatcher : IDisposable
     public int MaxRetries { get; set; } = 3;
 
     /// <summary>
+    /// Coordinator's public key (base64 SPKI) for dispatch authentication.
+    /// Set from the coordinator's SwarmIdentity. Included in every dispatch
+    /// so workers can verify the sender has Coordinator+ authority.
+    /// </summary>
+    public string? CoordinatorPublicKey { get; set; }
+
+    /// <summary>
     /// Heartbeat interval (ms). Peers that miss 3 consecutive heartbeats are marked stale.
     /// </summary>
     public int HeartbeatIntervalMs { get; set; } = 5_000;
@@ -440,6 +447,10 @@ public class P2PDispatcher : IDisposable
 
     private void SendDispatchToPeer(RemotePeer peer, KernelDispatchRequest request)
     {
+        // Include coordinator's public key for worker-side authority verification
+        if (CoordinatorPublicKey != null)
+            request.CoordinatorPublicKey = CoordinatorPublicKey;
+
         var message = new P2PMessage
         {
             Type = P2PMessageType.KernelDispatch,

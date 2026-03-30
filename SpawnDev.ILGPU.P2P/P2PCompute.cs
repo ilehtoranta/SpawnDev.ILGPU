@@ -130,6 +130,7 @@ public class P2PCompute : IAsyncDisposable
         var accelerator = coordinator.CreateAccelerator(context);
         accelerator.Dispatcher = new P2PDispatcher(accelerator);
         var dispatcher = accelerator.Dispatcher;
+        dispatcher.CoordinatorPublicKey = Convert.ToBase64String(identity.PublicKeySpki);
         var transport = new P2PTransport(client, coordinator, dispatcher);
         transport.SetCrypto(crypto);
 
@@ -139,10 +140,10 @@ public class P2PCompute : IAsyncDisposable
             await transport.SendSignedMessageAsync(peerId, msg);
         };
 
-        // Wire dispatcher dispatch messages to transport
-        dispatcher.OnSendMessage += (peerId, msg) =>
+        // Wire dispatcher dispatch messages to transport — signed like all authority messages
+        dispatcher.OnSendMessage += async (peerId, msg) =>
         {
-            _ = transport.SendMessageAsync(peerId, msg);
+            await transport.SendSignedMessageAsync(peerId, msg);
         };
 
         // Bridge WebRTC peer connections to sd_compute extension
