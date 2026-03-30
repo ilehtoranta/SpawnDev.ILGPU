@@ -894,22 +894,19 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
         [TestMethod]
         public async Task ScanBroadcastIsolationTest() => await RunTest(async accelerator =>
         {
-            // Right boundary values: same as what pass 1 would produce for
-            // input[i] = (i/256)+1 with 16 groups of 256 elements.
-            // tempView[0] = 0 (identity), tempView[g+1] = 256*(g+1)
+            int groupSize = Math.Min(256, accelerator.MaxNumThreadsPerGroup);
             int numGroups = 16;
             int numBoundaries = numGroups + 1; // 17
             var boundaries = new int[numBoundaries];
             for (int g = 0; g < numGroups; g++)
-                boundaries[g + 1] = 256 * (g + 1);
-            // boundaries = [0, 256, 512, 768, 1024, ..., 4096]
+                boundaries[g + 1] = groupSize * (g + 1);
 
             using var boundaryBuf = accelerator.Allocate1D(boundaries);
             using var outputBuf = accelerator.Allocate1D<int>(numGroups);
 
             var kernel = accelerator.LoadStreamKernel<ArrayView<int>, ArrayView<int>>(
                 ScanBroadcastIsolationKernel);
-            kernel(new KernelConfig(numGroups, 256), boundaryBuf.View, outputBuf.View);
+            kernel(new KernelConfig(numGroups, groupSize), boundaryBuf.View, outputBuf.View);
             await accelerator.SynchronizeAsync();
 
             var result = await outputBuf.CopyToHostAsync<int>();
@@ -992,12 +989,13 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
         [TestMethod]
         public async Task GroupBroadcastDiagTest() => await RunTest(async accelerator =>
         {
+            int groupSize = Math.Min(256, accelerator.MaxNumThreadsPerGroup);
             int numGroups = 16;
             using var outputBuf = accelerator.Allocate1D<int>(numGroups);
 
             var kernel = accelerator.LoadStreamKernel<ArrayView<int>>(
                 GroupBroadcastDiagKernel);
-            kernel(new KernelConfig(numGroups, 256), outputBuf.View);
+            kernel(new KernelConfig(numGroups, groupSize), outputBuf.View);
             await accelerator.SynchronizeAsync();
 
             var result = await outputBuf.CopyToHostAsync<int>();
