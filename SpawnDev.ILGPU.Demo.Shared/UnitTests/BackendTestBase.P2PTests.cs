@@ -2765,21 +2765,26 @@ public abstract partial class BackendTestBase
     public async Task P2P_Coordinator_DispatchToSwarm()
     {
         // Full coordinator → worker round-trip with real kernel execution
+        var crypto = Crypto;
         using var context = global::ILGPU.Context.CreateDefault();
         using var cpuAccel = global::ILGPU.Runtime.CPU.CPUDevice.Default.CreateAccelerator(context);
 
         var client = WebTorrentClient;
+        await using var identity = await SwarmIdentity.CreateAsync(crypto, "coordinator");
         await using var coordinator = new P2PSwarmCoordinator(client);
+        coordinator.SetIdentity(identity);
         await coordinator.CreateSwarmAsync("coord-dispatch-test");
 
         var p2pAccel = coordinator.CreateAccelerator(context);
         p2pAccel.Dispatcher = new P2PDispatcher(p2pAccel);
+        p2pAccel.Dispatcher.CoordinatorPublicKey = Convert.ToBase64String(identity.PublicKeySpki);
         var transport = new P2PTransport(client, coordinator, p2pAccel.Dispatcher);
+        transport.SetCrypto(crypto);
 
-        // Wire dispatcher → transport
+        // Wire dispatcher → transport (signed messages for authority verification)
         p2pAccel.Dispatcher.OnSendMessage += (peerId, msg) =>
         {
-            _ = transport.SendMessageAsync(peerId, msg);
+            _ = transport.SendSignedMessageAsync(peerId, msg);
         };
 
         // Create worker on same process (simulated remote)
@@ -2822,6 +2827,9 @@ public abstract partial class BackendTestBase
 
         if (string.IsNullOrEmpty(dispatchId))
             throw new Exception("DispatchToSwarm returned empty ID");
+
+        // Give async transport + kernel execution time to complete
+        await Task.Delay(200);
 
         // Verify the worker received and processed the dispatch
         var result = worker.GetBuffer("data");
@@ -3000,14 +3008,19 @@ public abstract partial class BackendTestBase
         // Worker-1 gets dispatch but "drops" before executing — dispatcher retries on worker-2
         // We simulate this by NOT wiring worker-1's transport (messages go nowhere),
         // then calling HandlePeerLost which triggers retry to worker-2 (which IS wired)
+        var crypto = Crypto;
         using var context = global::ILGPU.Context.CreateDefault();
         var client = WebTorrentClient;
+        await using var identity = await SwarmIdentity.CreateAsync(crypto, "coordinator");
         await using var coordinator = new P2PSwarmCoordinator(client);
+        coordinator.SetIdentity(identity);
         await coordinator.CreateSwarmAsync("dropout-test");
 
         var p2pAccel = coordinator.CreateAccelerator(context);
         p2pAccel.Dispatcher = new P2PDispatcher(p2pAccel);
+        p2pAccel.Dispatcher.CoordinatorPublicKey = Convert.ToBase64String(identity.PublicKeySpki);
         var coordTransport = new P2PTransport(client, coordinator, p2pAccel.Dispatcher);
+        coordTransport.SetCrypto(crypto);
 
         P2PKernelSerializer.RegisterKernelType(typeof(BackendTestBase));
 
@@ -3030,6 +3043,7 @@ public abstract partial class BackendTestBase
         var w2Coord = new P2PSwarmCoordinator(WebTorrentClient);
         var w2Dispatcher = new P2PDispatcher(p2pAccel);
         var w2Transport = new P2PTransport(WebTorrentClient, w2Coord, w2Dispatcher);
+        w2Transport.SetCrypto(crypto);
         var worker2 = new P2PWorker(w2Transport);
         worker2.Initialize(context, cpuAccel2);
         w2Transport.SetWorker(worker2);
@@ -3055,10 +3069,10 @@ public abstract partial class BackendTestBase
         string? retriedTo = null;
         p2pAccel.Dispatcher.OnDispatchRetried += (id, from, to) => retriedTo = to;
 
-        // Wire dispatcher send
+        // Wire dispatcher send (signed messages for authority verification)
         p2pAccel.Dispatcher.OnSendMessage += (peerId, msg) =>
         {
-            _ = coordTransport.SendMessageAsync(peerId, msg);
+            _ = coordTransport.SendSignedMessageAsync(peerId, msg);
         };
 
         // Dispatch — worker-1 gets it first (higher TFLOPS), but won't respond
@@ -3638,15 +3652,19 @@ public abstract partial class BackendTestBase
     public async Task P2P_Transport_WorkerHandlesKernelDispatch()
     {
         // Verify the transport routes KernelDispatch to the worker
+        var crypto = Crypto;
         using var context = global::ILGPU.Context.CreateDefault();
         using var cpuAccel = global::ILGPU.Runtime.CPU.CPUDevice.Default.CreateAccelerator(context);
 
         var client = WebTorrentClient;
+        await using var identity = await SwarmIdentity.CreateAsync(crypto, "coordinator");
         await using var coordinator = new P2PSwarmCoordinator(client);
+        coordinator.SetIdentity(identity);
         await coordinator.CreateSwarmAsync("transport-dispatch-test");
         var p2pAccel = coordinator.CreateAccelerator(context);
         var dispatcher = new P2PDispatcher(p2pAccel);
         await using var transport = new P2PTransport(client, coordinator, dispatcher);
+        transport.SetCrypto(crypto);
 
         var worker = new P2PWorker(transport);
         worker.Initialize(context, cpuAccel);
@@ -3663,12 +3681,13 @@ public abstract partial class BackendTestBase
             new BufferBinding { ParameterIndex = 1, BufferId = "data", Length = 4, ElementSize = 4 }
         };
 
-        // Serialize dispatch and feed through transport's incoming handler
+        // Sign the dispatch message — KernelDispatch requires authority verification
         var msg = new P2PMessage
         {
             Type = P2PMessageType.KernelDispatch,
             Payload = JsonSerializer.SerializeToElement(request),
         };
+        await P2PProtocol.SignMessageAsync(msg, identity);
         var serialized = P2PProtocol.Serialize(msg);
         await transport.HandleIncomingDataAsync("coordinator", serialized);
 
@@ -4227,16 +4246,18 @@ public abstract partial class BackendTestBase
             throw new Exception("Block should require signature");
         if (!P2PProtocol.RequiresSignature(P2PMessageType.CoordinatorTransfer))
             throw new Exception("CoordinatorTransfer should require signature");
+        if (!P2PProtocol.RequiresSignature(P2PMessageType.CoordinatorAnnounce))
+            throw new Exception("CoordinatorAnnounce should require signature");
         if (!P2PProtocol.RequiresSignature(P2PMessageType.RoleAssign))
             throw new Exception("RoleAssign should require signature");
         if (!P2PProtocol.RequiresSignature(P2PMessageType.RegistryUpdate))
             throw new Exception("RegistryUpdate should require signature");
+        if (!P2PProtocol.RequiresSignature(P2PMessageType.KernelDispatch))
+            throw new Exception("KernelDispatch should require signature");
 
         // Data messages should NOT require signatures
         if (P2PProtocol.RequiresSignature(P2PMessageType.Heartbeat))
             throw new Exception("Heartbeat should NOT require signature");
-        if (P2PProtocol.RequiresSignature(P2PMessageType.KernelDispatch))
-            throw new Exception("KernelDispatch should NOT require signature");
         if (P2PProtocol.RequiresSignature(P2PMessageType.BufferData))
             throw new Exception("BufferData should NOT require signature");
 
@@ -4493,17 +4514,13 @@ public abstract partial class BackendTestBase
     [TestMethod(Timeout = 60000)]
     public async Task P2P_Integration_TwoClients_MagnetJoin() => await RunTest(async accelerator =>
     {
-        if (!OperatingSystem.IsBrowser())
-            throw new UnsupportedTestException("WebRTC requires browser");
-
         var crypto = Crypto;
-        var trackerUrl = "wss://hub.spawndev.com:44365/announce";
 
         // Enable verbose logging to see tracker + WebRTC internals
         SpawnDev.WebTorrent.WebTorrentClient.VerboseLogging = true;
 
-        // Client 1: Coordinator — creates swarm with tracker in metadata
-        var coordClient = new SpawnDev.WebTorrent.WebTorrentClient(crypto: crypto);
+        // Client 1: Coordinator — uses DI-injected client (production path)
+        var coordClient = WebTorrentClient;
         await using var coordCompute = await P2PCompute.CreateSwarmAsync(crypto, coordClient, "magnet-test");
 
         var magnetLink = coordCompute.MagnetLink!;
@@ -4513,7 +4530,9 @@ public abstract partial class BackendTestBase
         // Wait for tracker registration
         await Task.Delay(3000);
 
-        // Client 2: Worker — joins via magnet link (separate client, separate PeerId)
+        // Client 2: Worker — needs a separate client with its own PeerId
+        // In production, this would be a different device. For in-page testing,
+        // we create a second client. This is the one acceptable "new" — simulating a remote device.
         var workerClient = new SpawnDev.WebTorrent.WebTorrentClient(crypto: crypto);
         Console.WriteLine($"[P2P MagnetJoin] Worker PeerId: {Convert.ToHexString(workerClient.PeerId)}");
         if (coordClient.PeerId.SequenceEqual(workerClient.PeerId))
@@ -4542,14 +4561,16 @@ public abstract partial class BackendTestBase
     //  WebAuthn / Hardware Key Tests
     //  These tests require a real authenticator (YubiKey, passkey).
     //  The user must physically interact with the key to pass.
-    //  Tests skip gracefully if no authenticator is available.
+    //  NEVER run in automated suites — each run creates a resident
+    //  credential that consumes finite YubiKey storage (~25 slots).
+    //  Run manually via filter: --filter "FullyQualifiedName~HardwareKey"
     // ═══════════════════════════════════════════════════════════
 
     [TestMethod(Timeout = 120000)]
     public async Task P2P_HardwareKey_Register()
     {
-        if (!HardwareKeyProvider.IsAvailable)
-            throw new UnsupportedTestException("WebAuthn requires a browser");
+        // Skip in automated runs — creates resident credentials on YubiKey (finite storage)
+        throw new UnsupportedTestException("HardwareKey tests must be run manually — creates resident credentials on YubiKey");
 
         var provider = new HardwareKeyProvider();
         Console.WriteLine("[WebAuthn] Requesting hardware key registration...");
@@ -4578,8 +4599,8 @@ public abstract partial class BackendTestBase
     [TestMethod(Timeout = 120000)]
     public async Task P2P_HardwareKey_RegisterAndAuthenticate()
     {
-        if (!HardwareKeyProvider.IsAvailable)
-            throw new UnsupportedTestException("WebAuthn requires a browser");
+        // Skip in automated runs — creates resident credentials on YubiKey (finite storage)
+        throw new UnsupportedTestException("HardwareKey tests must be run manually — creates resident credentials on YubiKey");
 
         var provider = new HardwareKeyProvider();
 
@@ -4620,8 +4641,8 @@ public abstract partial class BackendTestBase
     [TestMethod(Timeout = 120000)]
     public async Task P2P_HardwareKey_SwarmOwnership()
     {
-        if (!HardwareKeyProvider.IsAvailable)
-            throw new UnsupportedTestException("WebAuthn requires a browser");
+        // Skip in automated runs — creates resident credentials on YubiKey (finite storage)
+        throw new UnsupportedTestException("HardwareKey tests must be run manually — creates resident credentials on YubiKey");
 
         var crypto = Crypto;
         var provider = new HardwareKeyProvider();
