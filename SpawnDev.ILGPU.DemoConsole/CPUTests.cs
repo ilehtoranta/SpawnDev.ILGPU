@@ -6,7 +6,7 @@ using SpawnDev.ILGPU.Demo.Shared.UnitTests;
 
 public class CPUTests : BackendTestBase
 {
-    public CPUTests(IPortableCrypto crypto) : base(crypto) { }
+    public CPUTests(IPortableCrypto crypto, SpawnDev.WebTorrent.WebTorrentClient webTorrentClient) : base(crypto, webTorrentClient) { }
     protected override string BackendName => "CPU";
 
     protected override Task<(Context context, Accelerator accelerator)> CreateAcceleratorAsync()

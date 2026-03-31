@@ -14,9 +14,13 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
         /// <summary>Platform-appropriate crypto provider (injected via DI).</summary>
         protected IPortableCrypto Crypto { get; }
 
-        protected BackendTestBase(IPortableCrypto crypto)
+        /// <summary>DI-configured WebTorrent client with tracker discovery.</summary>
+        protected SpawnDev.WebTorrent.WebTorrentClient WebTorrentClient { get; }
+
+        protected BackendTestBase(IPortableCrypto crypto, SpawnDev.WebTorrent.WebTorrentClient webTorrentClient)
         {
             Crypto = crypto;
+            WebTorrentClient = webTorrentClient;
         }
 
         /// <summary>Creates the backend-specific accelerator. Caller is responsible for disposing both.</summary>

@@ -308,7 +308,7 @@ public abstract partial class BackendTestBase
     [TestMethod]
     public async Task P2P_Coordinator_Create()
     {
-        await using var client = new SpawnDev.WebTorrent.WebTorrentClient();
+        var client = WebTorrentClient;
         await using var coordinator = new P2PSwarmCoordinator(client);
 
         if (coordinator.PeerCount != 0)
@@ -320,7 +320,7 @@ public abstract partial class BackendTestBase
     [TestMethod]
     public async Task P2P_Coordinator_PeerJoin()
     {
-        await using var client = new SpawnDev.WebTorrent.WebTorrentClient();
+        var client = WebTorrentClient;
         await using var coordinator = new P2PSwarmCoordinator(client);
 
         RemotePeer? joined = null;
@@ -344,7 +344,7 @@ public abstract partial class BackendTestBase
     [TestMethod]
     public async Task P2P_Coordinator_PeerLeave()
     {
-        await using var client = new SpawnDev.WebTorrent.WebTorrentClient();
+        var client = WebTorrentClient;
         await using var coordinator = new P2PSwarmCoordinator(client);
 
         coordinator.HandlePeerConnected("phone-1", new PeerCapabilities
@@ -366,7 +366,7 @@ public abstract partial class BackendTestBase
     [TestMethod]
     public async Task P2P_Coordinator_CreateSwarm()
     {
-        await using var client = new SpawnDev.WebTorrent.WebTorrentClient();
+        var client = WebTorrentClient;
         await using var coordinator = new P2PSwarmCoordinator(client);
         await coordinator.CreateSwarmAsync("test-compute");
 
@@ -387,7 +387,7 @@ public abstract partial class BackendTestBase
     [TestMethod]
     public async Task P2P_Coordinator_JoinLink_WithBaseUrl()
     {
-        await using var client = new SpawnDev.WebTorrent.WebTorrentClient();
+        var client = WebTorrentClient;
         await using var coordinator = new P2PSwarmCoordinator(client);
         // Set to the coordinator's own web app URL
         coordinator.JoinLinkBaseUrl = "https://myapp.example.com/ml-demo";
@@ -406,7 +406,7 @@ public abstract partial class BackendTestBase
     [TestMethod]
     public async Task P2P_Coordinator_JoinLink_NoBaseUrl()
     {
-        await using var client = new SpawnDev.WebTorrent.WebTorrentClient();
+        var client = WebTorrentClient;
         await using var coordinator = new P2PSwarmCoordinator(client);
         // No base URL set — JoinLink stays null
         await coordinator.CreateSwarmAsync("no-url-test");
@@ -703,7 +703,7 @@ public abstract partial class BackendTestBase
     [TestMethod]
     public async Task P2P_Coordinator_TotalCapacity()
     {
-        await using var client = new SpawnDev.WebTorrent.WebTorrentClient();
+        var client = WebTorrentClient;
         await using var coordinator = new P2PSwarmCoordinator(client);
 
         coordinator.HandlePeerConnected("peer-1", new PeerCapabilities
@@ -737,7 +737,7 @@ public abstract partial class BackendTestBase
     [TestMethod]
     public async Task P2P_Transport_RegisterPeer_SendsCapabilityRequest()
     {
-        await using var client = new SpawnDev.WebTorrent.WebTorrentClient();
+        var client = WebTorrentClient;
         await using var coordinator = new P2PSwarmCoordinator(client);
         using var context = global::ILGPU.Context.CreateDefault();
         var accelerator = coordinator.CreateAccelerator(context);
@@ -760,7 +760,7 @@ public abstract partial class BackendTestBase
     [TestMethod]
     public async Task P2P_Transport_HandleCapabilityResponse_AddsPeer()
     {
-        await using var client = new SpawnDev.WebTorrent.WebTorrentClient();
+        var client = WebTorrentClient;
         await using var coordinator = new P2PSwarmCoordinator(client);
         using var context = global::ILGPU.Context.CreateDefault();
         var accelerator = coordinator.CreateAccelerator(context);
@@ -795,7 +795,7 @@ public abstract partial class BackendTestBase
     [TestMethod]
     public async Task P2P_Transport_HandleDisconnect_RemovesPeer()
     {
-        await using var client = new SpawnDev.WebTorrent.WebTorrentClient();
+        var client = WebTorrentClient;
         await using var coordinator = new P2PSwarmCoordinator(client);
         using var context = global::ILGPU.Context.CreateDefault();
         var accelerator = coordinator.CreateAccelerator(context);
@@ -827,7 +827,7 @@ public abstract partial class BackendTestBase
     [TestMethod]
     public async Task P2P_Transport_HandleHeartbeat_UpdatesTimestamp()
     {
-        await using var client = new SpawnDev.WebTorrent.WebTorrentClient();
+        var client = WebTorrentClient;
         await using var coordinator = new P2PSwarmCoordinator(client);
         using var context = global::ILGPU.Context.CreateDefault();
         var accelerator = coordinator.CreateAccelerator(context);
@@ -862,7 +862,7 @@ public abstract partial class BackendTestBase
     [TestMethod]
     public async Task P2P_Transport_Broadcast()
     {
-        await using var client = new SpawnDev.WebTorrent.WebTorrentClient();
+        var client = WebTorrentClient;
         await using var coordinator = new P2PSwarmCoordinator(client);
         using var context = global::ILGPU.Context.CreateDefault();
         var accelerator = coordinator.CreateAccelerator(context);
@@ -897,7 +897,7 @@ public abstract partial class BackendTestBase
     [TestMethod]
     public async Task P2P_Role_CreatorIsCoordinator()
     {
-        await using var client = new SpawnDev.WebTorrent.WebTorrentClient();
+        var client = WebTorrentClient;
         await using var coordinator = new P2PSwarmCoordinator(client);
         await coordinator.CreateSwarmAsync("role-test");
 
@@ -908,7 +908,7 @@ public abstract partial class BackendTestBase
     [TestMethod]
     public async Task P2P_Role_JoinerIsWorker()
     {
-        await using var client = new SpawnDev.WebTorrent.WebTorrentClient();
+        var client = WebTorrentClient;
         await using var coordinator = new P2PSwarmCoordinator(client);
         // JoinSwarmAsync needs a real magnet — use a fake one to test role assignment
         // Just test the role assignment logic directly
@@ -922,7 +922,7 @@ public abstract partial class BackendTestBase
     [TestMethod]
     public async Task P2P_Role_Transfer()
     {
-        await using var client = new SpawnDev.WebTorrent.WebTorrentClient();
+        var client = WebTorrentClient;
         await using var coordinator = new P2PSwarmCoordinator(client);
         await coordinator.CreateSwarmAsync("transfer-test");
 
@@ -955,7 +955,7 @@ public abstract partial class BackendTestBase
     [TestMethod]
     public async Task P2P_Role_Transfer_ToSpecific()
     {
-        await using var client = new SpawnDev.WebTorrent.WebTorrentClient();
+        var client = WebTorrentClient;
         await using var coordinator = new P2PSwarmCoordinator(client);
         await coordinator.CreateSwarmAsync("transfer-specific");
 
@@ -971,7 +971,7 @@ public abstract partial class BackendTestBase
     [TestMethod]
     public async Task P2P_Role_Election_PicksStrongest()
     {
-        await using var client = new SpawnDev.WebTorrent.WebTorrentClient();
+        var client = WebTorrentClient;
         await using var coordinator = new P2PSwarmCoordinator(client);
 
         coordinator.HandlePeerConnected("weak", new PeerCapabilities { PeerId = "weak", EstimatedTflops = 2.0, AvailableMemory = 2L * 1024 * 1024 * 1024 });
@@ -986,7 +986,7 @@ public abstract partial class BackendTestBase
     [TestMethod]
     public async Task P2P_Role_Election_Deterministic()
     {
-        await using var client = new SpawnDev.WebTorrent.WebTorrentClient();
+        var client = WebTorrentClient;
         await using var coordinator = new P2PSwarmCoordinator(client);
 
         // Two equal peers — should pick deterministically by PeerId
@@ -1002,7 +1002,7 @@ public abstract partial class BackendTestBase
     [TestMethod]
     public async Task P2P_Role_BecomeCoordinator()
     {
-        await using var client = new SpawnDev.WebTorrent.WebTorrentClient();
+        var client = WebTorrentClient;
         await using var coordinator = new P2PSwarmCoordinator(client);
 
         if (coordinator.Role != P2PRole.Worker)
@@ -1023,7 +1023,7 @@ public abstract partial class BackendTestBase
     [TestMethod]
     public async Task P2P_Worker_Create()
     {
-        await using var client = new SpawnDev.WebTorrent.WebTorrentClient();
+        var client = WebTorrentClient;
         await using var coordinator = new P2PSwarmCoordinator(client);
         using var context = global::ILGPU.Context.CreateDefault();
         var accelerator = coordinator.CreateAccelerator(context);
@@ -1038,7 +1038,7 @@ public abstract partial class BackendTestBase
     [TestMethod]
     public async Task P2P_Worker_Initialize()
     {
-        await using var client = new SpawnDev.WebTorrent.WebTorrentClient();
+        var client = WebTorrentClient;
         await using var coordinator = new P2PSwarmCoordinator(client);
         using var ctx = global::ILGPU.Context.CreateDefault();
         var accel = coordinator.CreateAccelerator(ctx);
@@ -1054,7 +1054,7 @@ public abstract partial class BackendTestBase
     [TestMethod]
     public async Task P2P_Worker_BuildCapabilities()
     {
-        await using var client = new SpawnDev.WebTorrent.WebTorrentClient();
+        var client = WebTorrentClient;
         await using var coordinator = new P2PSwarmCoordinator(client);
         using var ctx = global::ILGPU.Context.CreateDefault();
         var accel = coordinator.CreateAccelerator(ctx);
@@ -1075,7 +1075,7 @@ public abstract partial class BackendTestBase
     [TestMethod]
     public async Task P2P_Worker_BufferRoundTrip()
     {
-        await using var client = new SpawnDev.WebTorrent.WebTorrentClient();
+        var client = WebTorrentClient;
         await using var coordinator = new P2PSwarmCoordinator(client);
         using var ctx = global::ILGPU.Context.CreateDefault();
         var accel = coordinator.CreateAccelerator(ctx);
@@ -1097,7 +1097,7 @@ public abstract partial class BackendTestBase
     [TestMethod]
     public async Task P2P_Role_Transfer_NoPeers_ReturnsNull()
     {
-        await using var client = new SpawnDev.WebTorrent.WebTorrentClient();
+        var client = WebTorrentClient;
         await using var coordinator = new P2PSwarmCoordinator(client);
         await coordinator.CreateSwarmAsync("empty-transfer");
 
@@ -1115,7 +1115,7 @@ public abstract partial class BackendTestBase
     [TestMethod]
     public async Task P2P_Kick_RemovesPeer()
     {
-        await using var client = new SpawnDev.WebTorrent.WebTorrentClient();
+        var client = WebTorrentClient;
         await using var coordinator = new P2PSwarmCoordinator(client);
         await coordinator.CreateSwarmAsync("kick-test");
 
@@ -1134,7 +1134,7 @@ public abstract partial class BackendTestBase
     [TestMethod]
     public async Task P2P_Kick_OnlyCoordinatorCan()
     {
-        await using var client = new SpawnDev.WebTorrent.WebTorrentClient();
+        var client = WebTorrentClient;
         await using var coordinator = new P2PSwarmCoordinator(client);
         // Default role is Worker
         coordinator.HandlePeerConnected("peer-1", new PeerCapabilities { PeerId = "peer-1" });
@@ -1146,7 +1146,7 @@ public abstract partial class BackendTestBase
     [TestMethod]
     public async Task P2P_Block_PreventsReconnect()
     {
-        await using var client = new SpawnDev.WebTorrent.WebTorrentClient();
+        var client = WebTorrentClient;
         await using var coordinator = new P2PSwarmCoordinator(client);
         await coordinator.CreateSwarmAsync("block-test");
 
@@ -1169,7 +1169,7 @@ public abstract partial class BackendTestBase
     [TestMethod]
     public async Task P2P_Unblock_AllowsReconnect()
     {
-        await using var client = new SpawnDev.WebTorrent.WebTorrentClient();
+        var client = WebTorrentClient;
         await using var coordinator = new P2PSwarmCoordinator(client);
         await coordinator.CreateSwarmAsync("unblock-test");
 
@@ -1188,7 +1188,7 @@ public abstract partial class BackendTestBase
     [TestMethod]
     public async Task P2P_Block_ListTracked()
     {
-        await using var client = new SpawnDev.WebTorrent.WebTorrentClient();
+        var client = WebTorrentClient;
         await using var coordinator = new P2PSwarmCoordinator(client);
         await coordinator.CreateSwarmAsync("blocklist-test");
 
@@ -1277,7 +1277,7 @@ public abstract partial class BackendTestBase
     public async Task P2P_EndToEnd_DispatchAndReceiveResult()
     {
         // Full pipeline: coordinator → transport → worker → result → transport → coordinator
-        await using var client = new SpawnDev.WebTorrent.WebTorrentClient();
+        var client = WebTorrentClient;
         await using var coordinator = new P2PSwarmCoordinator(client);
         await coordinator.CreateSwarmAsync("e2e-test");
         using var ctx = global::ILGPU.Context.CreateDefault();
@@ -1332,7 +1332,7 @@ public abstract partial class BackendTestBase
     [TestMethod]
     public async Task P2P_EndToEnd_WorkerKernelResolution()
     {
-        await using var client = new SpawnDev.WebTorrent.WebTorrentClient();
+        var client = WebTorrentClient;
         await using var coordinator = new P2PSwarmCoordinator(client);
         using var ctx = global::ILGPU.Context.CreateDefault();
         var accelerator = coordinator.CreateAccelerator(ctx);
@@ -1381,7 +1381,7 @@ public abstract partial class BackendTestBase
     [TestMethod]
     public async Task P2P_EndToEnd_WorkerRejectsUnknownKernel()
     {
-        await using var client = new SpawnDev.WebTorrent.WebTorrentClient();
+        var client = WebTorrentClient;
         await using var coordinator = new P2PSwarmCoordinator(client);
         using var ctx = global::ILGPU.Context.CreateDefault();
         var accelerator = coordinator.CreateAccelerator(ctx);
@@ -1413,7 +1413,7 @@ public abstract partial class BackendTestBase
     [TestMethod]
     public async Task P2P_Worker_CompileKernel_RealBackend() => await RunTest(async accelerator =>
     {
-        await using var client = new SpawnDev.WebTorrent.WebTorrentClient();
+        var client = WebTorrentClient;
         await using var coordinator = new P2PSwarmCoordinator(client);
         var dispatcher = new P2PDispatcher(coordinator.CreateAccelerator(
             global::ILGPU.Context.CreateDefault()));
@@ -1444,7 +1444,7 @@ public abstract partial class BackendTestBase
     [TestMethod]
     public async Task P2P_Worker_CompileAndDispatch_RealBackend() => await RunTest(async accelerator =>
     {
-        await using var client = new SpawnDev.WebTorrent.WebTorrentClient();
+        var client = WebTorrentClient;
         await using var coordinator = new P2PSwarmCoordinator(client);
         var p2pAccel = coordinator.CreateAccelerator(global::ILGPU.Context.CreateDefault());
         var dispatcher = new P2PDispatcher(p2pAccel);
@@ -1645,7 +1645,7 @@ public abstract partial class BackendTestBase
     [TestMethod]
     public async Task P2P_Transport_SendBuffer_ChunkedDelivery()
     {
-        await using var client = new SpawnDev.WebTorrent.WebTorrentClient();
+        var client = WebTorrentClient;
         await using var coordinator = new P2PSwarmCoordinator(client);
         using var ctx = global::ILGPU.Context.CreateDefault();
         var accelerator = coordinator.CreateAccelerator(ctx);
@@ -1691,7 +1691,7 @@ public abstract partial class BackendTestBase
     [TestMethod]
     public async Task P2P_StateManager_Create()
     {
-        await using var client = new SpawnDev.WebTorrent.WebTorrentClient();
+        var client = WebTorrentClient;
         var dht = new SpawnDev.WebTorrent.Discovery.DhtDiscovery();
         var channel = new SpawnDev.WebTorrent.AgentChannel(dht, new SpawnDev.WebTorrent.Discovery.HmacFallbackSigner());
         await using var coordinator = new P2PSwarmCoordinator(client);
@@ -1708,7 +1708,7 @@ public abstract partial class BackendTestBase
     [TestMethod]
     public async Task P2P_StateManager_PublishState()
     {
-        await using var client = new SpawnDev.WebTorrent.WebTorrentClient();
+        var client = WebTorrentClient;
         var dht = new SpawnDev.WebTorrent.Discovery.DhtDiscovery();
         var channel = new SpawnDev.WebTorrent.AgentChannel(dht, new SpawnDev.WebTorrent.Discovery.HmacFallbackSigner());
         await using var coordinator = new P2PSwarmCoordinator(client);
@@ -1730,7 +1730,7 @@ public abstract partial class BackendTestBase
     [TestMethod]
     public async Task P2P_StateManager_WorkerCantPublish()
     {
-        await using var client = new SpawnDev.WebTorrent.WebTorrentClient();
+        var client = WebTorrentClient;
         var dht = new SpawnDev.WebTorrent.Discovery.DhtDiscovery();
         var channel = new SpawnDev.WebTorrent.AgentChannel(dht, new SpawnDev.WebTorrent.Discovery.HmacFallbackSigner());
         await using var coordinator = new P2PSwarmCoordinator(client);
@@ -1745,7 +1745,7 @@ public abstract partial class BackendTestBase
     [TestMethod]
     public async Task P2P_StateManager_OnStateUpdated()
     {
-        await using var client = new SpawnDev.WebTorrent.WebTorrentClient();
+        var client = WebTorrentClient;
         var dht = new SpawnDev.WebTorrent.Discovery.DhtDiscovery();
         var channel = new SpawnDev.WebTorrent.AgentChannel(dht, new SpawnDev.WebTorrent.Discovery.HmacFallbackSigner());
         await using var coordinator = new P2PSwarmCoordinator(client);
@@ -1783,7 +1783,7 @@ public abstract partial class BackendTestBase
     [TestMethod]
     public async Task P2P_SdComputeExtension_Name()
     {
-        await using var client = new SpawnDev.WebTorrent.WebTorrentClient();
+        var client = WebTorrentClient;
         await using var coordinator = new P2PSwarmCoordinator(client);
         using var ctx = global::ILGPU.Context.CreateDefault();
         var accelerator = coordinator.CreateAccelerator(ctx);
@@ -1798,7 +1798,7 @@ public abstract partial class BackendTestBase
     [TestMethod]
     public async Task P2P_SdComputeExtension_HandshakeData()
     {
-        await using var client = new SpawnDev.WebTorrent.WebTorrentClient();
+        var client = WebTorrentClient;
         await using var coordinator = new P2PSwarmCoordinator(client);
         using var ctx = global::ILGPU.Context.CreateDefault();
         var accelerator = coordinator.CreateAccelerator(ctx);
@@ -1822,7 +1822,7 @@ public abstract partial class BackendTestBase
     public async Task P2P_TwoNode_FullCycle() => await RunTest(async accelerator =>
     {
         // === NODE 1: Coordinator ===
-        await using var coordClient = new SpawnDev.WebTorrent.WebTorrentClient();
+        var coordClient = WebTorrentClient;
         await using var coordinator = new P2PSwarmCoordinator(coordClient);
         await coordinator.CreateSwarmAsync("two-node-test");
         using var coordCtx = global::ILGPU.Context.CreateDefault();
@@ -1831,7 +1831,7 @@ public abstract partial class BackendTestBase
         await using var coordTransport = new P2PTransport(coordClient, coordinator, dispatcher);
 
         // === NODE 2: Worker ===
-        await using var workerClient = new SpawnDev.WebTorrent.WebTorrentClient();
+        var workerClient = WebTorrentClient;
         await using var workerCoord = new P2PSwarmCoordinator(workerClient);
         var workerP2PAccel = workerCoord.CreateAccelerator(coordCtx);
         var workerDispatcher = new P2PDispatcher(workerP2PAccel);
@@ -2008,7 +2008,7 @@ public abstract partial class BackendTestBase
     [TestMethod]
     public async Task P2P_Security_KickRequiresCoordinator()
     {
-        await using var client = new SpawnDev.WebTorrent.WebTorrentClient();
+        var client = WebTorrentClient;
         await using var coordinator = new P2PSwarmCoordinator(client);
         // Default role is Worker — should not be able to kick
         coordinator.HandlePeerConnected("target", new PeerCapabilities { PeerId = "target" });
@@ -2025,7 +2025,7 @@ public abstract partial class BackendTestBase
     [TestMethod]
     public async Task P2P_Transfer_SendsNotification()
     {
-        await using var client = new SpawnDev.WebTorrent.WebTorrentClient();
+        var client = WebTorrentClient;
         await using var coordinator = new P2PSwarmCoordinator(client);
         await coordinator.CreateSwarmAsync("transfer-notify");
 
@@ -2056,7 +2056,7 @@ public abstract partial class BackendTestBase
     [TestMethod]
     public async Task P2P_Dispose_SendsDisconnect()
     {
-        var client = new SpawnDev.WebTorrent.WebTorrentClient();
+        var client = WebTorrentClient;
         var coordinator = new P2PSwarmCoordinator(client);
         await coordinator.CreateSwarmAsync("dispose-notify");
 
@@ -2216,7 +2216,7 @@ public abstract partial class BackendTestBase
     [TestMethod]
     public async Task P2P_Policy_MaxPeers()
     {
-        await using var client = new SpawnDev.WebTorrent.WebTorrentClient();
+        var client = WebTorrentClient;
         await using var coordinator = new P2PSwarmCoordinator(client);
         await coordinator.CreateSwarmAsync("max-peers");
         coordinator.Policy.MaxPeers = 2;
@@ -2236,7 +2236,7 @@ public abstract partial class BackendTestBase
     [TestMethod]
     public async Task P2P_Policy_ApprovalMode()
     {
-        await using var client = new SpawnDev.WebTorrent.WebTorrentClient();
+        var client = WebTorrentClient;
         await using var coordinator = new P2PSwarmCoordinator(client);
         await coordinator.CreateSwarmAsync("approval-test");
         coordinator.Policy.JoinPermission = JoinMode.Approval;
@@ -2261,7 +2261,7 @@ public abstract partial class BackendTestBase
     [TestMethod]
     public async Task P2P_Policy_ApprovalMode_KnownPeerAutoAdmit()
     {
-        await using var client = new SpawnDev.WebTorrent.WebTorrentClient();
+        var client = WebTorrentClient;
         await using var coordinator = new P2PSwarmCoordinator(client);
         await coordinator.CreateSwarmAsync("approval-known");
         coordinator.Policy.JoinPermission = JoinMode.Approval;
@@ -2280,7 +2280,7 @@ public abstract partial class BackendTestBase
     [TestMethod]
     public async Task P2P_Policy_KnownOnly()
     {
-        await using var client = new SpawnDev.WebTorrent.WebTorrentClient();
+        var client = WebTorrentClient;
         await using var coordinator = new P2PSwarmCoordinator(client);
         await coordinator.CreateSwarmAsync("known-only");
 
@@ -2306,7 +2306,7 @@ public abstract partial class BackendTestBase
     [TestMethod]
     public async Task P2P_Policy_Open_Default()
     {
-        await using var client = new SpawnDev.WebTorrent.WebTorrentClient();
+        var client = WebTorrentClient;
         await using var coordinator = new P2PSwarmCoordinator(client);
         await coordinator.CreateSwarmAsync("open-default");
 
@@ -2536,7 +2536,7 @@ public abstract partial class BackendTestBase
         using var context = global::ILGPU.Context.CreateDefault();
         using var accelerator = global::ILGPU.Runtime.CPU.CPUDevice.Default.CreateAccelerator(context);
 
-        await using var client = new SpawnDev.WebTorrent.WebTorrentClient();
+        var client = WebTorrentClient;
         await using var coordinator = new P2PSwarmCoordinator(client);
         await coordinator.CreateSwarmAsync("worker-dispatch-test");
 
@@ -2610,7 +2610,7 @@ public abstract partial class BackendTestBase
         using var context = global::ILGPU.Context.CreateDefault();
         using var accelerator = global::ILGPU.Runtime.CPU.CPUDevice.Default.CreateAccelerator(context);
 
-        await using var client = new SpawnDev.WebTorrent.WebTorrentClient();
+        var client = WebTorrentClient;
         await using var coordinator = new P2PSwarmCoordinator(client);
         await coordinator.CreateSwarmAsync("add-arrays-test");
 
@@ -2679,7 +2679,7 @@ public abstract partial class BackendTestBase
         using var context = global::ILGPU.Context.CreateDefault();
         using var accelerator = global::ILGPU.Runtime.CPU.CPUDevice.Default.CreateAccelerator(context);
 
-        await using var client = new SpawnDev.WebTorrent.WebTorrentClient();
+        var client = WebTorrentClient;
         await using var coordinator = new P2PSwarmCoordinator(client);
         await coordinator.CreateSwarmAsync("reject-test");
 
@@ -2768,7 +2768,7 @@ public abstract partial class BackendTestBase
         using var context = global::ILGPU.Context.CreateDefault();
         using var cpuAccel = global::ILGPU.Runtime.CPU.CPUDevice.Default.CreateAccelerator(context);
 
-        await using var client = new SpawnDev.WebTorrent.WebTorrentClient();
+        var client = WebTorrentClient;
         await using var coordinator = new P2PSwarmCoordinator(client);
         await coordinator.CreateSwarmAsync("coord-dispatch-test");
 
@@ -2903,10 +2903,10 @@ public abstract partial class BackendTestBase
             double tflops = 5.0)
     {
         var cpuAccel = global::ILGPU.Runtime.CPU.CPUDevice.Default.CreateAccelerator(context);
-        var workerCoord = new P2PSwarmCoordinator(new SpawnDev.WebTorrent.WebTorrentClient());
+        var workerCoord = new P2PSwarmCoordinator(WebTorrentClient);
         var workerDispatcher = new P2PDispatcher(p2pAccel);
         var workerTransport = new P2PTransport(
-            new SpawnDev.WebTorrent.WebTorrentClient(), workerCoord, workerDispatcher);
+            WebTorrentClient, workerCoord, workerDispatcher);
 
         var worker = new P2PWorker(workerTransport);
         worker.Initialize(context, cpuAccel);
@@ -2942,7 +2942,7 @@ public abstract partial class BackendTestBase
     {
         // 3 workers, each gets dispatches, all produce correct results
         using var context = global::ILGPU.Context.CreateDefault();
-        await using var client = new SpawnDev.WebTorrent.WebTorrentClient();
+        var client = WebTorrentClient;
         await using var coordinator = new P2PSwarmCoordinator(client);
         await coordinator.CreateSwarmAsync("multi-peer-test");
 
@@ -3001,7 +3001,7 @@ public abstract partial class BackendTestBase
         // We simulate this by NOT wiring worker-1's transport (messages go nowhere),
         // then calling HandlePeerLost which triggers retry to worker-2 (which IS wired)
         using var context = global::ILGPU.Context.CreateDefault();
-        await using var client = new SpawnDev.WebTorrent.WebTorrentClient();
+        var client = WebTorrentClient;
         await using var coordinator = new P2PSwarmCoordinator(client);
         await coordinator.CreateSwarmAsync("dropout-test");
 
@@ -3027,9 +3027,9 @@ public abstract partial class BackendTestBase
 
         // Worker-2: fully wired, will execute the retried dispatch
         var cpuAccel2 = global::ILGPU.Runtime.CPU.CPUDevice.Default.CreateAccelerator(context);
-        var w2Coord = new P2PSwarmCoordinator(new SpawnDev.WebTorrent.WebTorrentClient());
+        var w2Coord = new P2PSwarmCoordinator(WebTorrentClient);
         var w2Dispatcher = new P2PDispatcher(p2pAccel);
-        var w2Transport = new P2PTransport(new SpawnDev.WebTorrent.WebTorrentClient(), w2Coord, w2Dispatcher);
+        var w2Transport = new P2PTransport(WebTorrentClient, w2Coord, w2Dispatcher);
         var worker2 = new P2PWorker(w2Transport);
         worker2.Initialize(context, cpuAccel2);
         w2Transport.SetWorker(worker2);
@@ -3102,7 +3102,7 @@ public abstract partial class BackendTestBase
         // Coordinator has in-flight dispatch (worker is a black hole), transfers coordinator role,
         // pending state is included in the transfer message
         using var context = global::ILGPU.Context.CreateDefault();
-        await using var client = new SpawnDev.WebTorrent.WebTorrentClient();
+        var client = WebTorrentClient;
         await using var coordinator = new P2PSwarmCoordinator(client);
         await coordinator.CreateSwarmAsync("transfer-state-test");
 
@@ -3184,7 +3184,7 @@ public abstract partial class BackendTestBase
     public async Task P2P_Resilience_Election_AfterCoordinatorLoss()
     {
         // Coordinator drops — remaining peers elect new coordinator deterministically
-        await using var client = new SpawnDev.WebTorrent.WebTorrentClient();
+        var client = WebTorrentClient;
         await using var coordinator = new P2PSwarmCoordinator(client);
         await coordinator.CreateSwarmAsync("election-loss-test");
 
@@ -3233,7 +3233,7 @@ public abstract partial class BackendTestBase
     {
         // All peers are black holes, then drop — dispatch permanently fails
         using var context = global::ILGPU.Context.CreateDefault();
-        await using var client = new SpawnDev.WebTorrent.WebTorrentClient();
+        var client = WebTorrentClient;
         await using var coordinator = new P2PSwarmCoordinator(client);
         await coordinator.CreateSwarmAsync("max-retry-test");
 
@@ -3455,7 +3455,7 @@ public abstract partial class BackendTestBase
     public async Task P2P_Dispatcher_PendingSnapshot()
     {
         using var context = global::ILGPU.Context.CreateDefault();
-        await using var client = new SpawnDev.WebTorrent.WebTorrentClient();
+        var client = WebTorrentClient;
         await using var coordinator = new P2PSwarmCoordinator(client);
         await coordinator.CreateSwarmAsync("snapshot-test");
         var p2pAccel = coordinator.CreateAccelerator(context);
@@ -3488,7 +3488,7 @@ public abstract partial class BackendTestBase
     public async Task P2P_Dispatcher_HandlePendingTransfer()
     {
         using var context = global::ILGPU.Context.CreateDefault();
-        await using var client = new SpawnDev.WebTorrent.WebTorrentClient();
+        var client = WebTorrentClient;
         await using var coordinator = new P2PSwarmCoordinator(client);
         await coordinator.CreateSwarmAsync("transfer-accept-test");
         var p2pAccel = coordinator.CreateAccelerator(context);
@@ -3595,7 +3595,7 @@ public abstract partial class BackendTestBase
     public async Task P2P_Compute_CreateSwarmAsync_SubsystemsWired()
     {
         var crypto = Crypto;
-        await using var client = new SpawnDev.WebTorrent.WebTorrentClient();
+        var client = WebTorrentClient;
 
         await using var compute = await P2PCompute.CreateSwarmAsync(crypto, client, "wiring-test");
 
@@ -3614,7 +3614,7 @@ public abstract partial class BackendTestBase
     [TestMethod]
     public async Task P2P_Policy_InviteOnly_RequiresRegistry()
     {
-        await using var client = new SpawnDev.WebTorrent.WebTorrentClient();
+        var client = WebTorrentClient;
         var crypto = Crypto;
         await using var coordinator = new P2PSwarmCoordinator(client);
         var identity = await SwarmIdentity.CreateAsync(crypto, "owner");
@@ -3641,7 +3641,7 @@ public abstract partial class BackendTestBase
         using var context = global::ILGPU.Context.CreateDefault();
         using var cpuAccel = global::ILGPU.Runtime.CPU.CPUDevice.Default.CreateAccelerator(context);
 
-        await using var client = new SpawnDev.WebTorrent.WebTorrentClient();
+        var client = WebTorrentClient;
         await using var coordinator = new P2PSwarmCoordinator(client);
         await coordinator.CreateSwarmAsync("transport-dispatch-test");
         var p2pAccel = coordinator.CreateAccelerator(context);
@@ -3691,7 +3691,7 @@ public abstract partial class BackendTestBase
         using var context = global::ILGPU.Context.CreateDefault();
         using var cpuAccel = global::ILGPU.Runtime.CPU.CPUDevice.Default.CreateAccelerator(context);
 
-        await using var client = new SpawnDev.WebTorrent.WebTorrentClient();
+        var client = WebTorrentClient;
         await using var coordinator = new P2PSwarmCoordinator(client);
         await coordinator.CreateSwarmAsync("caps-backend-test");
         var p2pAccel = coordinator.CreateAccelerator(context);
@@ -3738,7 +3738,7 @@ public abstract partial class BackendTestBase
         using var context = global::ILGPU.Context.CreateDefault();
         using var cpuAccel = global::ILGPU.Runtime.CPU.CPUDevice.Default.CreateAccelerator(context);
 
-        await using var client = new SpawnDev.WebTorrent.WebTorrentClient();
+        var client = WebTorrentClient;
         await using var coordinator = new P2PSwarmCoordinator(client);
         var p2pAccel = coordinator.CreateAccelerator(context);
         var dispatcher = new P2PDispatcher(p2pAccel);
@@ -3989,7 +3989,7 @@ public abstract partial class BackendTestBase
         await using var worker = await SwarmIdentity.CreateAsync(crypto, "Worker");
 
         // Owner's coordinator — created the swarm, has Owner role
-        await using var client = new SpawnDev.WebTorrent.WebTorrentClient();
+        var client = WebTorrentClient;
         await using var ownerCoordinator = new P2PSwarmCoordinator(client);
         ownerCoordinator.SetIdentity(owner);
         await ownerCoordinator.CreateSwarmAsync("rbac-test");
@@ -4001,7 +4001,7 @@ public abstract partial class BackendTestBase
         if (!kicked) throw new Exception("Owner should be able to kick");
 
         // Worker's coordinator — never created a swarm, defaults to Worker role
-        await using var client2 = new SpawnDev.WebTorrent.WebTorrentClient();
+        var client2 = WebTorrentClient;
         await using var workerCoordinator = new P2PSwarmCoordinator(client2);
         workerCoordinator.SetIdentity(worker);
 
@@ -4020,7 +4020,7 @@ public abstract partial class BackendTestBase
         var crypto = Crypto;
         await using var owner = await SwarmIdentity.CreateAsync(crypto, "Owner");
 
-        await using var client = new SpawnDev.WebTorrent.WebTorrentClient();
+        var client = WebTorrentClient;
         await using var coordinator = new P2PSwarmCoordinator(client);
         coordinator.SetIdentity(owner);
         await coordinator.CreateSwarmAsync("transfer-test");
@@ -4052,7 +4052,7 @@ public abstract partial class BackendTestBase
         await using var owner = await SwarmIdentity.CreateAsync(crypto, "Owner");
         await using var peer = await SwarmIdentity.CreateAsync(crypto, "Peer");
 
-        await using var client = new SpawnDev.WebTorrent.WebTorrentClient();
+        var client = WebTorrentClient;
         await using var coordinator = new P2PSwarmCoordinator(client);
         coordinator.SetIdentity(owner);
         await coordinator.CreateSwarmAsync("assign-test");
@@ -4090,7 +4090,7 @@ public abstract partial class BackendTestBase
         await using var owner = await SwarmIdentity.CreateAsync(crypto, "Owner");
         await using var worker = await SwarmIdentity.CreateAsync(crypto, "Worker");
 
-        await using var client = new SpawnDev.WebTorrent.WebTorrentClient();
+        var client = WebTorrentClient;
         await using var coordinator = new P2PSwarmCoordinator(client);
         coordinator.SetIdentity(owner);
         await coordinator.CreateSwarmAsync("revoke-test");
@@ -4118,7 +4118,7 @@ public abstract partial class BackendTestBase
         await using var assignedCoord = await SwarmIdentity.CreateAsync(crypto, "AssignedCoord");
         await using var fastPeer = await SwarmIdentity.CreateAsync(crypto, "FastPeer");
 
-        await using var client = new SpawnDev.WebTorrent.WebTorrentClient();
+        var client = WebTorrentClient;
         await using var coordinator = new P2PSwarmCoordinator(client);
         coordinator.SetIdentity(owner);
         await coordinator.CreateSwarmAsync("election-test");
@@ -4161,7 +4161,7 @@ public abstract partial class BackendTestBase
         var crypto = Crypto;
         await using var owner = await SwarmIdentity.CreateAsync(crypto, "Owner");
 
-        await using var client = new SpawnDev.WebTorrent.WebTorrentClient();
+        var client = WebTorrentClient;
         await using var coordinator = new P2PSwarmCoordinator(client);
         coordinator.SetIdentity(owner);
         await coordinator.CreateSwarmAsync("election-fallback");
@@ -4192,7 +4192,7 @@ public abstract partial class BackendTestBase
         var crypto = Crypto;
         await using var owner = await SwarmIdentity.CreateAsync(crypto, "Owner");
 
-        await using var client = new SpawnDev.WebTorrent.WebTorrentClient();
+        var client = WebTorrentClient;
         await using var coordinator = new P2PSwarmCoordinator(client);
         coordinator.SetIdentity(owner);
         await coordinator.CreateSwarmAsync("seq-test");
@@ -4296,7 +4296,7 @@ public abstract partial class BackendTestBase
         Console.WriteLine($"[P2P Integration] Tracker: {trackerUrl}");
 
         // Create a real swarm through the production path
-        await using var client = new SpawnDev.WebTorrent.WebTorrentClient();
+        var client = WebTorrentClient;
         await using var compute = await P2PCompute.CreateSwarmAsync(
             crypto, client, "integration-test", joinLinkBaseUrl: null);
 
@@ -4322,7 +4322,7 @@ public abstract partial class BackendTestBase
         var trackers = new[] { trackerUrl };
 
         // ── Node 1: Coordinator ──
-        await using var coordClient = new SpawnDev.WebTorrent.WebTorrentClient();
+        var coordClient = WebTorrentClient;
         var coordIdentity = await SwarmIdentity.CreateAsync(crypto, "coord-owner");
         var coordinator = new P2PSwarmCoordinator(coordClient);
         coordinator.SetIdentity(coordIdentity);
@@ -4346,7 +4346,7 @@ public abstract partial class BackendTestBase
         await Task.Delay(2000);
 
         // ── Node 2: Worker ──
-        await using var workerClient = new SpawnDev.WebTorrent.WebTorrentClient();
+        var workerClient = WebTorrentClient;
         var workerIdentity = await SwarmIdentity.CreateAsync(crypto, "worker");
         var workerCoord = new P2PSwarmCoordinator(workerClient);
         workerCoord.SetIdentity(workerIdentity);
@@ -4405,7 +4405,7 @@ public abstract partial class BackendTestBase
         var crypto = Crypto;
 
         // Create a swarm to post to the board
-        await using var client = new SpawnDev.WebTorrent.WebTorrentClient();
+        var client = WebTorrentClient;
         await using var compute = await P2PCompute.CreateSwarmAsync(crypto, client, "board-test");
 
         var board = new ComputeBoardClient();
@@ -4450,7 +4450,7 @@ public abstract partial class BackendTestBase
         var crypto = Crypto;
 
         // Node 1: Create swarm (coordinator) — same as demo CreateSwarm
-        await using var coordClient = new SpawnDev.WebTorrent.WebTorrentClient();
+        var coordClient = WebTorrentClient;
         await using var coordCompute = await P2PCompute.CreateSwarmAsync(crypto, coordClient, "peer-count-test");
 
         if (coordCompute.PeerCount != 0)
@@ -4463,7 +4463,7 @@ public abstract partial class BackendTestBase
         await Task.Delay(2000);
 
         // Node 2: Join swarm (worker) — same as demo JoinSwarm
-        await using var workerClient = new SpawnDev.WebTorrent.WebTorrentClient();
+        var workerClient = WebTorrentClient;
         await using var workerCompute = await P2PCompute.JoinSwarmAsync(crypto, workerClient, accelerator, magnetLink!);
 
         Console.WriteLine("[P2P PeerCount] Worker joined, waiting for peer discovery...");

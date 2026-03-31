@@ -16,7 +16,7 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
     /// </summary>
     public class WasmTests : BackendTestBase
     {
-        public WasmTests(IPortableCrypto crypto) : base(crypto) { }
+        public WasmTests(IPortableCrypto crypto, SpawnDev.WebTorrent.WebTorrentClient webTorrentClient) : base(crypto, webTorrentClient) { }
         protected override string BackendName => "Wasm";
 
         protected override async Task<(Context context, Accelerator accelerator)> CreateAcceleratorAsync()

@@ -7,7 +7,7 @@ using SpawnDev.ILGPU.Demo.Shared.UnitTests;
 
 public class CudaTests : BackendTestBase
 {
-    public CudaTests(IPortableCrypto crypto) : base(crypto) { }
+    public CudaTests(IPortableCrypto crypto, SpawnDev.WebTorrent.WebTorrentClient webTorrentClient) : base(crypto, webTorrentClient) { }
     protected override string BackendName => "CUDA";
 
     protected override Task<(Context context, Accelerator accelerator)> CreateAcceleratorAsync()
