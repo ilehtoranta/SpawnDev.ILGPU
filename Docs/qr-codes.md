@@ -2,6 +2,8 @@
 
 **SpawnDev.ILGPU.QR** — a zero-dependency QR code encoder, decoder, and GPU renderer built into SpawnDev.ILGPU. Generates standard QR codes that any mobile device can scan, with optional logo overlay and GPU-accelerated rendering.
 
+To our knowledge, this is the first GPU-accelerated QR code library written entirely in C#, and the first to run across 7 compute backends — WebGPU, WebGL, Wasm, CUDA, OpenCL, CPU, and P2P — from a single codebase. Every component (Reed-Solomon error correction, Galois Field GF(256) arithmetic, encoder, decoder, renderer) is pure C# with zero external dependencies. Browser and desktop, one library.
+
 ## Features
 
 - **Full QR spec** — All 40 versions, 4 error correction levels (L/M/Q/H), byte mode encoding
