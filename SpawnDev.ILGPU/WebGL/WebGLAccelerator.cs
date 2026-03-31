@@ -761,6 +761,7 @@ namespace SpawnDev.ILGPU.WebGL
                     }
                     else
                     {
+                        // Determine scalar type from C# runtime type first
                         string scalarType = arg switch
                         {
                             int => "int",
@@ -774,18 +775,32 @@ namespace SpawnDev.ILGPU.WebGL
                             _ => null
                         };
 
+                        // For primitive integer scalars, override with the GLSL type from the compiled kernel.
+                        // ILGPU IR uses BasicValueType.Int32 for both int and uint, so the GLSL codegen
+                        // declares all 32-bit integer scalars as 'int'. We must match this when choosing
+                        // between gl.uniform1i/uniform1ui — a mismatch causes GL_INVALID_OPERATION.
+                        if (scalarType == "int" || scalarType == "uint")
+                        {
+                            var scalarBinding = compiledKernel.ParameterBindings
+                                .FirstOrDefault(b => b.ParamIndex == glslParamIndex && b.Kind == KernelParamKind.Scalar);
+                            if (scalarBinding.Kind == KernelParamKind.Scalar && scalarBinding.GlslType != null)
+                                scalarType = scalarBinding.GlslType;
+                        }
+
                         if (scalarType != null)
                         {
+                            // When the GLSL type is 'int' but the C# value is uint,
+                            // reinterpret the bits as int to match the uniform type.
                             object value = arg switch
                             {
-                                int iVal => iVal,
-                                uint uiVal => uiVal,
+                                int iVal => scalarType == "uint" ? (object)(uint)iVal : iVal,
+                                uint uiVal => scalarType == "int" ? (object)(int)uiVal : uiVal,
                                 float fVal => fVal,
                                 double dValFb => (float)dValFb,
                                 bool blVal => blVal ? 1 : 0,
                                 byte bVal => (int)bVal,
                                 long lValFb => (int)lValFb,
-                                ulong ulVal => (uint)ulVal,
+                                ulong ulVal => scalarType == "int" ? (object)(int)(uint)ulVal : (uint)ulVal,
                                 _ => throw new NotSupportedException($"Unsupported scalar: {arg?.GetType()}")
                             };
 
@@ -812,8 +827,12 @@ namespace SpawnDev.ILGPU.WebGL
                             {
                                 // Single primitive capture: IR collapses
                                 // to a scalar. Pass as scalar uniform.
+                                // Use GLSL type from compiled kernel to match uniform declaration.
                                 var fieldVal = captFields[0].GetValue(arg);
-                                string st = fieldVal switch
+                                var captBinding = compiledKernel.ParameterBindings
+                                    .FirstOrDefault(b => b.ParamIndex == glslParamIndex && b.Kind == KernelParamKind.Scalar);
+                                string? captGlslType = captBinding.Kind == KernelParamKind.Scalar ? captBinding.GlslType : null;
+                                string st = captGlslType ?? fieldVal switch
                                 {
                                     int => "int",
                                     uint => "uint",
@@ -822,8 +841,8 @@ namespace SpawnDev.ILGPU.WebGL
                                 };
                                 object vl = fieldVal switch
                                 {
-                                    int iv => iv,
-                                    uint uv => uv,
+                                    int iv => st == "uint" ? (object)(uint)iv : iv,
+                                    uint uv => st == "int" ? (object)(int)uv : uv,
                                     float fvl => fvl,
                                     double dvl => (float)dvl,
                                     bool bvl => bvl ? 1 : 0,

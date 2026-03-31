@@ -75,7 +75,8 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             if (lidx == 0)
             {
                 intOutput[Grid.IdxX] = sharedInt[0] + sharedInt[Group.DimX - 1];
-                floatOutput[Grid.IdxX] = sharedFloat[0] + sharedFloat[127];
+                int floatLastIdx = Group.DimX < 128 ? Group.DimX - 1 : 127;
+                floatOutput[Grid.IdxX] = sharedFloat[0] + sharedFloat[floatLastIdx];
             }
         }
 
