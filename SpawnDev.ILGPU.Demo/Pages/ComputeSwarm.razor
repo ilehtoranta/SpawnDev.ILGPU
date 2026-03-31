@@ -467,6 +467,8 @@
     private async Task CreateSwarm()
     {
         var client = WebTorrentClient;
+        SpawnDev.WebTorrent.WebTorrentClient.VerboseLogging = true;
+        Console.WriteLine($"[P2P CreateSwarm] PeerId: {Convert.ToHexString(client.PeerId)}");
         _compute = await P2PCompute.CreateSwarmAsync(Crypto, client, "Demo Compute Swarm");
         // Debug: verify tracker is in metadata
         var swarm = _compute.Coordinator.Swarm;
@@ -509,8 +511,12 @@
         var accelerator = await context.CreatePreferredAcceleratorAsync();
 
         var client = WebTorrentClient;
+        SpawnDev.WebTorrent.WebTorrentClient.VerboseLogging = true;
+        Console.WriteLine($"[P2P JoinSwarm] PeerId: {Convert.ToHexString(client.PeerId)}, Hash: {_computeHash}");
         var magnet = P2PCompute.BuildMagnetFromHash(_computeHash, _swarmName);
+        Console.WriteLine($"[P2P JoinSwarm] Magnet: {magnet[..Math.Min(80, magnet.Length)]}...");
         _compute = await P2PCompute.JoinSwarmAsync(Crypto, client, accelerator, magnet);
+        Console.WriteLine($"[P2P JoinSwarm] Joined. PeerCount: {_compute.PeerCount}, Bridge: {_compute.Bridge?.ComputePeerCount}");
         StateHasChanged();
     }
 

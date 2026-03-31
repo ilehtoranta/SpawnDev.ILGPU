@@ -3091,8 +3091,8 @@ public abstract partial class BackendTestBase
         if (retriedTo != "worker-2")
             throw new Exception($"Should retry on worker-2, got: {retriedTo}");
 
-        // Give async transport a moment to deliver
-        await Task.Delay(100);
+        // Give async transport + signed message + kernel execution time to complete
+        await Task.Delay(500);
 
         // Verify worker-2 actually executed
         var result = worker2.GetBuffer("data");
