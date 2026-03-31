@@ -4490,6 +4490,49 @@ public abstract partial class BackendTestBase
         Console.WriteLine($"[P2P PeerCount] Production path peer discovery: coordinator has {coordCompute.PeerCount} peer(s) ✓");
     });
 
+    [TestMethod(Timeout = 60000)]
+    public async Task P2P_Integration_TwoClients_MagnetJoin() => await RunTest(async accelerator =>
+    {
+        if (!OperatingSystem.IsBrowser())
+            throw new UnsupportedTestException("WebRTC requires browser");
+
+        var crypto = Crypto;
+        var trackerUrl = "wss://hub.spawndev.com:44365/announce";
+
+        // Client 1: Coordinator — creates swarm with tracker in metadata
+        var coordClient = new SpawnDev.WebTorrent.WebTorrentClient(crypto: crypto);
+        await using var coordCompute = await P2PCompute.CreateSwarmAsync(crypto, coordClient, "magnet-test");
+
+        var magnetLink = coordCompute.MagnetLink!;
+        Console.WriteLine($"[P2P MagnetJoin] Coordinator: {magnetLink[..Math.Min(70, magnetLink.Length)]}...");
+        Console.WriteLine($"[P2P MagnetJoin] Coord PeerId: {Convert.ToHexString(coordClient.PeerId)[..16]}...");
+
+        // Wait for tracker registration
+        await Task.Delay(3000);
+
+        // Client 2: Worker — joins via magnet link (separate client, separate PeerId)
+        var workerClient = new SpawnDev.WebTorrent.WebTorrentClient(crypto: crypto);
+        Console.WriteLine($"[P2P MagnetJoin] Worker PeerId: {Convert.ToHexString(workerClient.PeerId)[..16]}...");
+
+        await using var workerCompute = await P2PCompute.JoinSwarmAsync(crypto, workerClient, accelerator, magnetLink);
+
+        Console.WriteLine("[P2P MagnetJoin] Worker joined, waiting for peer discovery...");
+
+        // Wait for WebRTC connection + sd_compute handshake
+        var deadline = DateTime.UtcNow.AddSeconds(30);
+        while (coordCompute.PeerCount == 0 && DateTime.UtcNow < deadline)
+            await Task.Delay(500);
+
+        Console.WriteLine($"[P2P MagnetJoin] Coord peers: {coordCompute.PeerCount}, Worker peers: {workerCompute.PeerCount}");
+        Console.WriteLine($"[P2P MagnetJoin] Coord bridge: {coordCompute.Bridge?.ComputePeerCount}, Worker bridge: {workerCompute.Bridge?.ComputePeerCount}");
+
+        if (coordCompute.PeerCount == 0)
+            throw new UnsupportedTestException(
+                $"Peers did not connect after 30s. Coord bridge: {coordCompute.Bridge?.ComputePeerCount}, Worker bridge: {workerCompute.Bridge?.ComputePeerCount}");
+
+        Console.WriteLine($"[P2P MagnetJoin] In-page magnet join: {coordCompute.PeerCount} peer(s) ✓");
+    });
+
     // ═══════════════════════════════════════════════════════════
     //  WebAuthn / Hardware Key Tests
     //  These tests require a real authenticator (YubiKey, passkey).
