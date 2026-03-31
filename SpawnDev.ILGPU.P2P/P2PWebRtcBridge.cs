@@ -98,7 +98,37 @@ public class P2PWebRtcBridge : IAsyncDisposable
         swarm.OnPeerConnect += (peerConnection) =>
         {
             var peerId = peerConnection.Info.Address ?? Guid.NewGuid().ToString("N");
-            AttachToPeer(peerConnection.Wire, peerId);
+
+            // Check if the wire already has an SdComputeExtension (from UseExtension factory)
+            var existing = peerConnection.Wire.Extensions.Get<SdComputeExtension>();
+            if (existing != null)
+            {
+                // Use the factory-created extension (already in BEP 10 handshake)
+                existing.SetPeerId(peerId);
+                _extensions[peerId] = existing;
+
+                // Wire up the capability tracking
+                existing.OnComputeMessage += (msg) =>
+                {
+                    if (msg.Type == P2PMessageType.CapabilityResponse && _notified.TryAdd(peerId, true))
+                    {
+                        PeerCapabilities? caps = null;
+                        try
+                        {
+                            if (msg.Payload.HasValue)
+                                caps = System.Text.Json.JsonSerializer.Deserialize<PeerCapabilities>(msg.Payload.Value);
+                        }
+                        catch { }
+                        OnComputePeerConnected?.Invoke(peerId);
+                        OnComputePeerCapabilities?.Invoke(peerId, caps);
+                    }
+                };
+            }
+            else
+            {
+                // No factory extension — register one (legacy path)
+                AttachToPeer(peerConnection.Wire, peerId);
+            }
         };
     }
 
