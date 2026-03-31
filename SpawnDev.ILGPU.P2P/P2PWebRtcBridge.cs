@@ -52,13 +52,8 @@ public class P2PWebRtcBridge : IAsyncDisposable
         var ext = new SdComputeExtension(_transport);
         ext.SetPeerId(peerId);
 
-        // Wire the extension's send requests to the wire protocol
-        ext.OnSendRequested += async (remoteExtId, data) =>
-        {
-            await wire.SendExtensionMessageAsync(remoteExtId, data);
-        };
-
         // Register in the wire protocol's extension manager
+        // SendAsync uses Manager.Wire directly — no event wiring needed
         wire.Extensions.Register(ext);
 
         _extensions[peerId] = ext;
@@ -154,7 +149,7 @@ public class P2PWebRtcBridge : IAsyncDisposable
     {
         if (_extensions.TryGetValue(peerId, out var ext) && ext.IsSupported)
         {
-            await ext.SendAsync(message);
+            await ext.SendP2PMessageAsync(message);
         }
     }
 

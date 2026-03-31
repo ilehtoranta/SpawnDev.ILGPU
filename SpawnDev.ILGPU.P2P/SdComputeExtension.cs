@@ -55,6 +55,7 @@ public class SdComputeExtension : WireExtension
     /// </summary>
     public override async Task HandleMessageAsync(byte[] payload)
     {
+        Console.WriteLine($"[sd_compute] HandleMessageAsync: peerId={_peerId}, {payload.Length} bytes, IsSupported={IsSupported}, RemoteId={RemoteId}");
         // Route to the P2P transport for handling
         await _transport.HandleIncomingDataAsync(_peerId, payload);
 
@@ -84,6 +85,7 @@ public class SdComputeExtension : WireExtension
     /// </summary>
     public override void ProcessHandshakeData(Dictionary<string, object> handshake)
     {
+        Console.WriteLine($"[sd_compute] ProcessHandshakeData: peerId={_peerId}, keys=[{string.Join(",", handshake.Keys)}], IsSupported={IsSupported}, RemoteId={RemoteId}");
         // Check if peer announced sd_compute support
         if (handshake.TryGetValue("sd_compute_version", out var version))
         {
@@ -105,7 +107,7 @@ public class SdComputeExtension : WireExtension
                         Payload = System.Text.Json.JsonSerializer.SerializeToElement(
                             _transport.GetLocalCapabilities()),
                     };
-                    await SendAsync(capMsg);
+                    await SendP2PMessageAsync(capMsg);
                 }
                 catch { }
             });
@@ -114,28 +116,20 @@ public class SdComputeExtension : WireExtension
 
     /// <summary>
     /// Send a compute message to the peer via the BEP 10 extension channel.
+    /// Uses WireExtension.SendAsync which sends directly through the wire.
     /// </summary>
-    public async Task SendComputeMessageAsync(byte[] data)
+    public new async Task SendComputeMessageAsync(byte[] data)
     {
         if (!IsSupported) return;
-        // The wire protocol handles framing — we just provide the payload
-        // WireProtocol.SendExtensionMessage(RemoteId, data) sends:
-        //   [length][msgId=20][extId][payload]
-        OnSendRequested?.Invoke(RemoteId, data);
+        await SendAsync(data);
     }
 
     /// <summary>
     /// Send a typed P2P message to the peer.
     /// </summary>
-    public async Task SendAsync(P2PMessage message)
+    public async Task SendP2PMessageAsync(P2PMessage message)
     {
         var data = P2PProtocol.Serialize(message);
         await SendComputeMessageAsync(data);
     }
-
-    /// <summary>
-    /// Fired when the extension needs to send data through the wire protocol.
-    /// The wire protocol hooks this to call WireProtocol.SendExtensionMessage.
-    /// </summary>
-    public event Action<int, byte[]>? OnSendRequested; // remoteExtId, payload
 }
