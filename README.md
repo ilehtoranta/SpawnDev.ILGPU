@@ -7,6 +7,47 @@ Write parallel compute code in C# and let the library pick the best available ba
 
 > **Your existing ILGPU kernels run in the browser with zero changes to the kernel code — and the same code runs on desktop too.**
 
+## What's New in 4.7.1
+
+### P2P Distributed GPU Compute (`SpawnDev.ILGPU.P2P`)
+
+The 7th backend — **AcceleratorType.P2P** — distributes kernels across connected devices via [SpawnDev.WebTorrent](https://github.com/LostBeard/SpawnDev.WebTorrent). Scan a QR code, tap a YubiKey, contribute GPU power.
+
+- **Real P2P via WebRTC** — Peers discover each other through `wss://hub.spawndev.com:44365/announce`, connect via WebRTC data channels, exchange kernels and buffers
+- **RBAC ownership** — Cryptographic swarm ownership with ECDSA-signed messages. Owner → Admin → Coordinator → Worker hierarchy with role assignment, key revocation, last-owner protection
+- **WebAuthn/YubiKey** — Hardware-backed swarm ownership via `HardwareKeyProvider`. Register a YubiKey as the swarm owner — ownership lives in the key, not the device
+- **Signed dispatch** — All authority messages (kick, block, transfer, role assign, kernel dispatch) are cryptographically signed and verified by every peer
+- **sd_compute extension** — BEP 10 wire protocol extension for compute messages over BitTorrent peer connections
+- **ComputeBoard** — Post compute requests to `hub.spawndev.com`, browse available swarms, join via magnet link or QR code
+- **Full demo** — Create swarm, QR code join, camera QR scanner, peer management (kick/block), key management (assign roles, revoke keys), hardware key registration
+
+### GPU Test Verification (`GpuTestVerify`)
+
+Shared utility for verifying test results on the GPU without CPU readback. Data stays on the accelerator — CPU reads back only a few bytes of violation counts.
+
+- `VerifyDescendingSort` / `VerifyAscendingSort` — Sort order + index integrity + key-value tracking
+- `CompareBuffers` — Float comparison returning `(meanAbsError, maxAbsError)`
+- **10x+ faster** verification — 4M element RadixSort went from 120s timeout to 11s on CPU
+
+### QR Code Library (`SpawnDev.ILGPU.QR`)
+
+GPU-accelerated QR code encoder + decoder. Zero external dependencies.
+
+- **Encoder** — All 40 QR versions, 4 EC levels, byte mode, 8 mask patterns with penalty scoring
+- **Renderer** — GPU kernel for pixel rendering + CPU fallback + logo overlay (EC level H)
+- **Decoder** — Grayscale → binarize → finder detection → grid sampling → unmask → Reed-Solomon → data decode
+- **Round-trip verified** — Encode → render → decode = exact match, including with logo overlay
+
+### CPU Default Optimization
+
+CPU backend default changed from warp=4/warps=4 (group size 16) to **warp=8/warps=8 (group size 64)**, matching the Wasm backend's proven configuration. 4M element RadixSort: **TIMEOUT → 11 seconds**. CPU is now faster than Wasm for the same workloads.
+
+### DI Integration
+
+- `AddPlatformCrypto()` — registers platform-appropriate `IPortableCrypto` (WebCrypto in browser, System.Security.Cryptography on desktop)
+- `WebTorrentClient` registered as DI singleton with tracker discovery
+- All test classes receive `IPortableCrypto` via constructor injection
+
 ## What's New in 4.6.0
 
 ### Wasm Fiber-Based Barrier Dispatch
@@ -76,7 +117,7 @@ kernel(size, buffer, new DelegateSpecialization<Func<int, int>>(DoubleIt));
 | **Compiles to** | PTX | OpenCL C | — |
 | **Runs on** | NVIDIA GPU | Any GPU | CPU cores (multi-threaded) |
 
-**Coming: `AcceleratorType.P2P`** — A 7th backend that distributes kernels across connected devices via [SpawnDev.WebTorrent](https://github.com/LostBeard/SpawnDev.WebTorrent). Uses BEP 46 DHT mutable items for shared GPU state coordination and WebRTC data channels for peer-to-peer compute dispatch. Same C# kernel code runs on 1 GPU or 10 GPUs across a household — transparently.
+**`AcceleratorType.P2P`** — A 7th backend ([SpawnDev.ILGPU.P2P](https://www.nuget.org/packages/SpawnDev.ILGPU.P2P)) that distributes kernels across connected devices via [SpawnDev.WebTorrent](https://github.com/LostBeard/SpawnDev.WebTorrent). Peers discover each other through WebSocket trackers, connect via WebRTC, and exchange GPU kernels and buffer data. Create a compute swarm, share a QR code or link, and anyone can contribute GPU power — from any device with a browser. Ownership is cryptographic (ECDSA + WebAuthn/YubiKey), with role-based access control and signed messages.
 
 ## Demo Applications
 
@@ -89,6 +130,7 @@ The [Live Demo](https://lostbeard.github.io/SpawnDev.ILGPU/) source is in [Spawn
 - [Game of Life](https://lostbeard.github.io/SpawnDev.ILGPU/gameoflife) — Conway's Game of Life on the GPU
 - [Benchmarks](https://lostbeard.github.io/SpawnDev.ILGPU/benchmarks) — Performance comparison across all backends
 - [Unit Tests](https://lostbeard.github.io/SpawnDev.ILGPU/tests) — Comprehensive test suite for all backends
+- [P2P Compute Swarm](https://lostbeard.github.io/SpawnDev.ILGPU/compute) — Create or join a distributed GPU compute swarm. QR code sharing, hardware key ownership, real-time peer management
 
 ### Desktop Demo (WPF)
 
@@ -114,6 +156,7 @@ Comprehensive documentation is available in the [Docs](Docs/) folder:
 - **[Canvas Rendering](Docs/canvas-rendering.md)** — `ICanvasRenderer`, zero-copy GPU→canvas blitting, per-backend details
 - **[Advanced Patterns](Docs/advanced-patterns.md)** — Device sharing, external buffers, GPU intrinsics, render loops
 - **[Limitations](Docs/limitations.md)** — Blazor WASM constraints, browser compatibility
+- **[P2P Distributed Compute](Docs/p2p-compute.md)** — AcceleratorType.P2P: swarm creation, peer discovery, RBAC, WebAuthn, QR codes
 - **[API Reference](Docs/api-reference.md)** — Public API surface by namespace
 
 ## Browser Backends (Blazor WebAssembly)
