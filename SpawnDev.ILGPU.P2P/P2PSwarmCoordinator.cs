@@ -150,7 +150,11 @@ public class P2PSwarmCoordinator : IAsyncDisposable
 
         // Create a small data payload that identifies this compute swarm
         var swarmId = System.Text.Encoding.UTF8.GetBytes($"p2p-compute:{name}:{Guid.NewGuid():N}");
-        var swarm = await _client.SeedAsync(swarmId, $"{name}.p2p");
+        var createOptions = new SpawnDev.WebTorrent.Torrent.TorrentCreatorOptions
+        {
+            Trackers = trackers,
+        };
+        var swarm = await _client.SeedAsync(swarmId, $"{name}.p2p", createOptions);
         Swarm = swarm;
 
         // Build magnet link with tracker info
