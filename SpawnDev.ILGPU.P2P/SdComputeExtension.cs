@@ -31,6 +31,11 @@ public class SdComputeExtension : WireExtension
     /// </summary>
     public event Action<P2PMessage>? OnComputeMessage;
 
+    /// <summary>
+    /// Last CapabilityResponse received from this peer (buffered for late subscribers).
+    /// </summary>
+    public P2PMessage? LastCapabilityResponse { get; private set; }
+
     public SdComputeExtension(P2PTransport transport)
     {
         _transport = transport;
@@ -53,10 +58,14 @@ public class SdComputeExtension : WireExtension
         // Route to the P2P transport for handling
         await _transport.HandleIncomingDataAsync(_peerId, payload);
 
-        // Also fire local event
+        // Also fire local event + buffer capabilities
         var message = P2PProtocol.Deserialize(payload);
         if (message != null)
+        {
+            if (message.Type == P2PMessageType.CapabilityResponse)
+                LastCapabilityResponse = message;
             OnComputeMessage?.Invoke(message);
+        }
     }
 
     /// <summary>

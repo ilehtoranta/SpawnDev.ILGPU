@@ -107,7 +107,7 @@ public class P2PWebRtcBridge : IAsyncDisposable
                 existing.SetPeerId(peerId);
                 _extensions[peerId] = existing;
 
-                // Wire up the capability tracking
+                // Wire up the capability tracking for future messages
                 existing.OnComputeMessage += (msg) =>
                 {
                     if (msg.Type == P2PMessageType.CapabilityResponse && _notified.TryAdd(peerId, true))
@@ -123,6 +123,21 @@ public class P2PWebRtcBridge : IAsyncDisposable
                         OnComputePeerCapabilities?.Invoke(peerId, caps);
                     }
                 };
+
+                // Check if CapabilityResponse already arrived before we wired the handler
+                if (existing.LastCapabilityResponse != null && _notified.TryAdd(peerId, true))
+                {
+                    PeerCapabilities? caps = null;
+                    try
+                    {
+                        if (existing.LastCapabilityResponse.Payload.HasValue)
+                            caps = System.Text.Json.JsonSerializer.Deserialize<PeerCapabilities>(
+                                existing.LastCapabilityResponse.Payload.Value);
+                    }
+                    catch { }
+                    OnComputePeerConnected?.Invoke(peerId);
+                    OnComputePeerCapabilities?.Invoke(peerId, caps);
+                }
             }
             else
             {
