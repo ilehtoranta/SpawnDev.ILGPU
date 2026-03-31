@@ -468,8 +468,13 @@
     {
         var client = WebTorrentClient;
         _compute = await P2PCompute.CreateSwarmAsync(Crypto, client, "Demo Compute Swarm");
-        // Debug: log to browser console (visible in Playwright)
-        JS.CallVoid("console.log", $"[P2P] Swarm created. Torrents: {client.Torrents.Count}, Magnet: {_compute.MagnetLink?[..Math.Min(60, _compute.MagnetLink?.Length ?? 0)]}");
+        // Debug: verify tracker is in metadata
+        var swarm = _compute.Coordinator.Swarm;
+        var announceCount = swarm?.Metadata?.AnnounceList?.Length ?? -1;
+        var trackerUrls = announceCount > 0
+            ? string.Join(", ", swarm!.Metadata!.AnnounceList.SelectMany(t => t))
+            : "NONE";
+        JS.CallVoid("console.log", $"[P2P] Swarm created. Torrents: {client.Torrents.Count}, AnnounceList: [{trackerUrls}], IsBrowser: {OperatingSystem.IsBrowser()}");
         await GenerateQRCode();
         StateHasChanged();
     }
