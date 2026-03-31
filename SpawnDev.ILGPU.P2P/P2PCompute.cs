@@ -158,8 +158,10 @@ public class P2PCompute : IAsyncDisposable
         // via WebRTC + sd_compute handshake, register them with capabilities
         bridge.OnComputePeerCapabilities += (peerId, caps) =>
         {
+            Console.WriteLine($"[P2PCompute] Bridge OnComputePeerCapabilities: peerId={peerId}, caps={caps != null}");
             caps ??= new PeerCapabilities { PreferredBackend = "remote" };
-            coordinator.HandlePeerConnected(peerId, caps);
+            var result = coordinator.HandlePeerConnected(peerId, caps);
+            Console.WriteLine($"[P2PCompute] HandlePeerConnected result: {result}, PeerCount: {coordinator.PeerCount}");
         };
 
         return new P2PCompute(client, identity, coordinator, accelerator, dispatcher, transport, bridge, context: context);
@@ -214,8 +216,10 @@ public class P2PCompute : IAsyncDisposable
         // Wire bridge peer discovery to coordinator
         bridge.OnComputePeerCapabilities += (peerId, caps) =>
         {
+            Console.WriteLine($"[P2PCompute Join] Bridge OnComputePeerCapabilities: peerId={peerId}, caps={caps != null}");
             caps ??= worker.BuildCapabilities(peerId);
-            coordinator.HandlePeerConnected(peerId, caps);
+            var result = coordinator.HandlePeerConnected(peerId, caps);
+            Console.WriteLine($"[P2PCompute Join] HandlePeerConnected result: {result}, PeerCount: {coordinator.PeerCount}");
         };
 
         return new P2PCompute(client, identity, coordinator, p2pAccel, dispatcher, transport, bridge, worker);

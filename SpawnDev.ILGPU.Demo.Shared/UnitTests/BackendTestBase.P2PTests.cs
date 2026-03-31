@@ -4505,14 +4505,16 @@ public abstract partial class BackendTestBase
 
         var magnetLink = coordCompute.MagnetLink!;
         Console.WriteLine($"[P2P MagnetJoin] Coordinator: {magnetLink[..Math.Min(70, magnetLink.Length)]}...");
-        Console.WriteLine($"[P2P MagnetJoin] Coord PeerId: {Convert.ToHexString(coordClient.PeerId)[..16]}...");
+        Console.WriteLine($"[P2P MagnetJoin] Coord PeerId: {Convert.ToHexString(coordClient.PeerId)}");
 
         // Wait for tracker registration
         await Task.Delay(3000);
 
         // Client 2: Worker — joins via magnet link (separate client, separate PeerId)
         var workerClient = new SpawnDev.WebTorrent.WebTorrentClient(crypto: crypto);
-        Console.WriteLine($"[P2P MagnetJoin] Worker PeerId: {Convert.ToHexString(workerClient.PeerId)[..16]}...");
+        Console.WriteLine($"[P2P MagnetJoin] Worker PeerId: {Convert.ToHexString(workerClient.PeerId)}");
+        if (coordClient.PeerId.SequenceEqual(workerClient.PeerId))
+            throw new Exception("FATAL: Both clients have the same PeerId! Tracker will ignore.");
 
         await using var workerCompute = await P2PCompute.JoinSwarmAsync(crypto, workerClient, accelerator, magnetLink);
 
