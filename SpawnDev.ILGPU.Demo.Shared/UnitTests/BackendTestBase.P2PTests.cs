@@ -4499,6 +4499,9 @@ public abstract partial class BackendTestBase
         var crypto = Crypto;
         var trackerUrl = "wss://hub.spawndev.com:44365/announce";
 
+        // Enable verbose logging to see tracker + WebRTC internals
+        SpawnDev.WebTorrent.WebTorrentClient.VerboseLogging = true;
+
         // Client 1: Coordinator — creates swarm with tracker in metadata
         var coordClient = new SpawnDev.WebTorrent.WebTorrentClient(crypto: crypto);
         await using var coordCompute = await P2PCompute.CreateSwarmAsync(crypto, coordClient, "magnet-test");
