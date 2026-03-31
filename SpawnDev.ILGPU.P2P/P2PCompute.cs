@@ -122,13 +122,8 @@ public class P2PCompute : IAsyncDisposable
         var coordinator = new P2PSwarmCoordinator(client);
         coordinator.SetIdentity(identity);
 
-        // Auto-detect join link URL: explicit > browser location > null (desktop)
-        if (joinLinkBaseUrl != null)
-            coordinator.JoinLinkBaseUrl = joinLinkBaseUrl;
-        else if (OperatingSystem.IsBrowser())
-            coordinator.JoinLinkBaseUrl = GetBrowserBaseUrl();
-        await coordinator.CreateSwarmAsync(name);
-
+        // Create context + accelerator + dispatcher + transport BEFORE swarm
+        // so we can register sd_compute extension factory before any peers connect
         var context = global::ILGPU.Context.CreateDefault();
         var accelerator = coordinator.CreateAccelerator(context);
         accelerator.Dispatcher = new P2PDispatcher(accelerator);
@@ -136,6 +131,28 @@ public class P2PCompute : IAsyncDisposable
         dispatcher.CoordinatorPublicKey = Convert.ToBase64String(identity.PublicKeySpki);
         var transport = new P2PTransport(client, coordinator, dispatcher);
         transport.SetCrypto(crypto);
+
+        // Bridge for wiring sd_compute to peer connections
+        var bridge = new P2PWebRtcBridge(transport);
+
+        // Register sd_compute extension factory BEFORE creating swarm
+        // This ensures the extension is in the BEP 10 handshake for every peer.
+        // ProcessHandshakeData fires naturally, registering the peer in transport
+        // and triggering capability exchange.
+        client.UseExtension(() => new SdComputeExtension(transport));
+
+        // Auto-detect join link URL: explicit > browser location > null (desktop)
+        if (joinLinkBaseUrl != null)
+            coordinator.JoinLinkBaseUrl = joinLinkBaseUrl;
+        else if (OperatingSystem.IsBrowser())
+            coordinator.JoinLinkBaseUrl = GetBrowserBaseUrl();
+
+        // NOW create the swarm — peers that connect will get sd_compute in handshake
+        await coordinator.CreateSwarmAsync(name);
+
+        // Attach bridge to swarm for peer connection events
+        if (coordinator.Swarm != null)
+            bridge.AttachToSwarm(coordinator.Swarm);
 
         // Wire coordinator messages to transport — auto-sign authority messages
         coordinator.OnSendMessage += async (peerId, msg) =>
@@ -148,11 +165,6 @@ public class P2PCompute : IAsyncDisposable
         {
             await transport.SendSignedMessageAsync(peerId, msg);
         };
-
-        // Bridge WebRTC peer connections to sd_compute extension
-        var bridge = new P2PWebRtcBridge(transport);
-        if (coordinator.Swarm != null)
-            bridge.AttachToSwarm(coordinator.Swarm);
 
         // Wire bridge peer discovery to coordinator — when a compute peer connects
         // via WebRTC + sd_compute handshake, register them with capabilities
@@ -184,6 +196,18 @@ public class P2PCompute : IAsyncDisposable
         var coordinator = new P2PSwarmCoordinator(client);
         coordinator.SetIdentity(identity);
 
+        // Create transport + worker BEFORE joining so we can register sd_compute
+        var p2pAccel = coordinator.CreateAccelerator(accelerator.Context);
+        var dispatcher = new P2PDispatcher(p2pAccel);
+        var transport = new P2PTransport(client, coordinator, dispatcher);
+        transport.SetCrypto(crypto);
+        var worker = new P2PWorker(transport);
+        worker.Initialize(accelerator.Context, accelerator);
+        transport.SetWorker(worker);
+
+        // Register sd_compute extension factory BEFORE joining
+        client.UseExtension(() => new SdComputeExtension(transport));
+
         // Extract magnet from join link if needed
         string magnet;
         if (magnetOrJoinLink.StartsWith("magnet:"))
@@ -192,21 +216,14 @@ public class P2PCompute : IAsyncDisposable
         }
         else
         {
-            // Parse HTTP join link → build magnet from hash
             var (hash, name) = ParseJoinLink(magnetOrJoinLink);
             magnet = hash != null
                 ? BuildMagnetFromHash(hash, name)
-                : magnetOrJoinLink; // fallback: treat as raw magnet
+                : magnetOrJoinLink;
         }
-        await coordinator.JoinSwarmAsync(magnet);
 
-        var p2pAccel = coordinator.CreateAccelerator(accelerator.Context);
-        var dispatcher = new P2PDispatcher(p2pAccel);
-        var transport = new P2PTransport(client, coordinator, dispatcher);
-        transport.SetCrypto(crypto);
-        var worker = new P2PWorker(transport);
-        worker.Initialize(accelerator.Context, accelerator);
-        transport.SetWorker(worker);
+        // NOW join — peers that connect will get sd_compute in handshake
+        await coordinator.JoinSwarmAsync(magnet);
 
         // Bridge WebRTC peer connections to sd_compute extension
         var bridge = new P2PWebRtcBridge(transport);
