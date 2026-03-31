@@ -300,5 +300,107 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                     throw new Exception($"ManySubViews step2: output[{i}] = {result2[i]}, expected {expected}");
             }
         });
+
+        // ═══════════════════════════════════════════════════════════
+        //  ML-Scale Stress Test: hundreds of dispatches with SubViews
+        //  Reproduces Wasm RangeError and OOB from ML inference pattern
+        // ═══════════════════════════════════════════════════════════
+
+        /// <summary>
+        /// Simulates ML inference: a large weight buffer with many sequential dispatches,
+        /// each using a different SubView. This is the pattern that causes "RangeError:
+        /// offset is out of bounds" on Wasm after hundreds of dispatches.
+        /// </summary>
+        [TestMethod(Timeout = 120000)]
+        public async Task SubViewRange_MLInferenceStress() => await RunTest(async accelerator =>
+        {
+            // Simulate ML weight buffer: 1M floats (~4MB)
+            int weightSize = 1024 * 1024;
+            var weightData = new float[weightSize];
+            for (int i = 0; i < weightSize; i++)
+                weightData[i] = (i % 1000) * 0.001f;
+            using var weightBuf = accelerator.Allocate1D(weightData);
+
+            // Output buffer for each "layer" computation
+            int layerSize = 256;
+            using var outputBuf = accelerator.Allocate1D<float>(layerSize);
+
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<
+                Index1D, ArrayView<float>, ArrayView<float>>(CopySubViewKernel);
+
+            // Simulate 200 sequential dispatches (typical for a ~20-layer model
+            // with ~10 operators per layer)
+            int numDispatches = 200;
+            for (int d = 0; d < numDispatches; d++)
+            {
+                // Each dispatch reads from a different region of the weight buffer
+                int offset = (d * 4096) % (weightSize - layerSize);
+                var weightView = weightBuf.View.SubView(offset, layerSize);
+
+                kernel((Index1D)layerSize, weightView, outputBuf.View);
+                await accelerator.SynchronizeAsync();
+            }
+
+            // Verify last dispatch was correct
+            var result = await outputBuf.CopyToHostAsync<float>();
+            int lastOffset = ((numDispatches - 1) * 4096) % (weightSize - layerSize);
+            for (int i = 0; i < Math.Min(16, layerSize); i++)
+            {
+                float expected = ((lastOffset + i) % 1000) * 0.001f;
+                if (MathF.Abs(result[i] - expected) > 0.001f)
+                    throw new Exception($"MLStress dispatch {numDispatches - 1}: output[{i}] = {result[i]}, expected {expected}");
+            }
+
+            Console.WriteLine($"[SubView] ML inference stress: {numDispatches} dispatches with SubViews of {weightSize}-element buffer ✓");
+        });
+
+        /// <summary>
+        /// Simulates high dispatch count with multiple buffers per dispatch.
+        /// Tests Category 2 bug: "memory access out of bounds" after thousands of dispatches.
+        /// </summary>
+        [TestMethod(Timeout = 120000)]
+        public async Task SubViewRange_HighDispatchCount() => await RunTest(async accelerator =>
+        {
+            // Two buffers: weights (large, read-only SubViews) and activations (small, read-write)
+            int weightSize = 512 * 1024; // 2MB
+            var weightData = new float[weightSize];
+            for (int i = 0; i < weightSize; i++)
+                weightData[i] = (float)Math.Sin(i * 0.0001);
+            using var weightBuf = accelerator.Allocate1D(weightData);
+
+            int actSize = 512;
+            using var actBuf = accelerator.Allocate1D<float>(actSize);
+            using var outBuf = accelerator.Allocate1D<float>(actSize);
+
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<
+                Index1D, ArrayView<float>, ArrayView<float>, ArrayView<float>>(AddSubViewsKernel);
+
+            // 500 dispatches — each reads different weight SubView + same activation buffer
+            int numDispatches = 500;
+            for (int d = 0; d < numDispatches; d++)
+            {
+                int wOffset = (d * 1024) % (weightSize - actSize);
+                var wView = weightBuf.View.SubView(wOffset, actSize);
+
+                kernel((Index1D)actSize, wView, actBuf.View, outBuf.View);
+                await accelerator.SynchronizeAsync();
+
+                // Swap: output becomes next input (simulates layer chaining)
+                var copyKernel = accelerator.LoadAutoGroupedStreamKernel<
+                    Index1D, ArrayView<float>, ArrayView<float>>(CopySubViewKernel);
+                copyKernel((Index1D)actSize, outBuf.View, actBuf.View);
+                await accelerator.SynchronizeAsync();
+            }
+
+            var result = await outBuf.CopyToHostAsync<float>();
+            // Just verify no crash and result is finite
+            for (int i = 0; i < Math.Min(8, actSize); i++)
+            {
+                if (float.IsNaN(result[i]) || float.IsInfinity(result[i]))
+                    throw new Exception($"HighDispatch: output[{i}] = {result[i]} (NaN/Inf after {numDispatches} dispatches)");
+            }
+
+            Console.WriteLine($"[SubView] High dispatch count: {numDispatches} dispatches, {numDispatches * 2} kernel calls ✓");
+        });
     }
 }

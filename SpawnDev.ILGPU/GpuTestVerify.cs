@@ -198,4 +198,36 @@ public static class GpuTestVerify
         var result = await results.CopyToHostAsync<float>();
         return (result[0] / n, result[1]);
     }
+
+    // ═══════════════════════════════════════════════════════════
+    //  Sentinel Counting (for cull/sort boundary verification)
+    // ═══════════════════════════════════════════════════════════
+
+    static void CountNonSentinelKernel(
+        Index1D index, ArrayView<int> data, ArrayView<int> count, int n, int sentinel)
+    {
+        if (index < n && data[index] != sentinel)
+            Atomic.Add(ref count[0], 1);
+    }
+
+    /// <summary>
+    /// Count elements that are NOT equal to the sentinel value. GPU-side, returns single int.
+    /// Replaces downloading entire sorted arrays to CPU just to find sentinel boundaries.
+    /// </summary>
+    public static async Task<int> CountNonSentinel(
+        Accelerator accelerator,
+        MemoryBuffer1D<int, Stride1D.Dense> buffer,
+        int n,
+        int sentinel = int.MinValue)
+    {
+        using var count = accelerator.Allocate1D(new int[] { 0 });
+
+        var kernel = accelerator.LoadAutoGroupedStreamKernel<
+            Index1D, ArrayView<int>, ArrayView<int>, int, int>(CountNonSentinelKernel);
+        kernel((Index1D)n, buffer.View, count.View, n, sentinel);
+        await accelerator.SynchronizeAsync();
+
+        var result = await count.CopyToHostAsync<int>();
+        return result[0];
+    }
 }

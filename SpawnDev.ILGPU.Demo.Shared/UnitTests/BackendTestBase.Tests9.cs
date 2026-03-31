@@ -312,16 +312,12 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                 radixSort(accelerator.DefaultStream, keysBuf.View, valuesBuf.View, tempBuf.View.AsContiguous());
                 await accelerator.SynchronizeAsync();
 
-                var sortedKeys = await keysBuf.CopyToHostAsync<int>();
+                // GPU-accelerated verification — no CopyToHostAsync
+                var (orderViolations, duplicates, outOfRange, _) =
+                    await GpuTestVerify.VerifyDescendingSort(accelerator, keysBuf, valuesBuf, n);
 
-                int violations = 0;
-                for (int i = 1; i < n; i++)
-                {
-                    if (sortedKeys[i] > sortedKeys[i - 1])
-                        violations++;
-                }
-
-                string status = violations == 0 ? "PASS" : $"FAIL({violations} violations)";
+                int violations = orderViolations;
+                string status = violations == 0 ? "PASS" : $"FAIL({violations} order, {duplicates} dup, {outOfRange} OOB)";
                 results += $"  n={n}: {status}\n";
 
                 if (violations > 0 && firstFailure == null)
@@ -475,32 +471,14 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             // GPU verification for sort order + index integrity
             await VerifyDescendingSortOnGpu(accelerator, keysBuf, valuesBuf, n, "RadixSortSentinels");
 
-            // Sentinel boundary check — needs actual values, fine on CPU for this smaller check
-            var sortedKeys = await keysBuf.CopyToHostAsync<int>();
-
-            int actualVisible = 0;
-            for (int i = 0; i < n; i++)
-            {
-                if (sortedKeys[i] != int.MinValue)
-                    actualVisible++;
-                else
-                    break; // First int.MinValue found
-            }
+            // GPU sentinel boundary check — no CopyToHostAsync
+            int actualVisible = await GpuTestVerify.CountNonSentinel(accelerator, keysBuf, n);
 
             if (actualVisible != visibleCount)
                 throw new Exception(
                     $"RadixSortSentinels: Visible/culled boundary wrong. " +
                     $"Expected {visibleCount} visible then {cullCount} culled, " +
-                    $"but found {actualVisible} visible before first sentinel.");
-
-            // Verify all elements after the boundary are int.MinValue
-            for (int i = actualVisible; i < n; i++)
-            {
-                if (sortedKeys[i] != int.MinValue)
-                    throw new Exception(
-                        $"RadixSortSentinels: Non-sentinel key {sortedKeys[i]} found at [{i}] " +
-                        $"(after visible/culled boundary at {actualVisible}).");
-            }
+                    $"but GPU counted {actualVisible} non-sentinel elements.");
         });
 
         // ═══════════════════════════════════════════════════════════
@@ -769,32 +747,16 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                 tempBuf.View.AsContiguous());
             await accelerator.SynchronizeAsync();
 
-            var sortedKeys = await keysBuf.CopyToHostAsync<int>();
-            var sortedValues = await valuesBuf.CopyToHostAsync<int>();
+            // GPU-accelerated verification — no CopyToHostAsync
+            var (orderViolations, dupes, outOfRange, _) =
+                await GpuTestVerify.VerifyAscendingSort(accelerator, keysBuf, valuesBuf, n);
 
-            // Ascending order check
-            int orderViolations = 0;
-            for (int i = 1; i < n; i++)
-            {
-                if (sortedKeys[i] < sortedKeys[i - 1])
-                    orderViolations++;
-            }
             if (orderViolations > 0)
                 throw new Exception(
                     $"RadixSortAscending1.4M: Ascending order violated {orderViolations} times out of {n}");
-
-            // Index integrity
-            var seen = new HashSet<int>(n);
-            int dupes = 0, outOfRange = 0;
-            foreach (var v in sortedValues)
-            {
-                if (v < 0 || v >= n) outOfRange++;
-                else if (!seen.Add(v)) dupes++;
-            }
-            int missing = n - seen.Count;
-            if (dupes > 0 || missing > 0 || outOfRange > 0)
+            if (dupes > 0 || outOfRange > 0)
                 throw new Exception(
-                    $"RadixSortAscending1.4M: {dupes} duplicates, {missing} missing, {outOfRange} out-of-range");
+                    $"RadixSortAscending1.4M: {dupes} duplicates, {outOfRange} out-of-range");
         });
 
         // ═══════════════════════════════════════════════════════════
@@ -866,16 +828,13 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                 await VerifyDescendingSortOnGpu(accelerator, keysBuf, valuesBuf, n,
                     $"SpawnSceneSim_Frame{frame}(cull={cullRatio:P0})");
 
-                // Sentinel boundary check — small sequential scan, fine on CPU
-                var sortedKeys = await keysBuf.CopyToHostAsync<int>();
-                int actualVisible = 0;
-                while (actualVisible < n && sortedKeys[actualVisible] != int.MinValue)
-                    actualVisible++;
+                // GPU sentinel boundary check — no CopyToHostAsync
+                int actualVisible = await GpuTestVerify.CountNonSentinel(accelerator, keysBuf, n);
 
                 if (actualVisible != expectedVisible)
                     throw new Exception(
                         $"SpawnSceneSim_Frame{frame}: Sentinel boundary mismatch. " +
-                        $"Expected {expectedVisible} visible, got {actualVisible}.");
+                        $"Expected {expectedVisible} visible, GPU counted {actualVisible}.");
             }
         });
         // ═══════════════════════════════════════════════════════════
