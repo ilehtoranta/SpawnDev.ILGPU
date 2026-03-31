@@ -429,17 +429,20 @@ namespace PlaywrightMultiTest
         {
             var baseUrl = "https://localhost:5451";
 
-            // Tab 1: Navigate to compute page and create a swarm
-            await page1.GotoAsync($"{baseUrl}/compute");
-            await page1.WaitForSelectorAsync("button:has-text('Create Swarm')", new() { Timeout = 15000 });
-            await page1.ClickAsync("button:has-text('Create Swarm')");
+            // Tab 1: Open a NEW page for coordinator (don't reuse the test runner page)
+            var coordPage = await blazorProj.BrowserContext.NewPageAsync();
+            coordPage.Console += (_, msg) => LogStatus($"[Coord {msg.Type}] {msg.Text}");
+
+            await coordPage.GotoAsync($"{baseUrl}/compute");
+            await coordPage.WaitForSelectorAsync("button:has-text('Create Swarm')", new() { Timeout = 30000 });
+            await coordPage.ClickAsync("button:has-text('Create Swarm')");
 
             // Wait for the join link to appear
-            await page1.WaitForSelectorAsync("text=Share this link", new() { Timeout = 15000 });
-            await Task.Delay(1000); // Let the swarm stabilize
+            await coordPage.WaitForSelectorAsync("text=Share this link", new() { Timeout = 30000 });
+            await Task.Delay(2000); // Let the swarm + tracker stabilize
 
             // Extract the join link
-            var joinLinkEl = page1.Locator("div").Filter(new() { HasText = "Share this link" })
+            var joinLinkEl = coordPage.Locator("div").Filter(new() { HasText = "Share this link" })
                 .Locator("..").Locator("div[style*='monospace']").First;
             var joinLink = (await joinLinkEl.InnerTextAsync()).Trim();
 
@@ -452,10 +455,26 @@ namespace PlaywrightMultiTest
 
             // Tab 2: Open join link
             var page2 = await blazorProj.BrowserContext.NewPageAsync();
+            page2.Console += (_, msg) => LogStatus($"[Tab2 {msg.Type}] {msg.Text}");
             try
             {
                 await page2.GotoAsync(joinUrl);
                 LogStatus("[P2P TwoTab] Tab 2 opened, waiting for peer connection...");
+
+                // Test WebSocket connectivity to tracker from both pages
+                try
+                {
+                    var coordWs = await coordPage.EvaluateAsync<string>(@"() => new Promise((resolve) => {
+                        try {
+                            var ws = new WebSocket('wss://hub.spawndev.com:44365/announce');
+                            ws.onopen = () => { ws.close(); resolve('connected'); };
+                            ws.onerror = (e) => resolve('error');
+                            setTimeout(() => resolve('timeout'), 5000);
+                        } catch(e) { resolve('exception: ' + e.message); }
+                    })");
+                    LogStatus($"[P2P TwoTab] Coord WebSocket to tracker: {coordWs}");
+                }
+                catch (Exception ex) { LogStatus($"[P2P TwoTab] WS test failed: {ex.Message}"); }
 
                 // Wait for peer count on tab 1 to go above 0
                 var deadline = DateTime.UtcNow.AddSeconds(30);
@@ -465,7 +484,7 @@ namespace PlaywrightMultiTest
                     try
                     {
                         // Peer count is the first bold number in the stats bar
-                        peerCount = await page1.Locator("text=Peers").Locator("xpath=../div[1]").InnerTextAsync();
+                        peerCount = await coordPage.Locator("text=Peers").Locator("xpath=../div[1]").InnerTextAsync();
                         if (peerCount != "0") break;
                     }
                     catch { }
@@ -502,6 +521,7 @@ namespace PlaywrightMultiTest
                 {
                     try { await page2.CloseAsync(); } catch { }
                 }
+                try { await coordPage.CloseAsync(); } catch { }
             }
         }
 
