@@ -157,6 +157,7 @@ Comprehensive documentation is available in the [Docs](Docs/) folder:
 - **[Advanced Patterns](Docs/advanced-patterns.md)** — Device sharing, external buffers, GPU intrinsics, render loops
 - **[Limitations](Docs/limitations.md)** — Blazor WASM constraints, browser compatibility
 - **[P2P Distributed Compute](Docs/p2p-compute.md)** — AcceleratorType.P2P: swarm creation, peer discovery, RBAC, WebAuthn, QR codes
+- **[QR Codes](Docs/qr-codes.md)** — GPU-accelerated QR code encoder, decoder, renderer with logo overlay
 - **[API Reference](Docs/api-reference.md)** — Public API surface by namespace
 
 ## Browser Backends (Blazor WebAssembly)
