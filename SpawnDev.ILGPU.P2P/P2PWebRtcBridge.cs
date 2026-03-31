@@ -63,6 +63,33 @@ public class P2PWebRtcBridge : IAsyncDisposable
 
         _extensions[peerId] = ext;
 
+        // If the wire handshake already completed (extension registered late),
+        // manually trigger the capability exchange since ProcessHandshakeData
+        // won't be called.
+        if (wire.RemotePeerId != null) // handshake already completed — extension registered late
+        {
+            _transport.RegisterPeer(peerId, async (data) =>
+            {
+                await ext.SendComputeMessageAsync(data);
+            });
+
+            // Send our capabilities to the peer
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    var capMsg = new P2PMessage
+                    {
+                        Type = P2PMessageType.CapabilityResponse,
+                        Payload = System.Text.Json.JsonSerializer.SerializeToElement(
+                            _transport.GetLocalCapabilities()),
+                    };
+                    await ext.SendAsync(capMsg);
+                }
+                catch { }
+            });
+        }
+
         // Notify when compute peer sends capabilities
         ext.OnComputeMessage += (msg) =>
         {
