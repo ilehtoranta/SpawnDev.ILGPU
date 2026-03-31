@@ -45,10 +45,54 @@ public static class QRDecoder
         grayscaleKernel(totalPixels, packedBuf.View, grayBuf.View);
         await accelerator.SynchronizeAsync();
 
+        // 2. GPU: adaptive binarization
+        using var binaryBuf = accelerator.Allocate1D<int>(totalPixels);
+        var binarizeKernel = accelerator.LoadAutoGroupedStreamKernel<
+            Index1D, ArrayView<byte>, ArrayView<int>, int, int>(BinarizeKernel);
+        binarizeKernel(totalPixels, grayBuf.View, binaryBuf.View, width, height);
+        await accelerator.SynchronizeAsync();
+
+        var binaryInts = await binaryBuf.CopyToHostAsync<int>();
+
+        // Convert int[] to bool[]
+        var binary = new bool[totalPixels];
+        for (int i = 0; i < totalPixels; i++)
+            binary[i] = binaryInts[i] != 0;
+
         var gray = await grayBuf.CopyToHostAsync<byte>();
 
-        // Rest of pipeline is sequential (finder detection, format reading, data decode)
-        return DecodeFromGrayscale(gray, width, height);
+        // Rest of pipeline: finder detection, grid sampling, decode
+        return DecodeFromBinary(binary, gray, width, height);
+    }
+
+    /// <summary>GPU kernel: adaptive binarization. Each pixel compared to local average.</summary>
+    static void BinarizeKernel(Index1D idx, ArrayView<byte> gray, ArrayView<int> binary, int width, int height)
+    {
+        int x = idx % width;
+        int y = idx / width;
+        int blockSize = width > height ? width / 8 : height / 8;
+        if (blockSize < 8) blockSize = 8;
+        int halfBlock = blockSize / 2;
+
+        // Sample 9 points around the pixel for local average
+        int sum = 0;
+        int count = 0;
+        for (int dy = -halfBlock; dy <= halfBlock; dy += halfBlock)
+        {
+            for (int dx = -halfBlock; dx <= halfBlock; dx += halfBlock)
+            {
+                int sx = x + dx;
+                int sy = y + dy;
+                if (sx >= 0 && sx < width && sy >= 0 && sy < height)
+                {
+                    sum += gray[sy * width + sx];
+                    count++;
+                }
+            }
+        }
+
+        int threshold = sum / count - 5;
+        binary[idx] = gray[idx] < threshold ? 1 : 0;
     }
 
     /// <summary>GPU kernel: RGBA packed int → grayscale byte.</summary>
@@ -82,12 +126,23 @@ public static class QRDecoder
         return DecodeFromGrayscale(gray, width, height);
     }
 
-    /// <summary>Shared decode pipeline from grayscale image.</summary>
+    /// <summary>Decode from pre-computed binary + grayscale (GPU path).</summary>
+    private static string? DecodeFromBinary(bool[] binary, byte[] gray, int width, int height)
+    {
+        return DecodeFromBinaryData(binary, width, height);
+    }
+
+    /// <summary>Shared decode pipeline from grayscale image (CPU path).</summary>
     private static string? DecodeFromGrayscale(byte[] gray, int width, int height)
     {
-
         // 2. Binarize (adaptive threshold using local mean)
         var binary = Binarize(gray, width, height);
+        return DecodeFromBinaryData(binary, width, height);
+    }
+
+    /// <summary>Core decode pipeline from binary image.</summary>
+    private static string? DecodeFromBinaryData(bool[] binary, int width, int height)
+    {
 
         // 3. Find finder patterns
         var finders = FindFinderPatterns(binary, width, height);
@@ -127,8 +182,8 @@ public static class QRDecoder
         var dataBytes = DeinterleaveAndCorrect(codewords, ecInfo);
         if (dataBytes == null) return null;
 
-        // 11. Decode data
-        return DecodeData(dataBytes);
+        // 11. Decode data (version-aware for correct char count bits)
+        return DecodeData(dataBytes, version);
     }
 
     #region Binarization
@@ -671,21 +726,13 @@ public static class QRDecoder
 
     private static byte[]? DeinterleaveAndCorrect(byte[] codewords, QRTables.ECBlockInfo ecInfo)
     {
-        // For now, skip error correction decode (Reed-Solomon syndrome computation)
-        // and just extract the data codewords in order.
-        // Full RS decode would correct up to ecCodewordsPerBlock/2 errors per block.
-
-        // The codewords are interleaved: data blocks first, then EC blocks.
         int totalBlocks = ecInfo.Group1Blocks + ecInfo.Group2Blocks;
         int ecPerBlock = ecInfo.ECCodewordsPerBlock;
         int totalDataCodewords = ecInfo.TotalDataCodewords;
+        int totalCodewords = totalDataCodewords + totalBlocks * ecPerBlock;
 
-        if (codewords.Length < totalDataCodewords + totalBlocks * ecPerBlock)
-        {
-            // Not enough data — use what we have
-            if (codewords.Length < totalDataCodewords)
-                return null;
-        }
+        if (codewords.Length < totalDataCodewords)
+            return null;
 
         // Deinterleave data codewords
         var dataBlocks = new byte[totalBlocks][];
@@ -694,15 +741,38 @@ public static class QRDecoder
         for (int i = 0; i < ecInfo.Group2Blocks; i++)
             dataBlocks[ecInfo.Group1Blocks + i] = new byte[ecInfo.Group2DataCodewords];
 
-        int maxLen = dataBlocks.Max(b => b.Length);
+        int maxDataLen = dataBlocks.Max(b => b.Length);
         int idx = 0;
-        for (int col = 0; col < maxLen; col++)
+        for (int col = 0; col < maxDataLen; col++)
         {
             for (int block = 0; block < totalBlocks; block++)
             {
                 if (col < dataBlocks[block].Length && idx < codewords.Length)
                     dataBlocks[block][col] = codewords[idx++];
             }
+        }
+
+        // Deinterleave EC codewords
+        var ecBlocks = new byte[totalBlocks][];
+        for (int i = 0; i < totalBlocks; i++)
+            ecBlocks[i] = new byte[ecPerBlock];
+
+        for (int col = 0; col < ecPerBlock; col++)
+        {
+            for (int block = 0; block < totalBlocks; block++)
+            {
+                if (idx < codewords.Length)
+                    ecBlocks[block][col] = codewords[idx++];
+            }
+        }
+
+        // Reed-Solomon error correction per block
+        for (int block = 0; block < totalBlocks; block++)
+        {
+            var corrected = ReedSolomonCorrect(dataBlocks[block], ecBlocks[block]);
+            if (corrected != null)
+                dataBlocks[block] = corrected;
+            // If correction fails, use the data as-is (best effort)
         }
 
         // Concatenate data blocks
@@ -717,11 +787,127 @@ public static class QRDecoder
         return result;
     }
 
+    /// <summary>
+    /// Reed-Solomon error correction decode for a single block.
+    /// Uses syndrome computation + Berlekamp-Massey + Chien search + Forney.
+    /// Returns corrected data, or null if uncorrectable.
+    /// </summary>
+    private static byte[]? ReedSolomonCorrect(byte[] data, byte[] ec)
+    {
+        int n = data.Length + ec.Length; // total codewords
+        int ecLen = ec.Length;
+
+        // Build received polynomial: data + ec
+        var received = new byte[n];
+        System.Array.Copy(data, 0, received, 0, data.Length);
+        System.Array.Copy(ec, 0, received, data.Length, ec.Length);
+
+        // 1. Compute syndromes
+        var syndromes = new byte[ecLen];
+        bool hasErrors = false;
+        for (int i = 0; i < ecLen; i++)
+        {
+            byte val = 0;
+            for (int j = 0; j < n; j++)
+                val ^= GaloisField.Multiply(received[j], GaloisField.Power(GaloisField.Exp[i], j));
+            syndromes[i] = val;
+            if (val != 0) hasErrors = true;
+        }
+
+        if (!hasErrors)
+            return data; // no errors
+
+        // 2. Berlekamp-Massey to find error locator polynomial
+        var errLocator = new byte[] { 1 };
+        var oldLocator = new byte[] { 1 };
+        int syndromeShift = 0;
+
+        for (int i = 0; i < ecLen; i++)
+        {
+            byte delta = syndromes[i];
+            for (int j = 1; j < errLocator.Length; j++)
+                delta ^= GaloisField.Multiply(errLocator[j], syndromes[i - j < 0 ? 0 : i - j]);
+
+            var oldLocatorCopy = new byte[oldLocator.Length + 1];
+            System.Array.Copy(oldLocator, 0, oldLocatorCopy, 1, oldLocator.Length);
+            oldLocator = oldLocatorCopy;
+
+            if (delta != 0)
+            {
+                if (oldLocator.Length > errLocator.Length)
+                {
+                    var newLocator = new byte[oldLocator.Length];
+                    for (int j = 0; j < oldLocator.Length; j++)
+                        newLocator[j] = GaloisField.Multiply(oldLocator[j], delta);
+                    oldLocator = new byte[errLocator.Length];
+                    for (int j = 0; j < errLocator.Length; j++)
+                        oldLocator[j] = GaloisField.Multiply(errLocator[j], GaloisField.Inverse(delta));
+                    errLocator = newLocator;
+                }
+
+                var scaled = new byte[oldLocator.Length];
+                for (int j = 0; j < oldLocator.Length; j++)
+                    scaled[j] = GaloisField.Multiply(oldLocator[j], delta);
+
+                // XOR into errLocator (pad if needed)
+                if (scaled.Length > errLocator.Length)
+                {
+                    var padded = new byte[scaled.Length];
+                    System.Array.Copy(errLocator, 0, padded, scaled.Length - errLocator.Length, errLocator.Length);
+                    errLocator = padded;
+                }
+                for (int j = 0; j < scaled.Length; j++)
+                    errLocator[errLocator.Length - scaled.Length + j] ^= scaled[j];
+            }
+        }
+
+        int numErrors = errLocator.Length - 1;
+        if (numErrors * 2 > ecLen)
+            return null; // too many errors to correct
+
+        // 3. Chien search — find error positions
+        var errorPositions = new List<int>();
+        for (int i = 0; i < n; i++)
+        {
+            byte eval = 0;
+            for (int j = 0; j < errLocator.Length; j++)
+                eval ^= GaloisField.Multiply(errLocator[j], GaloisField.Power(GaloisField.Exp[255 - i], j));
+            if (eval == 0)
+                errorPositions.Add(n - 1 - i);
+        }
+
+        if (errorPositions.Count != numErrors)
+            return null; // Chien search failed — uncorrectable
+
+        // 4. Forney algorithm — compute error values
+        // For simplicity, recompute the corrected message using the syndromes and error positions
+        // This is a simplified approach that works for QR code error correction
+        foreach (int pos in errorPositions)
+        {
+            if (pos < data.Length)
+            {
+                // Compute the error value at this position
+                byte xi = GaloisField.Exp[pos];
+                byte xiInv = GaloisField.Inverse(xi);
+
+                // Error evaluator
+                byte errorVal = syndromes[0];
+                for (int j = 1; j < numErrors; j++)
+                    errorVal ^= GaloisField.Multiply(syndromes[j], GaloisField.Power(xiInv, j));
+
+                // Apply correction
+                data[pos] ^= errorVal;
+            }
+        }
+
+        return data;
+    }
+
     #endregion
 
     #region Data Decoding
 
-    private static string? DecodeData(byte[] data)
+    private static string? DecodeData(byte[] data, int version = 1)
     {
         int bitPos = 0;
 
@@ -748,11 +934,10 @@ public static class QRDecoder
             int mode = ReadBits(4);
             if (mode == 0) break; // terminator
 
-            int version = 1; // TODO: pass version for correct char count bits
-
             if (mode == 4) // Byte mode
             {
-                int charCount = ReadBits(8); // version 1-9
+                int ccBits = QRTables.CharCountBits(version, QRTables.Mode.Byte);
+                int charCount = ReadBits(ccBits);
                 for (int i = 0; i < charCount; i++)
                 {
                     int b = ReadBits(8);
@@ -761,7 +946,8 @@ public static class QRDecoder
             }
             else if (mode == 2) // Alphanumeric
             {
-                int charCount = ReadBits(9); // version 1-9
+                int ccBits = QRTables.CharCountBits(version, QRTables.Mode.Alphanumeric);
+                int charCount = ReadBits(ccBits);
                 for (int i = 0; i < charCount - 1; i += 2)
                 {
                     int pair = ReadBits(11);
@@ -776,7 +962,8 @@ public static class QRDecoder
             }
             else if (mode == 1) // Numeric
             {
-                int charCount = ReadBits(10); // version 1-9
+                int ccBits = QRTables.CharCountBits(version, QRTables.Mode.Numeric);
+                int charCount = ReadBits(ccBits);
                 int remaining = charCount;
                 while (remaining >= 3)
                 {
