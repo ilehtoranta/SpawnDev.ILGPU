@@ -80,6 +80,36 @@ static void MyKernel(Index1D index, ArrayView<float> data, float multiplier, int
 kernel((Index1D)length, buffer.View, 2.5f, 10);
 ```
 
+## Copying Between GPU Buffers (GPU→GPU)
+
+Use `CopyFrom` to copy data between GPU buffers. This works on **all six backends** — it's a native GPU operation with no CPU involvement:
+
+```csharp
+using var source = accelerator.Allocate1D(new float[] { 1, 2, 3, 4, 5 });
+using var dest = accelerator.Allocate1D<float>(5);
+
+// Copy GPU→GPU (fast, native, works everywhere)
+dest.CopyFrom(source);
+```
+
+On WebGPU this maps to `CopyBufferToBuffer`. On CUDA/OpenCL it's a device-to-device memcpy. On Wasm it copies within the SharedArrayBuffer. No shader compilation, no kernel dispatch.
+
+### Cross-Backend Buffer Operations Reference
+
+Not all copy operations work the same way on every backend. This table shows what works and what throws:
+
+| Operation | Method | CPU / CUDA / OpenCL | WebGPU | WebGL | Wasm |
+|-----------|--------|--------------------:|-------:|------:|-----:|
+| **GPU→GPU** | `CopyFrom` | Sync | `CopyBufferToBuffer` | TF readback | SharedArrayBuffer |
+| **CPU→GPU** | `CopyFromCPU` / `Allocate1D(data)` | Sync | `queue.WriteBuffer` | `texImage2D` | SharedArrayBuffer |
+| **GPU→CPU (async)** | `CopyToHostAsync` | Sync fallback | `mapAsync(Read)` | Readback | SharedArrayBuffer |
+| **GPU→CPU (sync)** | `CopyTo` / `CopyToCPU` / `GetAsArray1D` | Sync | **THROWS** | **THROWS** | **THROWS** |
+
+**Key rules:**
+- **GPU→GPU copies: always use `CopyFrom`.** It's fast, native, and works on all backends.
+- **GPU→CPU reads: always use `CopyToHostAsync`.** The sync methods (`CopyTo`, `CopyToCPU`, `GetAsArray1D`) throw `NotSupportedException` on browser backends (WebGPU, WebGL, Wasm) because they require async GPU readback (`mapAsync`).
+- **Never replace `CopyFrom` with a kernel dispatch** (e.g., a Scale-by-1 kernel). `CopyFrom` is a hardware copy command — it's faster, simpler, and doesn't require shader compilation. Using a kernel dispatch for GPU→GPU copies can cause initialization errors on WebGPU when the accelerator isn't fully ready.
+
 ## Reading Data from the GPU
 
 ### Synchronization

@@ -150,6 +150,12 @@ radixSort(stream, keys.View, values.View, tempBuf.View);
 await accelerator.SynchronizeAsync();
 ```
 
+### Important: Buffer Copy Behavior
+
+Synchronous GPU→CPU copy methods (`CopyTo`, `CopyToCPU`, `GetAsArray1D`) throw `NotSupportedException` on WebGPU because GPU readback requires an async `mapAsync` call. Use `CopyToHostAsync` instead.
+
+GPU→GPU copies via `CopyFrom` work perfectly — they use the native `CopyBufferToBuffer` command. See [Memory & Buffers](memory-and-buffers.md#cross-backend-buffer-operations-reference) for the full compatibility table.
+
 ### Browser Support
 
 Chrome/Edge 113+, Firefox Nightly (with `dom.webgpu.enabled`).
@@ -201,6 +207,7 @@ Buffers persist as **GPU-resident textures** in the worker. Kernel dispatch send
 - **No shared memory** — GLSL ES 3.0 vertex shaders don't support workgroup memory
 - **No atomics** — not available in the vertex shader stage  
 - **No barriers** — no workgroup synchronization
+- **No sync GPU→CPU** — `CopyTo`/`CopyToCPU`/`GetAsArray1D` throw `NotSupportedException`. Use `CopyToHostAsync`. GPU→GPU `CopyFrom` works.
 
 ### Browser Support
 
@@ -237,6 +244,10 @@ if (devices.Count > 0)
 - **Group.Broadcast** — intra-group value sharing
 - **Atomics** — supported via `SharedArrayBuffer`
 - **ILGPU Algorithms** — RadixSort, Scan, Reduce, and Histogram are fully supported with full `hardwareConcurrency` multi-worker barrier synchronization. The Wasm backend uses fiber-based phase dispatch with pure spin barriers, per-thread scratch memory, and an in-Wasm phase dispatcher that eliminates JS-Wasm boundary crossings between phases
+
+### Limitations
+
+- **No sync GPU→CPU** — `CopyTo`/`CopyToCPU`/`GetAsArray1D` throw `NotSupportedException`. Use `CopyToHostAsync`. GPU→GPU `CopyFrom` works.
 
 ### SharedArrayBuffer Requirement
 
