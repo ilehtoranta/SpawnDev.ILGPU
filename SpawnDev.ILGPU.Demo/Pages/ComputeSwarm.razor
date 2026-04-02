@@ -409,17 +409,18 @@
             {
                 _state = SwarmPageState.Dashboard;
                 await JoinSwarm();
-                return;
             }
-
-            _state = SwarmPageState.JoinConsent;
+            else
+            {
+                _state = SwarmPageState.JoinConsent;
+            }
         }
         else
         {
             _state = SwarmPageState.Dashboard;
         }
 
-        // Start refresh timer for live updates
+        // Start refresh timer for live updates (all paths need this)
         _refreshTimer = new System.Timers.Timer(2000);
         _refreshTimer.Elapsed += (s, e) => InvokeAsync(StateHasChanged);
         _refreshTimer.Start();

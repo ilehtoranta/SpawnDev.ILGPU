@@ -90,6 +90,99 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             output[idx] = sum;
         }
 
+        // --- Realistic Triple-Nested Loop (Conv2D pattern with array accesses) ---
+        // Unlike the simple TripleNestedLoopKernel, this reads from weight/input arrays
+        // with computed indices inside the loops — matching Conv2D's actual IR pattern.
+        static void Conv2DStyleTripleLoopKernel(
+            Index1D idx,
+            ArrayView<float> input,   // [inC * inH * inW]
+            ArrayView<float> weight,  // [outC * inC * kH * kW]
+            ArrayView<float> output,  // [outC * outH * outW]
+            int inC, int inH, int inW,
+            int outC, int kH, int kW)
+        {
+            int outH = inH - kH + 1;
+            int outW = inW - kW + 1;
+            int outHW = outH * outW;
+
+            int oc = idx / outHW;
+            int rem = idx % outHW;
+            int oy = rem / outW;
+            int ox = rem % outW;
+
+            if (oc >= outC) return;
+
+            float sum = 0f;
+            for (int ic = 0; ic < inC; ic++)
+            {
+                for (int ky = 0; ky < kH; ky++)
+                {
+                    for (int kx = 0; kx < kW; kx++)
+                    {
+                        int iy = oy + ky;
+                        int ix = ox + kx;
+                        float inVal = input[ic * inH * inW + iy * inW + ix];
+                        float wVal = weight[oc * inC * kH * kW + ic * kH * kW + ky * kW + kx];
+                        sum += inVal * wVal;
+                    }
+                }
+            }
+            output[idx] = sum;
+        }
+
+        // --- 2D Grid Dispatch with Shared Memory (Batched MatMul pattern) ---
+        // This matches the ML's BatchedTiledMatMulImpl: LoadStreamKernel + KernelConfig(Index2D)
+        // + Grid.IdxY for batch + SharedMemory for tiling.
+        const int TILE_2D_TEST = 8; // Small tile for testing
+        static void BatchedTiledKernel(
+            ArrayView<float> A,       // [batches * M * K]
+            ArrayView<float> B,       // [batches * K * N]
+            ArrayView<float> C,       // [batches * M * N]
+            int M, int K, int N)
+        {
+            var tileA = SharedMemory.Allocate<float>(TILE_2D_TEST * TILE_2D_TEST);
+            var tileB = SharedMemory.Allocate<float>(TILE_2D_TEST * TILE_2D_TEST);
+
+            int batch = Grid.IdxY;
+            int tileIdx = Grid.IdxX;
+            int numTilesN = (N + TILE_2D_TEST - 1) / TILE_2D_TEST;
+            int tileRow = tileIdx / numTilesN;
+            int tileCol = tileIdx % numTilesN;
+
+            int tid = Group.IdxX;
+            int localRow = tid / TILE_2D_TEST;
+            int localCol = tid % TILE_2D_TEST;
+
+            int globalRow = tileRow * TILE_2D_TEST + localRow;
+            int globalCol = tileCol * TILE_2D_TEST + localCol;
+
+            float sum = 0f;
+            int numTilesK = (K + TILE_2D_TEST - 1) / TILE_2D_TEST;
+            int batchOffA = batch * M * K;
+            int batchOffB = batch * K * N;
+
+            for (int t = 0; t < numTilesK; t++)
+            {
+                int aCol = t * TILE_2D_TEST + localCol;
+                int bRow = t * TILE_2D_TEST + localRow;
+
+                tileA[localRow * TILE_2D_TEST + localCol] = (globalRow < M && aCol < K)
+                    ? A[batchOffA + globalRow * K + aCol] : 0f;
+                tileB[localRow * TILE_2D_TEST + localCol] = (bRow < K && globalCol < N)
+                    ? B[batchOffB + bRow * N + globalCol] : 0f;
+
+                Group.Barrier();
+
+                for (int kk = 0; kk < TILE_2D_TEST; kk++)
+                    sum += tileA[localRow * TILE_2D_TEST + kk] * tileB[kk * TILE_2D_TEST + localCol];
+
+                Group.Barrier();
+            }
+
+            if (globalRow < M && globalCol < N)
+                C[batch * M * N + globalRow * N + globalCol] = sum;
+        }
+
         // --- Prefix Sum using Shared Memory ---
         static void PrefixSumKernel(ArrayView<int> data)
         {
@@ -439,6 +532,140 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             for (int i = 0; i < count; i++)
                 if (MathF.Abs(result[i] - expectedValue) > 0.01f)
                     throw new Exception($"Double nested loop failed at {i}: expected={expectedValue}, got={result[i]}");
+        });
+
+        /// <summary>
+        /// Realistic Conv2D-style triple-nested loop with array accesses.
+        /// Unlike TripleNestedLoopTest (scalar math only), this reads from
+        /// input/weight arrays with computed indices inside the loops —
+        /// matching the actual IR pattern that Conv2D generates.
+        /// If this passes but the simple test also passes, the WGSL loop
+        /// codegen handles array-access patterns correctly.
+        /// </summary>
+        [TestMethod]
+        public async Task Conv2DStyleTripleNestedLoopTest() => await RunTest(async accelerator =>
+        {
+            // Small Conv2D: 2 input channels, 5x5 input, 2 output channels, 3x3 kernel
+            int inC = 2, inH = 5, inW = 5;
+            int outC = 2, kH = 3, kW = 3;
+            int outH = inH - kH + 1; // 3
+            int outW = inW - kW + 1; // 3
+            int totalOut = outC * outH * outW; // 2 * 3 * 3 = 18
+
+            // Fill input with predictable values: input[ic,y,x] = ic*100 + y*10 + x
+            var inputData = new float[inC * inH * inW];
+            for (int ic = 0; ic < inC; ic++)
+                for (int y = 0; y < inH; y++)
+                    for (int x = 0; x < inW; x++)
+                        inputData[ic * inH * inW + y * inW + x] = ic * 100f + y * 10f + x;
+
+            // Fill weight with small values: weight[oc,ic,ky,kx] = 0.01 * (oc*100 + ic*10 + ky*3 + kx)
+            var weightData = new float[outC * inC * kH * kW];
+            for (int oc = 0; oc < outC; oc++)
+                for (int ic = 0; ic < inC; ic++)
+                    for (int ky = 0; ky < kH; ky++)
+                        for (int kx = 0; kx < kW; kx++)
+                            weightData[oc * inC * kH * kW + ic * kH * kW + ky * kW + kx]
+                                = 0.01f * (oc * 100 + ic * 10 + ky * 3 + kx);
+
+            // CPU reference
+            var expected = new float[totalOut];
+            for (int oc = 0; oc < outC; oc++)
+                for (int oy = 0; oy < outH; oy++)
+                    for (int ox = 0; ox < outW; ox++)
+                    {
+                        float sum = 0f;
+                        for (int ic = 0; ic < inC; ic++)
+                            for (int ky = 0; ky < kH; ky++)
+                                for (int kx = 0; kx < kW; kx++)
+                                    sum += inputData[ic * inH * inW + (oy + ky) * inW + (ox + kx)]
+                                         * weightData[oc * inC * kH * kW + ic * kH * kW + ky * kW + kx];
+                        expected[oc * outH * outW + oy * outW + ox] = sum;
+                    }
+
+            using var inputBuf = accelerator.Allocate1D(inputData);
+            using var weightBuf = accelerator.Allocate1D(weightData);
+            using var outputBuf = accelerator.Allocate1D<float>(totalOut);
+
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<
+                Index1D, ArrayView<float>, ArrayView<float>, ArrayView<float>,
+                int, int, int, int, int, int>(Conv2DStyleTripleLoopKernel);
+            kernel((Index1D)totalOut, inputBuf.View, weightBuf.View, outputBuf.View,
+                inC, inH, inW, outC, kH, kW);
+            await accelerator.SynchronizeAsync();
+
+            var result = await outputBuf.CopyToHostAsync<float>();
+            for (int i = 0; i < totalOut; i++)
+            {
+                if (MathF.Abs(result[i] - expected[i]) > 0.1f)
+                    throw new Exception($"Conv2D triple-nested loop failed at [{i}]: expected={expected[i]:F4}, got={result[i]:F4}");
+            }
+        });
+
+        /// <summary>
+        /// Batched tiled MatMul using LoadStreamKernel + KernelConfig(Index2D) +
+        /// Grid.IdxY for batch + SharedMemory for tiling. This matches the ML
+        /// engine's BatchedTiledMatMulImpl pattern exactly.
+        /// </summary>
+        [TestMethod]
+        public async Task BatchedTiledMatMul2DGridTest() => await RunTest(async accelerator =>
+        {
+            if (accelerator.AcceleratorType == AcceleratorType.WebGL)
+                throw new UnsupportedTestException("WebGL does not support LoadStreamKernel with shared memory + 2D grid");
+
+            int batches = 4, M = 16, K = 16, N = 16;
+            int totalA = batches * M * K;
+            int totalB = batches * K * N;
+            int totalC = batches * M * N;
+
+            // Fill A and B with predictable values
+            var aData = new float[totalA];
+            var bData = new float[totalB];
+            for (int b = 0; b < batches; b++)
+                for (int r = 0; r < M; r++)
+                    for (int c = 0; c < K; c++)
+                        aData[b * M * K + r * K + c] = (b + 1) * 0.1f + r * 0.01f;
+            for (int b = 0; b < batches; b++)
+                for (int r = 0; r < K; r++)
+                    for (int c = 0; c < N; c++)
+                        bData[b * K * N + r * N + c] = (b + 1) * 0.01f + c * 0.001f;
+
+            // CPU reference
+            var expectedC = new float[totalC];
+            for (int b = 0; b < batches; b++)
+                for (int r = 0; r < M; r++)
+                    for (int c = 0; c < N; c++)
+                    {
+                        float sum = 0f;
+                        for (int k = 0; k < K; k++)
+                            sum += aData[b * M * K + r * K + k] * bData[b * K * N + k * N + c];
+                        expectedC[b * M * N + r * N + c] = sum;
+                    }
+
+            using var aBuf = accelerator.Allocate1D(aData);
+            using var bBuf = accelerator.Allocate1D(bData);
+            using var cBuf = accelerator.Allocate1D<float>(totalC);
+            cBuf.MemSetToZero();
+
+            var kernel = accelerator.LoadStreamKernel<ArrayView<float>, ArrayView<float>, ArrayView<float>, int, int, int>(BatchedTiledKernel);
+            int numTilesM = (M + TILE_2D_TEST - 1) / TILE_2D_TEST;
+            int numTilesN = (N + TILE_2D_TEST - 1) / TILE_2D_TEST;
+            int totalTiles = numTilesM * numTilesN;
+
+            var gridDim = new Index2D(totalTiles, batches);
+            var groupDim = new Index2D(TILE_2D_TEST * TILE_2D_TEST, 1);
+            kernel(new KernelConfig(gridDim, groupDim), aBuf.View, bBuf.View, cBuf.View, M, K, N);
+            await accelerator.SynchronizeAsync();
+
+            var result = await cBuf.CopyToHostAsync<float>();
+            for (int b = 0; b < batches; b++)
+                for (int r = 0; r < M; r++)
+                    for (int c = 0; c < N; c++)
+                    {
+                        int idx = b * M * N + r * N + c;
+                        if (MathF.Abs(result[idx] - expectedC[idx]) > 0.1f)
+                            throw new Exception($"Batched tiled MatMul 2D grid failed at batch={b}, row={r}, col={c}: expected={expectedC[idx]:F4}, got={result[idx]:F4}");
+                    }
         });
 
         [TestMethod]
