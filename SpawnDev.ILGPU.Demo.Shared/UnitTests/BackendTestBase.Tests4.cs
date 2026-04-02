@@ -36,6 +36,24 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             output[index] = IntrinsicMath.Clamp(val, 0.0f, 10.0f);
         }
 
+        // --- Multiple LoadStreamKernel on Same Accelerator ---
+        // Regression test for _uf_group_iter redeclaration bug (PLANS.md Bug #2).
+        // Two LoadStreamKernel kernels that both need the uniformity transform
+        // must not collide on the synthetic counter variable name.
+        static void StreamKernelA(ArrayView<float> data, int limit)
+        {
+            var gid = Grid.IdxX * Group.DimX + Group.IdxX;
+            if (gid < limit)
+                data[gid] = gid * 2.0f;
+        }
+
+        static void StreamKernelB(ArrayView<float> data, int limit, float offset)
+        {
+            var gid = Grid.IdxX * Group.DimX + Group.IdxX;
+            if (gid < limit)
+                data[gid] = data[gid] + offset;
+        }
+
         // --- Explicitly Grouped Kernel (from ExplicitlyGroupedKernels sample) ---
         static void ExplicitGroupKernel(ArrayView<int> data, int constant)
         {
@@ -666,6 +684,46 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                         if (MathF.Abs(result[idx] - expectedC[idx]) > 0.1f)
                             throw new Exception($"Batched tiled MatMul 2D grid failed at batch={b}, row={r}, col={c}: expected={expectedC[idx]:F4}, got={result[idx]:F4}");
                     }
+        });
+
+        /// <summary>
+        /// Regression test for PLANS.md Bug #2: multiple LoadStreamKernel calls
+        /// on the same accelerator that both need the WGSL uniformity transform.
+        /// Without the fix, the second kernel emits "var _uf_group_iter" again,
+        /// causing a WGSL "redeclaration" compilation error.
+        /// </summary>
+        [TestMethod]
+        public async Task MultipleStreamKernelTest() => await RunTest(async accelerator =>
+        {
+            if (accelerator.AcceleratorType == AcceleratorType.WebGL)
+                throw new UnsupportedTestException("WebGL does not support LoadStreamKernel");
+
+            int length = 128;
+            int groupSize = 32;
+            int numGroups = (length + groupSize - 1) / groupSize;
+
+            using var buf = accelerator.Allocate1D<float>(length);
+            buf.MemSetToZero();
+
+            // Load TWO stream kernels on the same accelerator
+            var kernelA = accelerator.LoadStreamKernel<ArrayView<float>, int>(StreamKernelA);
+            var kernelB = accelerator.LoadStreamKernel<ArrayView<float>, int, float>(StreamKernelB);
+
+            // Dispatch kernel A: data[i] = i * 2
+            kernelA(new KernelConfig(numGroups, groupSize), buf.View, length);
+            await accelerator.SynchronizeAsync();
+
+            // Dispatch kernel B: data[i] = data[i] + 10
+            kernelB(new KernelConfig(numGroups, groupSize), buf.View, length, 10f);
+            await accelerator.SynchronizeAsync();
+
+            var result = await buf.CopyToHostAsync<float>();
+            for (int i = 0; i < length; i++)
+            {
+                float expected = i * 2.0f + 10f;
+                if (MathF.Abs(result[i] - expected) > 0.01f)
+                    throw new Exception($"Multiple LoadStreamKernel failed at [{i}]: expected={expected}, got={result[i]}");
+            }
         });
 
         [TestMethod]

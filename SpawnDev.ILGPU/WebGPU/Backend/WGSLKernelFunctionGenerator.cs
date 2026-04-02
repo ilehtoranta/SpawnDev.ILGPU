@@ -53,6 +53,9 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         private HashSet<string> _viewPointerVarNames = new HashSet<string>();
         private HashSet<int> _emulatedF64Params = new HashSet<int>();
         private HashSet<int> _emulatedI64Params = new HashSet<int>();
+        // Tracks synthetic uniformity counter variables already declared in this kernel.
+        // Prevents WGSL "redeclaration" errors when multiple loops need the same counter.
+        private HashSet<string> _declaredSyntheticCounters = new HashSet<string>();
         private List<DynamicSharedOverrideInfo> _dynamicSharedOverrides = new List<DynamicSharedOverrideInfo>();
         private bool _usesBroadcast = false;
         private string _broadcastType = "i32"; // WGSL type for _broadcast_temp (set by ScanForSubgroupAndBroadcastUsage)
@@ -5857,7 +5860,10 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                                     needsSyntheticGroupCounter = true;
                                     isTileLoopCounter = true;
                                     syntheticGroupCounterVar = "_uf_tile_iter";
-                                    AppendLine($"var {syntheticGroupCounterVar} : i32 = {uniformInit};");
+                                    if (_declaredSyntheticCounters.Add(syntheticGroupCounterVar))
+                                        AppendLine($"var {syntheticGroupCounterVar} : i32 = {uniformInit};");
+                                    else
+                                        AppendLine($"{syntheticGroupCounterVar} = {uniformInit};");
                                     usedTileCounter = true;
 
                                     if (WebGPU.Backend.WebGPUBackend.VerboseLogging)
@@ -5874,13 +5880,19 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                                 // ── Grid-stride / Unknown / tile fallback: existing behavior ──
                                 needsSyntheticGroupCounter = true;
                                 syntheticGroupCounterVar = "_uf_group_iter";
-                                if (ShouldLinearizeGridX())
+                                if (_declaredSyntheticCounters.Add(syntheticGroupCounterVar))
                                 {
-                                    AppendLine($"var {syntheticGroupCounterVar} : i32 = i32(group_id.x + group_id.y * num_workgroups.x);");
+                                    if (ShouldLinearizeGridX())
+                                        AppendLine($"var {syntheticGroupCounterVar} : i32 = i32(group_id.x + group_id.y * num_workgroups.x);");
+                                    else
+                                        AppendLine($"var {syntheticGroupCounterVar} : i32 = i32(group_id.x);");
                                 }
                                 else
                                 {
-                                    AppendLine($"var {syntheticGroupCounterVar} : i32 = i32(group_id.x);");
+                                    if (ShouldLinearizeGridX())
+                                        AppendLine($"{syntheticGroupCounterVar} = i32(group_id.x + group_id.y * num_workgroups.x);");
+                                    else
+                                        AppendLine($"{syntheticGroupCounterVar} = i32(group_id.x);");
                                 }
 
                                 if (WebGPU.Backend.WebGPUBackend.VerboseLogging)
