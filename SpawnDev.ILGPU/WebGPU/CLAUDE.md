@@ -29,6 +29,19 @@ Transpiles ILGPU IR → WGSL shaders. Dispatches via `WebGPUAccelerator`.
 - Library inclusion controlled by `SetEmulationFlags()` scanning kernel + helper IR.
 - Per-function trimming via `GetMinimalEmulationLibrary()` BFS dependency graph.
 
+## Buffer Copy Operations — What Works vs What Throws
+
+| Operation | Method | WebGPU Implementation | Status |
+|-----------|--------|----------------------|--------|
+| GPU→GPU | `CopyFrom` / `ArrayView.CopyTo(ArrayView)` | `CopyBufferToBuffer` | **WORKS** |
+| CPU→GPU | `CopyFromCPU` | `queue.WriteBuffer` | **WORKS** |
+| GPU→CPU (sync) | `CopyTo` / `CopyToCPU` / `GetAsArray1D` | N/A | **THROWS NotSupportedException** |
+| GPU→CPU (async) | `CopyToHostAsync` | `mapAsync(Read)` | **WORKS** |
+
+**NEVER replace `CopyFrom` with `Scale(×1)` kernel dispatch.** `CopyFrom` is a native GPU command (`CopyBufferToBuffer`) — no shader compilation, no dispatch overhead. `Scale(×1)` requires kernel loading and dispatch, which causes "obj null or undefined" errors during early session initialization when accelerator state isn't fully wired. This was proven in ML commit 45b7cba (13+ WebGPU failures, reverted).
+
+**The confusion:** `CopyTo` (GPU→**CPU**) throws on WebGPU. `CopyFrom` (GPU→**GPU**) works perfectly. They are different operations going different directions. When you need GPU→CPU, use `CopyToHostAsync`. When you need GPU→GPU, use `CopyFrom`.
+
 ## Command Batching & Synchronization
 
 **WebGPUStream batches compute passes into one command encoder.** `Synchronize()` = `Flush()` = finishes the encoder and submits to the GPU queue. This is NON-BLOCKING — it submits but does NOT wait for completion.
