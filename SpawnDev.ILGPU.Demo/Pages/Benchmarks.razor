@@ -328,7 +328,7 @@
     {
         if (!SwarmService.IsActive || _p2pRunning) return;
         var compute = SwarmService.Compute;
-        if (compute == null) return;
+        if (compute?.Accelerator == null) return;
 
         _p2pRunning = true;
         _p2pResults.Clear();
@@ -336,84 +336,48 @@
         _p2pTotalElements = 0;
         StateHasChanged();
 
-        var sw = Stopwatch.StartNew();
-        int peerCount = compute.PeerCount;
-        int totalElements = 1_000_000;
-
-        // Split proportionally by TFLOPS
-        var peers = compute.Coordinator.GetPeerList().Where(p => p.IsConnected).ToList();
-        double totalTflops = peers.Sum(p => p.Capabilities?.EstimatedTflops ?? 0.1);
-
-        var chunks = new List<(string peerId, int elements)>();
-        int assigned = 0;
-        for (int i = 0; i < peers.Count; i++)
+        try
         {
-            double peerTflops = peers[i].Capabilities?.EstimatedTflops ?? 0.1;
-            int chunkElements = (i == peers.Count - 1)
-                ? totalElements - assigned
-                : (int)(totalElements * (peerTflops / totalTflops));
-            chunks.Add((peers[i].PeerId, chunkElements));
-            assigned += chunkElements;
+            // Use the library's DispatchDistributedAsync — auto-splits by TFLOPS
+            var result = await compute.Accelerator.DispatchDistributedAsync(
+                typeof(P2PDemoKernels), nameof(P2PDemoKernels.MultiplyBy2),
+                totalElements: 1_000_000,
+                elementSize: 4,
+                dataFactory: (start, count) =>
+                {
+                    var data = new byte[count * 4];
+                    for (int j = 0; j < Math.Min(count, 1000); j++)
+                        BitConverter.TryWriteBytes(data.AsSpan(j * 4), (float)(start + j));
+                    return data;
+                });
 
+            // Map DistributedResult to UI model
+            foreach (var chunk in result.Chunks)
+            {
+                _p2pResults.Add(new P2PBenchmarkChunk
+                {
+                    Label = $"{chunk.ElementCount:N0} elements",
+                    PeerId = chunk.PeerId[..Math.Min(10, chunk.PeerId.Length)],
+                    Elements = chunk.ElementCount,
+                    Success = chunk.Success,
+                    DurationMs = chunk.DurationMs,
+                    Error = chunk.Error,
+                });
+            }
+
+            _p2pAggregateMs = result.WallTimeMs;
+            _p2pTotalElements = result.TotalElements;
+        }
+        catch (Exception ex)
+        {
             _p2pResults.Add(new P2PBenchmarkChunk
             {
-                Label = $"Chunk {i} ({chunkElements:N0} elem)",
-                PeerId = peers[i].PeerId[..Math.Min(10, peers[i].PeerId.Length)],
-                Elements = chunkElements,
+                Label = "Dispatch failed",
+                Success = false,
+                Error = ex.Message,
             });
         }
-        StateHasChanged();
 
-        // Dispatch all chunks
-        var tasks = new List<Task>();
-        for (int i = 0; i < chunks.Count; i++)
-        {
-            var idx = i;
-            var (peerId, elements) = chunks[idx];
-            tasks.Add(Task.Run(async () =>
-            {
-                var chunkSw = Stopwatch.StartNew();
-                try
-                {
-                    // Generate data
-                    var data = new byte[elements * 4];
-                    for (int j = 0; j < Math.Min(elements, 1000); j++)
-                        BitConverter.TryWriteBytes(data.AsSpan(j * 4), (float)j);
-
-                    compute.DispatchToSwarm(
-                        typeof(P2PDemoKernels), nameof(P2PDemoKernels.MultiplyBy2),
-                        elements,
-                        ($"bench_{idx}", data, 4));
-
-                    // Wait for dispatch acknowledgment
-                    await Task.Delay(100);
-                    chunkSw.Stop();
-
-                    _p2pResults[idx] = _p2pResults[idx] with
-                    {
-                        Success = true,
-                        DurationMs = chunkSw.Elapsed.TotalMilliseconds,
-                    };
-                }
-                catch (Exception ex)
-                {
-                    chunkSw.Stop();
-                    _p2pResults[idx] = _p2pResults[idx] with
-                    {
-                        Success = false,
-                        DurationMs = chunkSw.Elapsed.TotalMilliseconds,
-                        Error = ex.Message,
-                    };
-                }
-                await InvokeAsync(StateHasChanged);
-            }));
-        }
-
-        await Task.WhenAll(tasks);
-        sw.Stop();
-
-        _p2pAggregateMs = sw.Elapsed.TotalMilliseconds;
-        _p2pTotalElements = chunks.Sum(c => (long)c.elements);
         _p2pRunning = false;
         StateHasChanged();
     }
