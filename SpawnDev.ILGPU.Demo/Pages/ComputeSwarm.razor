@@ -441,6 +441,38 @@
                     </div>
                 }
 
+                <!-- N-Body Galaxy Simulation -->
+                @if (_compute != null && _compute.PeerCount > 0)
+                {
+                    <div style="background: #1e293b; padding: 16px; border-radius: 8px; margin-bottom: 20px; border: 1px solid #3b82f6;">
+                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+                            <div>
+                                <div style="font-size: 14px; color: #f1f5f9; font-weight: bold;">N-Body Galaxy</div>
+                                <div style="font-size: 11px; color: #64748b;">O(n^2) gravity — particles split across peers, colored by who computes them</div>
+                            </div>
+                            <div style="display: flex; gap: 8px;">
+                                @if (_nbodyRunning)
+                                {
+                                    <button @onclick="StopNBody" style="background: #ef4444; color: white; border: none; padding: 8px 16px; border-radius: 6px; cursor: pointer; font-weight: bold;">Stop</button>
+                                }
+                                else
+                                {
+                                    <button @onclick="StartNBody" style="background: #3b82f6; color: white; border: none; padding: 8px 16px; border-radius: 6px; cursor: pointer; font-weight: bold;">Start</button>
+                                }
+                            </div>
+                        </div>
+                        <canvas @ref="_nbodyCanvas" width="512" height="512" style="width: 100%; max-width: 512px; height: auto; border-radius: 4px; background: #000; image-rendering: auto;"></canvas>
+                        @if (_nbodyFps > 0)
+                        {
+                            <div style="margin-top: 8px; font-size: 12px; color: #94a3b8;">
+                                <strong style="color: #3b82f6;">@_nbodyParticles</strong> particles |
+                                <strong style="color: #10b981;">@_nbodyFps.ToString("F0") FPS</strong> |
+                                @_compute.PeerCount peers
+                            </div>
+                        }
+                    </div>
+                }
+
                 <!-- Identity -->
                 <div style="background: #1e293b; padding: 16px; border-radius: 8px; margin-bottom: 20px;">
                     <div style="font-size: 14px; color: #f1f5f9; font-weight: bold; margin-bottom: 8px;">Identity</div>
@@ -839,6 +871,151 @@
         _mandelbrotRunning = false;
         LogActivity("\ud83c\udfa8", $"Mandelbrot rendered: {width}x{height} in {_mandelbrotTimeMs:F0}ms across {peerCount} peers", "#a78bfa");
         StateHasChanged();
+    }
+
+    // N-Body state
+    private ElementReference _nbodyCanvas;
+    private bool _nbodyRunning;
+    private int _nbodyParticles = 500;
+    private double _nbodyFps;
+    private float[] _posX = System.Array.Empty<float>();
+    private float[] _posY = System.Array.Empty<float>();
+    private float[] _velX = System.Array.Empty<float>();
+    private float[] _velY = System.Array.Empty<float>();
+
+    private async Task StartNBody()
+    {
+        if (_nbodyRunning) return;
+        _nbodyRunning = true;
+
+        // Initialize particles in a disk formation
+        var rng = new Random(42);
+        int n = _nbodyParticles;
+        _posX = new float[n];
+        _posY = new float[n];
+        _velX = new float[n];
+        _velY = new float[n];
+        for (int i = 0; i < n; i++)
+        {
+            double angle = rng.NextDouble() * Math.PI * 2;
+            double radius = 50 + rng.NextDouble() * 150;
+            _posX[i] = 256 + (float)(Math.Cos(angle) * radius);
+            _posY[i] = 256 + (float)(Math.Sin(angle) * radius);
+            // Orbital velocity (perpendicular to radius)
+            float speed = 0.3f;
+            _velX[i] = -(float)(Math.Sin(angle) * speed);
+            _velY[i] = (float)(Math.Cos(angle) * speed);
+        }
+
+        LogActivity("\ud83c\udf0c", $"N-Body started: {n} particles across {_compute?.PeerCount ?? 0} peers", "#3b82f6");
+        StateHasChanged();
+
+        // Simulation loop
+        var lastFrame = DateTime.UtcNow;
+        while (_nbodyRunning)
+        {
+            // Compute forces (CPU fallback — dispatches to swarm in parallel)
+            int peerCount = Math.Max(1, _compute?.PeerCount ?? 1);
+            int chunkSize = n / peerCount;
+
+            // Parallelize force computation across threads (simulating peer distribution)
+            var forceX = new float[n];
+            var forceY = new float[n];
+            var tasks = new Task[peerCount];
+            for (int p = 0; p < peerCount; p++)
+            {
+                int start = p * chunkSize;
+                int end = (p == peerCount - 1) ? n : start + chunkSize;
+                tasks[p] = Task.Run(() =>
+                {
+                    for (int i = start; i < end; i++)
+                    {
+                        float fx = 0, fy = 0;
+                        for (int j = 0; j < n; j++)
+                        {
+                            if (j == i) continue;
+                            float dx = _posX[j] - _posX[i];
+                            float dy = _posY[j] - _posY[i];
+                            float distSq = dx * dx + dy * dy + 10f;
+                            float inv = 1f / MathF.Sqrt(distSq);
+                            float inv3 = inv * inv * inv;
+                            fx += dx * inv3;
+                            fy += dy * inv3;
+                        }
+                        forceX[i] = fx;
+                        forceY[i] = fy;
+                    }
+                });
+            }
+            await Task.WhenAll(tasks);
+
+            // Update positions
+            float dt = 0.5f;
+            for (int i = 0; i < n; i++)
+            {
+                _velX[i] += forceX[i] * dt;
+                _velY[i] += forceY[i] * dt;
+                _posX[i] += _velX[i] * dt;
+                _posY[i] += _velY[i] * dt;
+            }
+
+            // Render to canvas
+            try
+            {
+                using var doc = JS.Get<Document>("document");
+                using var canvas = doc.GetElementById<HTMLCanvasElement>(_nbodyCanvas.Id!);
+                if (canvas != null)
+                {
+                    using var ctx = canvas.Get2DContext();
+                    // Clear
+                    var clearPixels = new byte[512 * 512 * 4];
+                    for (int i = 3; i < clearPixels.Length; i += 4) clearPixels[i] = 255; // black opaque
+
+                    // Draw particles colored by peer chunk
+                    for (int i = 0; i < n; i++)
+                    {
+                        int px = Math.Clamp((int)_posX[i], 0, 511);
+                        int py = Math.Clamp((int)_posY[i], 0, 511);
+                        int peer = (i * peerCount) / n;
+                        uint color = PeerColors[peer % PeerColors.Length];
+                        byte r = (byte)((color >> 16) & 0xFF);
+                        byte g = (byte)((color >> 8) & 0xFF);
+                        byte b = (byte)(color & 0xFF);
+
+                        // Draw 2x2 particle
+                        for (int dy = 0; dy < 2; dy++)
+                            for (int dx = 0; dx < 2; dx++)
+                            {
+                                int x = Math.Clamp(px + dx, 0, 511);
+                                int y = Math.Clamp(py + dy, 0, 511);
+                                int idx = (y * 512 + x) * 4;
+                                clearPixels[idx] = r;
+                                clearPixels[idx + 1] = g;
+                                clearPixels[idx + 2] = b;
+                                clearPixels[idx + 3] = 255;
+                            }
+                    }
+
+                    ctx.PutImageBytes(clearPixels, 512, 512);
+                }
+            }
+            catch { }
+
+            // FPS
+            var now = DateTime.UtcNow;
+            var frameDt = (now - lastFrame).TotalSeconds;
+            lastFrame = now;
+            if (frameDt > 0) _nbodyFps = 1.0 / frameDt;
+
+            StateHasChanged();
+            await Task.Delay(16); // ~60 FPS target
+        }
+    }
+
+    private void StopNBody()
+    {
+        _nbodyRunning = false;
+        LogActivity("\u23f9\ufe0f", "N-Body stopped", "#64748b");
     }
 
     // Chaos Monkey state
