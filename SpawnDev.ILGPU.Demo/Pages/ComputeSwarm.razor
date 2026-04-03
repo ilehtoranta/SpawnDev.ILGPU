@@ -639,6 +639,29 @@
         StateHasChanged();
     }
 
+    private void SaveSwarmState()
+    {
+        try
+        {
+            if (_compute == null) return;
+            var magnet = _compute.MagnetLink ?? _compute.JoinLink ?? "";
+            var role = _compute.Role == P2PRole.Coordinator ? "coordinator" : "worker";
+            JS.CallVoid("localStorage.setItem", "p2p-swarm-magnet", magnet);
+            JS.CallVoid("localStorage.setItem", "p2p-swarm-role", role);
+        }
+        catch { }
+    }
+
+    private void ClearSwarmState()
+    {
+        try
+        {
+            JS.CallVoid("localStorage.removeItem", "p2p-swarm-magnet");
+            JS.CallVoid("localStorage.removeItem", "p2p-swarm-role");
+        }
+        catch { }
+    }
+
     private void LogActivity(string icon, string message, string color = "#94a3b8")
     {
         _activityLog.Add(new ActivityEntry(DateTime.Now, icon, message, color));
@@ -709,8 +732,44 @@
 
     protected override async Task OnInitializedAsync()
     {
-        // Check if this is a join link
+        // Check if this is a join link (URL takes priority over saved state)
         var (hash, name) = P2PCompute.ParseJoinLink(Nav.Uri);
+
+        // If no URL join link, try to restore from saved swarm state
+        if (hash == null)
+        {
+            try
+            {
+                var savedMagnet = JS.Call<string>("localStorage.getItem", "p2p-swarm-magnet");
+                var savedRole = JS.Call<string>("localStorage.getItem", "p2p-swarm-role");
+                if (!string.IsNullOrEmpty(savedMagnet))
+                {
+                    _state = SwarmPageState.Dashboard;
+                    LogActivity("\ud83d\udd04", "Restoring swarm from saved state...", "#f59e0b");
+                    StateHasChanged();
+
+                    if (savedRole == "coordinator")
+                    {
+                        await CreateSwarm();
+                    }
+                    else
+                    {
+                        var (savedHash, savedName) = P2PCompute.ParseJoinLink(savedMagnet);
+                        if (savedHash != null)
+                        {
+                            _computeHash = savedHash;
+                            _swarmName = savedName ?? "Restored Swarm";
+                            await JoinSwarm();
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[P2P] Swarm restore failed: {ex.Message}");
+            }
+        }
+
         if (hash != null)
         {
             _computeHash = hash;
@@ -801,6 +860,7 @@
         JS.CallVoid("console.log", $"[P2P] Swarm created. Torrents: {client.Torrents.Count}, AnnounceList: [{trackerUrls}], IsBrowser: {OperatingSystem.IsBrowser()}");
         await GenerateQRCode();
         WireSwarmEvents();
+        SaveSwarmState();
         LogActivity("\ud83d\ude80", "Swarm created — you are the coordinator", "#10b981");
         StateHasChanged();
     }
@@ -893,6 +953,7 @@
         SwarmService.SetCompute(_compute);
         Console.WriteLine($"[P2P JoinSwarm] Joined. PeerCount: {_compute.PeerCount}, Bridge: {_compute.Bridge?.ComputePeerCount}");
         WireSwarmEvents();
+        SaveSwarmState();
         LogActivity("\ud83d\udd17", "Joined swarm as worker", "#3b82f6");
         StateHasChanged();
     }
@@ -1157,6 +1218,8 @@
     public async ValueTask DisposeAsync()
     {
         _refreshTimer?.Dispose();
+        // Don't clear swarm state on dispose — we want to restore on reload.
+        // Only ClearSwarmState() when the user explicitly leaves/destroys the swarm.
         if (_compute != null) await _compute.DisposeAsync();
     }
 }
