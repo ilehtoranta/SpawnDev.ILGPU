@@ -3324,16 +3324,8 @@ public abstract partial class BackendTestBase
             throw new Exception($"BackendType: {backend.BackendType}");
     }
 
-    [TestMethod]
-    public async Task P2P_Backend_Properties()
-    {
-        using var context = global::ILGPU.Context.CreateDefault();
-        var backend = new P2PBackend(context);
-        if (backend == null) throw new Exception("Backend creation failed");
-        // P2PBackend is a thin wrapper — verify it doesn't crash on property access
-        var type = backend.BackendType;
-        Console.WriteLine($"[P2P] Backend properties: type={type} ✓");
-    }
+    // P2P_Backend_Properties REMOVED — was a crash-only test with no assertions on behavior.
+    // P2P_Backend_Create already verifies BackendType value. This added nothing.
 
     [TestMethod]
     public async Task P2P_Stream_Create()
