@@ -65,6 +65,12 @@
                         Create Swarm
                     </button>
                 }
+                else
+                {
+                    <button @onclick="LeaveSwarm" style="background: #ef4444; color: white; border: none; padding: 8px 16px; border-radius: 6px; cursor: pointer; font-size: 13px;">
+                        Leave Swarm
+                    </button>
+                }
             </div>
 
             @if (_compute != null)
@@ -930,6 +936,17 @@
     private void Decline()
     {
         _state = SwarmPageState.Dashboard;
+        StateHasChanged();
+    }
+
+    private async Task LeaveSwarm()
+    {
+        LogActivity("\ud83d\udc4b", "Leaving swarm...", "#f59e0b");
+        ClearSwarmState();
+        await SwarmService.ClearAsync();
+        _compute = null;
+        _qrDataUrl = null;
+        _activityLog.Clear();
         StateHasChanged();
     }
 
