@@ -1,4 +1,5 @@
 @page "/gameoflife"
+@implements IDisposable
 @using SpawnDev.BlazorJS
 @using SpawnDev.BlazorJS.JSObjects
 @using global::ILGPU
@@ -394,6 +395,8 @@
     {
         isRunning = false;
         animCts?.Cancel();
+        animCts?.Dispose();
+        animCts = null;
         imageData?.Dispose();
         ctx2d?.Dispose();
         canvasEl?.Dispose();

@@ -1234,7 +1234,28 @@
 
     public async ValueTask DisposeAsync()
     {
+        _refreshTimer?.Stop();
         _refreshTimer?.Dispose();
+        _scanTimer?.Stop();
+        _scanTimer?.Dispose();
+
+        // Release camera if scanning was active
+        if (_cameraStream != null)
+        {
+            try
+            {
+                using var tracks = _cameraStream.GetTracks();
+                for (int i = 0; i < tracks.Length; i++)
+                {
+                    using var track = tracks[i];
+                    track.Stop();
+                }
+            }
+            catch { }
+            _cameraStream.Dispose();
+            _cameraStream = null;
+        }
+
         // Don't clear swarm state on dispose — we want to restore on reload.
         // Only ClearSwarmState() when the user explicitly leaves/destroys the swarm.
         if (_compute != null) await _compute.DisposeAsync();
