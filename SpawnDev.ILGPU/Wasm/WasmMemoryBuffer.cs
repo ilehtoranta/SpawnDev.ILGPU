@@ -93,8 +93,16 @@ namespace SpawnDev.ILGPU.Wasm
         public Task<Uint8Array> CopyToHostUint8ArrayAsync(long sourceByteOffset = 0, long? copyBytes = null)
         {
             if (SharedBuffer == null) return Task.FromResult(new Uint8Array());
-            return copyBytes == null ? 
-                Task.FromResult(new Uint8Array(SharedBuffer, sourceByteOffset)) : 
+            long bufferSize = SharedBuffer.ByteLength;
+            long actualCopyBytes = copyBytes ?? (bufferSize - sourceByteOffset);
+            if (sourceByteOffset < 0 || sourceByteOffset > bufferSize)
+                throw new ArgumentOutOfRangeException(nameof(sourceByteOffset),
+                    $"Source offset {sourceByteOffset} is outside buffer bounds [0, {bufferSize})");
+            if (actualCopyBytes < 0 || sourceByteOffset + actualCopyBytes > bufferSize)
+                throw new ArgumentOutOfRangeException(nameof(copyBytes),
+                    $"Copy range [{sourceByteOffset}, {sourceByteOffset + actualCopyBytes}) exceeds buffer size {bufferSize}");
+            return copyBytes == null ?
+                Task.FromResult(new Uint8Array(SharedBuffer, sourceByteOffset)) :
                 Task.FromResult(new Uint8Array(SharedBuffer, sourceByteOffset, copyBytes.Value));
         }
 
@@ -164,6 +172,14 @@ namespace SpawnDev.ILGPU.Wasm
         {
             if (sourceBuffer is WasmMemoryBuffer wasmSource)
             {
+                // Bounds validation
+                if (sourceOffsetInBytes + lengthInBytes > wasmSource.SharedBuffer.ByteLength)
+                    throw new ArgumentOutOfRangeException(nameof(sourceOffsetInBytes),
+                        $"Source copy range [{sourceOffsetInBytes}, {sourceOffsetInBytes + lengthInBytes}) exceeds source buffer size {wasmSource.SharedBuffer.ByteLength}");
+                if (targetOffsetInBytes + lengthInBytes > SharedBuffer.ByteLength)
+                    throw new ArgumentOutOfRangeException(nameof(targetOffsetInBytes),
+                        $"Target copy range [{targetOffsetInBytes}, {targetOffsetInBytes + lengthInBytes}) exceeds target buffer size {SharedBuffer.ByteLength}");
+
                 // Wasm-to-Wasm: copy between SharedArrayBuffers via JS TypedArray
                 using var srcView = new Uint8Array(
                     wasmSource.SharedBuffer,

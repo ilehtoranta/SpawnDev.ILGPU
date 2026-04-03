@@ -558,6 +558,10 @@ namespace SpawnDev.ILGPU.WebGPU
         {
             var webGpuAccel = (WebGPUAccelerator)kernel.Accelerator;
             var nativeAccel = webGpuAccel.NativeAccelerator;
+
+            if (webGpuAccel.IsDeviceLost)
+                throw new InvalidOperationException("WebGPU device has been lost — cannot dispatch kernel.");
+
             var webGpuKernel = (WebGPUKernel)kernel;
             var compiledKernel = webGpuKernel.CompiledKernel;
 
