@@ -174,6 +174,91 @@ public class P2PAccelerator : KernelAccelerator<P2PCompiledKernel, P2PKernel>
     }
 
     /// <summary>
+    /// Distribute work across ALL connected peers, splitting proportionally by TFLOPS.
+    /// Each peer gets a chunk sized by its compute power. A 10 TFLOPS peer gets 5x
+    /// the work of a 2 TFLOPS peer. Returns one dispatch per peer.
+    ///
+    /// The dataFactory callback generates the input data for a given chunk range.
+    /// The kernel operates on elements [chunkStart..chunkStart+chunkSize).
+    ///
+    /// Usage:
+    ///   var results = await p2pAccelerator.DispatchDistributedAsync(
+    ///       typeof(MyKernels), nameof(MyKernels.VectorScale),
+    ///       totalElements: 1_000_000,
+    ///       elementSize: 4,
+    ///       dataFactory: (start, count) => GenerateChunkData(start, count));
+    /// </summary>
+    public async Task<DistributedResult> DispatchDistributedAsync(
+        Type kernelType, string methodName,
+        long totalElements, int elementSize,
+        Func<long, int, byte[]> dataFactory)
+    {
+        if (Dispatcher == null)
+            throw new InvalidOperationException("Dispatcher not set.");
+
+        var method = kernelType.GetMethod(methodName,
+            System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)
+            ?? throw new ArgumentException($"Kernel method not found: {kernelType.Name}.{methodName}");
+
+        var peers = Peers.Where(p => p.IsConnected).ToList();
+        if (peers.Count == 0)
+            throw new InvalidOperationException("No connected peers for distributed dispatch.");
+
+        // Split proportionally by TFLOPS
+        double totalTflops = peers.Sum(p => p.Capabilities?.EstimatedTflops ?? 0.1);
+        var chunks = new List<(RemotePeer peer, long start, int count)>();
+        long assigned = 0;
+
+        for (int i = 0; i < peers.Count; i++)
+        {
+            double peerTflops = peers[i].Capabilities?.EstimatedTflops ?? 0.1;
+            int chunkCount = (i == peers.Count - 1)
+                ? (int)(totalElements - assigned)
+                : (int)(totalElements * (peerTflops / totalTflops));
+            chunkCount = Math.Max(1, chunkCount);
+            chunks.Add((peers[i], assigned, chunkCount));
+            assigned += chunkCount;
+        }
+
+        // Dispatch all chunks in parallel
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        var tasks = chunks.Select((chunk, idx) =>
+        {
+            var data = dataFactory(chunk.start, chunk.count);
+            var request = P2PKernelSerializer.CreateDispatch(method, chunk.count);
+            request.Buffers = new[]
+            {
+                new BufferBinding
+                {
+                    ParameterIndex = 1,
+                    BufferId = $"dist_{idx}",
+                    Length = chunk.count,
+                    ElementSize = elementSize,
+                }
+            };
+            return Dispatcher.DispatchAsync(request);
+        }).ToList();
+
+        var results = await Task.WhenAll(tasks);
+        sw.Stop();
+
+        return new DistributedResult
+        {
+            TotalElements = totalElements,
+            WallTimeMs = sw.Elapsed.TotalMilliseconds,
+            Chunks = chunks.Select((c, i) => new DistributedChunk
+            {
+                PeerId = c.peer.PeerId,
+                StartElement = c.start,
+                ElementCount = c.count,
+                Success = results[i].Success,
+                DurationMs = results[i].DurationMs,
+                Error = results[i].Error,
+            }).ToArray(),
+        };
+    }
+
+    /// <summary>
     /// Create a typed dispatch helper for a specific kernel method.
     /// Caches the method reference for repeated dispatch.
     ///
@@ -413,4 +498,41 @@ public class RemotePeer
     {
         IsConnected = false;
     }
+}
+
+/// <summary>
+/// Result of a distributed dispatch across multiple peers.
+/// </summary>
+public record DistributedResult
+{
+    /// <summary>Total elements across all chunks.</summary>
+    public long TotalElements { get; init; }
+
+    /// <summary>Wall clock time for the entire distributed dispatch (ms).</summary>
+    public double WallTimeMs { get; init; }
+
+    /// <summary>Per-chunk results.</summary>
+    public DistributedChunk[] Chunks { get; init; } = Array.Empty<DistributedChunk>();
+
+    /// <summary>Number of successful chunks.</summary>
+    public int SuccessCount => Chunks.Count(c => c.Success);
+
+    /// <summary>Number of failed chunks.</summary>
+    public int FailureCount => Chunks.Count(c => !c.Success);
+
+    /// <summary>Aggregate throughput (elements/sec).</summary>
+    public double ThroughputElemPerSec => WallTimeMs > 0 ? TotalElements / (WallTimeMs / 1000.0) : 0;
+}
+
+/// <summary>
+/// One chunk of a distributed dispatch.
+/// </summary>
+public record DistributedChunk
+{
+    public string PeerId { get; init; } = "";
+    public long StartElement { get; init; }
+    public int ElementCount { get; init; }
+    public bool Success { get; init; }
+    public double DurationMs { get; init; }
+    public string? Error { get; init; }
 }
