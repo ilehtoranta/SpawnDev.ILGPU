@@ -47,14 +47,14 @@ namespace SpawnDev.ILGPU.WebGPU
             {
                 try { BlazorJS.BlazorJSRuntime.JS.Set("wgslDebug", wgslSource); } catch { }
             }
+            // Push validation error scope BEFORE shader/pipeline creation to capture both
+            device.PushErrorScope(GPUErrorFilter.Validation);
+
             var shaderDescriptor = new GPUShaderModuleDescriptor
             {
                 Code = wgslSource
             };
             _shaderModule = device.CreateShaderModule(shaderDescriptor);
-
-            // Push validation error scope to capture silent pipeline creation failures
-            device.PushErrorScope(GPUErrorFilter.Validation);
 
             // Create compute pipeline with optional override constants
             var programmableStage = new GPUProgrammableStage
@@ -162,22 +162,32 @@ namespace SpawnDev.ILGPU.WebGPU
 
         private static async Task CheckShaderAsync(GPUShaderModule shaderModule, string entryPoint, GPUDevice device)
         {
-            if (!Backend.WebGPUBackend.VerboseLogging) return;
             try
             {
-                using var info = await shaderModule.GetCompilationInfo();
-                foreach (var msg in info.Messages)
-                {
-                    if (msg.Type == "error" || msg.Type == "warning")
-                        Backend.WebGPUBackend.Log($"[WGSL-{msg.Type.ToUpper()}] {entryPoint} L{msg.LineNum}:{msg.LinePos} - {msg.Message}");
-                }
+                // Always pop the error scope — leaving it open leaks and masks subsequent errors
                 using var error = await device.PopErrorScope();
                 if (error != null)
-                    Backend.WebGPUBackend.Log($"[WebGPU-ValidationError] {entryPoint}: {error.Message}");
+                {
+                    var msg = $"[WebGPU-ValidationError] {entryPoint}: {error.Message}";
+                    if (Backend.WebGPUBackend.VerboseLogging)
+                        Backend.WebGPUBackend.Log(msg);
+                    // Even without verbose logging, the error is still captured and scope is popped
+                }
+
+                if (Backend.WebGPUBackend.VerboseLogging)
+                {
+                    using var info = await shaderModule.GetCompilationInfo();
+                    foreach (var msg in info.Messages)
+                    {
+                        if (msg.Type == "error" || msg.Type == "warning")
+                            Backend.WebGPUBackend.Log($"[WGSL-{msg.Type.ToUpper()}] {entryPoint} L{msg.LineNum}:{msg.LinePos} - {msg.Message}");
+                    }
+                }
             }
             catch (Exception ex)
             {
-                Backend.WebGPUBackend.Log($"[WGSL-Check] Exception for {entryPoint}: {ex.Message}");
+                if (Backend.WebGPUBackend.VerboseLogging)
+                    Backend.WebGPUBackend.Log($"[WGSL-Check] Exception for {entryPoint}: {ex.Message}");
             }
         }
 

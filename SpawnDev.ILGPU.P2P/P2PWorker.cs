@@ -35,6 +35,15 @@ public class P2PWorker : IAsyncDisposable
     private string _coordinatorPeerId = "";
 
     /// <summary>
+    /// Called when the coordinator changes (transfer, election, or announcement).
+    /// Clears the cached coordinator peer ID so the next dispatch re-verifies authority.
+    /// </summary>
+    public void NotifyCoordinatorChanged()
+    {
+        _coordinatorPeerId = "";
+    }
+
+    /// <summary>
     /// The swarm's KeyRegistry for verifying coordinator authority.
     /// Set via SetKeyRegistry when joining a swarm.
     /// </summary>

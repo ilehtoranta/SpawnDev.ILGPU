@@ -481,6 +481,7 @@ public class P2PTransport : IAsyncDisposable
         }
 
         OnCoordinatorTransferred?.Invoke(peerId);
+        _worker?.NotifyCoordinatorChanged();
     }
 
     private void HandleCoordinatorAnnounce(string peerId, P2PMessage message)
@@ -491,6 +492,7 @@ public class P2PTransport : IAsyncDisposable
         {
             _coordinator.CoordinatorPeerId = data.NewCoordinatorPeerId;
             _coordinator.Role = P2PRole.Worker;
+            _worker?.NotifyCoordinatorChanged();
         }
     }
 
@@ -553,6 +555,9 @@ public class P2PTransport : IAsyncDisposable
     /// <inheritdoc/>
     public ValueTask DisposeAsync()
     {
+        // Disable all channels before clearing to prevent sends on disposed transport
+        foreach (var channel in _channels.Values)
+            channel.SendAsync = _ => Task.CompletedTask;
         _channels.Clear();
         return ValueTask.CompletedTask;
     }
