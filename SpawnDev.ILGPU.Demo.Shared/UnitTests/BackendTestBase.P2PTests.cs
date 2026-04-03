@@ -4780,11 +4780,10 @@ public abstract partial class BackendTestBase
     public void P2P_Reputation_InitialScore()
     {
         var peer = new RemotePeer { PeerId = "test", IsConnected = true };
-        // New peer with no dispatches: base = 0.5 + (SuccessRate=1.0 * 0.5) = 1.0
-        // Anonymous identity bonus = 0 → total = 1.0 (capped)
-        // New peers start optimistic — they haven't failed yet
-        if (peer.Reputation < 0.9 || peer.Reputation > 1.01)
-            throw new Exception($"New anonymous peer reputation should be ~1.0 (optimistic start), got {peer.Reputation:F3}");
+        // New peer with no dispatches: base = 0.7 (moderate start)
+        // Anonymous identity bonus = 0 → total = 0.7
+        if (peer.Reputation < 0.65 || peer.Reputation > 0.75)
+            throw new Exception($"New anonymous peer reputation should be ~0.7, got {peer.Reputation:F3}");
     }
 
     [TestMethod]

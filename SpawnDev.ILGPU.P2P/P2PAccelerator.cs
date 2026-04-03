@@ -448,8 +448,9 @@ public class RemotePeer
     {
         get
         {
-            // Base: success rate (or 0.5 for new peers with no history)
-            double base_ = DispatchCount >= 3 ? SuccessRate : 0.5 + (SuccessRate * 0.5);
+            // Base: success rate for established peers, moderate start for new peers.
+            // New peers start at 0.7 (not 1.0) so identity bonus has room to differentiate.
+            double base_ = DispatchCount >= 3 ? SuccessRate : 0.7;
 
             // Identity bonus: anonymous=0, identified=0.1, verified=0.2
             double identityBonus = 0;
