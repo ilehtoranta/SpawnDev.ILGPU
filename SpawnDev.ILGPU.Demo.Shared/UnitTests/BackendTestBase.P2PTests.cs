@@ -4854,4 +4854,105 @@ public abstract partial class BackendTestBase
         if (Math.Abs(peer.SuccessRate - 1.0 / 3.0) > 0.01)
             throw new Exception($"Expected ~33% success rate, got {peer.SuccessRate:P0}");
     }
+
+    // ═══════════════════════════════════════════════════════════
+    //  DispatchPipeline Tests
+    // ═══════════════════════════════════════════════════════════
+
+    [TestMethod]
+    public void P2P_Pipeline_Create_Empty()
+    {
+        using var ctx = global::ILGPU.Context.CreateDefault();
+        var device = new P2PDevice();
+        using var accel = (P2PAccelerator)device.CreateAccelerator(ctx);
+        var pipeline = new P2PDispatchPipeline(accel);
+        if (pipeline.StageCount != 0)
+            throw new Exception($"New pipeline should have 0 stages, got {pipeline.StageCount}");
+    }
+
+    [TestMethod]
+    public void P2P_Pipeline_AddStages()
+    {
+        using var ctx = global::ILGPU.Context.CreateDefault();
+        var device = new P2PDevice();
+        using var accel = (P2PAccelerator)device.CreateAccelerator(ctx);
+
+        var pipeline = new P2PDispatchPipeline(accel)
+            .Add(typeof(P2PDemoKernels), nameof(P2PDemoKernels.MultiplyBy2), 1024,
+                ("data", new byte[1024 * 4], 4))
+            .Add(typeof(P2PDemoKernels), nameof(P2PDemoKernels.MultiplyBy2), 1024,
+                ("data", null, 4));
+
+        if (pipeline.StageCount != 2)
+            throw new Exception($"Pipeline should have 2 stages, got {pipeline.StageCount}");
+    }
+
+    [TestMethod]
+    public void P2P_Pipeline_InvalidKernel_Throws()
+    {
+        using var ctx = global::ILGPU.Context.CreateDefault();
+        var device = new P2PDevice();
+        using var accel = (P2PAccelerator)device.CreateAccelerator(ctx);
+
+        bool threw = false;
+        try
+        {
+            new P2PDispatchPipeline(accel)
+                .Add(typeof(P2PDemoKernels), "NonExistentKernel", 1024, ("x", null, 4));
+        }
+        catch (ArgumentException) { threw = true; }
+
+        if (!threw)
+            throw new Exception("Adding non-existent kernel should throw ArgumentException");
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    //  DistributedResult Type Tests
+    // ═══════════════════════════════════════════════════════════
+
+    [TestMethod]
+    public void P2P_DistributedResult_AggregatesCorrectly()
+    {
+        var result = new DistributedResult
+        {
+            TotalElements = 1_000_000,
+            WallTimeMs = 500,
+            Chunks = new[]
+            {
+                new DistributedChunk { PeerId = "a", ElementCount = 600_000, Success = true, DurationMs = 400 },
+                new DistributedChunk { PeerId = "b", ElementCount = 400_000, Success = true, DurationMs = 300 },
+            }
+        };
+
+        if (result.SuccessCount != 2)
+            throw new Exception($"Expected 2 successes, got {result.SuccessCount}");
+        if (result.FailureCount != 0)
+            throw new Exception($"Expected 0 failures, got {result.FailureCount}");
+
+        // Throughput: 1M elements / 0.5 seconds = 2M elem/s
+        double expectedThroughput = 1_000_000 / 0.5;
+        if (Math.Abs(result.ThroughputElemPerSec - expectedThroughput) > 1)
+            throw new Exception($"Expected throughput ~{expectedThroughput:N0}, got {result.ThroughputElemPerSec:N0}");
+    }
+
+    [TestMethod]
+    public void P2P_DistributedResult_HandlesFailures()
+    {
+        var result = new DistributedResult
+        {
+            TotalElements = 300_000,
+            WallTimeMs = 1000,
+            Chunks = new[]
+            {
+                new DistributedChunk { PeerId = "a", ElementCount = 100_000, Success = true, DurationMs = 200 },
+                new DistributedChunk { PeerId = "b", ElementCount = 100_000, Success = false, Error = "timeout" },
+                new DistributedChunk { PeerId = "c", ElementCount = 100_000, Success = true, DurationMs = 300 },
+            }
+        };
+
+        if (result.SuccessCount != 2)
+            throw new Exception($"Expected 2 successes, got {result.SuccessCount}");
+        if (result.FailureCount != 1)
+            throw new Exception($"Expected 1 failure, got {result.FailureCount}");
+    }
 }
