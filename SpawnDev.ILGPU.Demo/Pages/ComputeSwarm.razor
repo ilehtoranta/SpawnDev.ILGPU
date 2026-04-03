@@ -788,7 +788,12 @@
                         ($"mand_real_{peerIdx}", realBytes, 4),
                         ($"mand_imag_{peerIdx}", imagBytes, 4));
 
-                    // For demo: compute locally as fallback (P2P dispatch is fire-and-forget for now)
+                    // LOCAL COMPUTATION: The DispatchToSwarm above sends the kernel to
+                    // the peer, but result collection (BufferRequest → BufferData) is not
+                    // yet wired into this demo. The dispatch IS real — it executes on the
+                    // peer. But we render from local CPU here until result readback is
+                    // integrated. When WebTorrent peer connections are working end-to-end,
+                    // replace this with await DispatchAsync + buffer readback.
                     var result = new int[stripPixelCount];
                     for (int i = 0; i < stripPixelCount; i++)
                     {
@@ -914,7 +919,12 @@
         var lastFrame = DateTime.UtcNow;
         while (_nbodyRunning)
         {
-            // Compute forces (CPU fallback — dispatches to swarm in parallel)
+            // LOCAL COMPUTATION with thread parallelism to demonstrate the
+            // visual effect of per-peer chunk coloring. The P2P dispatch path
+            // (NBodyForces kernel) exists and works in unit tests, but this demo
+            // runs locally until WebTorrent peer connections support streaming
+            // buffer exchange per frame. The thread count matches peer count to
+            // show how work would be distributed.
             int peerCount = Math.Max(1, _compute?.PeerCount ?? 1);
             int chunkSize = n / peerCount;
 

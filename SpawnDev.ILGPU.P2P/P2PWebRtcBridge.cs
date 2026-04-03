@@ -145,7 +145,12 @@ public class P2PWebRtcBridge : IAsyncDisposable
             }
             else
             {
-                // No factory extension — register one (legacy path)
+                // No factory extension — this means UseExtension was NOT called before the swarm was created.
+                // The legacy AttachToPeer path registers the extension AFTER the BEP 10 handshake,
+                // which means ext.IsSupported will be false and compute messages won't flow.
+                Console.WriteLine($"[P2PBridge] WARNING: No factory extension for peer {peerId}. " +
+                    "UseExtension must be called BEFORE creating/joining the swarm. " +
+                    "Falling back to post-handshake registration (sd_compute may not work).");
                 AttachToPeer(peerConnection.Wire, peerId);
             }
         };
