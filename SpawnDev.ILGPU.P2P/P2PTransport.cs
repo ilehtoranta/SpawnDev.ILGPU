@@ -102,6 +102,16 @@ public class P2PTransport : IAsyncDisposable
 
         if (message == null) return;
 
+        // Verify the sender is a registered peer (transport-level identity from WebRTC)
+        // CapabilityResponse is exempt — it arrives during initial handshake before registration
+        if (message.Type != P2PMessageType.CapabilityResponse &&
+            message.Type != P2PMessageType.CapabilityRequest &&
+            !_channels.ContainsKey(peerId))
+        {
+            Console.WriteLine($"[P2PTransport] Rejected {message.Type} from unregistered peer {peerId}");
+            return;
+        }
+
         // Verify signatures on authority-sensitive messages
         if (P2PProtocol.RequiresSignature(message.Type))
         {
