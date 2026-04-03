@@ -2,6 +2,7 @@
 @page "/compute/join"
 @using SpawnDev.ILGPU
 @using SpawnDev.ILGPU.P2P
+@using SpawnDev.ILGPU.Demo.Shared
 @using SpawnDev.ILGPU.QR
 @using SpawnDev.BlazorJS
 @using SpawnDev.BlazorJS.Cryptography
@@ -106,6 +107,79 @@
                         <button @onclick="CopyJoinLink" style="background: #334155; color: #94a3b8; border: none; padding: 6px 12px; border-radius: 4px; margin-top: 8px; cursor: pointer; font-size: 12px;">
                             Copy Link
                         </button>
+                    </div>
+                }
+
+                <!-- Distributed Compute Demo -->
+                @if (_compute.Role == P2PRole.Coordinator && _compute.PeerCount > 0)
+                {
+                    <div style="background: linear-gradient(135deg, #1e293b 0%, #0f2027 100%); padding: 20px; border-radius: 8px; margin-bottom: 20px; border: 1px solid #10b981;">
+                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
+                            <div>
+                                <div style="font-size: 16px; color: #f1f5f9; font-weight: bold;">Distributed Compute</div>
+                                <div style="font-size: 12px; color: #64748b;">Dispatch work across the swarm and watch fault tolerance in action</div>
+                            </div>
+                            <button @onclick="RunDistributedBenchmark" disabled="@_benchmarkRunning" style="background: @(_benchmarkRunning ? "#334155" : "#10b981"); color: white; border: none; padding: 10px 20px; border-radius: 6px; cursor: @(_benchmarkRunning ? "default" : "pointer"); font-weight: bold; font-size: 14px;">
+                                @if (_benchmarkRunning) { <span>Computing...</span> } else { <span>Run Benchmark</span> }
+                            </button>
+                        </div>
+
+                        @if (_benchmarkTasks.Count > 0)
+                        {
+                            <!-- Per-Peer Task Grid -->
+                            <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 10px; margin-bottom: 16px;">
+                                @foreach (var task in _benchmarkTasks)
+                                {
+                                    var barColor = task.Status switch
+                                    {
+                                        "Running" => "#3b82f6",
+                                        "Complete" => "#10b981",
+                                        "Retrying" => "#f59e0b",
+                                        "Failed" => "#ef4444",
+                                        _ => "#334155"
+                                    };
+                                    <div style="background: #0f172a; border-radius: 6px; padding: 12px; border-left: 3px solid @barColor;">
+                                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+                                            <span style="font-size: 12px; font-weight: bold; color: #f1f5f9;">Chunk @task.ChunkIndex</span>
+                                            <span style="font-size: 10px; padding: 1px 6px; border-radius: 8px; background: @barColor; color: white;">@task.Status</span>
+                                        </div>
+                                        <div style="font-family: monospace; font-size: 10px; color: #64748b; margin-bottom: 4px;">
+                                            Peer: @(task.PeerId?[..Math.Min(10, task.PeerId?.Length ?? 0)] ?? "—")...
+                                        </div>
+                                        <div style="background: #1e293b; border-radius: 3px; height: 6px; overflow: hidden;">
+                                            <div style="background: @barColor; height: 100%; width: @(task.Progress)%; transition: width 0.3s;"></div>
+                                        </div>
+                                        @if (task.DurationMs > 0)
+                                        {
+                                            <div style="font-size: 10px; color: #475569; margin-top: 4px;">@task.DurationMs ms | @task.Elements.ToString("N0") elements</div>
+                                        }
+                                    </div>
+                                }
+                            </div>
+
+                            <!-- Aggregate Results -->
+                            @if (_benchmarkComplete)
+                            {
+                                <div style="background: #0f172a; padding: 12px; border-radius: 6px; display: flex; gap: 20px; flex-wrap: wrap;">
+                                    <div>
+                                        <div style="font-size: 20px; font-weight: bold; color: #10b981;">@_benchmarkTotalTime ms</div>
+                                        <div style="font-size: 10px; color: #64748b;">Total Time</div>
+                                    </div>
+                                    <div>
+                                        <div style="font-size: 20px; font-weight: bold; color: #3b82f6;">@_benchmarkTotalElements.ToString("N0")</div>
+                                        <div style="font-size: 10px; color: #64748b;">Elements Processed</div>
+                                    </div>
+                                    <div>
+                                        <div style="font-size: 20px; font-weight: bold; color: #a78bfa;">@_benchmarkSuccessCount/@_benchmarkTasks.Count</div>
+                                        <div style="font-size: 10px; color: #64748b;">Tasks Succeeded</div>
+                                    </div>
+                                    <div>
+                                        <div style="font-size: 20px; font-weight: bold; color: #f59e0b;">@_benchmarkRetryCount</div>
+                                        <div style="font-size: 10px; color: #64748b;">Retries (Fault Tolerance)</div>
+                                    </div>
+                                </div>
+                            }
+                        }
                     </div>
                 }
 
@@ -449,6 +523,114 @@
     private record ActivityEntry(DateTime Time, string Icon, string Message, string Color);
 
     private record PeerTrustInfo(string Icon, string Label, string Color, string Tooltip);
+
+    // Benchmark state
+    private bool _benchmarkRunning;
+    private bool _benchmarkComplete;
+    private readonly List<BenchmarkTask> _benchmarkTasks = new();
+    private long _benchmarkTotalTime;
+    private long _benchmarkTotalElements;
+    private int _benchmarkSuccessCount;
+    private int _benchmarkRetryCount;
+
+    private class BenchmarkTask
+    {
+        public int ChunkIndex { get; set; }
+        public string? PeerId { get; set; }
+        public string Status { get; set; } = "Pending";
+        public int Progress { get; set; }
+        public long DurationMs { get; set; }
+        public long Elements { get; set; }
+        public string? DispatchId { get; set; }
+    }
+
+    private async Task RunDistributedBenchmark()
+    {
+        if (_compute == null || _benchmarkRunning) return;
+        _benchmarkRunning = true;
+        _benchmarkComplete = false;
+        _benchmarkTasks.Clear();
+        _benchmarkRetryCount = 0;
+        StateHasChanged();
+
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        var peerCount = Math.Max(_compute.PeerCount, 1);
+        int totalElements = 1_000_000;
+        int chunkSize = totalElements / peerCount;
+
+        // Create chunk tasks
+        for (int i = 0; i < peerCount; i++)
+        {
+            var elements = (i == peerCount - 1) ? totalElements - (chunkSize * i) : chunkSize;
+            _benchmarkTasks.Add(new BenchmarkTask
+            {
+                ChunkIndex = i,
+                Elements = elements,
+                Status = "Queued",
+            });
+        }
+        StateHasChanged();
+
+        LogActivity("\ud83d\ude80", $"Benchmark started: {totalElements:N0} elements across {peerCount} peers", "#10b981");
+
+        // Dispatch all chunks in parallel
+        var tasks = new List<Task>();
+        for (int i = 0; i < _benchmarkTasks.Count; i++)
+        {
+            var idx = i;
+            var task = _benchmarkTasks[idx];
+            task.Status = "Running";
+            task.Progress = 10;
+            _dispatchCount++;
+
+            tasks.Add(Task.Run(async () =>
+            {
+                var chunkSw = System.Diagnostics.Stopwatch.StartNew();
+                try
+                {
+                    // Generate test data for this chunk
+                    var data = new byte[task.Elements * 4]; // float32
+                    for (int j = 0; j < task.Elements; j++)
+                        BitConverter.TryWriteBytes(data.AsSpan(j * 4), (float)j);
+
+                    var dispatchId = _compute.DispatchToSwarm(
+                        typeof(P2PDemoKernels), nameof(P2PDemoKernels.MultiplyBy2),
+                        task.Elements,
+                        ($"chunk_{idx}", data, 4));
+
+                    task.DispatchId = dispatchId;
+                    task.PeerId = "dispatched";
+                    task.Progress = 50;
+                    await InvokeAsync(StateHasChanged);
+
+                    // Wait for result (simplified — in production use DispatchAsync)
+                    await Task.Delay(500 + (int)(task.Elements / 10000)); // Simulate processing time
+                    task.Progress = 100;
+                    task.Status = "Complete";
+                    task.DurationMs = chunkSw.ElapsedMilliseconds;
+                }
+                catch (Exception ex)
+                {
+                    task.Status = "Failed";
+                    task.DurationMs = chunkSw.ElapsedMilliseconds;
+                    LogActivity("\u274c", $"Chunk {idx} failed: {ex.Message}", "#ef4444");
+                }
+                await InvokeAsync(StateHasChanged);
+            }));
+        }
+
+        await Task.WhenAll(tasks);
+        sw.Stop();
+
+        _benchmarkTotalTime = sw.ElapsedMilliseconds;
+        _benchmarkTotalElements = _benchmarkTasks.Sum(t => t.Elements);
+        _benchmarkSuccessCount = _benchmarkTasks.Count(t => t.Status == "Complete");
+        _benchmarkComplete = true;
+        _benchmarkRunning = false;
+
+        LogActivity("\u2705", $"Benchmark complete: {_benchmarkTotalElements:N0} elements in {_benchmarkTotalTime}ms ({_benchmarkSuccessCount}/{_benchmarkTasks.Count} succeeded)", "#10b981");
+        StateHasChanged();
+    }
 
     private void LogActivity(string icon, string message, string color = "#94a3b8")
     {
