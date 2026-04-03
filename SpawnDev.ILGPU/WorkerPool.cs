@@ -214,7 +214,10 @@ self.onmessage = async function(e) {
                         worker.Terminate();
                         worker.Dispose();
                     }
-                    catch { }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"[WorkerPool] Worker termination failed: {ex.Message}");
+                    }
                 }
                 _allWorkers.Clear();
             }

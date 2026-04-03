@@ -946,7 +946,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             }
 
             // Fire callback for browser shader debug (ShaderDebugService)
-            try { OnShaderCompiled?.Invoke(methodName, wgslSource, WGSLRegistry[methodName]); } catch { }
+            try { OnShaderCompiled?.Invoke(methodName, wgslSource, WGSLRegistry[methodName]); }
+            catch (Exception ex) { if (VerboseLogging) Log($"[WebGPU] OnShaderCompiled subscriber error: {ex.Message}"); }
 
             if (VerboseLogging)
             {
