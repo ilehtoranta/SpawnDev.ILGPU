@@ -288,7 +288,10 @@ public class P2PCompute : IAsyncDisposable
             if (!string.IsNullOrEmpty(origin))
                 return origin + (path ?? "");
         }
-        catch { }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[P2PCompute] GetBrowserBaseUrl failed: {ex.Message}");
+        }
         return null;
     }
 

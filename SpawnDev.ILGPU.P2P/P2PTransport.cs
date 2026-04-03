@@ -232,7 +232,8 @@ public class P2PTransport : IAsyncDisposable
         var data = P2PProtocol.Serialize(message);
         foreach (var channel in _channels.Values)
         {
-            try { await channel.SendAsync(data); } catch { }
+            try { await channel.SendAsync(data); }
+            catch (Exception ex) { Console.WriteLine($"[P2PTransport] Broadcast send to {channel.PeerId} failed: {ex.Message}"); }
         }
     }
 
@@ -273,7 +274,8 @@ public class P2PTransport : IAsyncDisposable
         var data = P2PProtocol.Serialize(message);
         foreach (var channel in _channels.Values)
         {
-            try { await channel.SendAsync(data); } catch { }
+            try { await channel.SendAsync(data); }
+            catch (Exception ex) { Console.WriteLine($"[P2PTransport] Broadcast send to {channel.PeerId} failed: {ex.Message}"); }
         }
     }
 
