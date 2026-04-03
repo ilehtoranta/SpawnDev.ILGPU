@@ -274,6 +274,12 @@
                                             <div title="@trustInfo.Tooltip">
                                                 <span style="font-size: 14px;">@trustInfo.Icon</span>
                                                 <div style="font-size: 9px; color: @trustInfo.Color;">@trustInfo.Label</div>
+                                                @if (peer.DispatchCount > 0)
+                                                {
+                                                    <div style="font-size: 9px; color: @(peer.SuccessRate >= 0.9 ? "#10b981" : peer.SuccessRate >= 0.5 ? "#f59e0b" : "#ef4444");">
+                                                        @peer.SuccessCount/@peer.DispatchCount (@(peer.SuccessRate * 100):F0%)
+                                                    </div>
+                                                }
                                             </div>
                                         </td>
                                         <td style="text-align: right; padding: 8px 6px; color: #10b981; font-weight: bold;">@(peer.Capabilities?.EstimatedTflops.ToString("N1") ?? "-")</td>
