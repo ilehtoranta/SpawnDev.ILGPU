@@ -133,7 +133,10 @@ public class P2PStateManager
                     OnCoordinatorAnnounced?.Invoke(announcement);
             }
         }
-        catch { }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[P2PState] Failed to process state update: {ex.Message}");
+        }
     }
 
     /// <summary>

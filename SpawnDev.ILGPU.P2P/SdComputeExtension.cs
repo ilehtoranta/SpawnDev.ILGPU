@@ -109,7 +109,10 @@ public class SdComputeExtension : WireExtension
                     };
                     await SendP2PMessageAsync(capMsg);
                 }
-                catch { }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[sd_compute] Capability exchange failed for peer {_peerId}: {ex.Message}");
+                }
             });
         }
     }

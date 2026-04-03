@@ -2990,7 +2990,10 @@ public abstract partial class BackendTestBase
                 p2pAccel.DispatchToSwarm(method, 256, (bufId, new byte[256 * 4], 4));
                 dispatched++;
             }
-            catch { }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[P2P Resilience] Dispatch {i} failed (expected under stress): {ex.Message}");
+            }
         }
 
         if (dispatched < 3)

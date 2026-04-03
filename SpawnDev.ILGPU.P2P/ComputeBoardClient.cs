@@ -38,7 +38,10 @@ public class ComputeBoardClient
             if (response.IsSuccessStatusCode)
                 return await response.Content.ReadFromJsonAsync<ComputeBoardRequest>();
         }
-        catch { }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[ComputeBoard] POST failed: {ex.Message}");
+        }
         return null;
     }
 

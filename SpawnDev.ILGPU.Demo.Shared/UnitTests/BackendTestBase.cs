@@ -101,17 +101,21 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
 
         private void InvalidateCache()
         {
-            try { _cachedAccelerator?.Dispose(); } catch { }
+            try { _cachedAccelerator?.Dispose(); }
+            catch (Exception ex) { Console.WriteLine($"[Test] Accelerator disposal warning: {ex.Message}"); }
             _cachedAccelerator = null;
-            try { _cachedContext?.Dispose(); } catch { }
+            try { _cachedContext?.Dispose(); }
+            catch (Exception ex) { Console.WriteLine($"[Test] Context disposal warning: {ex.Message}"); }
             _cachedContext = null;
         }
 
         private void InvalidateEmulatedCache()
         {
-            try { _cachedEmulatedAccelerator?.Dispose(); } catch { }
+            try { _cachedEmulatedAccelerator?.Dispose(); }
+            catch (Exception ex) { Console.WriteLine($"[Test] Emulated accelerator disposal warning: {ex.Message}"); }
             _cachedEmulatedAccelerator = null;
-            try { _cachedEmulatedContext?.Dispose(); } catch { }
+            try { _cachedEmulatedContext?.Dispose(); }
+            catch (Exception ex) { Console.WriteLine($"[Test] Emulated context disposal warning: {ex.Message}"); }
             _cachedEmulatedContext = null;
         }
 

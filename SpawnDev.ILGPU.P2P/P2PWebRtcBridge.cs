@@ -74,7 +74,10 @@ public class P2PWebRtcBridge : IAsyncDisposable
                     if (msg.Payload.HasValue)
                         caps = System.Text.Json.JsonSerializer.Deserialize<PeerCapabilities>(msg.Payload.Value);
                 }
-                catch { }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[P2PBridge] Failed to deserialize capabilities from peer {peerId}: {ex.Message}");
+                }
                 OnComputePeerConnected?.Invoke(peerId);
                 OnComputePeerCapabilities?.Invoke(peerId, caps);
             }
@@ -113,7 +116,10 @@ public class P2PWebRtcBridge : IAsyncDisposable
                             if (msg.Payload.HasValue)
                                 caps = System.Text.Json.JsonSerializer.Deserialize<PeerCapabilities>(msg.Payload.Value);
                         }
-                        catch { }
+                        catch (Exception ex)
+                        {
+                            Console.WriteLine($"[P2PBridge] Failed to deserialize capabilities from peer {peerId}: {ex.Message}");
+                        }
                         OnComputePeerConnected?.Invoke(peerId);
                         OnComputePeerCapabilities?.Invoke(peerId, caps);
                     }
@@ -129,7 +135,10 @@ public class P2PWebRtcBridge : IAsyncDisposable
                             caps = System.Text.Json.JsonSerializer.Deserialize<PeerCapabilities>(
                                 existing.LastCapabilityResponse.Payload.Value);
                     }
-                    catch { }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"[P2PBridge] Failed to deserialize buffered capabilities from peer {peerId}: {ex.Message}");
+                    }
                     OnComputePeerConnected?.Invoke(peerId);
                     OnComputePeerCapabilities?.Invoke(peerId, caps);
                 }
