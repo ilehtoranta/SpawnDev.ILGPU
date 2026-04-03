@@ -54,7 +54,11 @@ public class ComputeBoardClient
         {
             return await _http.GetFromJsonAsync<List<ComputeBoardRequest>>($"{BaseUrl}/compute/requests") ?? new();
         }
-        catch { return new(); }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[ComputeBoard] GET requests failed: {ex.Message}");
+            return new();
+        }
     }
 
     /// <summary>
@@ -66,7 +70,11 @@ public class ComputeBoardClient
         {
             return await _http.GetFromJsonAsync<ComputeBoardStats>($"{BaseUrl}/compute/stats");
         }
-        catch { return null; }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[ComputeBoard] GET stats failed: {ex.Message}");
+            return null;
+        }
     }
 
     /// <summary>
@@ -80,7 +88,11 @@ public class ComputeBoardClient
                 $"{BaseUrl}/compute/request/{id}?fingerprint={Uri.EscapeDataString(ownerFingerprint)}");
             return response.IsSuccessStatusCode;
         }
-        catch { return false; }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[ComputeBoard] DELETE failed: {ex.Message}");
+            return false;
+        }
     }
 
     /// <summary>

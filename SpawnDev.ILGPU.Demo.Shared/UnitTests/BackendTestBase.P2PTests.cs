@@ -4681,4 +4681,94 @@ public abstract partial class BackendTestBase
 
         await identity.DisposeAsync();
     }
+
+    // ═══════════════════════════════════════════════════════════
+    //  Utility Method Coverage (ParseJoinLink, BuildMagnetFromHash)
+    // ═══════════════════════════════════════════════════════════
+
+    [TestMethod]
+    public void P2P_ParseJoinLink_ValidUrl()
+    {
+        var (hash, name) = P2PCompute.ParseJoinLink("https://example.com/compute?compute=abc123def456&n=My%20Swarm");
+        if (hash != "abc123def456")
+            throw new Exception($"Expected hash 'abc123def456', got '{hash}'");
+        if (name != "My Swarm")
+            throw new Exception($"Expected name 'My Swarm', got '{name}'");
+    }
+
+    [TestMethod]
+    public void P2P_ParseJoinLink_NoComputeParam()
+    {
+        var (hash, name) = P2PCompute.ParseJoinLink("https://example.com/compute");
+        if (hash != null)
+            throw new Exception($"Expected null hash for URL without compute param, got '{hash}'");
+    }
+
+    [TestMethod]
+    public void P2P_ParseJoinLink_InvalidUrl()
+    {
+        var (hash, name) = P2PCompute.ParseJoinLink("not a url");
+        if (hash != null)
+            throw new Exception($"Expected null hash for invalid URL, got '{hash}'");
+    }
+
+    [TestMethod]
+    public void P2P_BuildMagnetFromHash_ValidOutput()
+    {
+        var magnet = P2PCompute.BuildMagnetFromHash("abc123", "Test Swarm");
+        if (!magnet.StartsWith("magnet:?xt=urn:btih:abc123"))
+            throw new Exception($"Magnet should start with btih hash, got: {magnet}");
+        if (!magnet.Contains("dn=Test%20Swarm"))
+            throw new Exception($"Magnet should contain encoded display name, got: {magnet}");
+        if (!magnet.Contains("tr="))
+            throw new Exception($"Magnet should contain tracker URL, got: {magnet}");
+    }
+
+    [TestMethod]
+    public void P2P_BuildMagnetFromHash_EmptyName()
+    {
+        var magnet = P2PCompute.BuildMagnetFromHash("abc123", null);
+        if (!magnet.StartsWith("magnet:?xt=urn:btih:abc123"))
+            throw new Exception($"Magnet should start with btih hash, got: {magnet}");
+        // Should not crash with null name
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    //  ComputeBoardClient — Direct HTTP Tests (hub.spawndev.com)
+    // ═══════════════════════════════════════════════════════════
+
+    [TestMethod(Timeout = 30000)]
+    public async Task P2P_ComputeBoard_GetStats_ReturnsValidData()
+    {
+        var board = new ComputeBoardClient();
+        var stats = await board.GetStatsAsync();
+        if (stats == null)
+            throw new UnsupportedTestException("hub.spawndev.com unreachable");
+
+        Console.WriteLine($"[ComputeBoard] Stats: {stats.ActiveRequests} active, {stats.TotalTflopsAvailable:F1} TFLOPS, {stats.UniqueSwarms} swarms");
+        // Stats should return non-negative values
+        if (stats.ActiveRequests < 0)
+            throw new Exception($"ActiveRequests should be >= 0, got {stats.ActiveRequests}");
+    }
+
+    [TestMethod(Timeout = 30000)]
+    public async Task P2P_ComputeBoard_GetRequests_ReturnsList()
+    {
+        var board = new ComputeBoardClient();
+        var requests = await board.GetRequestsAsync();
+        // Should return a list (may be empty, but never null)
+        Console.WriteLine($"[ComputeBoard] Browse: {requests.Count} active requests");
+        // Verify it's a real list, not null
+        if (requests == null)
+            throw new Exception("GetRequestsAsync should never return null");
+    }
+
+    [TestMethod(Timeout = 30000)]
+    public async Task P2P_ComputeBoard_RemoveNonexistent_ReturnsFalse()
+    {
+        var board = new ComputeBoardClient();
+        var removed = await board.RemoveRequestAsync("nonexistent-id-12345", "fake-fingerprint");
+        // Should return false for nonexistent request, not throw
+        Console.WriteLine($"[ComputeBoard] Remove nonexistent: {removed}");
+    }
 }

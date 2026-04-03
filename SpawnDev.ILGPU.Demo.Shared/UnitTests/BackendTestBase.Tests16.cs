@@ -204,5 +204,71 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                 if (MathF.Abs(result[i] - srcData[i]) > 0.001f)
                     throw new Exception($"CopyToHostAsync [{i}]: expected={srcData[i]:F3}, got={result[i]:F3}");
         });
+
+        // --- Buffer Aliasing Detection Kernels ---
+        static void AliasingKernel(Index1D idx, ArrayView<float> input, ArrayView<float> output)
+        {
+            output[idx] = input[idx] * 2.0f;
+        }
+
+        /// <summary>
+        /// WebGPU should detect and reject overlapping buffer bindings.
+        /// Other backends may allow aliasing (CUDA/CPU don't have this restriction).
+        /// This test verifies the aliasing detection works correctly on WebGPU.
+        /// </summary>
+        [TestMethod]
+        public async Task BufferAliasing_SameBufferTwoParams_WebGPUDetectsTest() => await RunTest(async accelerator =>
+        {
+            if (accelerator.AcceleratorType != AcceleratorType.WebGPU)
+                throw new UnsupportedTestException("Buffer aliasing detection is WebGPU-specific");
+
+            int length = 256;
+            using var buf = accelerator.Allocate1D<float>(length);
+
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<float>, ArrayView<float>>(AliasingKernel);
+
+            // Pass the SAME buffer as both input and output — should throw on WebGPU
+            bool threw = false;
+            try
+            {
+                kernel((Index1D)length, buf.View, buf.View);
+                await accelerator.SynchronizeAsync();
+            }
+            catch (InvalidOperationException ex) when (ex.Message.Contains("aliasing") || ex.Message.Contains("Aliasing") || ex.Message.Contains("same buffer"))
+            {
+                threw = true;
+                Console.WriteLine($"[Aliasing] Correctly detected: {ex.Message}");
+            }
+
+            if (!threw)
+                throw new Exception("WebGPU should detect and reject same-buffer aliasing for read_write bindings");
+        });
+
+        /// <summary>
+        /// Verify two DIFFERENT buffers with same element type dispatch correctly.
+        /// This is the correct pattern — no aliasing.
+        /// </summary>
+        [TestMethod]
+        public async Task BufferAliasing_DifferentBuffers_WorksTest() => await RunTest(async accelerator =>
+        {
+            int length = 256;
+            var inputData = new float[length];
+            for (int i = 0; i < length; i++) inputData[i] = i * 0.5f;
+
+            using var inputBuf = accelerator.Allocate1D(inputData);
+            using var outputBuf = accelerator.Allocate1D<float>(length);
+
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<float>, ArrayView<float>>(AliasingKernel);
+            kernel((Index1D)length, inputBuf.View, outputBuf.View);
+            await accelerator.SynchronizeAsync();
+
+            var result = await outputBuf.CopyToHostAsync<float>();
+            for (int i = 0; i < length; i++)
+            {
+                float expected = i * 1.0f; // 0.5 * 2
+                if (MathF.Abs(result[i] - expected) > 0.01f)
+                    throw new Exception($"Non-aliased dispatch [{i}]: expected={expected:F2}, got={result[i]:F2}");
+            }
+        });
     }
 }
