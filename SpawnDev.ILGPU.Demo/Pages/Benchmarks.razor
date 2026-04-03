@@ -8,7 +8,11 @@
 @using SpawnDev.BlazorJS
 @using SpawnDev.BlazorJS.JSObjects
 @using SpawnDev.ILGPU.Demo.Shared.Benchmarks
+@using SpawnDev.ILGPU.Demo.Shared
+@using SpawnDev.ILGPU.Demo.Shared.Services
+@using SpawnDev.ILGPU.P2P
 @using ILGPU
+@inject P2PSwarmService SwarmService
 @using System.Diagnostics
 @using global::ILGPU
 @using global::ILGPU.Runtime
@@ -84,6 +88,78 @@
                     </div>
                 }
             </div>
+        </div>
+    }
+
+    @* ── P2P Swarm Benchmark ── *@
+    @if (SwarmService.HasSwarm)
+    {
+        <div class="bench-card" style="border: 1px solid #10b981;">
+            <div class="bench-card-header" style="display: flex; justify-content: space-between; align-items: center;">
+                <div>
+                    <h2 style="color: #10b981;">🌐 P2P Swarm Benchmark</h2>
+                    <span class="bench-card-desc">Distribute compute across @SwarmService.PeerCount peers (@SwarmService.TotalTflops.ToString("N1") TFLOPS)</span>
+                </div>
+                <button class="btn-run @(_p2pRunning ? "disabled" : "")" @onclick="RunP2PBenchmark" disabled="@(_p2pRunning || !SwarmService.IsActive)" style="background: #10b981;">
+                    @if (_p2pRunning)
+                    {
+                        <span class="spinner"></span>
+                        <span>Running…</span>
+                    }
+                    else if (!SwarmService.IsActive)
+                    {
+                        <span>⏳ Waiting for peers</span>
+                    }
+                    else
+                    {
+                        <span>▶ Run P2P Benchmark</span>
+                    }
+                </button>
+            </div>
+
+            @if (_p2pResults.Count > 0)
+            {
+                <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 10px; margin-top: 12px;">
+                    @foreach (var pr in _p2pResults)
+                    {
+                        <div style="background: var(--card-bg, #1e293b); border-radius: 6px; padding: 12px; border-left: 3px solid @(pr.Success ? "#10b981" : "#ef4444");">
+                            <div style="font-size: 13px; font-weight: bold; color: var(--text-primary, #f1f5f9);">@pr.Label</div>
+                            <div style="font-family: monospace; font-size: 10px; color: var(--text-muted, #64748b); margin: 2px 0;">Peer: @(pr.PeerId ?? "local")</div>
+                            @if (pr.Success)
+                            {
+                                <div style="font-size: 18px; font-weight: bold; color: #10b981;">@pr.DurationMs.ToString("F1") ms</div>
+                                <div style="font-size: 11px; color: var(--text-muted, #64748b);">@pr.Elements.ToString("N0") elements</div>
+                            }
+                            else
+                            {
+                                <div style="font-size: 12px; color: #ef4444;">@pr.Error</div>
+                            }
+                        </div>
+                    }
+                </div>
+
+                @if (_p2pAggregateMs > 0)
+                {
+                    <div style="margin-top: 12px; padding: 12px; background: var(--card-bg, #0f172a); border-radius: 6px; display: flex; gap: 24px; flex-wrap: wrap;">
+                        <div>
+                            <div style="font-size: 24px; font-weight: bold; color: #10b981;">@_p2pAggregateMs.ToString("F1") ms</div>
+                            <div style="font-size: 11px; color: var(--text-muted, #64748b);">Total Wall Time</div>
+                        </div>
+                        <div>
+                            <div style="font-size: 24px; font-weight: bold; color: #3b82f6;">@_p2pTotalElements.ToString("N0")</div>
+                            <div style="font-size: 11px; color: var(--text-muted, #64748b);">Total Elements</div>
+                        </div>
+                        <div>
+                            <div style="font-size: 24px; font-weight: bold; color: #a78bfa;">@BenchmarkRunner.FormatThroughput(_p2pTotalElements / (_p2pAggregateMs / 1000.0), "elem")</div>
+                            <div style="font-size: 11px; color: var(--text-muted, #64748b);">Aggregate Throughput</div>
+                        </div>
+                        <div>
+                            <div style="font-size: 24px; font-weight: bold; color: #f59e0b;">@_p2pResults.Count(r => r.Success)/@_p2pResults.Count</div>
+                            <div style="font-size: 11px; color: var(--text-muted, #64748b);">Chunks Succeeded</div>
+                        </div>
+                    </div>
+                }
+            }
         </div>
     }
 
@@ -231,6 +307,116 @@
     private int _progressPercent;
     private string _currentBackend = "";
     private readonly List<BenchmarkResult> _results = new();
+
+    // ── P2P Benchmark State ──
+    private bool _p2pRunning;
+    private readonly List<P2PBenchmarkChunk> _p2pResults = new();
+    private double _p2pAggregateMs;
+    private long _p2pTotalElements;
+
+    private record P2PBenchmarkChunk
+    {
+        public string Label { get; init; } = "";
+        public string? PeerId { get; init; }
+        public bool Success { get; init; }
+        public double DurationMs { get; init; }
+        public long Elements { get; init; }
+        public string? Error { get; init; }
+    }
+
+    private async Task RunP2PBenchmark()
+    {
+        if (!SwarmService.IsActive || _p2pRunning) return;
+        var compute = SwarmService.Compute;
+        if (compute == null) return;
+
+        _p2pRunning = true;
+        _p2pResults.Clear();
+        _p2pAggregateMs = 0;
+        _p2pTotalElements = 0;
+        StateHasChanged();
+
+        var sw = Stopwatch.StartNew();
+        int peerCount = compute.PeerCount;
+        int totalElements = 1_000_000;
+
+        // Split proportionally by TFLOPS
+        var peers = compute.Coordinator.GetPeerList().Where(p => p.IsConnected).ToList();
+        double totalTflops = peers.Sum(p => p.Capabilities?.EstimatedTflops ?? 0.1);
+
+        var chunks = new List<(string peerId, int elements)>();
+        int assigned = 0;
+        for (int i = 0; i < peers.Count; i++)
+        {
+            double peerTflops = peers[i].Capabilities?.EstimatedTflops ?? 0.1;
+            int chunkElements = (i == peers.Count - 1)
+                ? totalElements - assigned
+                : (int)(totalElements * (peerTflops / totalTflops));
+            chunks.Add((peers[i].PeerId, chunkElements));
+            assigned += chunkElements;
+
+            _p2pResults.Add(new P2PBenchmarkChunk
+            {
+                Label = $"Chunk {i} ({chunkElements:N0} elem)",
+                PeerId = peers[i].PeerId[..Math.Min(10, peers[i].PeerId.Length)],
+                Elements = chunkElements,
+            });
+        }
+        StateHasChanged();
+
+        // Dispatch all chunks
+        var tasks = new List<Task>();
+        for (int i = 0; i < chunks.Count; i++)
+        {
+            var idx = i;
+            var (peerId, elements) = chunks[idx];
+            tasks.Add(Task.Run(async () =>
+            {
+                var chunkSw = Stopwatch.StartNew();
+                try
+                {
+                    // Generate data
+                    var data = new byte[elements * 4];
+                    for (int j = 0; j < Math.Min(elements, 1000); j++)
+                        BitConverter.TryWriteBytes(data.AsSpan(j * 4), (float)j);
+
+                    compute.DispatchToSwarm(
+                        typeof(P2PDemoKernels), nameof(P2PDemoKernels.MultiplyBy2),
+                        elements,
+                        ($"bench_{idx}", data, 4));
+
+                    // Wait for dispatch acknowledgment
+                    await Task.Delay(100);
+                    chunkSw.Stop();
+
+                    _p2pResults[idx] = _p2pResults[idx] with
+                    {
+                        Success = true,
+                        DurationMs = chunkSw.Elapsed.TotalMilliseconds,
+                    };
+                }
+                catch (Exception ex)
+                {
+                    chunkSw.Stop();
+                    _p2pResults[idx] = _p2pResults[idx] with
+                    {
+                        Success = false,
+                        DurationMs = chunkSw.Elapsed.TotalMilliseconds,
+                        Error = ex.Message,
+                    };
+                }
+                await InvokeAsync(StateHasChanged);
+            }));
+        }
+
+        await Task.WhenAll(tasks);
+        sw.Stop();
+
+        _p2pAggregateMs = sw.Elapsed.TotalMilliseconds;
+        _p2pTotalElements = chunks.Sum(c => (long)c.elements);
+        _p2pRunning = false;
+        StateHasChanged();
+    }
 
     // ── Backend colors ──
     private static string GetBackendColor(string name) => name switch
