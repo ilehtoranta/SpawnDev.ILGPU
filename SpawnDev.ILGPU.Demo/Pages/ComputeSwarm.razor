@@ -67,19 +67,31 @@
 
             @if (_compute != null)
             {
-                <!-- Stats Bar -->
-                <div style="display: flex; gap: 16px; margin-bottom: 20px;">
-                    <div style="background: #1e293b; padding: 16px 24px; border-radius: 8px; flex: 1; text-align: center;">
+                <!-- Swarm Resource Overview -->
+                <div style="display: flex; gap: 12px; margin-bottom: 20px; flex-wrap: wrap;">
+                    <div style="background: #1e293b; padding: 16px 20px; border-radius: 8px; flex: 1; min-width: 120px; text-align: center;">
                         <div style="font-size: 28px; font-weight: bold; color: #10b981;">@_compute.PeerCount</div>
-                        <div style="font-size: 12px; color: #64748b;">Peers</div>
+                        <div style="font-size: 11px; color: #64748b;">Peers</div>
                     </div>
-                    <div style="background: #1e293b; padding: 16px 24px; border-radius: 8px; flex: 1; text-align: center;">
+                    <div style="background: #1e293b; padding: 16px 20px; border-radius: 8px; flex: 1; min-width: 120px; text-align: center;">
                         <div style="font-size: 28px; font-weight: bold; color: #3b82f6;">@_compute.TotalTflops.ToString("N1")</div>
-                        <div style="font-size: 12px; color: #64748b;">TFLOPS</div>
+                        <div style="font-size: 11px; color: #64748b;">Total TFLOPS</div>
                     </div>
-                    <div style="background: #1e293b; padding: 16px 24px; border-radius: 8px; flex: 1; text-align: center;">
+                    <div style="background: #1e293b; padding: 16px 20px; border-radius: 8px; flex: 1; min-width: 120px; text-align: center;">
+                        <div style="font-size: 28px; font-weight: bold; color: #a78bfa;">@FormatBytes(GetTotalMemory())</div>
+                        <div style="font-size: 11px; color: #64748b;">Total Memory</div>
+                    </div>
+                    <div style="background: #1e293b; padding: 16px 20px; border-radius: 8px; flex: 1; min-width: 120px; text-align: center;">
                         <div style="font-size: 28px; font-weight: bold; color: #f59e0b;">@_compute.Role</div>
-                        <div style="font-size: 12px; color: #64748b;">Role</div>
+                        <div style="font-size: 11px; color: #64748b;">Your Role</div>
+                    </div>
+                    <div style="background: #1e293b; padding: 16px 20px; border-radius: 8px; flex: 1; min-width: 120px; text-align: center;">
+                        <div style="font-size: 28px; font-weight: bold; color: @(_dispatching ? "#10b981" : "#334155");">@_dispatchCount</div>
+                        <div style="font-size: 11px; color: #64748b;">Dispatches</div>
+                    </div>
+                    <div style="background: #1e293b; padding: 16px 20px; border-radius: 8px; flex: 1; min-width: 120px; text-align: center;">
+                        <div style="font-size: 28px; font-weight: bold; color: @GetVerifiedColor();">@GetVerifiedCount()/@_compute.PeerCount</div>
+                        <div style="font-size: 11px; color: #64748b;">Verified</div>
                     </div>
                 </div>
 
@@ -145,7 +157,7 @@
                     </div>
                 }
 
-                <!-- Peer List -->
+                <!-- Peer List with Reputation -->
                 <div style="background: #1e293b; padding: 16px; border-radius: 8px; margin-bottom: 20px;">
                     <div style="font-size: 14px; color: #f1f5f9; font-weight: bold; margin-bottom: 12px;">Connected Peers</div>
                     @if (_compute.Coordinator.GetPeerList().Count == 0)
@@ -160,6 +172,7 @@
                             <thead>
                                 <tr style="border-bottom: 1px solid #334155;">
                                     <th style="text-align: left; padding: 6px; color: #64748b; font-size: 11px;">Peer</th>
+                                    <th style="text-align: center; padding: 6px; color: #64748b; font-size: 11px;">Trust</th>
                                     <th style="text-align: right; padding: 6px; color: #64748b; font-size: 11px;">TFLOPS</th>
                                     <th style="text-align: right; padding: 6px; color: #64748b; font-size: 11px;">Memory</th>
                                     <th style="text-align: center; padding: 6px; color: #64748b; font-size: 11px;">Backend</th>
@@ -173,8 +186,21 @@
                             <tbody>
                                 @foreach (var peer in _compute.Coordinator.GetPeerList())
                                 {
+                                    var trustInfo = GetPeerTrust(peer);
                                     <tr style="border-bottom: 1px solid #1a2332;">
-                                        <td style="padding: 8px 6px; font-family: monospace; font-size: 12px; color: #94a3b8;">@peer.PeerId[..Math.Min(12, peer.PeerId.Length)]...</td>
+                                        <td style="padding: 8px 6px;">
+                                            <div style="font-family: monospace; font-size: 12px; color: #94a3b8;">@peer.PeerId[..Math.Min(12, peer.PeerId.Length)]...</div>
+                                            @if (!string.IsNullOrEmpty(peer.Capabilities?.Fingerprint))
+                                            {
+                                                <div style="font-family: monospace; font-size: 9px; color: #334155; margin-top: 1px;" title="ECDSA Fingerprint">@peer.Capabilities.Fingerprint[..Math.Min(16, peer.Capabilities.Fingerprint.Length)]...</div>
+                                            }
+                                        </td>
+                                        <td style="text-align: center; padding: 8px 6px;">
+                                            <div title="@trustInfo.Tooltip">
+                                                <span style="font-size: 14px;">@trustInfo.Icon</span>
+                                                <div style="font-size: 9px; color: @trustInfo.Color;">@trustInfo.Label</div>
+                                            </div>
+                                        </td>
                                         <td style="text-align: right; padding: 8px 6px; color: #10b981; font-weight: bold;">@(peer.Capabilities?.EstimatedTflops.ToString("N1") ?? "-")</td>
                                         <td style="text-align: right; padding: 8px 6px; color: #94a3b8; font-size: 12px;">@FormatBytes(peer.Capabilities?.AvailableMemory ?? 0)</td>
                                         <td style="text-align: center; padding: 8px 6px; font-size: 11px;">
@@ -204,6 +230,34 @@
                             </tbody>
                         </table>
                     }
+                </div>
+
+                <!-- Swarm Activity Log -->
+                <div style="background: #1e293b; padding: 16px; border-radius: 8px; margin-bottom: 20px;">
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+                        <div style="font-size: 14px; color: #f1f5f9; font-weight: bold;">Activity</div>
+                        @if (_activityLog.Count > 0)
+                        {
+                            <button @onclick="() => _activityLog.Clear()" style="background: #334155; color: #64748b; border: none; padding: 2px 8px; border-radius: 4px; cursor: pointer; font-size: 10px;">Clear</button>
+                        }
+                    </div>
+                    <div style="max-height: 200px; overflow-y: auto; font-family: monospace; font-size: 11px;">
+                        @if (_activityLog.Count == 0)
+                        {
+                            <div style="color: #475569; text-align: center; padding: 12px;">Waiting for activity...</div>
+                        }
+                        else
+                        {
+                            @foreach (var entry in _activityLog.AsEnumerable().Reverse().Take(50))
+                            {
+                                <div style="padding: 3px 0; border-bottom: 1px solid #0f172a; color: @entry.Color;">
+                                    <span style="color: #475569;">@entry.Time.ToString("HH:mm:ss")</span>
+                                    <span style="margin-left: 8px;">@entry.Icon</span>
+                                    <span style="margin-left: 4px;">@entry.Message</span>
+                                </div>
+                            }
+                        }
+                    </div>
                 </div>
 
                 <!-- Pending Approvals (Coordinator only, Approval mode) -->
@@ -387,6 +441,83 @@
     private MediaStream? _cameraStream;
     private System.Timers.Timer? _scanTimer;
 
+    // Activity log
+    private readonly List<ActivityEntry> _activityLog = new();
+    private bool _dispatching;
+    private int _dispatchCount;
+
+    private record ActivityEntry(DateTime Time, string Icon, string Message, string Color);
+
+    private record PeerTrustInfo(string Icon, string Label, string Color, string Tooltip);
+
+    private void LogActivity(string icon, string message, string color = "#94a3b8")
+    {
+        _activityLog.Add(new ActivityEntry(DateTime.Now, icon, message, color));
+        if (_activityLog.Count > 200) _activityLog.RemoveAt(0);
+    }
+
+    private PeerTrustInfo GetPeerTrust(RemotePeer peer)
+    {
+        var caps = peer.Capabilities;
+        if (caps == null)
+            return new("?", "Unknown", "#64748b", "No capabilities received");
+
+        var fingerprint = caps.Fingerprint ?? "";
+        var pubKey = caps.PublicKey ?? "";
+        var registry = _compute?.Coordinator.Registry;
+
+        // Check if peer's key is in the registry
+        bool isRegistered = registry != null && !string.IsNullOrEmpty(pubKey)
+            && registry.HasRole(pubKey, SwarmRole.Worker);
+        bool isRevoked = registry != null && !string.IsNullOrEmpty(pubKey)
+            && registry.IsRevoked(pubKey);
+
+        if (isRevoked)
+            return new("\u26d4", "Revoked", "#ef4444", "Key revoked — untrusted");
+
+        if (isRegistered)
+        {
+            var role = registry!.Keys.FirstOrDefault(k => k.PublicKey == pubKey)?.Role ?? SwarmRole.Worker;
+            return role switch
+            {
+                SwarmRole.Owner => new("\ud83d\udd12", "Owner", "#7c3aed", "Hardware-backed owner key in registry"),
+                SwarmRole.Admin => new("\u2705", "Admin", "#3b82f6", "Admin key verified in registry"),
+                SwarmRole.Coordinator => new("\u2705", "Coord", "#10b981", "Coordinator key verified in registry"),
+                _ => new("\u2705", "Verified", "#10b981", "Key verified in swarm registry"),
+            };
+        }
+
+        if (!string.IsNullOrEmpty(fingerprint))
+            return new("\ud83d\udd11", "Identified", "#f59e0b", $"ECDSA identity: {fingerprint[..Math.Min(12, fingerprint.Length)]}...");
+
+        return new("\ud83d\udc64", "Anonymous", "#64748b", "No cryptographic identity provided");
+    }
+
+    private long GetTotalMemory()
+    {
+        if (_compute == null) return 0;
+        return _compute.Coordinator.GetPeerList().Sum(p => p.Capabilities?.AvailableMemory ?? 0);
+    }
+
+    private int GetVerifiedCount()
+    {
+        if (_compute == null) return 0;
+        return _compute.Coordinator.GetPeerList().Count(p =>
+        {
+            var trust = GetPeerTrust(p);
+            return trust.Label != "Anonymous" && trust.Label != "Unknown";
+        });
+    }
+
+    private string GetVerifiedColor()
+    {
+        if (_compute == null || _compute.PeerCount == 0) return "#334155";
+        var verified = GetVerifiedCount();
+        if (verified == _compute.PeerCount) return "#10b981";
+        if (verified > 0) return "#f59e0b";
+        return "#ef4444";
+    }
+
     protected override async Task OnInitializedAsync()
     {
         // Check if this is a join link
@@ -479,7 +610,59 @@
             : "NONE";
         JS.CallVoid("console.log", $"[P2P] Swarm created. Torrents: {client.Torrents.Count}, AnnounceList: [{trackerUrls}], IsBrowser: {OperatingSystem.IsBrowser()}");
         await GenerateQRCode();
+        WireSwarmEvents();
+        LogActivity("\ud83d\ude80", "Swarm created — you are the coordinator", "#10b981");
         StateHasChanged();
+    }
+
+    private void WireSwarmEvents()
+    {
+        if (_compute == null) return;
+
+        _compute.Coordinator.OnPeerJoined += (peer) =>
+        {
+            var trust = GetPeerTrust(peer);
+            LogActivity("\u2795", $"Peer joined: {peer.PeerId[..Math.Min(10, peer.PeerId.Length)]}... ({peer.Capabilities?.EstimatedTflops:N1} TFLOPS) [{trust.Label}]", "#10b981");
+        };
+        _compute.Coordinator.OnPeerLeft += (peer) =>
+        {
+            LogActivity("\u274c", $"Peer left: {peer.PeerId[..Math.Min(10, peer.PeerId.Length)]}...", "#ef4444");
+        };
+        _compute.Coordinator.OnPeerKicked += (peerId, reason) =>
+        {
+            LogActivity("\ud83d\udeab", $"Peer kicked: {peerId[..Math.Min(10, peerId.Length)]}... — {reason}", "#f59e0b");
+        };
+        _compute.Coordinator.OnPeerBlocked += (peerId, reason) =>
+        {
+            LogActivity("\u26d4", $"Peer blocked: {peerId[..Math.Min(10, peerId.Length)]}... — {reason}", "#ef4444");
+        };
+        _compute.Coordinator.OnPeerRejected += (peerId, reason) =>
+        {
+            LogActivity("\u26a0\ufe0f", $"Peer rejected: {peerId[..Math.Min(10, peerId.Length)]}... — {reason}", "#f59e0b");
+        };
+        _compute.Coordinator.OnCapacityChanged += () =>
+        {
+            LogActivity("\ud83d\udcca", $"Capacity: {_compute.TotalTflops:N1} TFLOPS, {_compute.PeerCount} peers, {FormatBytes(GetTotalMemory())}", "#3b82f6");
+        };
+        _compute.Coordinator.OnCoordinatorChanged += (newCoordId) =>
+        {
+            if (newCoordId == null)
+                LogActivity("\ud83d\udc51", "You are now the coordinator", "#7c3aed");
+            else
+                LogActivity("\ud83d\udc51", $"Coordinator changed to: {newCoordId[..Math.Min(10, newCoordId.Length)]}...", "#f59e0b");
+        };
+
+        if (_compute.Dispatcher != null)
+        {
+            _compute.Dispatcher.OnDispatchFailed += (id, reason) =>
+            {
+                LogActivity("\u274c", $"Dispatch {id[..Math.Min(8, id.Length)]}... failed: {reason}", "#ef4444");
+            };
+            _compute.Dispatcher.OnDispatchRetried += (id, failedPeerId, newPeerId) =>
+            {
+                LogActivity("\ud83d\udd04", $"Dispatch {id[..Math.Min(8, id.Length)]}... retried: {failedPeerId[..Math.Min(8, failedPeerId.Length)]}... → {newPeerId[..Math.Min(8, newPeerId.Length)]}...", "#f59e0b");
+            };
+        }
     }
 
     private async Task JoinAlways()
@@ -518,6 +701,8 @@
         Console.WriteLine($"[P2P JoinSwarm] Magnet: {magnet[..Math.Min(80, magnet.Length)]}...");
         _compute = await P2PCompute.JoinSwarmAsync(Crypto, client, accelerator, magnet);
         Console.WriteLine($"[P2P JoinSwarm] Joined. PeerCount: {_compute.PeerCount}, Bridge: {_compute.Bridge?.ComputePeerCount}");
+        WireSwarmEvents();
+        LogActivity("\ud83d\udd17", "Joined swarm as worker", "#3b82f6");
         StateHasChanged();
     }
 
