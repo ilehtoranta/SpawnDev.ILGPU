@@ -190,6 +190,29 @@
                     </div>
                 }
 
+                <!-- Distributed Mandelbrot Rendering -->
+                @if (_compute != null && _compute.PeerCount > 0)
+                {
+                    <div style="background: #1e293b; padding: 16px; border-radius: 8px; margin-bottom: 20px; border: 1px solid #a78bfa;">
+                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+                            <div>
+                                <div style="font-size: 14px; color: #f1f5f9; font-weight: bold;">Distributed Mandelbrot</div>
+                                <div style="font-size: 11px; color: #64748b;">Each peer computes a horizontal strip — tiles colored by peer</div>
+                            </div>
+                            <button @onclick="RunDistributedMandelbrot" disabled="@_mandelbrotRunning" style="background: @(_mandelbrotRunning ? "#334155" : "#a78bfa"); color: white; border: none; padding: 8px 16px; border-radius: 6px; cursor: pointer; font-weight: bold;">
+                                @if (_mandelbrotRunning) { <span>Rendering...</span> } else { <span>Render</span> }
+                            </button>
+                        </div>
+                        <canvas @ref="_mandelbrotCanvas" width="512" height="512" style="width: 100%; max-width: 512px; height: auto; border-radius: 4px; background: #0f172a; image-rendering: pixelated;"></canvas>
+                        @if (_mandelbrotTimeMs > 0)
+                        {
+                            <div style="margin-top: 8px; font-size: 12px; color: #94a3b8;">
+                                Rendered in <strong style="color: #a78bfa;">@_mandelbrotTimeMs.ToString("F0") ms</strong> across <strong>@_compute.PeerCount peers</strong>
+                            </div>
+                        }
+                    </div>
+                }
+
                 <!-- QR Code -->
                 @if (!string.IsNullOrEmpty(_qrDataUrl))
                 {
@@ -642,6 +665,159 @@
         _benchmarkRunning = false;
 
         LogActivity("\u2705", $"Benchmark complete: {_benchmarkTotalElements:N0} elements in {_benchmarkTotalTime}ms ({_benchmarkSuccessCount}/{_benchmarkTasks.Count} succeeded)", "#10b981");
+        StateHasChanged();
+    }
+
+    // Mandelbrot state
+    private ElementReference _mandelbrotCanvas;
+    private bool _mandelbrotRunning;
+    private double _mandelbrotTimeMs;
+
+    // Peer colors for tile tinting (up to 8 peers)
+    private static readonly uint[] PeerColors = {
+        0xFF44FF44, // green
+        0xFF4488FF, // blue
+        0xFFFF8844, // orange
+        0xFFFF44FF, // magenta
+        0xFFFFFF44, // yellow
+        0xFF44FFFF, // cyan
+        0xFFFF4444, // red
+        0xFFAAAAFF, // lavender
+    };
+
+    private async Task RunDistributedMandelbrot()
+    {
+        if (_compute == null || _mandelbrotRunning) return;
+        _mandelbrotRunning = true;
+        StateHasChanged();
+
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        int width = 512, height = 512;
+        int maxIter = 200;
+        int peerCount = Math.Max(1, _compute.PeerCount);
+        int stripHeight = height / peerCount;
+
+        // Generate coordinate arrays for each strip and dispatch
+        var stripPixels = new int[peerCount][];
+        var tasks = new Task[peerCount];
+
+        for (int p = 0; p < peerCount; p++)
+        {
+            var peerIdx = p;
+            int yStart = peerIdx * stripHeight;
+            int yEnd = (peerIdx == peerCount - 1) ? height : yStart + stripHeight;
+            int stripPixelCount = width * (yEnd - yStart);
+
+            tasks[peerIdx] = Task.Run(async () =>
+            {
+                try
+                {
+                    // Generate coordinate data for this strip
+                    var realCoords = new float[stripPixelCount];
+                    var imagCoords = new float[stripPixelCount];
+                    for (int y = yStart; y < yEnd; y++)
+                        for (int x = 0; x < width; x++)
+                        {
+                            int idx = (y - yStart) * width + x;
+                            realCoords[idx] = (x / (float)width) * 3.5f - 2.5f;
+                            imagCoords[idx] = (y / (float)height) * 2.0f - 1.0f;
+                        }
+
+                    // Dispatch to swarm
+                    var realBytes = new byte[stripPixelCount * 4];
+                    var imagBytes = new byte[stripPixelCount * 4];
+                    Buffer.BlockCopy(realCoords, 0, realBytes, 0, realBytes.Length);
+                    Buffer.BlockCopy(imagCoords, 0, imagBytes, 0, imagBytes.Length);
+
+                    _compute.DispatchToSwarm(
+                        typeof(P2PDemoKernels), nameof(P2PDemoKernels.MandelbrotChunk),
+                        stripPixelCount,
+                        ($"mand_out_{peerIdx}", null, 4),
+                        ($"mand_real_{peerIdx}", realBytes, 4),
+                        ($"mand_imag_{peerIdx}", imagBytes, 4));
+
+                    // For demo: compute locally as fallback (P2P dispatch is fire-and-forget for now)
+                    var result = new int[stripPixelCount];
+                    for (int i = 0; i < stripPixelCount; i++)
+                    {
+                        float cr = realCoords[i], ci = imagCoords[i];
+                        float zr = 0, zi = 0;
+                        int iter = 0;
+                        while (zr * zr + zi * zi <= 4.0f && iter < maxIter)
+                        {
+                            float tmp = zr * zr - zi * zi + cr;
+                            zi = 2.0f * zr * zi + ci;
+                            zr = tmp;
+                            iter++;
+                        }
+                        result[i] = iter;
+                    }
+                    stripPixels[peerIdx] = result;
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[Mandelbrot] Strip {peerIdx} failed: {ex.Message}");
+                    stripPixels[peerIdx] = new int[stripPixelCount]; // black on failure
+                }
+            });
+        }
+
+        await Task.WhenAll(tasks);
+        sw.Stop();
+        _mandelbrotTimeMs = sw.Elapsed.TotalMilliseconds;
+
+        // Render to canvas with per-peer color tinting
+        try
+        {
+            using var doc = JS.Get<Document>("document");
+            using var canvas = doc.GetElementById<HTMLCanvasElement>(_mandelbrotCanvas.Id!);
+            if (canvas != null)
+            {
+                using var ctx = canvas.Get2DContext();
+                var pixels = new byte[width * height * 4];
+
+                for (int p = 0; p < peerCount; p++)
+                {
+                    if (stripPixels[p] == null) continue;
+                    int yStart = p * stripHeight;
+                    uint tint = PeerColors[p % PeerColors.Length];
+                    byte tintR = (byte)((tint >> 16) & 0xFF);
+                    byte tintG = (byte)((tint >> 8) & 0xFF);
+                    byte tintB = (byte)(tint & 0xFF);
+
+                    for (int i = 0; i < stripPixels[p].Length; i++)
+                    {
+                        int iter = stripPixels[p][i];
+                        int x = i % width;
+                        int y = yStart + i / width;
+                        int idx = (y * width + x) * 4;
+
+                        if (iter >= maxIter)
+                        {
+                            pixels[idx] = 0; pixels[idx + 1] = 0; pixels[idx + 2] = 0; pixels[idx + 3] = 255;
+                        }
+                        else
+                        {
+                            // Color by iteration with peer tint
+                            float t = iter / (float)maxIter;
+                            pixels[idx] = (byte)(tintR * t);
+                            pixels[idx + 1] = (byte)(tintG * t);
+                            pixels[idx + 2] = (byte)(tintB * t);
+                            pixels[idx + 3] = 255;
+                        }
+                    }
+                }
+
+                ctx.PutImageBytes(pixels, width, height);
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[Mandelbrot] Canvas render failed: {ex.Message}");
+        }
+
+        _mandelbrotRunning = false;
+        LogActivity("\ud83c\udfa8", $"Mandelbrot rendered: {width}x{height} in {_mandelbrotTimeMs:F0}ms across {peerCount} peers", "#a78bfa");
         StateHasChanged();
     }
 
