@@ -49,7 +49,11 @@ namespace SpawnDev.ILGPU.Wasm
             : base(accelerator, length, elementSize)
         {
             // Compute total bytes: length (elements) × elementSize (bytes per element).
-            int totalBytes = (int)(length * elementSize);
+            long totalBytesLong = length * elementSize;
+            if (totalBytesLong > int.MaxValue || totalBytesLong < 0)
+                throw new ArgumentOutOfRangeException(nameof(length),
+                    $"Buffer size {totalBytesLong} bytes exceeds maximum SharedArrayBuffer capacity (2GB)");
+            int totalBytes = (int)totalBytesLong;
             SharedBuffer = new SharedArrayBuffer(totalBytes);
 
             // Create a Uint8Array view for raw data access

@@ -761,7 +761,9 @@ namespace SpawnDev.ILGPU.WebGL
                     }
                     else
                     {
-                        // Determine scalar type from C# runtime type first
+                        // Determine scalar type from C# runtime type first.
+                        // ILGPU IR maps all integer types to BasicValueType.Int32/Int64,
+                        // so GLSL declares them as int/uint. Map all C# integer types here.
                         string scalarType = arg switch
                         {
                             int => "int",
@@ -769,7 +771,10 @@ namespace SpawnDev.ILGPU.WebGL
                             float => "float",
                             double => "double",
                             bool => "bool",
-                            byte => "byte",
+                            byte => "int",
+                            sbyte => "int",
+                            short => "int",
+                            ushort => "int",
                             long => "int",
                             ulong => "uint",
                             _ => null
@@ -799,6 +804,9 @@ namespace SpawnDev.ILGPU.WebGL
                                 double dValFb => (float)dValFb,
                                 bool blVal => blVal ? 1 : 0,
                                 byte bVal => (int)bVal,
+                                sbyte sbVal => (int)sbVal,
+                                short sVal => (int)sVal,
+                                ushort usVal => (int)usVal,
                                 long lValFb => (int)lValFb,
                                 ulong ulVal => scalarType == "int" ? (object)(int)(uint)ulVal : (uint)ulVal,
                                 _ => throw new NotSupportedException($"Unsupported scalar: {arg?.GetType()}")
@@ -837,6 +845,10 @@ namespace SpawnDev.ILGPU.WebGL
                                     int => "int",
                                     uint => "uint",
                                     float => "float",
+                                    double => "float",
+                                    byte or sbyte or short or ushort => "int",
+                                    long => "int",
+                                    ulong => "uint",
                                     _ => "int"
                                 };
                                 object vl = fieldVal switch
@@ -846,6 +858,12 @@ namespace SpawnDev.ILGPU.WebGL
                                     float fvl => fvl,
                                     double dvl => (float)dvl,
                                     bool bvl => bvl ? 1 : 0,
+                                    byte bvl2 => (int)bvl2,
+                                    sbyte sbvl => (int)sbvl,
+                                    short svl => (int)svl,
+                                    ushort usvl => (int)usvl,
+                                    long lvl => (int)lvl,
+                                    ulong ulvl => st == "int" ? (object)(int)(uint)ulvl : (uint)ulvl,
                                     _ => fieldVal ?? 0
                                 };
                                 jsParams.Add(new
@@ -1105,6 +1123,8 @@ namespace SpawnDev.ILGPU.WebGL
                         float => "float",
                         double => "float",
                         bool => "bool",
+                        byte or sbyte or short or ushort or long => "int",
+                        ulong => "uint",
                         _ => "float"
                     };
                     object value = fieldVal switch
@@ -1114,6 +1134,12 @@ namespace SpawnDev.ILGPU.WebGL
                         float fVal => fVal,
                         double dVal => (float)dVal,
                         bool bVal => bVal ? 1 : 0,
+                        byte bv => (int)bv,
+                        sbyte sbv => (int)sbv,
+                        short sv => (int)sv,
+                        ushort usv => (int)usv,
+                        long lv => (int)lv,
+                        ulong ulv => (uint)ulv,
                         _ => fieldVal ?? 0
                     };
                     results.Add(new { path, scalarType, value });

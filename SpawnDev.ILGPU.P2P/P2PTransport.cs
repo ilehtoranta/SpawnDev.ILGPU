@@ -170,7 +170,7 @@ public class P2PTransport : IAsyncDisposable
 
             // Ownership / RBAC:
             case P2PMessageType.RoleAssign:
-                HandleRoleAssign(peerId, message);
+                await HandleRoleAssignAsync(peerId, message);
                 break;
 
             case P2PMessageType.RegistryUpdate:
@@ -411,13 +411,19 @@ public class P2PTransport : IAsyncDisposable
 
     #region Message Handlers — Coordinator Role Management
 
-    private void HandleRoleAssign(string peerId, P2PMessage message)
+    private async Task HandleRoleAssignAsync(string peerId, P2PMessage message)
     {
         if (message.Payload == null) return;
         var assignment = message.Payload.Value.Deserialize<RoleAssignment>();
         if (assignment == null) return;
 
-        // Store the assignment — the worker can use it for self-identification
+        // Verify the inner assignment signature matches the granter's key
+        if (_crypto != null)
+        {
+            if (assignment.IsExpired) return;
+            if (!await assignment.VerifyAsync(_crypto)) return;
+        }
+
         OnRoleAssigned?.Invoke(assignment);
     }
 
@@ -490,8 +496,8 @@ public class P2PTransport : IAsyncDisposable
 
     private void HandleKick(string peerId, P2PMessage message)
     {
-        // Only accept kicks from the coordinator
-        if (peerId != _coordinator.CoordinatorPeerId && _coordinator.Role != P2PRole.Worker)
+        // Only workers can be kicked, and only by the coordinator
+        if (_coordinator.Role != P2PRole.Worker || peerId != _coordinator.CoordinatorPeerId)
             return;
 
         // We've been kicked — disconnect from the swarm

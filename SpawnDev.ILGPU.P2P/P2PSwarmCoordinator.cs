@@ -42,7 +42,7 @@ public class P2PSwarmCoordinator : IAsyncDisposable
     /// <summary>
     /// Set of peer fingerprints that have been seen before (for KnownOnly mode).
     /// </summary>
-    private readonly HashSet<string> _knownPeers = new();
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, bool> _knownPeers = new();
 
     /// <summary>
     /// Peers waiting for owner approval (Approval mode).
@@ -267,7 +267,7 @@ public class P2PSwarmCoordinator : IAsyncDisposable
                 break;
 
             case JoinMode.KnownOnly:
-                if (!_knownPeers.Contains(identityKey))
+                if (!_knownPeers.ContainsKey(identityKey))
                 {
                     OnPeerRejected?.Invoke(peerId, "unknown device");
                     return false;
@@ -275,7 +275,7 @@ public class P2PSwarmCoordinator : IAsyncDisposable
                 break;
 
             case JoinMode.Approval:
-                if (!_knownPeers.Contains(identityKey))
+                if (!_knownPeers.ContainsKey(identityKey))
                 {
                     // Add to pending — owner must approve
                     var pendingPeer = new RemotePeer
@@ -307,7 +307,7 @@ public class P2PSwarmCoordinator : IAsyncDisposable
 
         // Remember this peer for future joins (by fingerprint if available, else peerId)
         if (Policy.RememberPeers)
-            _knownPeers.Add(identityKey);
+            _knownPeers.TryAdd(identityKey, true);
 
         OnPeerJoined?.Invoke(peer);
         OnCapacityChanged?.Invoke();
@@ -324,7 +324,7 @@ public class P2PSwarmCoordinator : IAsyncDisposable
         if (!HasLocalAuthority(SwarmRole.Coordinator)) return false;
         if (!PendingApproval.TryRemove(peerId, out var pending)) return false;
 
-        _knownPeers.Add(peerId);
+        _knownPeers.TryAdd(peerId, true);
         _peers[peerId] = pending;
         _accelerator?.AddPeer(pending);
 

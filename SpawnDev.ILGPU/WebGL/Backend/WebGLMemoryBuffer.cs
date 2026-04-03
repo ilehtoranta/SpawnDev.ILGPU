@@ -41,6 +41,9 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         public WebGLMemoryBuffer(Accelerator accelerator, long length, int elementSize)
             : base(accelerator, length, elementSize)
         {
+            if (LengthInBytes > int.MaxValue)
+                throw new ArgumentOutOfRangeException(nameof(length),
+                    $"Buffer size {LengthInBytes} bytes exceeds maximum WebGL buffer capacity (2GB)");
             _backingArray = new Uint8Array((int)LengthInBytes);
             WorkerBufferId = ((WebGLAccelerator)accelerator).AllocateWorkerBufferId();
         }
