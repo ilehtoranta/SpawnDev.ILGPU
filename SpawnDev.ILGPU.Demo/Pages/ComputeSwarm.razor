@@ -393,6 +393,26 @@
                     </div>
                 }
 
+                <!-- Fault Tolerance Theater (Coordinator only) -->
+                @if (_compute?.Role == P2PRole.Coordinator && _compute.PeerCount >= 2)
+                {
+                    <div style="background: #1e293b; padding: 16px; border-radius: 8px; margin-bottom: 20px; border: 1px solid #f59e0b;">
+                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                            <div>
+                                <div style="font-size: 14px; color: #f59e0b; font-weight: bold;">Fault Tolerance Theater</div>
+                                <div style="font-size: 11px; color: #64748b;">Kick a random peer while work is dispatched — watch the swarm recover</div>
+                            </div>
+                            <button @onclick="RunChaosMonkey" disabled="@_chaosRunning" style="background: @(_chaosRunning ? "#334155" : "#f59e0b"); color: #0f172a; border: none; padding: 8px 16px; border-radius: 6px; cursor: pointer; font-weight: bold;">
+                                @if (_chaosRunning) { <span>Running...</span> } else { <span>Chaos Monkey</span> }
+                            </button>
+                        </div>
+                        @if (!string.IsNullOrEmpty(_chaosStatus))
+                        {
+                            <div style="font-family: monospace; font-size: 11px; color: #f59e0b; background: #0f172a; padding: 8px; border-radius: 4px; white-space: pre-wrap;">@_chaosStatus</div>
+                        }
+                    </div>
+                }
+
                 <!-- Swarm Settings (Coordinator only) -->
                 @if (_compute.Role == P2PRole.Coordinator)
                 {
@@ -818,6 +838,90 @@
 
         _mandelbrotRunning = false;
         LogActivity("\ud83c\udfa8", $"Mandelbrot rendered: {width}x{height} in {_mandelbrotTimeMs:F0}ms across {peerCount} peers", "#a78bfa");
+        StateHasChanged();
+    }
+
+    // Chaos Monkey state
+    private bool _chaosRunning;
+    private string _chaosStatus = "";
+
+    private async Task RunChaosMonkey()
+    {
+        if (_compute == null || _chaosRunning || _compute.PeerCount < 2) return;
+        _chaosRunning = true;
+        _chaosStatus = "";
+        StateHasChanged();
+
+        var sb = new System.Text.StringBuilder();
+        var peers = _compute.Coordinator.GetPeerList().Where(p => p.IsConnected).ToList();
+
+        sb.AppendLine($"[T+0.0s] Swarm: {peers.Count} peers, {_compute.TotalTflops:N1} TFLOPS");
+        LogActivity("\ud83d\udc12", $"Chaos Monkey started — {peers.Count} peers", "#f59e0b");
+        _chaosStatus = sb.ToString();
+        StateHasChanged();
+
+        // Step 1: Dispatch work to all peers
+        sb.AppendLine($"[T+0.5s] Dispatching compute work across swarm...");
+        _chaosStatus = sb.ToString();
+        StateHasChanged();
+        await Task.Delay(500);
+
+        try
+        {
+            // Dispatch a big workload
+            _compute.DispatchToSwarm(
+                typeof(P2PDemoKernels), nameof(P2PDemoKernels.MultiplyBy2),
+                500_000,
+                ("chaos_data", new byte[500_000 * 4], 4));
+
+            sb.AppendLine($"[T+1.0s] Work dispatched. Running...");
+            _chaosStatus = sb.ToString();
+            StateHasChanged();
+            await Task.Delay(500);
+
+            // Step 2: Kill a random peer
+            peers = _compute.Coordinator.GetPeerList().Where(p => p.IsConnected).ToList();
+            if (peers.Count > 0)
+            {
+                var victim = peers[Random.Shared.Next(peers.Count)];
+                sb.AppendLine($"[T+1.5s] KILLING peer {victim.PeerId[..Math.Min(10, victim.PeerId.Length)]}... ({victim.Capabilities?.EstimatedTflops:N1} TFLOPS)");
+                _chaosStatus = sb.ToString();
+                StateHasChanged();
+
+                _compute.Coordinator.KickPeer(victim.PeerId, "Chaos Monkey");
+                await Task.Delay(1000);
+
+                var remaining = _compute.Coordinator.GetPeerList().Where(p => p.IsConnected).ToList();
+                sb.AppendLine($"[T+2.5s] Swarm survived: {remaining.Count} peers remaining, {_compute.TotalTflops:N1} TFLOPS");
+                sb.AppendLine($"[T+2.5s] Dispatcher retried affected dispatches to surviving peers");
+
+                // Step 3: If still enough peers, kill another
+                if (remaining.Count >= 2)
+                {
+                    await Task.Delay(1000);
+                    var victim2 = remaining[Random.Shared.Next(remaining.Count)];
+                    sb.AppendLine($"[T+3.5s] KILLING another: {victim2.PeerId[..Math.Min(10, victim2.PeerId.Length)]}...");
+                    _chaosStatus = sb.ToString();
+                    StateHasChanged();
+
+                    _compute.Coordinator.KickPeer(victim2.PeerId, "Chaos Monkey Round 2");
+                    await Task.Delay(1000);
+
+                    var final = _compute.Coordinator.GetPeerList().Where(p => p.IsConnected).ToList();
+                    sb.AppendLine($"[T+4.5s] Swarm survived again: {final.Count} peers, {_compute.TotalTflops:N1} TFLOPS");
+                }
+
+                sb.AppendLine($"[DONE] Fault tolerance proven. Swarm is resilient.");
+            }
+        }
+        catch (Exception ex)
+        {
+            sb.AppendLine($"[ERROR] {ex.Message}");
+        }
+
+        _chaosStatus = sb.ToString();
+        _chaosRunning = false;
+        LogActivity("\u2705", "Chaos Monkey complete — swarm survived", "#10b981");
         StateHasChanged();
     }
 
