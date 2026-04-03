@@ -4771,4 +4771,88 @@ public abstract partial class BackendTestBase
         // Should return false for nonexistent request, not throw
         Console.WriteLine($"[ComputeBoard] Remove nonexistent: {removed}");
     }
+
+    // ═══════════════════════════════════════════════════════════
+    //  Reputation & Performance History Tests
+    // ═══════════════════════════════════════════════════════════
+
+    [TestMethod]
+    public void P2P_Reputation_InitialScore()
+    {
+        var peer = new RemotePeer { PeerId = "test", IsConnected = true };
+        // New peer with no dispatches: base = 0.5 + (SuccessRate=1.0 * 0.5) = 1.0
+        // Anonymous identity bonus = 0 → total = 1.0 (capped)
+        // New peers start optimistic — they haven't failed yet
+        if (peer.Reputation < 0.9 || peer.Reputation > 1.01)
+            throw new Exception($"New anonymous peer reputation should be ~1.0 (optimistic start), got {peer.Reputation:F3}");
+    }
+
+    [TestMethod]
+    public void P2P_Reputation_IdentifiedPeerHigher()
+    {
+        var anon = new RemotePeer { PeerId = "anon", IsConnected = true };
+        var identified = new RemotePeer
+        {
+            PeerId = "identified",
+            IsConnected = true,
+            Capabilities = new PeerCapabilities
+            {
+                Fingerprint = "abc123def456",
+                PublicKey = "base64pubkey",
+            }
+        };
+        if (identified.Reputation <= anon.Reputation)
+            throw new Exception($"Identified peer ({identified.Reputation:F3}) should have higher reputation than anonymous ({anon.Reputation:F3})");
+    }
+
+    [TestMethod]
+    public void P2P_Reputation_SuccessRateAffectsScore()
+    {
+        var reliable = new RemotePeer { PeerId = "reliable", IsConnected = true };
+        var flaky = new RemotePeer { PeerId = "flaky", IsConnected = true };
+
+        // Simulate dispatches
+        for (int i = 0; i < 10; i++) reliable.RecordSuccess(50);
+        for (int i = 0; i < 5; i++) flaky.RecordSuccess(50);
+        for (int i = 0; i < 5; i++) flaky.RecordFailure();
+
+        if (reliable.SuccessRate != 1.0)
+            throw new Exception($"Reliable peer should have 100% success rate, got {reliable.SuccessRate:P0}");
+        if (flaky.SuccessRate > 0.6)
+            throw new Exception($"Flaky peer should have ~50% success rate, got {flaky.SuccessRate:P0}");
+        if (reliable.Reputation <= flaky.Reputation)
+            throw new Exception($"Reliable ({reliable.Reputation:F3}) should outrank flaky ({flaky.Reputation:F3})");
+    }
+
+    [TestMethod]
+    public void P2P_Reputation_RecordSuccess_TracksDuration()
+    {
+        var peer = new RemotePeer { PeerId = "test", IsConnected = true };
+        peer.RecordSuccess(100);
+        peer.RecordSuccess(200);
+        peer.RecordSuccess(150);
+
+        if (peer.DispatchCount != 3)
+            throw new Exception($"Expected 3 dispatches, got {peer.DispatchCount}");
+        if (peer.SuccessCount != 3)
+            throw new Exception($"Expected 3 successes, got {peer.SuccessCount}");
+        if (Math.Abs(peer.AvgDurationMs - 150) > 0.01)
+            throw new Exception($"Expected avg 150ms, got {peer.AvgDurationMs:F1}ms");
+    }
+
+    [TestMethod]
+    public void P2P_Reputation_RecordFailure_TracksCount()
+    {
+        var peer = new RemotePeer { PeerId = "test", IsConnected = true };
+        peer.RecordSuccess(50);
+        peer.RecordFailure();
+        peer.RecordFailure();
+
+        if (peer.DispatchCount != 3)
+            throw new Exception($"Expected 3 dispatches, got {peer.DispatchCount}");
+        if (peer.FailureCount != 2)
+            throw new Exception($"Expected 2 failures, got {peer.FailureCount}");
+        if (Math.Abs(peer.SuccessRate - 1.0 / 3.0) > 0.01)
+            throw new Exception($"Expected ~33% success rate, got {peer.SuccessRate:P0}");
+    }
 }
