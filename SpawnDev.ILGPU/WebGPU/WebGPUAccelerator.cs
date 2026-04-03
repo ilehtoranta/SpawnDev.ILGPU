@@ -53,6 +53,12 @@ namespace SpawnDev.ILGPU.WebGPU
         public HashSet<string> EnabledFeatures => NativeAccelerator?.EnabledFeatures ?? new HashSet<string>();
 
         /// <summary>
+        /// WebGPU requires storage buffer binding offsets to be aligned to this value.
+        /// Spec default: 256 bytes. Query from device.limits.minStorageBufferOffsetAlignment.
+        /// </summary>
+        private const ulong MinStorageBufferOffsetAlignment = 256UL;
+
+        /// <summary>
         /// True if the underlying GPU device has been lost (driver crash, GPU reset, etc.).
         /// </summary>
         public bool IsDeviceLost => NativeAccelerator?.IsDeviceLost ?? false;
@@ -592,7 +598,7 @@ namespace SpawnDev.ILGPU.WebGPU
                     }
                     overrideConstants[overrideInfo.ConstantName] = (double)numElements;
                     if (WebGPUBackend.VerboseLogging)
-                        if (WebGPUBackend.VerboseLogging) WebGPUBackend.Log($"[WebGPU-Debug] Dynamic shared memory override: {overrideInfo.ConstantName} = {numElements}");
+                        WebGPUBackend.Log($"[WebGPU-Debug] Dynamic shared memory override: {overrideInfo.ConstantName} = {numElements}");
                 }
             }
 
@@ -745,7 +751,7 @@ namespace SpawnDev.ILGPU.WebGPU
                     if (a != null && a.GetType().IsValueType && !(a is IArrayView) && ContainsPointerFields(a.GetType()))
                     {
                         if (WebGPUBackend.VerboseLogging)
-                            if (WebGPUBackend.VerboseLogging) WebGPUBackend.Log($"[WebGPU-Debug] Pre-expand: Flattening body struct {a.GetType().Name} at args[{i}]");
+                            WebGPUBackend.Log($"[WebGPU-Debug] Pre-expand: Flattening body struct {a.GetType().Name} at args[{i}]");
                         expandedArgs.AddRange(FlattenStructFields(a));
                     }
                     else
@@ -868,12 +874,12 @@ namespace SpawnDev.ILGPU.WebGPU
                                     int effectiveArgsIdx = nonViewIdxList[nthCSharpScalarField];
                                     packedScalarLookup[effectiveArgsIdx] = entry;
                                     if (WebGPUBackend.VerboseLogging)
-                                        if (WebGPUBackend.VerboseLogging) WebGPUBackend.Log($"[WebGPU-Debug] Body struct scalar: ParamIndex={entry.ParamIndex}, effectiveArgsIdx={effectiveArgsIdx}, nthManifest={nthManifestEntry}, nthCSharp={nthCSharpScalarField}");
+                                        WebGPUBackend.Log($"[WebGPU-Debug] Body struct scalar: ParamIndex={entry.ParamIndex}, effectiveArgsIdx={effectiveArgsIdx}, nthManifest={nthManifestEntry}, nthCSharp={nthCSharpScalarField}");
                                 }
                                 else
                                 {
                                     if (WebGPUBackend.VerboseLogging)
-                                        if (WebGPUBackend.VerboseLogging) WebGPUBackend.Log($"[WebGPU-Debug] Body struct scalar: ParamIndex={entry.ParamIndex}, SKIPPED (IR-only, nthManifest={nthManifestEntry}, extra={extraIROnlyEntries})");
+                                        WebGPUBackend.Log($"[WebGPU-Debug] Body struct scalar: ParamIndex={entry.ParamIndex}, SKIPPED (IR-only, nthManifest={nthManifestEntry}, extra={extraIROnlyEntries})");
                                 }
                             }
                         }
@@ -947,7 +953,7 @@ namespace SpawnDev.ILGPU.WebGPU
                         var gpuBuffer = nativeBuffer!.NativeBuffer.NativeBuffer!;
 
                         if (WebGPUBackend.VerboseLogging)
-                            if (WebGPUBackend.VerboseLogging) WebGPUBackend.Log($"[WebGPU-Debug] Arg {i}: Binding Buffer. Size={contiguous.LengthInBytes}, Offset={contiguous.IndexInBytes}");
+                            WebGPUBackend.Log($"[WebGPU-Debug] Arg {i}: Binding Buffer. Size={contiguous.LengthInBytes}, Offset={contiguous.IndexInBytes}");
 
                         // WebGPU requires storage buffer binding offsets to be aligned
                         // to minStorageBufferOffsetAlignment (256 bytes). ILGPU sub-views
@@ -961,7 +967,7 @@ namespace SpawnDev.ILGPU.WebGPU
                         // different 256-aligned positions get NON-OVERLAPPING binding ranges,
                         // satisfying WebGPU's writable storage buffer aliasing rules.
                         ulong rawOffset = (ulong)((long)contiguous.IndexInBytes);
-                        ulong alignedOffset = rawOffset & ~255UL; // round DOWN to 256
+                        ulong alignedOffset = rawOffset & ~(MinStorageBufferOffsetAlignment - 1);
                         ulong padding = rawOffset - alignedOffset;
                         ulong bindingSize = (ulong)WebGPUAlignment.AlignTo4((long)(padding + (ulong)contiguous.LengthInBytes));
                         // Clamp to actual GPU buffer size (which was allocated with AlignTo4)
@@ -989,7 +995,7 @@ namespace SpawnDev.ILGPU.WebGPU
                         viewElementCounts[currentBindingIndex] = (int)contiguous.Length;
                         
                         if (WebGPUBackend.VerboseLogging)
-                            if (WebGPUBackend.VerboseLogging) WebGPUBackend.Log($"[WebGPU-Debug] Arg {i}: rawOffset={rawOffset}, alignedOffset={alignedOffset}, padding={padding}, elemOffset={elementOffset}, bindingSize={bindingSize}");
+                            WebGPUBackend.Log($"[WebGPU-Debug] Arg {i}: rawOffset={rawOffset}, alignedOffset={alignedOffset}, padding={padding}, elemOffset={elementOffset}, bindingSize={bindingSize}");
                     }
                     else
                     {
@@ -999,7 +1005,7 @@ namespace SpawnDev.ILGPU.WebGPU
                         scalarBuffersToReturn.Add(uBuffer);
 
                         if (WebGPUBackend.VerboseLogging)
-                            if (WebGPUBackend.VerboseLogging) WebGPUBackend.Log($"[WebGPU-Debug] Arg {i}: Binding Struct Scalar. Value={arg}");
+                            WebGPUBackend.Log($"[WebGPU-Debug] Arg {i}: Binding Struct Scalar. Value={arg}");
 
                         if (arg != null && arg.GetType().IsValueType)
                         {
@@ -1018,7 +1024,7 @@ namespace SpawnDev.ILGPU.WebGPU
 
                             device.Queue.WriteBuffer(uBuffer, 0, bytes);
                             if (WebGPUBackend.VerboseLogging)
-                                if (WebGPUBackend.VerboseLogging) WebGPUBackend.Log($"[WebGPU-Debug] Arg {i}: Struct scalar {argType.Name}, Size={structSize} bytes");
+                                WebGPUBackend.Log($"[WebGPU-Debug] Arg {i}: Struct scalar {argType.Name}, Size={structSize} bytes");
                         }
                         else if (arg != null && arg.GetType().IsDefined(
                             typeof(System.Runtime.CompilerServices.CompilerGeneratedAttribute), false))
@@ -1060,7 +1066,7 @@ namespace SpawnDev.ILGPU.WebGPU
                     if (dims.Length > 1)
                     {
                         if (WebGPUBackend.VerboseLogging)
-                            if (WebGPUBackend.VerboseLogging) WebGPUBackend.Log($"[WebGPU-Debug] Arg {i}: Binding Stride Buffer. Values=[{string.Join(", ", dims)}]");
+                            WebGPUBackend.Log($"[WebGPU-Debug] Arg {i}: Binding Stride Buffer. Values=[{string.Join(", ", dims)}]");
 
                         var strideSize = 256;
                         var strideBuffer = GetPooledScalarBuffer(device);
@@ -1101,7 +1107,7 @@ namespace SpawnDev.ILGPU.WebGPU
                         int byteOffset = entry.ByteOffset;
 
                         if (WebGPUBackend.VerboseLogging)
-                            if (WebGPUBackend.VerboseLogging) WebGPUBackend.Log($"[WebGPU-Debug] Packing scalar param {entry.ParamIndex} (effectiveArgs[{effectiveArgsIdx}]) at byte offset {byteOffset}: {arg}");
+                            WebGPUBackend.Log($"[WebGPU-Debug] Packing scalar param {entry.ParamIndex} (effectiveArgs[{effectiveArgsIdx}]) at byte offset {byteOffset}: {arg}");
 
                         // Unwrap SpecializedValue<T> to extract the inner T value
                         if (arg != null && arg.GetType().IsGenericType && 
@@ -1263,7 +1269,7 @@ namespace SpawnDev.ILGPU.WebGPU
                             int elemOffset = viewElementOffsets.TryGetValue(entry.ViewBindingIndex, out int eo) ? eo : 0;
                             BitConverter.GetBytes(elemOffset).CopyTo(packedData, byteOffset);
                             if (WebGPUBackend.VerboseLogging)
-                                if (WebGPUBackend.VerboseLogging) WebGPUBackend.Log($"[WebGPU-Debug] Packed view offset: binding={entry.ViewBindingIndex}, elemOffset={elemOffset}, byteOffset={byteOffset}");
+                                WebGPUBackend.Log($"[WebGPU-Debug] Packed view offset: binding={entry.ViewBindingIndex}, elemOffset={elemOffset}, byteOffset={byteOffset}");
                         }
                         else if (entry.IsViewCount)
                         {
@@ -1277,7 +1283,7 @@ namespace SpawnDev.ILGPU.WebGPU
                             int elemCount = viewElementCounts.TryGetValue(entry.ViewCountBindingIndex, out int ec) ? ec : 0;
                             BitConverter.GetBytes(elemCount).CopyTo(packedData, byteOffset);
                             if (WebGPUBackend.VerboseLogging)
-                                if (WebGPUBackend.VerboseLogging) WebGPUBackend.Log($"[WebGPU-Debug] Packed view count: binding={entry.ViewCountBindingIndex}, elemCount={elemCount}, byteOffset={byteOffset}");
+                                WebGPUBackend.Log($"[WebGPU-Debug] Packed view count: binding={entry.ViewCountBindingIndex}, elemCount={elemCount}, byteOffset={byteOffset}");
                         }
                     }
 
@@ -1293,7 +1299,7 @@ namespace SpawnDev.ILGPU.WebGPU
                     currentBindingIndex++;
 
                     if (WebGPUBackend.VerboseLogging)
-                        if (WebGPUBackend.VerboseLogging) WebGPUBackend.Log($"[WebGPU-Debug] Packed {packedScalarLookup.Count} scalars into 1 buffer ({totalBytes} bytes used, binding {currentBindingIndex - 1})");
+                        WebGPUBackend.Log($"[WebGPU-Debug] Packed {packedScalarLookup.Count} scalars into 1 buffer ({totalBytes} bytes used, binding {currentBindingIndex - 1})");
                 }
 
 
@@ -1316,7 +1322,7 @@ namespace SpawnDev.ILGPU.WebGPU
                     entries.Clear();
                     entries.Add(new GPUBindGroupEntry { Binding = 0, Resource = scalarEntry.Resource });
                     if (WebGPUBackend.VerboseLogging)
-                        if (WebGPUBackend.VerboseLogging) WebGPUBackend.Log($"[WebGPU-BindGroup] Workaround: using scalar-only bindings for kernel '{compiledKernel.Name}'");
+                        WebGPUBackend.Log($"[WebGPU-BindGroup] Workaround: using scalar-only bindings for kernel '{compiledKernel.Name}'");
                 }
                 else if (expectedCount > 0 && entries.Count > expectedCount)
                 {
@@ -1343,7 +1349,7 @@ namespace SpawnDev.ILGPU.WebGPU
                 {
                     if (WebGPUBackend.VerboseLogging) WebGPUBackend.Log($"[WebGPU-BindGroup] Creating bind group with {entries.Count} entries (expected={expectedCount}) for kernel: {compiledKernel.Name}");
                     for (int ei = 0; ei < entries.Count; ei++)
-                        if (WebGPUBackend.VerboseLogging) WebGPUBackend.Log($"  entries[{ei}]: binding={entries[ei].Binding}");
+                        WebGPUBackend.Log($"  entries[{ei}]: binding={entries[ei].Binding}");
                 }
 
                 // ── WebGPU aliasing check ──────────────────────────────────

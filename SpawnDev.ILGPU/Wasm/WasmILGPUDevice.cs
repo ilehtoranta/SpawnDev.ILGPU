@@ -82,8 +82,10 @@ namespace SpawnDev.ILGPU.Wasm
 
         public override Accelerator CreateAccelerator(Context context)
         {
-            // Must use async; synchronous creation is not safe in WASM
-            return WasmAccelerator.Create(context).GetAwaiter().GetResult();
+            // Wasm accelerator requires async creation (Worker init, module compilation).
+            // Blocking here deadlocks Blazor WASM's single-threaded scheduler.
+            throw new NotSupportedException(
+                "Wasm accelerator requires async creation. Use CreateAcceleratorAsync() instead.");
         }
 
         public override async Task<Accelerator> CreateAcceleratorAsync(Context context)
@@ -91,9 +93,9 @@ namespace SpawnDev.ILGPU.Wasm
             return await WasmAccelerator.Create(context);
         }
 
-        public WasmAccelerator CreateAccelerator(Context context, WasmBackendOptions? options)
+        public async Task<WasmAccelerator> CreateAcceleratorAsync(Context context, WasmBackendOptions? options)
         {
-            return WasmAccelerator.Create(context, options ?? new WasmBackendOptions()).GetAwaiter().GetResult();
+            return await WasmAccelerator.Create(context, options ?? new WasmBackendOptions());
         }
 
         #endregion

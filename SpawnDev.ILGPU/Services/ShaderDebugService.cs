@@ -82,7 +82,7 @@ public class ShaderDebugService : IAsyncBackgroundService, IAsyncDisposable
             // Check if we already have write permission (no prompt)
             HasReadPermission = await handle.VerifyPermission(readWrite: false, askIfNeeded: false);
             HasWritePermission = await handle.VerifyPermission(readWrite: true, askIfNeeded: false);
-            Console.WriteLine($"[ShaderDebug] Active: {FolderName}, readable: {HasReadPermission}, writable: {HasWritePermission}");
+            if (WebGPUBackend.VerboseLogging) Console.WriteLine($"[ShaderDebug] Active: {FolderName}, readable: {HasReadPermission}, writable: {HasWritePermission}");
         }
         catch (Exception ex)
         {
@@ -123,11 +123,11 @@ public class ShaderDebugService : IAsyncBackgroundService, IAsyncDisposable
             using var tx = db!.Transaction(STORE_NAME, true);
             using var store = tx.ObjectStore<string, FileSystemHandle>(STORE_NAME);
             await store.PutAsync(handle, KEY);
-            Console.WriteLine($"[ShaderDebug] Active: {FolderName}");
+            if (WebGPUBackend.VerboseLogging) Console.WriteLine($"[ShaderDebug] Active: {FolderName}");
             await WriteReadme();
             return true;
         }
-        catch (Exception ex) { Console.WriteLine($"[ShaderDebug] {ex.Message}"); return false; }
+        catch (Exception ex) { if (WebGPUBackend.VerboseLogging) Console.WriteLine($"[ShaderDebug] {ex.Message}"); return false; }
     }
 
     /// <summary>Clear persisted folder and stop auto-dumping.</summary>
@@ -161,7 +161,7 @@ public class ShaderDebugService : IAsyncBackgroundService, IAsyncDisposable
         _wasmCount = 0;
         _glslCount = 0;
         await WriteRunNotesAsync(description);
-        Console.WriteLine($"[ShaderDebug] New run: {CurrentRunTimestamp}");
+        if (WebGPUBackend.VerboseLogging) Console.WriteLine($"[ShaderDebug] New run: {CurrentRunTimestamp}");
         return CurrentRunTimestamp;
     }
 
