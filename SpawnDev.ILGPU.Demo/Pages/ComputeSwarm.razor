@@ -11,6 +11,7 @@
 @inject BlazorJSRuntime JS
 @inject IPortableCrypto Crypto
 @inject SpawnDev.WebTorrent.WebTorrentClient WebTorrentClient
+@inject SpawnDev.ILGPU.Demo.Shared.Services.P2PSwarmService SwarmService
 @implements IAsyncDisposable
 
 <PageTitle>P2P Compute Swarm</PageTitle>
@@ -784,6 +785,7 @@
         SpawnDev.WebTorrent.WebTorrentClient.VerboseLogging = true;
         Console.WriteLine($"[P2P CreateSwarm] PeerId: {Convert.ToHexString(client.PeerId)}");
         _compute = await P2PCompute.CreateSwarmAsync(Crypto, client, "Demo Compute Swarm");
+        SwarmService.SetCompute(_compute);
         // Debug: verify tracker is in metadata
         var swarm = _compute.Coordinator.Swarm;
         var announceCount = swarm?.Metadata?.AnnounceList?.Length ?? -1;
@@ -882,6 +884,7 @@
         var magnet = P2PCompute.BuildMagnetFromHash(_computeHash, _swarmName);
         Console.WriteLine($"[P2P JoinSwarm] Magnet: {magnet[..Math.Min(80, magnet.Length)]}...");
         _compute = await P2PCompute.JoinSwarmAsync(Crypto, client, accelerator, magnet);
+        SwarmService.SetCompute(_compute);
         Console.WriteLine($"[P2P JoinSwarm] Joined. PeerCount: {_compute.PeerCount}, Bridge: {_compute.Bridge?.ComputePeerCount}");
         WireSwarmEvents();
         LogActivity("\ud83d\udd17", "Joined swarm as worker", "#3b82f6");

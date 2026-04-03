@@ -22,6 +22,9 @@ builder.Services.AddSingleton(sp =>
     new SpawnDev.WebTorrent.WebTorrentClient(
         crypto: sp.GetRequiredService<SpawnDev.BlazorJS.Cryptography.IPortableCrypto>()));
 
+// P2P: Shared swarm service — holds the active compute swarm for all pages
+builder.Services.AddSingleton<SpawnDev.ILGPU.Demo.Shared.Services.P2PSwarmService>();
+
 builder.Services.AddSingleton<WebGPUTests>();
 builder.Services.AddSingleton<WebGPUNoSubgroupsTests>();
 

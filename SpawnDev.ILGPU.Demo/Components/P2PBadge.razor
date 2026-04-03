@@ -1,0 +1,45 @@
+@using SpawnDev.ILGPU.Demo.Shared.Services
+@inject P2PSwarmService SwarmService
+@implements IDisposable
+
+@if (SwarmService.HasSwarm)
+{
+    <div style="display: inline-flex; align-items: center; gap: 6px; background: @(_isActive ? "#0d2e24" : "#1e293b"); padding: 4px 12px; border-radius: 16px; border: 1px solid @(_isActive ? "#10b981" : "#334155"); font-size: 12px; cursor: pointer;" title="@(_isActive ? $"P2P Swarm: {SwarmService.PeerCount} peers, {SwarmService.TotalTflops:N1} TFLOPS" : "Swarm active but no peers connected")" @onclick="NavigateToCompute">
+    <span style="color: @(_isActive ? "#10b981" : "#f59e0b");">&#9679;</span>
+    <span style="color: @(_isActive ? "#10b981" : "#94a3b8"); font-weight: bold;">P2P</span>
+    @if (_isActive)
+    {
+        <span style="color: #64748b;">@SwarmService.PeerCount peers</span>
+        <span style="color: #10b981; font-weight: bold;">@SwarmService.TotalTflops.ToString("N1") TF</span>
+    }
+    else
+    {
+        <span style="color: #64748b;">waiting for peers</span>
+    }
+    </div>
+}
+
+@code {
+    [Inject] private NavigationManager Nav { get; set; } = null!;
+    private bool _isActive => SwarmService.IsActive;
+
+    protected override void OnInitialized()
+    {
+        SwarmService.OnStateChanged += HandleStateChanged;
+    }
+
+    private void HandleStateChanged()
+    {
+        InvokeAsync(StateHasChanged);
+    }
+
+    private void NavigateToCompute()
+    {
+        Nav.NavigateTo("/compute");
+    }
+
+    public void Dispose()
+    {
+        SwarmService.OnStateChanged -= HandleStateChanged;
+    }
+}
