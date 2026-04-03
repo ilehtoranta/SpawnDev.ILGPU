@@ -335,6 +335,80 @@ public class RemotePeer
     public DateTime LastHeartbeat { get; set; } = DateTime.MinValue;
     internal P2PAccelerator? Accelerator { get; set; }
 
+    // ── Performance History ──
+
+    /// <summary>Total dispatches sent to this peer.</summary>
+    public int DispatchCount { get; private set; }
+
+    /// <summary>Number of successful dispatches.</summary>
+    public int SuccessCount { get; private set; }
+
+    /// <summary>Number of failed dispatches.</summary>
+    public int FailureCount { get; private set; }
+
+    /// <summary>Total execution time across all successful dispatches (ms).</summary>
+    public double TotalDurationMs { get; private set; }
+
+    /// <summary>Average execution time for successful dispatches (ms). 0 if none.</summary>
+    public double AvgDurationMs => SuccessCount > 0 ? TotalDurationMs / SuccessCount : 0;
+
+    /// <summary>Success rate (0.0 to 1.0). 1.0 if no dispatches yet.</summary>
+    public double SuccessRate => DispatchCount > 0 ? (double)SuccessCount / DispatchCount : 1.0;
+
+    /// <summary>
+    /// Reputation score (0.0 to 1.0). Combines success rate with identity strength.
+    /// Used by the dispatcher as a scoring factor.
+    /// </summary>
+    public double Reputation
+    {
+        get
+        {
+            // Base: success rate (or 0.5 for new peers with no history)
+            double base_ = DispatchCount >= 3 ? SuccessRate : 0.5 + (SuccessRate * 0.5);
+
+            // Identity bonus: anonymous=0, identified=0.1, verified=0.2
+            double identityBonus = 0;
+            if (!string.IsNullOrEmpty(Capabilities?.PublicKey)) identityBonus = 0.1;
+            if (!string.IsNullOrEmpty(Capabilities?.Fingerprint)) identityBonus = 0.2;
+
+            return Math.Min(1.0, base_ + identityBonus);
+        }
+    }
+
+    /// <summary>When this peer first connected.</summary>
+    public DateTime ConnectedAt { get; set; } = DateTime.UtcNow;
+
+    /// <summary>Record a successful dispatch.</summary>
+    public void RecordSuccess(double durationMs)
+    {
+        Interlocked.Increment(ref _dispatchCountBacking);
+        Interlocked.Increment(ref _successCountBacking);
+        // Thread-safe double addition via CompareExchange
+        double initial, updated;
+        do
+        {
+            initial = TotalDurationMs;
+            updated = initial + durationMs;
+        } while (Interlocked.CompareExchange(ref _totalDurationMsBacking, updated, initial) != initial);
+        DispatchCount = _dispatchCountBacking;
+        SuccessCount = _successCountBacking;
+        TotalDurationMs = _totalDurationMsBacking;
+    }
+
+    /// <summary>Record a failed dispatch.</summary>
+    public void RecordFailure()
+    {
+        Interlocked.Increment(ref _dispatchCountBacking);
+        Interlocked.Increment(ref _failureCountBacking);
+        DispatchCount = _dispatchCountBacking;
+        FailureCount = _failureCountBacking;
+    }
+
+    private int _dispatchCountBacking;
+    private int _successCountBacking;
+    private int _failureCountBacking;
+    private double _totalDurationMsBacking;
+
     public void Disconnect()
     {
         IsConnected = false;

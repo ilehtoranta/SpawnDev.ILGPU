@@ -169,11 +169,13 @@ public class P2PDispatcher : IDisposable
 
         if (result.Success)
         {
+            pending.AssignedPeer.RecordSuccess(result.DurationMs);
             lock (_lock) { _pending.Remove(dispatchId); }
             pending.CompletionSource?.TrySetResult(result);
         }
         else
         {
+            pending.AssignedPeer.RecordFailure();
             // Execution failed on peer — retry on another peer
             RetryDispatch(pending, $"Peer {pending.AssignedPeer.PeerId} reported error: {result.Error}");
         }
@@ -328,10 +330,14 @@ public class P2PDispatcher : IDisposable
             // Charging devices get no battery penalty
         }
 
+        // Reputation: dispatch history — success rate + identity strength
+        double reputationScore = peer.Reputation;
+
         // Weighted combination: health acts as a multiplier, not an additive factor.
         // A thermally critical peer gets zero score regardless of TFLOPS.
-        double baseScore = (abilityScore * 0.4) + (loadScore * 0.3) +
-                           (reliabilityScore * 0.2) + (memoryScore * 0.1);
+        double baseScore = (abilityScore * 0.35) + (loadScore * 0.25) +
+                           (reliabilityScore * 0.15) + (memoryScore * 0.10) +
+                           (reputationScore * 0.15);
         return baseScore * healthScore;
     }
 
