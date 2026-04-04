@@ -66,7 +66,7 @@ compute.DispatchToSwarm(typeof(MyKernels), "VectorAdd", 1024,
 ### Role Hierarchy
 
 ```
-Owner (cryptographic identity — YubiKey, passkey, ECDSA key)
+Owner (cryptographic identity — YubiKey, passkey, Ed25519 key)
   |
   +-- Can join from ANY device with their key
   +-- Can promote/demote coordinators, admins
@@ -98,7 +98,7 @@ Worker (default role)
 | `P2PWebRtcBridge` | Wires WebTorrent peer connections to compute messages |
 | `P2PKernelLauncher` | Reflection-based kernel compilation and async execution |
 | `P2PKernelSerializer` | Secure kernel method resolution (allowlist-based) |
-| `SwarmIdentity` | ECDSA key pair for cryptographic identity |
+| `SwarmIdentity` | Ed25519 key pair for cryptographic identity |
 | `KeyRegistry` | Owner-signed list of authorized keys and roles |
 | `HardwareKeyProvider` | WebAuthn/FIDO2 for YubiKey/passkey hardware-backed ownership |
 | `ComputeBoardClient` | Post/browse compute requests on hub.spawndev.com |
@@ -119,7 +119,7 @@ Coordinator                          Worker
     |   (success, duration, buffers)     |
 ```
 
-All authority messages (Kick, Block, Transfer, RoleAssign, RegistryUpdate, KernelDispatch) are signed with the sender's ECDSA key and verified by the recipient against the KeyRegistry.
+All authority messages (Kick, Block, Transfer, RoleAssign, RegistryUpdate, KernelDispatch) are signed with the sender's Ed25519 key and verified by the recipient against the KeyRegistry.
 
 ## Security
 
@@ -153,7 +153,7 @@ await registry.SignAsync(identity);
 Every authority message includes:
 - `SenderPublicKey` — base64 SPKI
 - `SenderFingerprint` — SHA-256 hash of the public key
-- `Signature` — ECDSA signature over the message payload
+- `Signature` — Ed25519 signature over the message payload
 
 Workers verify the coordinator's authority before executing any kernel.
 

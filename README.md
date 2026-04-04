@@ -14,7 +14,7 @@ Write parallel compute code in C# and let the library pick the best available ba
 The 7th backend — **AcceleratorType.P2P** — distributes kernels across connected devices via [SpawnDev.WebTorrent](https://github.com/LostBeard/SpawnDev.WebTorrent). Scan a QR code, tap a YubiKey, contribute GPU power.
 
 - **Real P2P via WebRTC** — Peers discover each other through `wss://hub.spawndev.com:44365/announce`, connect via WebRTC data channels, exchange kernels and buffers
-- **RBAC ownership** — Cryptographic swarm ownership with ECDSA-signed messages. Owner → Admin → Coordinator → Worker hierarchy with role assignment, key revocation, last-owner protection
+- **RBAC ownership** — Cryptographic swarm ownership with Ed25519-signed messages. Owner → Admin → Coordinator → Worker hierarchy with role assignment, key revocation, last-owner protection
 - **WebAuthn/YubiKey** — Hardware-backed swarm ownership via `HardwareKeyProvider`. Register a YubiKey as the swarm owner — ownership lives in the key, not the device
 - **Signed dispatch** — All authority messages (kick, block, transfer, role assign, kernel dispatch) are cryptographically signed and verified by every peer
 - **sd_compute extension** — BEP 10 wire protocol extension for compute messages over BitTorrent peer connections
@@ -117,7 +117,7 @@ kernel(size, buffer, new DelegateSpecialization<Func<int, int>>(DoubleIt));
 | **Compiles to** | PTX | OpenCL C | — |
 | **Runs on** | NVIDIA GPU | Any GPU | CPU cores (multi-threaded) |
 
-**`AcceleratorType.P2P`** — A 7th backend ([SpawnDev.ILGPU.P2P](https://www.nuget.org/packages/SpawnDev.ILGPU.P2P)) that distributes kernels across connected devices via [SpawnDev.WebTorrent](https://github.com/LostBeard/SpawnDev.WebTorrent). Peers discover each other through WebSocket trackers, connect via WebRTC, and exchange GPU kernels and buffer data. Create a compute swarm, share a QR code or link, and anyone can contribute GPU power — from any device with a browser. Ownership is cryptographic (ECDSA + WebAuthn/YubiKey), with role-based access control and signed messages.
+**`AcceleratorType.P2P`** — A 7th backend ([SpawnDev.ILGPU.P2P](https://www.nuget.org/packages/SpawnDev.ILGPU.P2P)) that distributes kernels across connected devices via [SpawnDev.WebTorrent](https://github.com/LostBeard/SpawnDev.WebTorrent). Peers discover each other through WebSocket trackers, connect via WebRTC, and exchange GPU kernels and buffer data. Create a compute swarm, share a QR code or link, and anyone can contribute GPU power — from any device with a browser. Ownership is cryptographic (Ed25519 + WebAuthn/YubiKey), with role-based access control and signed messages.
 
 ## Demo Applications
 

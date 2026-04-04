@@ -32,7 +32,7 @@ var compute = await P2PCompute.JoinSwarmAsync(crypto, client, accelerator, magne
 - **173 unit tests** — real kernel execution, coordinator dispatch, crypto, policy, security, buffer transfer, RBAC enforcement, fault tolerance
 - **Real kernel execution** — P2PKernelLauncher: reflection-based typed dispatch via LoadAutoGroupedStreamKernel. Verified on CPU and CUDA.
 - **Coordinator dispatch API** — `DispatchToSwarm()` routes to best peer, worker executes, results returned
-- **Real ECDSA-P256 crypto** — SwarmIdentity, KeyRegistry, RoleAssignment via SpawnDev.BlazorJS.Cryptography
+- **Real Ed25519 crypto** — SwarmIdentity, KeyRegistry, RoleAssignment via SpawnDev.BlazorJS.Cryptography
 - **Fault-tolerant dispatch** — peer scoring (TFLOPS/load/thermal/battery), automatic retry, graceful handoff
 - **Coordinator roles** — transfer, deterministic election, kick/block. Survives coordinator loss via BEP 46 DHT
 - **Join policies** — Open, Approval, KnownOnly, InviteOnly. Persistent device trust via fingerprints
@@ -45,7 +45,7 @@ var compute = await P2PCompute.JoinSwarmAsync(crypto, client, accelerator, magne
 
 ```
 P2PCompute (facade)
-├── SwarmIdentity (ECDSA-P256 key pair)
+├── SwarmIdentity (Ed25519 key pair)
 ├── SwarmPolicy (join rules: Open/Approval/KnownOnly/InviteOnly)
 ├── P2PSwarmCoordinator (roles, transfer, election, kick/block)
 ├── P2PDispatcher (scoring, fault tolerance, thermal/battery awareness)
@@ -80,7 +80,7 @@ See: [AI Sovereignty and Digital Rights](../Plans/ai-sovereignty-and-digital-rig
 
 - [SpawnDev.ILGPU](https://github.com/LostBeard/SpawnDev.ILGPU) — GPU compute (6 backends)
 - [SpawnDev.WebTorrent](https://github.com/LostBeard/SpawnDev.WebTorrent) — P2P transport (WebRTC + BitTorrent)
-- [SpawnDev.BlazorJS.Cryptography](https://github.com/LostBeard/SpawnDev.BlazorJS.Cryptography) — Cross-platform ECDSA
+- [SpawnDev.BlazorJS.Cryptography](https://github.com/LostBeard/SpawnDev.BlazorJS.Cryptography) — Cross-platform Ed25519
 
 ## License
 

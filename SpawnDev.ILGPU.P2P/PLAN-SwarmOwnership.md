@@ -59,13 +59,13 @@ Manages the owner's cryptographic identity. Generates, imports, exports, and bin
 ```csharp
 public class SwarmIdentity
 {
-    // The owner's ECDSA key pair (via SpawnDev.BlazorJS.Cryptography)
-    public PortableECDSAKey OwnerKey { get; }
+    // The owner's Ed25519 key pair (via SpawnDev.BlazorJS.Cryptography)
+    public PortableEd25519Key OwnerKey { get; }
 
     // Public key bytes for verification by peers
     public byte[] PublicKeySpki { get; }
 
-    // Create new identity (generates fresh ECDSA key)
+    // Create new identity (generates fresh Ed25519 key)
     public static Task<SwarmIdentity> CreateAsync(PortableCrypto crypto);
 
     // Import from hardware key (WebAuthn / FIDO2)
@@ -94,7 +94,7 @@ public class RoleAssignment
     public string PeerId { get; set; }           // Who receives the role
     public SwarmRole Role { get; set; }           // Owner, Admin, Coordinator, Worker
     public byte[] GranterPublicKey { get; set; }  // Who granted it
-    public byte[] Signature { get; set; }         // ECDSA signature of the assignment
+    public byte[] Signature { get; set; }         // Ed25519 signature of the assignment
     public long Timestamp { get; set; }           // When granted (UTC ticks)
     public long? ExpiresAt { get; set; }          // Optional expiration
 
@@ -154,7 +154,7 @@ public class RevokedKey
 ```csharp
 // Browser: uses navigator.credentials (WebAuthn / FIDO2)
 // Desktop: uses platform authenticator (Windows Hello, Touch ID)
-// YubiKeys, passkeys, biometrics — all produce ECDSA signatures
+// YubiKeys (firmware 5.2+), passkeys, biometrics — all support Ed25519 signatures
 
 public class HardwareKeyProvider
 {
@@ -173,7 +173,7 @@ public class HardwareKeyProvider
 ### Creating a Swarm
 
 ```
-1. Owner generates or imports SwarmIdentity (ECDSA key pair)
+1. Owner generates or imports SwarmIdentity (Ed25519 key pair)
 2. Owner creates swarm → P2PSwarmCoordinator.CreateSwarmAsync()
 3. Owner publishes KeyRegistry via BEP 46 (signed by owner key)
    - Registry contains owner's public key as the sole Owner
@@ -252,7 +252,7 @@ With ownership, the split-brain is resolved:
 ## Dependencies
 
 ### Already Built
-- **SpawnDev.BlazorJS.Cryptography** — ECDSA sign/verify, cross-platform (browser + desktop)
+- **SpawnDev.BlazorJS.Cryptography** — Ed25519 sign/verify, cross-platform (browser + desktop)
 - **BEP 46 mutable items** — signed state publication via DHT (needs crypto stub replacement)
 - **P2PSwarmCoordinator** — kick/block/transfer already implemented
 - **AgentChannel** — pub/sub for state updates
@@ -282,8 +282,8 @@ Replace the stub `IDhtSigner` implementations in SpawnDev.WebTorrent with real `
 
 ## Implementation Order
 
-1. ~~**Replace WebTorrent crypto stubs** with SpawnDev.BlazorJS.Cryptography~~ **DONE** (Data, 2026-03-29) — EcdsaP256Signer wired to IPortableCrypto, 15 ECDSA security tests passing in browser, AgentChannel relay signed+verified
-2. ~~**SwarmIdentity** — key generation, import/export, sign/verify~~ **DONE** (Data, 2026-03-29) — Full ECDSA-P256 identity with fingerprinting, sign/verify, export/import
+1. ~~**Replace WebTorrent crypto stubs** with SpawnDev.BlazorJS.Cryptography~~ **DONE** (Data, 2026-03-29) — Ed25519Signer wired to IPortableCrypto, 15 Ed25519 security tests passing in browser, AgentChannel relay signed+verified
+2. ~~**SwarmIdentity** — key generation, import/export, sign/verify~~ **DONE** (Data, 2026-03-29) — Full Ed25519 identity with fingerprinting, sign/verify, export/import
 3. ~~**KeyRegistry** — data structure, serialization, BEP 46 publish/subscribe~~ **DONE** (Data, 2026-03-29) — Add/revoke keys, sign/verify, last-owner protection, sequence-protected updates
 4. ~~**RoleAssignment** — signed role messages, verification~~ **DONE** (Data, 2026-03-29) — Signed assignments with expiration, tamper detection
 5. ~~**Authority checks** — integrate into P2PWorker, P2PSwarmCoordinator, P2PTransport~~ **DONE** (Data, 2026-03-29) — RBAC enforcement on kick/block/transfer, signed authority messages, registry distribution on peer join, election prefers registry-assigned coordinators
