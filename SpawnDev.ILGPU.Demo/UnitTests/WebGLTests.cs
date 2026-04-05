@@ -171,10 +171,11 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
         public new async Task MapReduceTest() =>
             throw new UnsupportedTestException("WebGL: reduce kernel requires shared memory (unsupported in vertex shaders)");
 
-        // --- Part 4: Array fill pattern (WebGL over-dispatches threads beyond requested count) ---
+        // --- Part 4: Array fill pattern ---
+        // Verified failed on 2026-04-04 even with groupSize=1. Root cause needs deeper investigation.
         [TestMethod]
         public new async Task ArrayFillPatternTest() =>
-            throw new UnsupportedTestException("WebGL: auto-grouping may dispatch extra threads causing out-of-bounds writes");
+            throw new UnsupportedTestException("WebGL: auto-grouping dispatch causes incorrect fill pattern results");
 
         // --- Part 4: NaN/Inf comparisons (GLSL ES 3.0 doesn't guarantee IEEE 754 NaN semantics) ---
         [TestMethod]

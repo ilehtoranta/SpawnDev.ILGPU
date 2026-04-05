@@ -139,7 +139,12 @@ public class P2PCompute : IAsyncDisposable
         // This ensures the extension is in the BEP 10 handshake for every peer.
         // ProcessHandshakeData fires naturally, registering the peer in transport
         // and triggering capability exchange.
-        client.UseExtension((swarm, wire) => new SdComputeExtension(transport));
+        client.UseExtension((wire) =>
+        {
+            var ext = new SdComputeExtension(transport);
+            ext.SetWire(wire);
+            return ext;
+        });
 
         // Auto-detect join link URL: explicit > browser location > null (desktop)
         if (joinLinkBaseUrl != null)
@@ -150,7 +155,7 @@ public class P2PCompute : IAsyncDisposable
         // NOW create the swarm — peers that connect will get sd_compute in handshake
         await coordinator.CreateSwarmAsync(name);
 
-        // Attach bridge to swarm for peer connection events
+        // Attach bridge to torrent for peer connection events
         if (coordinator.Swarm != null)
             bridge.AttachToSwarm(coordinator.Swarm);
 
@@ -206,7 +211,12 @@ public class P2PCompute : IAsyncDisposable
         transport.SetWorker(worker);
 
         // Register sd_compute extension factory BEFORE joining
-        client.UseExtension((swarm, wire) => new SdComputeExtension(transport));
+        client.UseExtension((wire) =>
+        {
+            var ext = new SdComputeExtension(transport);
+            ext.SetWire(wire);
+            return ext;
+        });
 
         // Extract magnet from join link if needed
         string magnet;

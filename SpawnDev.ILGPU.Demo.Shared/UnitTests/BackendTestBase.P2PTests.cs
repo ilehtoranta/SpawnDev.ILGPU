@@ -1692,8 +1692,8 @@ public abstract partial class BackendTestBase
     public async Task P2P_StateManager_Create()
     {
         var client = WebTorrentClient;
-        var dht = new SpawnDev.WebTorrent.Discovery.DhtDiscovery();
-        var channel = new SpawnDev.WebTorrent.AgentChannel(dht, new SpawnDev.WebTorrent.Discovery.HmacFallbackSigner());
+        var dht = new SpawnDev.WebTorrent.DhtDiscovery();
+        var channel = new SpawnDev.WebTorrent.AgentChannel(dht, new SpawnDev.WebTorrent.NoOpSigner(new byte[32]));
         await using var coordinator = new P2PSwarmCoordinator(client);
         await coordinator.CreateSwarmAsync("state-test");
 
@@ -1709,8 +1709,8 @@ public abstract partial class BackendTestBase
     public async Task P2P_StateManager_PublishState()
     {
         var client = WebTorrentClient;
-        var dht = new SpawnDev.WebTorrent.Discovery.DhtDiscovery();
-        var channel = new SpawnDev.WebTorrent.AgentChannel(dht, new SpawnDev.WebTorrent.Discovery.HmacFallbackSigner());
+        var dht = new SpawnDev.WebTorrent.DhtDiscovery();
+        var channel = new SpawnDev.WebTorrent.AgentChannel(dht, new SpawnDev.WebTorrent.NoOpSigner(new byte[32]));
         await using var coordinator = new P2PSwarmCoordinator(client);
         await coordinator.CreateSwarmAsync("publish-test");
 
@@ -1731,8 +1731,8 @@ public abstract partial class BackendTestBase
     public async Task P2P_StateManager_WorkerCantPublish()
     {
         var client = WebTorrentClient;
-        var dht = new SpawnDev.WebTorrent.Discovery.DhtDiscovery();
-        var channel = new SpawnDev.WebTorrent.AgentChannel(dht, new SpawnDev.WebTorrent.Discovery.HmacFallbackSigner());
+        var dht = new SpawnDev.WebTorrent.DhtDiscovery();
+        var channel = new SpawnDev.WebTorrent.AgentChannel(dht, new SpawnDev.WebTorrent.NoOpSigner(new byte[32]));
         await using var coordinator = new P2PSwarmCoordinator(client);
         // Don't call CreateSwarmAsync — stays as Worker role
 
@@ -1746,8 +1746,8 @@ public abstract partial class BackendTestBase
     public async Task P2P_StateManager_OnStateUpdated()
     {
         var client = WebTorrentClient;
-        var dht = new SpawnDev.WebTorrent.Discovery.DhtDiscovery();
-        var channel = new SpawnDev.WebTorrent.AgentChannel(dht, new SpawnDev.WebTorrent.Discovery.HmacFallbackSigner());
+        var dht = new SpawnDev.WebTorrent.DhtDiscovery();
+        var channel = new SpawnDev.WebTorrent.AgentChannel(dht, new SpawnDev.WebTorrent.NoOpSigner(new byte[32]));
         await using var coordinator = new P2PSwarmCoordinator(client);
 
         var stateManager = new P2PStateManager(channel, coordinator);
@@ -1806,12 +1806,15 @@ public abstract partial class BackendTestBase
         await using var transport = new P2PTransport(client, coordinator, dispatcher);
 
         var ext = new SdComputeExtension(transport);
-        var handshake = ext.GetHandshakeData();
-
-        if (handshake == null)
-            throw new Exception("Should include handshake data");
-        if (!handshake.ContainsKey("sd_compute_version"))
-            throw new Exception("Should include version");
+        // In _Alt, handshake data is set on the wire via SetWire().
+        // Verify the extension has the correct name.
+        if (ext.Name != "sd_compute")
+            throw new Exception($"Expected 'sd_compute', got '{ext.Name}'");
+        // Verify SetWire populates ExtendedHandshake with version
+        var wire = new SpawnDev.WebTorrent.Wire();
+        ext.SetWire(wire);
+        if (!wire.ExtendedHandshake.ContainsKey("sd_compute_version"))
+            throw new Exception("SetWire should add sd_compute_version to ExtendedHandshake");
     }
 
     // ═══════════════════════════════════════════════════════════
@@ -2818,18 +2821,15 @@ public abstract partial class BackendTestBase
         Buffer.BlockCopy(inputFloats, 0, inputBytes, 0, 16);
         worker.ReceiveBuffer("data", inputBytes);
 
-        // Coordinator dispatches to swarm
-        var dispatchId = p2pAccel.DispatchToSwarm(
+        // Coordinator dispatches to swarm and awaits completion via TaskCompletionSource
+        var dispatchResult = await p2pAccel.DispatchAsync(
             typeof(BackendTestBase).GetMethod(nameof(KernelMultiplyBy2),
                 System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!,
             4,
             ("data", inputBytes, 4));
 
-        if (string.IsNullOrEmpty(dispatchId))
-            throw new Exception("DispatchToSwarm returned empty ID");
-
-        // Give async transport + kernel execution time to complete
-        await Task.Delay(200);
+        if (!dispatchResult.Success)
+            throw new Exception($"DispatchAsync failed: {dispatchResult.Error}");
 
         // Verify the worker received and processed the dispatch
         var result = worker.GetBuffer("data");
@@ -3667,6 +3667,9 @@ public abstract partial class BackendTestBase
 
         P2PKernelSerializer.RegisterKernelType(typeof(BackendTestBase));
         worker.ReceiveBuffer("data", new byte[16]);
+
+        // Register the coordinator as a known peer so the transport accepts its messages
+        transport.RegisterPeer("coordinator", _ => Task.CompletedTask);
 
         var method = typeof(BackendTestBase).GetMethod(nameof(KernelFillConstant),
             System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!;
@@ -4520,7 +4523,7 @@ public abstract partial class BackendTestBase
 
         var magnetLink = coordCompute.MagnetLink!;
         Console.WriteLine($"[P2P MagnetJoin] Coordinator: {magnetLink[..Math.Min(70, magnetLink.Length)]}...");
-        Console.WriteLine($"[P2P MagnetJoin] Coord PeerId: {Convert.ToHexString(coordClient.PeerId)}");
+        Console.WriteLine($"[P2P MagnetJoin] Coord PeerId: {coordClient.PeerId}");
 
         // Wait for tracker registration
         await Task.Delay(3000);
@@ -4528,9 +4531,9 @@ public abstract partial class BackendTestBase
         // Client 2: Worker — needs a separate client with its own PeerId
         // In production, this would be a different device. For in-page testing,
         // we create a second client. This is the one acceptable "new" — simulating a remote device.
-        var workerClient = new SpawnDev.WebTorrent.WebTorrentClient(crypto: crypto);
-        Console.WriteLine($"[P2P MagnetJoin] Worker PeerId: {Convert.ToHexString(workerClient.PeerId)}");
-        if (coordClient.PeerId.SequenceEqual(workerClient.PeerId))
+        var workerClient = new SpawnDev.WebTorrent.WebTorrentClient();
+        Console.WriteLine($"[P2P MagnetJoin] Worker PeerId: {workerClient.PeerId}");
+        if (coordClient.PeerId == workerClient.PeerId)
             throw new Exception("FATAL: Both clients have the same PeerId! Tracker will ignore.");
 
         await using var workerCompute = await P2PCompute.JoinSwarmAsync(crypto, workerClient, accelerator, magnetLink);

@@ -1499,10 +1499,21 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                     var fieldAccess = new FieldAccess(i);
                     int byteOffset = structType.GetOffset(fieldAccess);
                     var fieldType = structType.Fields[i];
+                    // Float16 fields are 2 bytes in struct memory but GetWasmTypeFromIR returns F32.
+                    // Must use 2-byte load/store to preserve struct layout (no f16↔f32 conversion here).
+                    bool isFloat16Field = fieldType is PrimitiveType ptF16Chk
+                        && ptF16Chk.BasicValueType == BasicValueType.Float16;
                     byte fieldWasmType = GetWasmTypeFromIR(fieldType);
                     byte loadOp, storeOp;
                     uint align;
-                    switch (fieldWasmType)
+                    if (isFloat16Field)
+                    {
+                        // Float16: 2-byte raw binary copy (no f32 promotion in struct copy)
+                        loadOp = WasmOpCodes.I32Load16U;
+                        storeOp = WasmOpCodes.I32Store16;
+                        align = 1;
+                    }
+                    else switch (fieldWasmType)
                     {
                         case WasmOpCodes.I64: loadOp = WasmOpCodes.I64Load; storeOp = WasmOpCodes.I64Store; align = 3; break;
                         case WasmOpCodes.F32: loadOp = WasmOpCodes.F32Load; storeOp = WasmOpCodes.F32Store; align = 2; break;
@@ -1523,7 +1534,12 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                     // Load from source (atomic in barrier kernels for cross-worker visibility)
                     if (_hasBarriers)
                     {
-                        switch (fieldWasmType)
+                        if (isFloat16Field)
+                        {
+                            // Float16: 2-byte atomic load
+                            WasmModuleBuilder.EmitAtomicRmw(Code, WasmOpCodes.I32AtomicLoad16U, 1, 0);
+                        }
+                        else switch (fieldWasmType)
                         {
                             case WasmOpCodes.I64:
                                 WasmModuleBuilder.EmitAtomicRmw(Code, WasmOpCodes.I64AtomicLoad, 3, 0);
@@ -1542,7 +1558,12 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                         }
                         // Store to scratch (per-thread private, but use matching int type for
                         // the value on the stack after atomic load of float fields)
-                        switch (fieldWasmType)
+                        if (isFloat16Field)
+                        {
+                            // Float16: 2-byte store to scratch (raw f16 bits)
+                            WasmModuleBuilder.EmitStore(Code, WasmOpCodes.I32Store16, 1, 0);
+                        }
+                        else switch (fieldWasmType)
                         {
                             case WasmOpCodes.I64:
                                 WasmModuleBuilder.EmitStore(Code, WasmOpCodes.I64Store, 3, 0);
@@ -1876,6 +1897,8 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 var fieldAccess = new FieldAccess(fieldIndex);
                 int byteOffset = structType.GetOffset(fieldAccess);
                 var fieldType = structType.Fields[fieldIndex];
+                bool isFloat16Field = fieldType is PrimitiveType ptF16Gf
+                    && ptF16Gf.BasicValueType == BasicValueType.Float16;
                 byte fieldWasmType = GetWasmTypeFromIR(fieldType);
 
                 // Push address: source + byteOffset
@@ -1886,8 +1909,20 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                     Code.Add(WasmOpCodes.I32Add);
                 }
 
-                // Emit typed load for the field (atomic for barrier kernels)
-                EmitTypedLoad(fieldWasmType);
+                if (isFloat16Field)
+                {
+                    // Float16: load 2 bytes as u16, then convert f16 bits → f32
+                    if (_hasBarriers)
+                        WasmModuleBuilder.EmitAtomicRmw(Code, WasmOpCodes.I32AtomicLoad16U, 1, 0);
+                    else
+                        WasmModuleBuilder.EmitLoad(Code, WasmOpCodes.I32Load16U, 1, 0);
+                    EmitF16ToF32();
+                }
+                else
+                {
+                    // Emit typed load for the field (atomic for barrier kernels)
+                    EmitTypedLoad(fieldWasmType);
+                }
                 WasmModuleBuilder.EmitLocalSet(Code, target);
                 return;
             }
@@ -1895,6 +1930,45 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             // Fallback: pass through
             EmitGetLocal(source);
             WasmModuleBuilder.EmitLocalSet(Code, target);
+        }
+
+        public override void GenerateCode(FloatAsIntCast value)
+        {
+            // Float16 lives in an F32 Wasm local (promoted). A plain I32ReinterpretF32
+            // would give the 32-bit f32 bit pattern, not the original 16-bit f16 bits.
+            // EmitF32ToF16() converts the promoted f32 value back to its 16-bit bit
+            // pattern as an I32 — exactly what Interop.FloatAsInt(Half) should return.
+            var srcIRType = value.Value.Resolve().Type;
+            bool isSrcFloat16 = srcIRType is PrimitiveType ptSrc
+                && ptSrc.BasicValueType == BasicValueType.Float16;
+            if (isSrcFloat16)
+            {
+                var target = AllocateLocal(value, WasmOpCodes.I32);
+                EmitGetLocal(value.Value.Resolve());
+                EmitF32ToF16();
+                WasmModuleBuilder.EmitLocalSet(Code, target);
+                return;
+            }
+            base.GenerateCode(value);
+        }
+
+        public override void GenerateCode(IntAsFloatCast value)
+        {
+            // Reverse of FloatAsIntCast: when the target is Float16, the source I32 holds
+            // a 16-bit f16 bit pattern. A plain F32ReinterpretI32 would treat all 32 bits
+            // as an f32. EmitF16ToF32() properly expands the 16-bit pattern to f32.
+            var dstIRType = value.Type;
+            bool isDstFloat16 = dstIRType is PrimitiveType ptDst
+                && ptDst.BasicValueType == BasicValueType.Float16;
+            if (isDstFloat16)
+            {
+                var target = AllocateLocal(value, WasmOpCodes.F32);
+                EmitGetLocal(value.Value.Resolve());
+                EmitF16ToF32();
+                WasmModuleBuilder.EmitLocalSet(Code, target);
+                return;
+            }
+            base.GenerateCode(value);
         }
 
         public override void GenerateCode(SetField value)
@@ -1912,6 +1986,8 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 int byteOffset = structType.GetOffset(fieldAccess);
                 var fieldType = structType.Fields[fieldIdx];
                 byte fieldWasmType = GetWasmTypeFromIR(fieldType);
+                bool isFloat16Field = fieldType is PrimitiveType ptF16Sf
+                    && ptF16Sf.BasicValueType == BasicValueType.Float16;
 
                 // Store the new field value to memory: mem[base + offset] = newValue
                 EmitGetLocal(objectValue); // push base address
@@ -1922,32 +1998,44 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 }
                 EmitGetLocal(value.Value.Resolve()); // push new value
 
-                // Emit typed store
-                byte storeOp;
-                uint align;
-                switch (fieldWasmType)
+                // Float16: value is f32 on Wasm stack — convert to f16 bits, 2-byte store
+                if (isFloat16Field)
                 {
-                    case WasmOpCodes.I64:
-                        storeOp = WasmOpCodes.I64Store;
-                        align = 3;
-                        break;
-                    case WasmOpCodes.F32:
-                        storeOp = WasmOpCodes.F32Store;
-                        align = 2;
-                        break;
-                    case WasmOpCodes.F64:
-                        storeOp = WasmOpCodes.F64Store;
-                        align = 3;
-                        break;
-                    default:
-                        storeOp = WasmOpCodes.I32Store;
-                        align = 2;
-                        break;
+                    EmitF32ToF16();
+                    if (_hasBarriers)
+                        WasmModuleBuilder.EmitAtomicRmw(Code, WasmOpCodes.I32AtomicStore16, 1, 0);
+                    else
+                        WasmModuleBuilder.EmitStore(Code, WasmOpCodes.I32Store16, 1, 0);
                 }
-                if (_hasBarriers)
+                else if (_hasBarriers)
+                {
                     EmitTypedStore(fieldWasmType);
+                }
                 else
+                {
+                    byte storeOp;
+                    uint align;
+                    switch (fieldWasmType)
+                    {
+                        case WasmOpCodes.I64:
+                            storeOp = WasmOpCodes.I64Store;
+                            align = 3;
+                            break;
+                        case WasmOpCodes.F32:
+                            storeOp = WasmOpCodes.F32Store;
+                            align = 2;
+                            break;
+                        case WasmOpCodes.F64:
+                            storeOp = WasmOpCodes.F64Store;
+                            align = 3;
+                            break;
+                        default:
+                            storeOp = WasmOpCodes.I32Store;
+                            align = 2;
+                            break;
+                    }
                     WasmModuleBuilder.EmitStore(Code, storeOp, align, 0);
+                }
 
                 // Return the base address (unchanged — struct was modified in-place)
                 EmitGetLocal(objectValue);
@@ -2008,11 +2096,20 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                     var fieldAccess = new FieldAccess(i);
                     int byteOffset = structType.GetOffset(fieldAccess);
                     var fieldType = structType.Fields[i];
+                    // Float16 fields are 2 bytes in struct memory — use 2-byte ops
+                    bool isFloat16Field = fieldType is PrimitiveType ptF16St
+                        && ptF16St.BasicValueType == BasicValueType.Float16;
                     byte fieldWasmType = GetWasmTypeFromIR(fieldType);
 
                     byte loadOp, storeOp;
                     uint align;
-                    switch (fieldWasmType)
+                    if (isFloat16Field)
+                    {
+                        loadOp = WasmOpCodes.I32Load16U;
+                        storeOp = WasmOpCodes.I32Store16;
+                        align = 1;
+                    }
+                    else switch (fieldWasmType)
                     {
                         case WasmOpCodes.I64:
                             loadOp = WasmOpCodes.I64Load;
@@ -2056,7 +2153,12 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                     // Load field value (atomic for barrier kernels, all types via reinterpret)
                     if (_hasBarriers)
                     {
-                        switch (fieldWasmType)
+                        if (isFloat16Field)
+                        {
+                            // Float16: 2-byte atomic load (raw f16 bits as i32)
+                            WasmModuleBuilder.EmitAtomicRmw(Code, WasmOpCodes.I32AtomicLoad16U, 1, 0);
+                        }
+                        else switch (fieldWasmType)
                         {
                             case WasmOpCodes.I64:
                                 WasmModuleBuilder.EmitAtomicRmw(Code, WasmOpCodes.I64AtomicLoad, 3, 0);
@@ -2080,7 +2182,12 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                     // Store to destination (atomic for barrier kernels, all types via reinterpret)
                     if (_hasBarriers)
                     {
-                        switch (fieldWasmType)
+                        if (isFloat16Field)
+                        {
+                            // Float16: 2-byte atomic store
+                            WasmModuleBuilder.EmitAtomicRmw(Code, WasmOpCodes.I32AtomicStore16, 1, 0);
+                        }
+                        else switch (fieldWasmType)
                         {
                             case WasmOpCodes.I64:
                                 WasmModuleBuilder.EmitAtomicRmw(Code, WasmOpCodes.I64AtomicStore, 3, 0);
@@ -2236,6 +2343,9 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                     var fieldAccess = new FieldAccess(i);
                     int fieldOffset = structType.GetOffset(fieldAccess);
                     var fieldType = structType.Fields[i];
+                    // Float16 fields are 2 bytes in struct memory — use 2-byte store
+                    bool isFloat16Field = fieldType is PrimitiveType ptF16Sf
+                        && ptF16Sf.BasicValueType == BasicValueType.Float16;
                     byte fieldWasmType = GetWasmTypeFromIR(fieldType);
 
                     // Push destination address: target + fieldOffset
@@ -2249,29 +2359,38 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                     // Push field value
                     EmitGetLocal(value[i].Resolve());
 
-                    // Emit typed store
-                    byte storeOp;
-                    uint align;
-                    switch (fieldWasmType)
+                    // Float16: value is f32 on the Wasm stack — convert to f16 bits before 2-byte store
+                    if (isFloat16Field)
                     {
-                        case WasmOpCodes.I64:
-                            storeOp = WasmOpCodes.I64Store;
-                            align = 3;
-                            break;
-                        case WasmOpCodes.F32:
-                            storeOp = WasmOpCodes.F32Store;
-                            align = 2;
-                            break;
-                        case WasmOpCodes.F64:
-                            storeOp = WasmOpCodes.F64Store;
-                            align = 3;
-                            break;
-                        default:
-                            storeOp = WasmOpCodes.I32Store;
-                            align = 2;
-                            break;
+                        EmitF32ToF16();
+                        WasmModuleBuilder.EmitStore(Code, WasmOpCodes.I32Store16, 1, 0);
                     }
-                    WasmModuleBuilder.EmitStore(Code, storeOp, align, 0);
+                    else
+                    {
+                        // Emit typed store
+                        byte storeOp;
+                        uint align;
+                        switch (fieldWasmType)
+                        {
+                            case WasmOpCodes.I64:
+                                storeOp = WasmOpCodes.I64Store;
+                                align = 3;
+                                break;
+                            case WasmOpCodes.F32:
+                                storeOp = WasmOpCodes.F32Store;
+                                align = 2;
+                                break;
+                            case WasmOpCodes.F64:
+                                storeOp = WasmOpCodes.F64Store;
+                                align = 3;
+                                break;
+                            default:
+                                storeOp = WasmOpCodes.I32Store;
+                                align = 2;
+                                break;
+                        }
+                        WasmModuleBuilder.EmitStore(Code, storeOp, align, 0);
+                    }
                 }
             }
             else

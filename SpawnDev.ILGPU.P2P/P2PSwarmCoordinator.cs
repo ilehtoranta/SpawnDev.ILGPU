@@ -1,6 +1,5 @@
 using global::ILGPU;
 using SpawnDev.WebTorrent;
-using SpawnDev.WebTorrent.Torrent;
 
 namespace SpawnDev.ILGPU.P2P;
 
@@ -24,9 +23,9 @@ public class P2PSwarmCoordinator : IAsyncDisposable
     private P2PAccelerator? _accelerator;
 
     /// <summary>
-    /// The underlying WebTorrent swarm (for bridge attachment).
+    /// The underlying WebTorrent torrent/swarm (for bridge attachment).
     /// </summary>
-    public TorrentSwarm? Swarm { get; private set; }
+    public Torrent? Swarm { get; private set; }
 
     /// <summary>
     /// This node's cryptographic identity (ECDSA key pair).
@@ -150,15 +149,15 @@ public class P2PSwarmCoordinator : IAsyncDisposable
 
         // Create a small data payload that identifies this compute swarm
         var swarmId = System.Text.Encoding.UTF8.GetBytes($"p2p-compute:{name}:{Guid.NewGuid():N}");
-        var createOptions = new SpawnDev.WebTorrent.Torrent.TorrentCreatorOptions
+        var createOptions = new TorrentCreatorOptions
         {
             Trackers = trackers,
         };
-        var swarm = await _client.SeedAsync(swarmId, $"{name}.p2p", createOptions);
-        Swarm = swarm;
+        var torrent = await _client.SeedAsync($"{name}.p2p", swarmId, createOptions);
+        Swarm = torrent;
 
-        // Build magnet link with tracker info
-        var hashHex = Convert.ToHexString(swarm.InfoHash).ToLowerInvariant();
+        // Build magnet link with tracker info (InfoHash is already hex string in _Alt)
+        var hashHex = torrent.InfoHash ?? "";
         var trackerParams = string.Join("", trackers.Select(t =>
             $"&tr={Uri.EscapeDataString(t)}"));
         MagnetLink = $"magnet:?xt=urn:btih:{hashHex}&dn={Uri.EscapeDataString(name)}{trackerParams}";
@@ -184,14 +183,15 @@ public class P2PSwarmCoordinator : IAsyncDisposable
     /// Join an existing compute swarm via magnet link.
     /// Joins as a Worker — the swarm already has a coordinator.
     /// </summary>
-    public async Task JoinSwarmAsync(string magnetLink)
+    public Task JoinSwarmAsync(string magnetLink)
     {
         MagnetLink = magnetLink;
         Role = P2PRole.Worker;
-        var swarm = await _client.AddAsync(magnetLink);
-        Swarm = swarm;
+        var torrent = _client.Add(magnetLink);
+        Swarm = torrent;
         // Swarm connection happens through the tracker
         // Peers are discovered and capabilities exchanged
+        return Task.CompletedTask;
     }
 
     /// <summary>

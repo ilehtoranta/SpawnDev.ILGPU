@@ -2,7 +2,6 @@ using System.Collections.Concurrent;
 using System.Text.Json;
 using SpawnDev.BlazorJS.Cryptography;
 using SpawnDev.WebTorrent;
-using SpawnDev.WebTorrent.Torrent;
 
 namespace SpawnDev.ILGPU.P2P;
 
@@ -550,7 +549,7 @@ public class P2PTransport : IAsyncDisposable
     {
         return new PeerCapabilities
         {
-            PeerId = _client.PeerId != null ? Convert.ToHexString(_client.PeerId) : Guid.NewGuid().ToString("N"),
+            PeerId = !string.IsNullOrEmpty(_client.PeerId) ? _client.PeerId : Guid.NewGuid().ToString("N"),
             Platform = OperatingSystem.IsBrowser() ? "browser" : "desktop",
             IlgpuVersion = typeof(P2PAccelerator).Assembly.GetName().Version?.ToString() ?? "4.7.1",
             AvailableBackends = new[] { "CPU" },

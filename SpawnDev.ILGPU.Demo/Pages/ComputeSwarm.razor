@@ -1321,16 +1321,12 @@
     {
         var client = WebTorrentClient;
         SpawnDev.WebTorrent.WebTorrentClient.VerboseLogging = true;
-        Console.WriteLine($"[P2P CreateSwarm] PeerId: {Convert.ToHexString(client.PeerId)}");
+        Console.WriteLine($"[P2P CreateSwarm] PeerId: {client.PeerId}");
         _compute = await P2PCompute.CreateSwarmAsync(Crypto, client, "Demo Compute Swarm");
         SwarmService.SetCompute(_compute);
-        // Debug: verify tracker is in metadata
-        var swarm = _compute.Coordinator.Swarm;
-        var announceCount = swarm?.Metadata?.AnnounceList?.Length ?? -1;
-        var trackerUrls = announceCount > 0
-            ? string.Join(", ", swarm!.Metadata!.AnnounceList.SelectMany(t => t))
-            : "NONE";
-        JS.CallVoid("console.log", $"[P2P] Swarm created. Torrents: {client.Torrents.Count}, AnnounceList: [{trackerUrls}], IsBrowser: {OperatingSystem.IsBrowser()}");
+        // Debug: verify swarm created
+        var torrent = _compute.Coordinator.Swarm;
+        JS.CallVoid("console.log", $"[P2P] Swarm created. InfoHash: {torrent?.InfoHash ?? "null"}, IsBrowser: {OperatingSystem.IsBrowser()}");
         await GenerateQRCode();
         WireSwarmEvents();
         SaveSwarmState();
@@ -1430,7 +1426,7 @@
 
         var client = WebTorrentClient;
         SpawnDev.WebTorrent.WebTorrentClient.VerboseLogging = true;
-        Console.WriteLine($"[P2P JoinSwarm] PeerId: {Convert.ToHexString(client.PeerId)}, Hash: {_computeHash}");
+        Console.WriteLine($"[P2P JoinSwarm] PeerId: {client.PeerId}, Hash: {_computeHash}");
         var magnet = P2PCompute.BuildMagnetFromHash(_computeHash, _swarmName);
         Console.WriteLine($"[P2P JoinSwarm] Magnet: {magnet[..Math.Min(80, magnet.Length)]}...");
         _compute = await P2PCompute.JoinSwarmAsync(Crypto, client, accelerator, magnet);

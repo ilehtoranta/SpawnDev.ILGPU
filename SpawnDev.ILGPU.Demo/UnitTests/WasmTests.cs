@@ -555,9 +555,10 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
         // Double/Long offset + index tests: un-skipped with unsigned shift fix
         // 16K/20K: consistently 2-4 violations. Unsigned shift fix helped double/long
         // but 16K int pairs still have intermittent corruption.
-        [TestMethod]
-        public new async Task AlgorithmRadixSortPairsHalfTest() =>
-            throw new UnsupportedTestException("Wasm: Half pairs — f16 struct handling in sort pipeline (not onesComplementMask)");
+        // Float16 struct field load/store fixed (2-byte ops in all 5 IR handlers).
+        // FloatAsIntCast/IntAsFloatCast fixed: use EmitF32ToF16/EmitF16ToF32 instead of
+        // I32ReinterpretF32/F32ReinterpretI32 for Float16 — gives correct 16-bit bit patterns
+        // for RadixSort onesComplementMask.
 
         // Large sort tests: increase timeout from 30s to 120s for 260K+ elements.
         [TestMethod(Timeout = 120000)]

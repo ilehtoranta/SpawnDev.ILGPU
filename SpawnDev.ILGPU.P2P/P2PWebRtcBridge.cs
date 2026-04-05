@@ -1,6 +1,4 @@
 using SpawnDev.WebTorrent;
-using SpawnDev.WebTorrent.Torrent;
-using SpawnDev.WebTorrent.Wire;
 
 namespace SpawnDev.ILGPU.P2P;
 
@@ -10,13 +8,8 @@ namespace SpawnDev.ILGPU.P2P;
 ///
 /// Usage:
 ///   var bridge = new P2PWebRtcBridge(transport);
-///   // When a WebTorrent peer connects:
-///   bridge.AttachToPeer(wire, peerId);
-///   // Now compute messages flow through the real WebRTC data channel.
-///
-/// Or attach to a whole swarm:
-///   bridge.AttachToSwarm(torrentSwarm);
-///   // Automatically wires sd_compute to every peer that connects.
+///   // Attach to a torrent — automatically wires sd_compute to every peer:
+///   bridge.AttachToSwarm(torrent);
 /// </summary>
 public class P2PWebRtcBridge : IAsyncDisposable
 {
@@ -44,61 +37,19 @@ public class P2PWebRtcBridge : IAsyncDisposable
     }
 
     /// <summary>
-    /// Attach sd_compute extension to a specific wire protocol connection.
-    /// Call before the extension handshake is exchanged.
+    /// Attach to a Torrent — automatically wires sd_compute
+    /// to every peer that connects to this torrent.
+    /// Uses the OnWire event (replaces old OnPeerConnect pattern).
     /// </summary>
-    public SdComputeExtension AttachToPeer(WireProtocol wire, string peerId)
+    public void AttachToSwarm(Torrent torrent)
     {
-        var ext = new SdComputeExtension(_transport);
-        ext.SetPeerId(peerId);
-
-        // Register in the wire protocol's extension manager
-        // SendAsync uses Manager.Wire directly — no event wiring needed
-        wire.Extensions.Register(ext);
-
-        _extensions[peerId] = ext;
-
-        // TODO: Extension registered after BEP 10 handshake — ext.IsSupported is false.
-        // Requires WebTorrentClient.UseExtension(factory) to register extensions BEFORE
-        // handshake. See: data-to-riker-wire-use-pattern-2026-03-31.md
-
-        // Notify when compute peer sends capabilities
-        ext.OnComputeMessage += (msg) =>
+        torrent.OnWire += (wire, peerId) =>
         {
-            if (msg.Type == P2PMessageType.CapabilityResponse && _notified.TryAdd(peerId, true))
-            {
-                // Extract capabilities from the message
-                PeerCapabilities? caps = null;
-                try
-                {
-                    if (msg.Payload.HasValue)
-                        caps = System.Text.Json.JsonSerializer.Deserialize<PeerCapabilities>(msg.Payload.Value);
-                }
-                catch (Exception ex)
-                {
-                    Console.WriteLine($"[P2PBridge] Failed to deserialize capabilities from peer {peerId}: {ex.Message}");
-                }
-                OnComputePeerConnected?.Invoke(peerId);
-                OnComputePeerCapabilities?.Invoke(peerId, caps);
-            }
-        };
-
-        return ext;
-    }
-    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, bool> _notified = new();
-
-    /// <summary>
-    /// Attach to a TorrentSwarm — automatically wires sd_compute
-    /// to every peer that connects to this swarm.
-    /// </summary>
-    public void AttachToSwarm(TorrentSwarm swarm)
-    {
-        swarm.OnPeerConnect += (peerConnection) =>
-        {
-            var peerId = peerConnection.Info.Address ?? Guid.NewGuid().ToString("N");
+            if (string.IsNullOrEmpty(peerId))
+                peerId = Guid.NewGuid().ToString("N");
 
             // Check if the wire already has an SdComputeExtension (from UseExtension factory)
-            var existing = peerConnection.Wire.Extensions.Get<SdComputeExtension>();
+            var existing = wire.GetExtension<SdComputeExtension>();
             if (existing != null)
             {
                 // Use the factory-created extension (already in BEP 10 handshake)
@@ -145,16 +96,15 @@ public class P2PWebRtcBridge : IAsyncDisposable
             }
             else
             {
-                // No factory extension — this means UseExtension was NOT called before the swarm was created.
-                // The legacy AttachToPeer path registers the extension AFTER the BEP 10 handshake,
-                // which means ext.IsSupported will be false and compute messages won't flow.
+                // No factory extension — UseExtension was NOT called before the torrent was created.
                 Console.WriteLine($"[P2PBridge] WARNING: No factory extension for peer {peerId}. " +
-                    "UseExtension must be called BEFORE creating/joining the swarm. " +
-                    "Falling back to post-handshake registration (sd_compute may not work).");
-                AttachToPeer(peerConnection.Wire, peerId);
+                    "UseExtension must be called BEFORE creating/joining the torrent. " +
+                    "sd_compute will not work for this peer.");
             }
         };
     }
+
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, bool> _notified = new();
 
     /// <summary>
     /// Send a compute message to a specific peer via the real WebRTC channel.

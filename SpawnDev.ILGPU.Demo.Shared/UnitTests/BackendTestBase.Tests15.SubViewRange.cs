@@ -374,6 +374,8 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
 
             var kernel = accelerator.LoadAutoGroupedStreamKernel<
                 Index1D, ArrayView<float>, ArrayView<float>, ArrayView<float>>(AddSubViewsKernel);
+            var copyKernel = accelerator.LoadAutoGroupedStreamKernel<
+                Index1D, ArrayView<float>, ArrayView<float>>(CopySubViewKernel);
 
             // 500 dispatches — each reads different weight SubView + same activation buffer
             int numDispatches = 500;
@@ -386,8 +388,6 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                 await accelerator.SynchronizeAsync();
 
                 // Swap: output becomes next input (simulates layer chaining)
-                var copyKernel = accelerator.LoadAutoGroupedStreamKernel<
-                    Index1D, ArrayView<float>, ArrayView<float>>(CopySubViewKernel);
                 copyKernel((Index1D)actSize, outBuf.View, actBuf.View);
                 await accelerator.SynchronizeAsync();
             }

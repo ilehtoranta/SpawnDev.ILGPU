@@ -19,8 +19,7 @@ builder.Services.AddPlatformCrypto();
 
 // P2P: WebTorrent client with DI crypto for piece verification
 builder.Services.AddSingleton(sp =>
-    new SpawnDev.WebTorrent.WebTorrentClient(
-        crypto: sp.GetRequiredService<SpawnDev.BlazorJS.Cryptography.IPortableCrypto>()));
+    new SpawnDev.WebTorrent.WebTorrentClient());
 
 // P2P: Shared swarm service — holds the active compute swarm for all pages
 builder.Services.AddSingleton<SpawnDev.ILGPU.Demo.Shared.Services.P2PSwarmService>();

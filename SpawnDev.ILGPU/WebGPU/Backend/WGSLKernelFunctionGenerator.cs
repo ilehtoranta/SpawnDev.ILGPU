@@ -1139,6 +1139,10 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 if (ownBinding)
                 {
                     // --- OWN BINDING (views, structs, atomics) ---
+                    // NOTE: read-only optimization (var<storage, read>) is disabled because
+                    // algorithm kernels bind SubViews of the same temp buffer to multiple params.
+                    // WebGPU rejects mixed read-only/read-write usage on the same buffer in one
+                    // compute pass. Enabling this requires runtime buffer aliasing checks.
                     string accessMode = "read_write";
                     string bindingWgslType = wgslType;
 

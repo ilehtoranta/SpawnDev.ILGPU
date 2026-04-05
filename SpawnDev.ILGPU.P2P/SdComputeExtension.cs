@@ -1,5 +1,4 @@
 using System.Text.Json;
-using SpawnDev.WebTorrent.Wire;
 
 namespace SpawnDev.ILGPU.P2P;
 
@@ -12,19 +11,28 @@ namespace SpawnDev.ILGPU.P2P;
 /// over the same WebRTC data channel used for BitTorrent piece exchange.
 ///
 /// Usage:
-///   var ext = new SdComputeExtension(transport);
-///   wire.Extensions.Register(ext);
-///   // After handshake, ext.IsSupported tells you if peer has compute capability
+///   client.UseExtension((wire) =>
+///   {
+///       var ext = new SdComputeExtension(transport);
+///       ext.SetWire(wire);
+///       return ext;
+///   });
 /// </summary>
-public class SdComputeExtension : WireExtension
+public class SdComputeExtension : SpawnDev.WebTorrent.IWireExtension
 {
     private readonly P2PTransport _transport;
+    private SpawnDev.WebTorrent.Wire? _wire;
     private string _peerId = "";
 
     /// <summary>
     /// Extension name in BEP 10 handshake.
     /// </summary>
-    public override string Name => "sd_compute";
+    public string Name => "sd_compute";
+
+    /// <summary>
+    /// True if the remote peer also supports sd_compute (determined after BEP 10 handshake).
+    /// </summary>
+    public bool IsSupported { get; private set; }
 
     /// <summary>
     /// Fired when a compute message is received from this peer.
@@ -42,7 +50,18 @@ public class SdComputeExtension : WireExtension
     }
 
     /// <summary>
-    /// Set the peer ID for this connection (from the wire handshake).
+    /// Set the Wire reference for sending messages.
+    /// Called by the UseExtension factory.
+    /// </summary>
+    public void SetWire(SpawnDev.WebTorrent.Wire wire)
+    {
+        _wire = wire;
+        // Add our version to the extended handshake
+        wire.ExtendedHandshake["sd_compute_version"] = P2PProtocol.Version;
+    }
+
+    /// <summary>
+    /// Set the peer ID for this connection.
     /// </summary>
     public void SetPeerId(string peerId)
     {
@@ -50,14 +69,68 @@ public class SdComputeExtension : WireExtension
     }
 
     /// <summary>
-    /// Handle incoming sd_compute extension message.
-    /// The payload is a P2P protocol message (JSON).
+    /// Called when the BEP 3 handshake completes (before BEP 10 extended handshake).
     /// </summary>
-    public override async Task HandleMessageAsync(byte[] payload)
+    public void OnHandshake(string infoHash, string peerId, SpawnDev.WebTorrent.WireExtensions extensions)
     {
-        Console.WriteLine($"[sd_compute] HandleMessageAsync: peerId={_peerId}, {payload.Length} bytes, IsSupported={IsSupported}, RemoteId={RemoteId}");
-        // Route to the P2P transport for handling
-        await _transport.HandleIncomingDataAsync(_peerId, payload);
+        if (string.IsNullOrEmpty(_peerId))
+            _peerId = peerId;
+    }
+
+    /// <summary>
+    /// Called when the BEP 10 extended handshake arrives from the remote peer.
+    /// Check if peer supports sd_compute.
+    /// </summary>
+    public void OnExtendedHandshake(Dictionary<string, object> handshake)
+    {
+        // The Wire class already filters: OnExtendedHandshake is only called
+        // if the peer's 'm' dict includes our extension name. So if we get here,
+        // the peer supports sd_compute.
+        IsSupported = true;
+
+        Console.WriteLine($"[sd_compute] OnExtendedHandshake: peerId={_peerId}, IsSupported={IsSupported}");
+
+        // Check for version info
+        if (handshake.TryGetValue("sd_compute_version", out var version))
+        {
+            Console.WriteLine($"[sd_compute] Peer {_peerId} supports sd_compute version {version}");
+        }
+
+        // Register peer in transport with a send function that uses the wire
+        _transport.RegisterPeer(_peerId, async (data) =>
+        {
+            await SendComputeMessageAsync(data);
+        });
+
+        // Initiate capability exchange — send our capabilities to the peer
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                var capMsg = new P2PMessage
+                {
+                    Type = P2PMessageType.CapabilityResponse,
+                    Payload = JsonSerializer.SerializeToElement(
+                        _transport.GetLocalCapabilities()),
+                };
+                await SendP2PMessageAsync(capMsg);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[sd_compute] Capability exchange failed for peer {_peerId}: {ex.Message}");
+            }
+        });
+    }
+
+    /// <summary>
+    /// Handle incoming sd_compute extension message.
+    /// Called by the Wire framework when a BEP 10 message with our extension ID arrives.
+    /// </summary>
+    public void OnMessage(byte[] payload)
+    {
+        Console.WriteLine($"[sd_compute] OnMessage: peerId={_peerId}, {payload.Length} bytes, IsSupported={IsSupported}");
+        // Route to the P2P transport for handling (fire-and-forget since OnMessage is sync)
+        _ = _transport.HandleIncomingDataAsync(_peerId, payload);
 
         // Also fire local event + buffer capabilities
         var message = P2PProtocol.Deserialize(payload);
@@ -70,61 +143,12 @@ public class SdComputeExtension : WireExtension
     }
 
     /// <summary>
-    /// Include compute capabilities in the extension handshake.
-    /// </summary>
-    public override Dictionary<string, object>? GetHandshakeData()
-    {
-        return new Dictionary<string, object>
-        {
-            ["sd_compute_version"] = P2PProtocol.Version,
-        };
-    }
-
-    /// <summary>
-    /// Process the peer's compute extension handshake data.
-    /// </summary>
-    public override void ProcessHandshakeData(Dictionary<string, object> handshake)
-    {
-        Console.WriteLine($"[sd_compute] ProcessHandshakeData: peerId={_peerId}, keys=[{string.Join(",", handshake.Keys)}], IsSupported={IsSupported}, RemoteId={RemoteId}");
-        // Check if peer announced sd_compute support
-        if (handshake.TryGetValue("sd_compute_version", out var version))
-        {
-            // Peer supports compute — register in transport
-            _transport.RegisterPeer(_peerId, async (data) =>
-            {
-                // Send via the wire protocol's extension message system
-                await SendComputeMessageAsync(data);
-            });
-
-            // Initiate capability exchange — send our capabilities to the peer
-            _ = Task.Run(async () =>
-            {
-                try
-                {
-                    var capMsg = new P2PMessage
-                    {
-                        Type = P2PMessageType.CapabilityResponse,
-                        Payload = System.Text.Json.JsonSerializer.SerializeToElement(
-                            _transport.GetLocalCapabilities()),
-                    };
-                    await SendP2PMessageAsync(capMsg);
-                }
-                catch (Exception ex)
-                {
-                    Console.WriteLine($"[sd_compute] Capability exchange failed for peer {_peerId}: {ex.Message}");
-                }
-            });
-        }
-    }
-
-    /// <summary>
     /// Send a compute message to the peer via the BEP 10 extension channel.
-    /// Uses WireExtension.SendAsync which sends directly through the wire.
     /// </summary>
-    public new async Task SendComputeMessageAsync(byte[] data)
+    public async Task SendComputeMessageAsync(byte[] data)
     {
-        if (!IsSupported) return;
-        await SendAsync(data);
+        if (_wire == null || !IsSupported) return;
+        await _wire.Extended("sd_compute", data);
     }
 
     /// <summary>
