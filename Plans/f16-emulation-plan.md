@@ -1,0 +1,265 @@
+# Plan: Float16 (Half) Emulation for All Backends
+
+**Author:** Data (with Captain's approval from 2026-04-04)
+**Date:** 2026-04-08
+**Status:** DRAFT - Awaiting review
+
+---
+
+## Goal
+
+Enable `Float16 = true` on ALL backends, even when native f16 is unavailable. ML models increasingly use f16 for weights and activations - skipping Half tests means skipping real workloads.
+
+## Why This Is Exact (Not Approximate)
+
+Every f16 value is exactly representable as f32. The f16 format is a strict subset of f32:
+- f16: 1 sign + 5 exponent + 10 mantissa (16 bits)
+- f32: 1 sign + 8 exponent + 23 mantissa (32 bits)
+
+Unlike Dekker f64 emulation (which is approximate), f16 emulation through f32 is **lossless**. There is zero precision cost.
+
+## Current State
+
+| Backend | Native f16? | Emulated? | Float16 capability | Half tests |
+|---------|------------|-----------|-------------------|------------|
+| WebGPU (with shader-f16) | Yes | N/A | `true` | All pass |
+| WebGPU (without shader-f16) | No | **No** | `false` | All skip |
+| WebGL | No | **No** | `false` (hardcoded) | All skip |
+| Wasm | No | **Yes** (April 2026) | `true` | All pass |
+| CUDA | Yes | N/A | `true` | All pass |
+| CPU | Yes (.NET Half) | N/A | `true` | All pass |
+| OpenCL | Device-dependent | No | Device-dependent | Varies |
+
+## Reference Implementation: Wasm Backend
+
+The Wasm backend already solves this problem. The pattern:
+
+**Storage:** 2-byte memory elements (u16 bit patterns)
+**Arithmetic:** All math in f32 locals
+**Load:** `i32.load16_u` (2-byte read) -> inline IEEE 754 bit expansion -> `f32.reinterpret_i32`
+**Store:** `i32.reinterpret_f32` -> inline IEEE 754 bit compression -> `i32.store16` (2-byte write)
+
+Conversion algorithms in `WasmKernelFunctionGenerator.cs`:
+
+### f16 -> f32 (EmitF16ToF32, line 3828)
+```
+sign = (h >> 15) & 1
+exp  = (h >> 10) & 0x1F
+mant = h & 0x3FF
+if exp == 0:  result = sign << 31           (zero/denormal -> zero)
+if exp == 31: result = (sign<<31) | (0xFF<<23) | (mant<<13)  (inf/nan)
+else:         result = (sign<<31) | ((exp+112)<<23) | (mant<<13)  (rebias -15+127=112)
+return reinterpret_f32(result)
+```
+
+### f32 -> f16 (EmitF32ToF16, line 3935)
+```
+bits = reinterpret_i32(f)
+sign = (bits >> 31) & 1
+exp  = ((bits >> 23) & 0xFF) - 112   (rebias 127-15=112)
+mant = (bits >> 13) & 0x3FF          (truncate 23->10 mantissa bits)
+if exp < 0:  exp=0, mant=0           (underflow to zero)
+if exp > 31: exp=31                  (overflow to inf)
+return (sign << 15) | (exp << 10) | mant
+```
+
+---
+
+## Phase 1: WebGPU Emulation (when shader-f16 unavailable)
+
+### 1a. WGSL Helper Functions
+
+Add to `WGSLEmulationLibrary.cs` (following the f64/i64 emulation pattern):
+
+```wgsl
+fn _f16_to_f32(h: u32) -> f32 {
+    let sign = (h >> 15u) & 1u;
+    let exp  = (h >> 10u) & 0x1Fu;
+    let mant = h & 0x3FFu;
+    if (exp == 0u) {
+        return bitcast<f32>(sign << 31u);
+    }
+    if (exp == 31u) {
+        return bitcast<f32>((sign << 31u) | (0xFFu << 23u) | (mant << 13u));
+    }
+    return bitcast<f32>((sign << 31u) | ((exp + 112u) << 23u) | (mant << 13u));
+}
+
+fn _f32_to_f16(f: f32) -> u32 {
+    let bits = bitcast<u32>(f);
+    let sign = (bits >> 31u) & 1u;
+    var exp  = i32((bits >> 23u) & 0xFFu) - 112;
+    var mant = (bits >> 13u) & 0x3FFu;
+    if (exp <= 0) { exp = 0; mant = 0u; }
+    if (exp >= 31) { exp = 31; }
+    return (sign << 15u) | (u32(exp) << 10u) | mant;
+}
+```
+
+### 1b. Type Mapping Changes
+
+In `WGSLTypeGenerator.cs`:
+```csharp
+// Current:
+BasicValueType.Float16 => Backend.HasShaderF16 ? "f16" : "f32",
+// Change to:
+BasicValueType.Float16 => Backend.HasShaderF16 ? "f16" : "f32",  // arithmetic type unchanged
+```
+Arithmetic type stays `f32`. No change needed here - the promotion is already correct.
+
+### 1c. Buffer Load/Store
+
+The critical part. Half buffers contain packed 2-byte f16 values. When `shader-f16` is unavailable:
+
+**Load (reading Half from buffer):**
+- Buffer is bound as `array<u32>` (standard for WebGPU storage buffers)
+- Element at index `i`: read `buf[i >> 1]`, extract `(val >> ((i & 1) * 16)) & 0xFFFF`
+- Convert u16 bits to f32 via `_f16_to_f32()`
+
+**Store (writing Half to buffer):**
+- Convert f32 to u16 bits via `_f32_to_f16()`
+- Read-modify-write the u32 at `buf[i >> 1]`
+- For even index: `(existing & 0xFFFF0000) | half_bits`
+- For odd index: `(existing & 0x0000FFFF) | (half_bits << 16)`
+
+**Note:** The read-modify-write for stores needs atomic ops if multiple threads could write to the same u32. For ArrayView<Half> with stride 1, adjacent even/odd elements share a u32. If threads write to adjacent Half elements, this is a race. Solutions:
+- Option A: Use `atomicOr` / `atomicAnd` for the read-modify-write (safe but slower)
+- Option B: Pad storage to 1 Half per u32 (wastes 50% memory but eliminates races)
+- Option C: Detect when writes are guaranteed non-overlapping (stride analysis)
+
+**Recommendation:** Start with Option B (1 Half per u32) for correctness. Optimize to packed storage later if memory pressure demands it. This matches how Int8/Int16 are already promoted to full 32-bit storage.
+
+### 1d. Capability Change
+
+In `WebGPUCapabilityContext.cs`:
+```csharp
+// Current:
+Float16 = enabledFeatures.Contains("shader-f16");
+// Change to:
+Float16 = true;  // Always true - native or emulated
+```
+
+Add a property to distinguish native vs emulated:
+```csharp
+public bool Float16Native { get; private set; }
+// Set from enabledFeatures.Contains("shader-f16")
+```
+
+### 1e. Conditional Emission
+
+In `WGSLKernelFunctionGenerator.cs`, add emulation path branching (similar to how f64 has `EnableF64Emulation`):
+- If `HasShaderF16`: current code path (native f16)
+- If `!HasShaderF16`: emit `_f16_to_f32`/`_f32_to_f16` calls at load/store boundaries
+
+### 1f. Conversion Intrinsics
+
+`GenerateConvertHalfToFloat` and `GenerateConvertFloatToHalf` already exist for native f16. Add emulated paths:
+- HalfToFloat: `_f16_to_f32(source)` (source is already u32 bits from buffer load)
+- FloatToHalf: `_f32_to_f16(source)` (result is u32 bits for buffer store)
+
+---
+
+## Phase 2: WebGL Emulation
+
+### 2a. GLSL Helper Functions
+
+Add to `GLSLEmulationLibrary.cs`:
+
+```glsl
+float _f16_to_f32(uint h) {
+    uint sign = (h >> 15u) & 1u;
+    uint exp  = (h >> 10u) & 0x1Fu;
+    uint mant = h & 0x3FFu;
+    if (exp == 0u) return uintBitsToFloat(sign << 31u);
+    if (exp == 31u) return uintBitsToFloat((sign << 31u) | (0xFFu << 23u) | (mant << 13u));
+    return uintBitsToFloat((sign << 31u) | ((exp + 112u) << 23u) | (mant << 13u));
+}
+
+uint _f32_to_f16(float f) {
+    uint bits = floatBitsToUint(f);
+    uint sign = (bits >> 31u) & 1u;
+    int exp = int((bits >> 23u) & 0xFFu) - 112;
+    uint mant = (bits >> 13u) & 0x3FFu;
+    if (exp <= 0) { exp = 0; mant = 0u; }
+    if (exp >= 31) { exp = 31; }
+    return (sign << 15u) | (uint(exp) << 10u) | mant;
+}
+```
+
+### 2b. Type Mapping
+
+Already correct: `BasicValueType.Float16 => "float"` (promoted to f32 for arithmetic).
+
+### 2c. Buffer Access via Transform Feedback
+
+WebGL uses Transform Feedback for output. The load/store pattern differs from WebGPU:
+- **Load:** Texel fetch from buffer texture. Read u32, extract f16 bits, convert.
+- **Store:** Output f32 via Transform Feedback varying. The CPU-side readback would need to handle the f32->f16 conversion, OR store as u32 with packed f16 bits.
+
+WebGL's constraint (no shared memory, no atomics, no barriers) simplifies the store race issue - each thread writes its own output via Transform Feedback, no read-modify-write needed.
+
+### 2d. Capability Change
+
+In `WebGLCapabilityContext.cs`:
+```csharp
+// Current:
+Float16 = false;  // hardcoded
+// Change to:
+Float16 = true;   // emulated via f32 promotion + bit conversion
+```
+
+---
+
+## Phase 3: OpenCL Emulation (if needed)
+
+OpenCL has `cl_khr_fp16` for native Half. For devices without it, apply the same pattern. Lower priority since most OpenCL devices support f16 natively.
+
+---
+
+## Tests Unblocked
+
+When emulation is enabled, these currently-skipped tests will run on all backends:
+
+| Test | What It Exercises |
+|------|------------------|
+| AlgorithmRadixSortPairsHalfTest | Half sorting (barrier + multi-group) |
+| AlgorithmExclusiveScanHalfTest | Half scan (shared memory + barriers) |
+| AlgorithmInclusiveScanHalfTest | Half scan (shared memory + barriers) |
+| AlgorithmAllReduceHalfTest | Half reduction (lock-free warp pattern) |
+| AlgorithmGroupReduceHalfTest | Half group reduce |
+| HalfBufferRoundTripTest | Load/store correctness |
+| HalfEdgeCasesTest | Zero, denormal, inf, NaN handling |
+| HalfMixedTypeTest | Half + int -> float kernels |
+
+Plus `ILGPUReduceHalfTest` (currently unimplemented - blocked on Half atomics, but the lock-free AllReduce pattern already solves this).
+
+---
+
+## Implementation Order
+
+1. **WebGPU emulation** (Phase 1) - highest value, ML workloads need this
+2. **WebGL emulation** (Phase 2) - follows naturally from WebGPU work
+3. **OpenCL** (Phase 3) - only if devices without cl_khr_fp16 are encountered
+4. **ILGPUReduceHalfTest** - write the missing test using the lock-free pattern
+
+---
+
+## Risks and Open Questions
+
+1. **Buffer packing (u16 in u32):** Option B (1 Half per u32) wastes memory but guarantees correctness. For ML weight buffers (millions of f16 values), this doubles memory usage. May need packed storage with atomic RMW for production ML workloads.
+
+2. **WebGL Transform Feedback:** Need to verify the f16 bit pattern survives the Transform Feedback output path. If TF only outputs float, we may need to output uint with the packed f16 bits.
+
+3. **Struct fields containing Half:** Structs with Half fields need consistent layout between CPU and GPU. The CPU uses 2-byte Half; if GPU pads to 4 bytes, struct offsets break. Need careful alignment analysis.
+
+4. **Performance:** f16 emulation adds ~5 ALU ops per load and ~8 per store. For compute-bound kernels this is negligible. For memory-bound kernels with many f16 loads/stores, measure before assuming overhead is acceptable (but Dekker f64 runs Mandelbrot at 90 FPS, so this should be fine).
+
+---
+
+## References
+
+- Wasm reference implementation: `WasmKernelFunctionGenerator.cs` lines 3828-4011
+- WebGPU native f16: `WGSLKernelFunctionGenerator.cs` (search `HasShaderF16`)
+- f64 emulation pattern: `WGSLEmulationLibrary.cs`, `GLSLEmulationLibrary.cs`
+- Half roadmap: `Notes/half-support-and-quality-roadmap.md`
+- Memory file: `project_f16_emulation_roadmap.md`
