@@ -66,11 +66,11 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         private bool _usesGroupReduce = false;
         /// <summary>Set to true by GenerateGroupAllReduce to request emission of <c>var&lt;workgroup&gt; _grp_reduce_i32: atomic&lt;i32&gt;</c>.</summary>
         public override bool UsesGroupReduce { get => _usesGroupReduce; set => _usesGroupReduce = value; }
-        // Tracks view params with byte/int8/int16 element types — WGSL declares these as array<u32>
-        // but element access must extract individual bytes/shorts from packed u32 words
-        private HashSet<int> _byteElementParams = new HashSet<int>();
-        // Maps LEA variable names to their byte-element param index (for Load/Store byte extraction)
-        private Dictionary<string, int> _byteElementLEAVars = new Dictionary<string, int>();
+        // Tracks view params with sub-word element types (1=byte, 2=short/half).
+        // WGSL declares these as array<u32> but element access must extract sub-word values from packed u32 words.
+        private Dictionary<int, int> _subWordParams = new Dictionary<int, int>(); // paramIndex -> elementByteSize
+        // Maps LEA variable names to their sub-word param index (for Load/Store extraction)
+        private Dictionary<string, int> _subWordLEAVars = new Dictionary<string, int>();
         // Maps variable names to their emulation info (param index, is emu_f64)
         private Dictionary<string, (int ParamIndex, bool IsF64)> _emulatedVarMappings = new Dictionary<string, (int, bool)>();
         // Maps cross-block pointer variable names to inline expressions (e.g. "param1[v_3_idx]")
@@ -1121,11 +1121,26 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                         isEmulatedF64 = true;
                     if (Backend.EnableI64Emulation && (elemWgslType == "emu_i64" || elemWgslType == "emu_u64"))
                         isEmulatedI64 = true;
-                    // Track byte-element views: WGSL has no byte type, buffer is array<u32>,
-                    // element access needs byte extraction from packed u32 words
-                    if (paramElemType is PrimitiveType pt &&
-                        (pt.BasicValueType == BasicValueType.Int8 || pt.BasicValueType == BasicValueType.Int16))
-                        _byteElementParams.Add(param.Index);
+                    // Track sub-word element views: WGSL has no 8/16-bit types,
+                    // buffer is array<u32>, element access needs sub-word extraction
+                    if (paramElemType is PrimitiveType pt)
+                    {
+                        // BasicValueType: Int8 covers both sbyte/byte, Int16 covers both short/ushort
+                        // (ILGPU IR doesn't distinguish signed/unsigned at storage level)
+                        switch (pt.BasicValueType)
+                        {
+                            case BasicValueType.Int8:
+                                _subWordParams[param.Index] = 1; // 1 byte per element
+                                break;
+                            case BasicValueType.Int16:
+                                _subWordParams[param.Index] = 2; // 2 bytes per element
+                                break;
+                            case BasicValueType.Float16:
+                                if (!Backend.HasShaderF16)
+                                    _subWordParams[param.Index] = 2; // emulated f16 = 2 bytes
+                                break;
+                        }
+                    }
                 }
 
                 if (isEmulatedF64)
@@ -3550,18 +3565,23 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                         return;
                     }
 
-                    // BYTE-ELEMENT VIEW FIX:
-                    // WGSL has no byte type — buffer is array<u32>. For byte-element views,
-                    // we can't take a pointer to a byte within a u32 word. Instead, store the
-                    // byte index and extract the byte in the Load codegen.
-                    if (_byteElementParams.Contains(param.Index))
+                    // SUB-WORD VIEW FIX:
+                    // WGSL has no 8/16-bit types — buffer is array<u32>. For sub-word views,
+                    // we can't take a pointer to a sub-word within a u32 word. Instead, store the
+                    // element index and extract the sub-word value in the Load codegen.
+                    if (_subWordParams.TryGetValue(param.Index, out var elemSize))
                     {
-                        _byteElementLEAVars[target.Name] = param.Index;
+                        _subWordLEAVars[target.Name] = param.Index;
                         AppendIndent();
                         Builder.Append($"let {target.Name} = {adjustedOffsetExpr};");
                         Builder.AppendLine();
                         if (_crossBlockPointers.Contains(value))
-                            _crossBlockPointerExprs[target.Name] = $"(param{param.Index}[u32({adjustedOffsetExpr}) / 4u] >> ((u32({adjustedOffsetExpr}) % 4u) * 8u)) & 0xFFu";
+                        {
+                            if (elemSize == 1) // byte
+                                _crossBlockPointerExprs[target.Name] = $"(param{param.Index}[u32({adjustedOffsetExpr}) / 4u] >> ((u32({adjustedOffsetExpr}) % 4u) * 8u)) & 0xFFu";
+                            else // short (2 bytes)
+                                _crossBlockPointerExprs[target.Name] = $"(param{param.Index}[u32({adjustedOffsetExpr}) / 2u] >> ((u32({adjustedOffsetExpr}) % 2u) * 16u)) & 0xFFFFu";
+                        }
                         return;
                     }
 
@@ -3701,11 +3721,22 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 return;
             }
 
-            // BYTE-ELEMENT VIEW FIX: Extract byte from packed u32 word
-            if (_byteElementLEAVars.TryGetValue(source.ToString(), out var byteParamIdx))
+            // SUB-WORD VIEW FIX: Extract sub-word value from packed u32 word
+            if (_subWordLEAVars.TryGetValue(source.ToString(), out var subWordParamIdx))
             {
-                var byteIdx = source.ToString();
-                var extractExpr = $"i32((param{byteParamIdx}[u32({byteIdx}) / 4u] >> ((u32({byteIdx}) % 4u) * 8u)) & 0xFFu)";
+                var idx = source.ToString();
+                var elemSize = _subWordParams[subWordParamIdx];
+                string extractExpr;
+                if (elemSize == 1)
+                {
+                    // Byte extraction: 4 bytes per u32 word
+                    extractExpr = $"i32((param{subWordParamIdx}[u32({idx}) / 4u] >> ((u32({idx}) % 4u) * 8u)) & 0xFFu)";
+                }
+                else
+                {
+                    // Short extraction: 2 shorts per u32 word
+                    extractExpr = $"i32((param{subWordParamIdx}[u32({idx}) / 2u] >> ((u32({idx}) % 2u) * 16u)) & 0xFFFFu)";
+                }
                 if (_hoistedPrimitives.Contains(loadVal))
                     AppendLine($"{target} = {extractExpr};");
                 else
@@ -3817,6 +3848,28 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     {
                         AppendLine($"{slotRef} = {val}.field_{fi};"); // u32 or other: direct
                     }
+                }
+                return;
+            }
+
+            // SUB-WORD STORE: write sub-word value into packed u32 word via read-modify-write
+            if (_subWordLEAVars.TryGetValue(address.ToString(), out var storeParamIdx))
+            {
+                var idx = address.ToString();
+                var elemSize = _subWordParams[storeParamIdx];
+                if (elemSize == 1)
+                {
+                    // Byte store: read u32 word, clear target byte, OR in new value
+                    var wordIdx = $"u32({idx}) / 4u";
+                    var shift = $"(u32({idx}) % 4u) * 8u";
+                    AppendLine($"param{storeParamIdx}[{wordIdx}] = (param{storeParamIdx}[{wordIdx}] & ~(0xFFu << {shift})) | ((u32({val}) & 0xFFu) << {shift});");
+                }
+                else // elemSize == 2
+                {
+                    // Short store: read u32 word, clear target half, OR in new value
+                    var wordIdx = $"u32({idx}) / 2u";
+                    var shift = $"(u32({idx}) % 2u) * 16u";
+                    AppendLine($"param{storeParamIdx}[{wordIdx}] = (param{storeParamIdx}[{wordIdx}] & ~(0xFFFFu << {shift})) | ((u32({val}) & 0xFFFFu) << {shift});");
                 }
                 return;
             }
