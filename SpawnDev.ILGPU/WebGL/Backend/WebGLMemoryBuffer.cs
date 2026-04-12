@@ -74,6 +74,26 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             return accel.ReadbackAndGetUint8ArrayAsync(this, sourceByteOffset, copyBytes);
         }
 
+        /// <inheritdoc/>
+        public void CopyFromJS(TypedArray source, long targetByteOffset = 0)
+        {
+            if (_backingArray == null)
+                throw new ObjectDisposedException(nameof(WebGLMemoryBuffer));
+            using var srcBytes = new Uint8Array(source.Buffer, (int)source.ByteOffset, (int)source.ByteLength);
+            _backingArray.Set(srcBytes, targetByteOffset);
+            NeedsUpload = true;
+        }
+
+        /// <inheritdoc/>
+        public void CopyFromJS(ArrayBuffer source, long targetByteOffset = 0)
+        {
+            if (_backingArray == null)
+                throw new ObjectDisposedException(nameof(WebGLMemoryBuffer));
+            using var srcBytes = new Uint8Array(source);
+            _backingArray.Set(srcBytes, targetByteOffset);
+            NeedsUpload = true;
+        }
+
         protected override void CopyFrom(
             AcceleratorStream stream,
             in ArrayView<byte> source,

@@ -335,8 +335,9 @@ namespace ILGPU.Runtime
 
         /// <summary>
         /// Returns the owned memory buffer instance.
+        /// Public for GPU-to-GPU zero-copy operations (ILGPU buffer -> WebGPU vertex buffer).
         /// </summary>
-        protected MemoryBuffer Buffer => View.Buffer;
+        public MemoryBuffer Buffer => View.Buffer;
 
         /// <summary>
         /// Returns the same memory buffer instance.

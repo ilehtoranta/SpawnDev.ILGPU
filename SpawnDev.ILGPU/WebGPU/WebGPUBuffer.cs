@@ -101,6 +101,8 @@ namespace SpawnDev.ILGPU.WebGPU
 
         /// <summary>
         /// Copies data from a host array to the GPU buffer.
+        /// Data crosses the .NET/JS boundary. For browser backends, prefer
+        /// <see cref="CopyFromJS(TypedArray, long)"/> when data is already in JS.
         /// </summary>
         public void CopyFromHost(T[] sourceArray, long targetOffset = 0)
         {
@@ -119,6 +121,46 @@ namespace SpawnDev.ILGPU.WebGPU
             using var uint8Array = new Uint8Array((int)paddedBytes);
             uint8Array.Write(sourceArray);
             queue.WriteBuffer(_buffer, (long)(targetOffset * ElementSize), uint8Array);
+        }
+
+        /// <summary>
+        /// Copies data from a JS TypedArray directly to the GPU buffer without crossing into .NET.
+        /// This is the zero-copy path for browser backends - data stays in JS/GPU land.
+        /// Use this when data originates from JS (WebSocket, IndexedDB, fetch, etc.).
+        /// The TypedArray is NOT disposed by this method - caller manages its lifetime.
+        /// </summary>
+        /// <param name="source">JS TypedArray (Uint8Array, Float32Array, Int32Array, etc.) containing the data.</param>
+        /// <param name="targetByteOffset">Byte offset into the GPU buffer to write at.</param>
+        public void CopyFromJS(TypedArray source, long targetByteOffset = 0)
+        {
+            if (_buffer == null)
+                throw new ObjectDisposedException(nameof(WebGPUBuffer<T>));
+
+            var queue = Accelerator.Queue;
+            if (queue == null)
+                throw new InvalidOperationException("GPU queue not available");
+
+            queue.WriteBuffer(_buffer, targetByteOffset, source);
+        }
+
+        /// <summary>
+        /// Copies data from a JS ArrayBuffer directly to the GPU buffer without crossing into .NET.
+        /// This is the zero-copy path for browser backends - data stays in JS/GPU land.
+        /// Use this when data originates from JS (WebSocket, IndexedDB, fetch, etc.).
+        /// The ArrayBuffer is NOT disposed by this method - caller manages its lifetime.
+        /// </summary>
+        /// <param name="source">JS ArrayBuffer containing the data.</param>
+        /// <param name="targetByteOffset">Byte offset into the GPU buffer to write at.</param>
+        public void CopyFromJS(ArrayBuffer source, long targetByteOffset = 0)
+        {
+            if (_buffer == null)
+                throw new ObjectDisposedException(nameof(WebGPUBuffer<T>));
+
+            var queue = Accelerator.Queue;
+            if (queue == null)
+                throw new InvalidOperationException("GPU queue not available");
+
+            queue.WriteBuffer(_buffer, targetByteOffset, source);
         }
 
         /// <summary>

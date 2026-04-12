@@ -27,9 +27,9 @@ namespace SpawnDev.ILGPU.Wasm
         { }
 
         /// <summary>
-        /// Does not perform any operation (single-threaded Wasm environment).
+        /// Cleans up completed tasks and surfaces errors. Cannot block-wait in single-threaded WASM.
         /// </summary>
-        public override void Synchronize() { }
+        public override void Synchronize() => Accelerator.Synchronize();
 
         /// <inheritdoc/>
         protected override ProfilingMarker AddProfilingMarkerInternal() =>

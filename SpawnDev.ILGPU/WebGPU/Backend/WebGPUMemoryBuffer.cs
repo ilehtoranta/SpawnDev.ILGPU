@@ -28,6 +28,12 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
         public Task<Uint8Array> CopyToHostUint8ArrayAsync(long sourceByteOffset = 0, long? copyBytes = null) => NativeBuffer.CopyToHostUint8ArrayAsync(sourceByteOffset, copyBytes);
 
+        /// <inheritdoc/>
+        public void CopyFromJS(TypedArray source, long targetByteOffset = 0) => NativeBuffer.CopyFromJS(source, targetByteOffset);
+
+        /// <inheritdoc/>
+        public void CopyFromJS(ArrayBuffer source, long targetByteOffset = 0) => NativeBuffer.CopyFromJS(source, targetByteOffset);
+
         /// <summary>
         /// Returns the underlying WebGPU byte buffer. Virtual so subclasses can provide an external buffer.
         /// </summary>

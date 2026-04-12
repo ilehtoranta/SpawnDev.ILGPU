@@ -1729,8 +1729,19 @@ namespace SpawnDev.ILGPU.Wasm
 
         protected override void SynchronizeInternal()
         {
-            // No-op: synchronous blocking would deadlock in single-threaded Blazor WASM.
-            // Buffer synchronization is handled by the serialized dispatch in RunKernelAsync.
+            // Can't block-wait in single-threaded Blazor WASM.
+            // But we CAN clean up completed tasks and surface errors,
+            // matching WebGPU's Synchronize which flushes + checks errors.
+            for (int i = _pendingWork.Count - 1; i >= 0; i--)
+            {
+                var task = _pendingWork[i];
+                if (task.IsCompleted)
+                {
+                    _pendingWork.RemoveAt(i);
+                    if (task.IsFaulted)
+                        throw task.Exception!.InnerException ?? task.Exception;
+                }
+            }
         }
 
         /// <summary>

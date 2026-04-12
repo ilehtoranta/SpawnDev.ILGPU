@@ -25,5 +25,23 @@ namespace SpawnDev.ILGPU
         /// <returns>A task that represents the asynchronous copy operation. The task result contains a Uint8Array with the
         /// copied bytes.</returns>
         Task<Uint8Array> CopyToHostUint8ArrayAsync(long sourceByteOffset = 0, long? copyBytes = null);
+
+        /// <summary>
+        /// Copies data from a JS TypedArray directly into the GPU buffer without crossing into .NET managed memory.
+        /// This is the zero-copy path for browser backends - data stays in JS/GPU land.
+        /// Use this when data originates from JS (WebSocket, IndexedDB, fetch, FileReader, etc.).
+        /// </summary>
+        /// <param name="source">JS TypedArray containing the source data. Not disposed by this method.</param>
+        /// <param name="targetByteOffset">Byte offset into the GPU buffer to write at.</param>
+        void CopyFromJS(TypedArray source, long targetByteOffset = 0);
+
+        /// <summary>
+        /// Copies data from a JS ArrayBuffer directly into the GPU buffer without crossing into .NET managed memory.
+        /// This is the zero-copy path for browser backends - data stays in JS/GPU land.
+        /// Use this when data originates from JS (WebSocket, IndexedDB, fetch, FileReader, etc.).
+        /// </summary>
+        /// <param name="source">JS ArrayBuffer containing the source data. Not disposed by this method.</param>
+        /// <param name="targetByteOffset">Byte offset into the GPU buffer to write at.</param>
+        void CopyFromJS(ArrayBuffer source, long targetByteOffset = 0);
     }
 }

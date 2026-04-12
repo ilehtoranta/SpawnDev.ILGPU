@@ -68,10 +68,31 @@ namespace SpawnDev.ILGPU.Wasm
 
         /// <summary>
         /// Copies data from the host to this buffer.
+        /// Data crosses the .NET/JS boundary. For browser backends, prefer
+        /// <see cref="CopyFromJS(TypedArray, long)"/> when data is already in JS.
         /// </summary>
         public void CopyFromHost<T>(T[] data) where T : unmanaged
         {
             TypedArrayView.Write(data);
+        }
+
+        /// <inheritdoc/>
+        public void CopyFromJS(TypedArray source, long targetByteOffset = 0)
+        {
+            if (TypedArrayView == null)
+                throw new ObjectDisposedException(nameof(WasmMemoryBuffer));
+            // Use the typed Set(TypedArray, long) overload - zero .NET copy, JS-to-JS
+            using var srcBytes = new Uint8Array(source.Buffer, (int)source.ByteOffset, (int)source.ByteLength);
+            TypedArrayView.Set(srcBytes, targetByteOffset);
+        }
+
+        /// <inheritdoc/>
+        public void CopyFromJS(ArrayBuffer source, long targetByteOffset = 0)
+        {
+            if (TypedArrayView == null)
+                throw new ObjectDisposedException(nameof(WasmMemoryBuffer));
+            using var srcBytes = new Uint8Array(source);
+            TypedArrayView.Set(srcBytes, targetByteOffset);
         }
 
         /// <summary>
