@@ -304,6 +304,13 @@ namespace ILGPU.Algorithms
     /// </summary>
     public static class RadixSortExtensions
     {
+        /// <summary>
+        /// DIAGNOSTIC: Per-pass hook. Called after each radix sort pass with (bitIdx, counterView).
+        /// The stream is already synchronized before this is called.
+        /// counterView has 4*numGroups entries: the per-group bucket counts from Kernel1.
+        /// </summary>
+        public static Action<int, ArrayView<int>>? PerPassHook { get; set; }
+
         #region RadixSort Helpers
 
         /// <summary>
@@ -1326,6 +1333,14 @@ namespace ILGPU.Algorithms
                             numVirtualGroups,
                             lengthInformation,
                             bitIdx);
+
+                        // DIAGNOSTIC: per-pass hook with counter data
+                        if (PerPassHook != null)
+                        {
+                            stream.Synchronize();
+                            PerPassHook(bitIdx, counterView);
+                        }
+
                         bitIdx += specialization.BitIncrement;
                         Debug.Assert(bitIdx < radixSortOperation.NumBits);
 
@@ -1356,6 +1371,14 @@ namespace ILGPU.Algorithms
                             numVirtualGroups,
                             lengthInformation,
                             bitIdx);
+
+                        // DIAGNOSTIC: per-pass hook with counter data
+                        if (PerPassHook != null)
+                        {
+                            stream.Synchronize();
+                            PerPassHook(bitIdx, counterView);
+                        }
+
                         bitIdx += specialization.BitIncrement;
                     }
                 };

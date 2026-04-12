@@ -459,17 +459,57 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             var tempSize = accelerator.ComputeRadixSortPairsTempStorageSize<int, int, DescendingInt32>(n);
             using var tempBuf = accelerator.Allocate1D<int>(tempSize);
 
-            var radixSort = accelerator.CreateRadixSortPairs<
+            // DIAGNOSTIC: Binary search for culprit pass
+            // NumBits must be multiple of 4. Test: 4, 8, 12, ..., 32 (2, 4, 6, ..., 16 passes)
+            string passResults = "";
+            for (int testBits = 4; testBits <= 32; testBits += 4)
+            {
+                keysBuf.CopyFromCPU(keys);
+                valuesBuf.CopyFromCPU(values);
+
+                DescendingInt32Partial.ConfiguredNumBits = testBits;
+                var partialSort = accelerator.CreateRadixSortPairs<
+                    int, Stride1D.Dense, int, Stride1D.Dense, DescendingInt32Partial>();
+                partialSort(
+                    accelerator.DefaultStream,
+                    keysBuf.View,
+                    valuesBuf.View,
+                    tempBuf.View.AsContiguous());
+                await accelerator.SynchronizeAsync();
+
+                // Verify partial sort: output should be sorted by lower testBits (descending)
+                var gpuResult = keysBuf.GetAsArray1D();
+                int partialViolations = 0;
+                for (int pi = 1; pi < n; pi++)
+                {
+                    // Extract the sort key (lower testBits, descending = inverted)
+                    int keyA = 0, keyB = 0;
+                    for (int s = 0; s < testBits; s += 2)
+                    {
+                        keyA |= ((~((gpuResult[pi-1] ^ (1 << 31)) >> s)) & 3) << s;
+                        keyB |= ((~((gpuResult[pi] ^ (1 << 31)) >> s)) & 3) << s;
+                    }
+                    if (keyB > keyA) partialViolations++;
+                }
+                passResults += $"\n  NumBits={testBits} ({testBits/2} passes): {partialViolations} partial-sort violations";
+
+                if (partialViolations > 0) break;
+            }
+
+            // Run full sort for final verification
+            keysBuf.CopyFromCPU(keys);
+            valuesBuf.CopyFromCPU(values);
+            var fullSort = accelerator.CreateRadixSortPairs<
                 int, Stride1D.Dense, int, Stride1D.Dense, DescendingInt32>();
-            radixSort(
+            fullSort(
                 accelerator.DefaultStream,
                 keysBuf.View,
                 valuesBuf.View,
                 tempBuf.View.AsContiguous());
             await accelerator.SynchronizeAsync();
 
-            // GPU verification for sort order + index integrity
-            await VerifyDescendingSortOnGpu(accelerator, keysBuf, valuesBuf, n, "RadixSortSentinels");
+            await VerifyDescendingSortOnGpu(accelerator, keysBuf, valuesBuf, n,
+                "RadixSortSentinels (per-pass:" + passResults + ")");
 
             // GPU sentinel boundary check — no CopyToHostAsync
             int actualVisible = await GpuTestVerify.CountNonSentinel(accelerator, keysBuf, n);

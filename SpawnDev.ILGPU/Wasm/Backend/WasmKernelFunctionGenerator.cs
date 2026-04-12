@@ -806,7 +806,8 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             if (_generatorArgs.HelperMethods.Count == 0)
                 return; // No helpers
 
-            int importCount = WasmBackend.UnaryMathFuncs.Length + WasmBackend.BinaryMathFuncs.Length;
+            int importCount = WasmBackend.UnaryMathFuncs.Length + WasmBackend.BinaryMathFuncs.Length
+                + (_generatorArgs.ExtraImportCount); // e.g., jsAtomicsWait import
             int nextHelperFuncIdx = importCount + 1; // +1 for the kernel function
 
             foreach (var kvp in _generatorArgs.HelperMethods)
@@ -829,6 +830,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 {
                     _generatorArgs.HelperFunctionIndices[kvp.Key] = nextHelperFuncIdx++;
                     _generatorArgs.HelperBarrierCounts[kvp.Key] = barrierCount;
+                    if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm-PreScan] Helper '{kvp.Key.Name}': pre-scan barriers={barrierCount}, blocks={kvp.Key.Blocks.Count}");
 
                     // Estimate helper's scratch size for kernel-side offset computation.
                     // Actual size is computed during helper codegen, but we need an estimate
@@ -1063,7 +1065,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             // Sync yields are only needed when there are 2+ barrier-helper calls
             // (to prevent shared memory stomping between sequential calls).
             // With 1 call, no sync yield needed — remove the extra counts.
-            _needsSyncYields = helperCallCount > 1;
+            _needsSyncYields = helperCallCount >= 1;
             if (!_needsSyncYields && helperCallCount == 1)
                 helperBarriers -= 1; // undo the +1 sync yield added during scan
             int totalBarriers = directBarriers + helperBarriers + structStoreYields;
@@ -2680,7 +2682,13 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                     // In phase mode: skip post-helper barrier — the fiber dispatch
                     // runs all fibers sequentially per phase, providing implicit sync.
                     // The helper's own barriers handle intra-helper sync via phase yields.
-                    _barrierCounter++;
+                    // Only increment for multi-helper sync (2+ helpers need inter-helper barriers).
+                    // Single-helper kernels don't need the sync yield — the state machine
+                    // already excludes it (line 1067-1068). Incrementing here without
+                    // the matching state machine entry causes an off-by-one that puts the
+                    // last barrier's phase ID outside the br_table range.
+                    if (_needsSyncYields)
+                        _barrierCounter++;
                 }
 
                 if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm-Call] Done calling '{targetMethod.Name}', barrierCounter now={_barrierCounter}");

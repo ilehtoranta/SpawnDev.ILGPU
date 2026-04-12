@@ -65,6 +65,8 @@ self.onmessage = function(e) {
 var _cachedModule = null;
 var _cachedInstance = null;
 var _lastMemory = null;
+var _cachedFn = null;
+var _cachedFnSrc = null;
 const AsyncFunction = Object.getPrototypeOf(async function(){}).constructor;
 const _mathImports = {
   sin: Math.sin, cos: Math.cos, tan: Math.tan,
@@ -100,8 +102,8 @@ self.onmessage = async function(e) {
       });
     }
     d._instance = _cachedInstance;
-    var fn = new AsyncFunction('d', d.script);
-    await fn(d);
+    if (_cachedFnSrc !== d.script) { _cachedFn = new AsyncFunction('d', d.script); _cachedFnSrc = d.script; }
+    await _cachedFn(d);
   } catch(ex) {
     self.postMessage({ done: false, error: (ex && ex.message) ? ex.message : String(ex) });
   }

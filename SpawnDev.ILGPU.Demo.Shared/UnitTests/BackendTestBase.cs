@@ -170,11 +170,86 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                     await GpuTestVerify.VerifyDescendingSort(accelerator, keysBuf, valuesBuf, n, origBuf);
 
                 if (orderViolations > 0)
+                {
+                    // Diagnostic: compare GPU output vs CPU reference
+                    var diag = "";
+                    try
+                    {
+                        var gpuKeys = keysBuf.GetAsArray1D();
+                        // CPU reference sort (descending)
+                        var cpuKeys = (int[])gpuKeys.Clone();
+                        Array.Sort(cpuKeys);
+                        Array.Reverse(cpuKeys); // descending
+
+                        // Find first ROOT displacements (diff != -1, not cascade)
+                        int mismatches = 0;
+                        int shownRoot = 0;
+                        int shownAny = 0;
+                        for (int i = 0; i < n; i++)
+                        {
+                            if (gpuKeys[i] != cpuKeys[i])
+                            {
+                                mismatches++;
+                                int diff = gpuKeys[i] - cpuKeys[i];
+                                // Show ROOT displacements (|diff| > 1) separately from cascade
+                                if (Math.Abs(diff) > 1 && shownRoot < 10)
+                                {
+                                    diag += $"\n  ROOT[{i}]: gpu={gpuKeys[i]} cpu={cpuKeys[i]} (diff={diff}, group~{i/256}, localPos={i%256})";
+                                    shownRoot++;
+                                }
+                                else if (shownAny < 5)
+                                {
+                                    diag += $"\n  [{i}]: gpu={gpuKeys[i]} cpu={cpuKeys[i]} (diff={diff}, group~{i/256})";
+                                    shownAny++;
+                                }
+                            }
+                        }
+                        diag = $"\n  Total mismatches vs CPU: {mismatches}" + diag;
+
+                        // Also show order violations
+                        int shownOrd = 0;
+                        for (int i = 1; i < n && shownOrd < 5; i++)
+                        {
+                            if (gpuKeys[i] > gpuKeys[i - 1])
+                            {
+                                diag += $"\n  ORDER[{i}]: {gpuKeys[i-1]} -> {gpuKeys[i]} (group~{i/256})";
+                                shownOrd++;
+                            }
+                        }
+                    }
+                    catch { diag = " (diagnostic readback failed)"; }
                     throw new Exception(
-                        $"{testName}: Descending order violated {orderViolations} times out of {n} elements.");
+                        $"{testName}: Descending order violated {orderViolations} times out of {n} elements.{diag}");
+                }
                 if (outOfRange > 0 || duplicates > 0)
+                {
+                    var intDiag = "";
+                    try
+                    {
+                        var gpuKeys = keysBuf.GetAsArray1D();
+                        var cpuKeys = (int[])gpuKeys.Clone();
+                        Array.Sort(cpuKeys);
+                        Array.Reverse(cpuKeys);
+                        int mismatches = 0;
+                        int shown = 0;
+                        for (int i = 0; i < n; i++)
+                        {
+                            if (gpuKeys[i] != cpuKeys[i])
+                            {
+                                mismatches++;
+                                if (shown < 15)
+                                {
+                                    intDiag += $"\n  [{i}]: gpu={gpuKeys[i]} cpu={cpuKeys[i]} (diff={gpuKeys[i]-cpuKeys[i]}, group~{i/256})";
+                                    shown++;
+                                }
+                            }
+                        }
+                        intDiag = $"\n  Total mismatches vs CPU: {mismatches}" + intDiag;
+                    }
+                    catch { intDiag = " (readback failed)"; }
                     throw new Exception(
-                        $"{testName}: Index integrity failure — {duplicates} duplicates, {outOfRange} out-of-range out of {n} elements.");
+                        $"{testName}: Index integrity failure — {duplicates} duplicates, {outOfRange} out-of-range out of {n} elements.{intDiag}");
+                }
                 if (trackingErrors > 0)
                     throw new Exception(
                         $"{testName}: Key-value tracking failed — {trackingErrors} mismatches out of {n} elements.");

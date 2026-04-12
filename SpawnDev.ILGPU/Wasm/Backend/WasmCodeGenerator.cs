@@ -62,6 +62,11 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             /// </summary>
             public int DynamicSharedElementSize { get; set; }
             public int ScratchPerThread { get; set; }
+            /// <summary>
+            /// Number of extra function imports beyond math (e.g., jsAtomicsWait).
+            /// Used by AssignHelperFunctionIndices to compute correct function indices.
+            /// </summary>
+            public int ExtraImportCount { get; set; }
 
             /// <summary>
             /// Number of phases for fiber dispatch (1 = no barriers, N+1 for N barriers).
@@ -1973,7 +1978,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                     // which silently corrupts address computations (see RADIX RULE in Wasm/CLAUDE.md)
                     if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm-IR] *** UNHANDLED IR VALUE: {value.GetType().Name} id={value.Id} type={value.Type} ***");
                     // Also record to dispatch log so it's visible in test output
-                    WasmAccelerator._dispatchLog += $"|UNHANDLED:{value.GetType().Name}";
+                    if (WasmBackend.VerboseLogging) WasmAccelerator._dispatchLog += $"|UNHANDLED:{value.GetType().Name}";
                     break;
             }
         }

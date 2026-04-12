@@ -349,7 +349,7 @@ namespace SpawnDev.ILGPU.Wasm
                                 }
                                 catch (Exception ex)
                                 {
-                                    WasmBackend.Log($"[Wasm] Embedded view extraction failed for param {i}: {ex.GetType().Name}: {ex.Message}");
+                                    if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm] Embedded view extraction failed for param {i}: {ex.GetType().Name}: {ex.Message}");
                                 }
                             }
                         }
@@ -409,8 +409,8 @@ namespace SpawnDev.ILGPU.Wasm
                                 // SubView offset extraction failed — offset defaults to 0.
                                 // This is WRONG for SubViews with non-zero indices (e.g., in-place
                                 // RadixSort where output SubView is at a different offset).
-                                // Log unconditionally — this path should never fire silently.
-                                WasmBackend.Log($"[Wasm-SubView] OFFSET EXTRACTION FAILED for param {i}: {ex.GetType().Name}: {ex.Message}");
+                                // Log when verbose — non-fatal extraction path.
+                                if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm-SubView] OFFSET EXTRACTION FAILED for param {i}: {ex.GetType().Name}: {ex.Message}");
                             }
                             viewSubOffsets.Add(subViewByteOffset);
 
@@ -422,7 +422,7 @@ namespace SpawnDev.ILGPU.Wasm
 
                             // Log buffer identity for dispatch debugging
                             if (dispNum >= 1 && dispNum <= 20)
-                                _dispatchLog += $"|D{dispNum}V{i}:buf={wasmBuf.GetHashCode()%1000},sub={subViewByteOffset},len={iav.Length}";
+                                if (WasmBackend.VerboseLogging) _dispatchLog += $"|D{dispNum}V{i}:buf={wasmBuf.GetHashCode()%1000},sub={subViewByteOffset},len={iav.Length}";
 
                             // Extract stride via cached reflection for multi-dimensional views
                             int stride = 1;
@@ -477,7 +477,7 @@ namespace SpawnDev.ILGPU.Wasm
                             foreach (var sf in structFields)
                             {
                                 try { if (sf.GetValue(args[i]) is IArrayView) { hasViews = true; break; } }
-                                catch (Exception ex) { WasmBackend.Log($"[Wasm] Struct view check failed for field {sf.Name}: {ex.Message}"); }
+                                catch (Exception ex) { if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm] Struct view check failed for field {sf.Name}: {ex.Message}"); }
                             }
 
                             if (hasViews)
@@ -709,7 +709,7 @@ namespace SpawnDev.ILGPU.Wasm
                     // What's in Wasm memory after copy-in?
                     using var wmView = new Uint8Array(memoryBuffer, bufferOffsets[0], 4);
                     int wmVal = BitConverter.ToInt32(wmView.ReadBytes());
-                    _dispatchLog += $"|D{dispNum}pre:sab={sabVal},wm={wmVal}";
+                    if (WasmBackend.VerboseLogging) _dispatchLog += $"|D{dispNum}pre:sab={sabVal},wm={wmVal}";
                 }
                 _lastImplicitIndexDebug += $" | bufInfoCnt={bufferInfos.Count} bufOffCnt={bufferOffsets.Count}";
                 // CRITICAL: Set each buffer's NativePtr to its Wasm memory offset.
@@ -997,7 +997,7 @@ namespace SpawnDev.ILGPU.Wasm
                     string flatArgStr = "";
                     for (int fi = 0; fi < flatArgs.Count; fi++)
                         flatArgStr += (fi > 0 ? "," : "") + flatArgs[fi];
-                    _dispatchLog += $"|D{dispNum}:items={totalItems},gs={groupSize},ng={numGroups},bar={compiledKernel.HasBarriers},flat=[{flatArgStr}]";
+                    if (WasmBackend.VerboseLogging) _dispatchLog += $"|D{dispNum}:items={totalItems},gs={groupSize},ng={numGroups},bar={compiledKernel.HasBarriers},flat=[{flatArgStr}]";
                 }
 
                 // Dispatch to workers
@@ -1015,7 +1015,7 @@ namespace SpawnDev.ILGPU.Wasm
             }
             catch (Exception ex)
             {
-                _dispatchLog += $"|ERR_D{dispNum}:{ex.Message}";
+                if (WasmBackend.VerboseLogging) _dispatchLog += $"|ERR_D{dispNum}:{ex.Message}";
                 WasmBackend.Log($"[Wasm] Kernel execution error: {ex}");
                 throw;
             }
@@ -1068,8 +1068,8 @@ namespace SpawnDev.ILGPU.Wasm
             }
             else
             {
-                // Non-barrier: cap at 2 to isolate the issue
-                workerCount = Math.Min(_workerCount, 2);
+                // Non-barrier: full worker count for maximum parallelism
+                workerCount = _workerCount;
                 if (workerCount > totalItems) workerCount = Math.Max(1, totalItems);
             }
 
@@ -1149,7 +1149,7 @@ namespace SpawnDev.ILGPU.Wasm
                             {
                                 var d0 = msg.JSRef!.Get<int?>("data.diag.0");
                                 var d1 = msg.JSRef!.Get<int?>("data.diag.1");
-                                _dispatchLog += $"|W0mem=[{d0},{d1}]";
+                                if (WasmBackend.VerboseLogging) _dispatchLog += $"|W0mem=[{d0},{d1}]";
                             }
                             catch { }
                         }
@@ -1301,7 +1301,7 @@ namespace SpawnDev.ILGPU.Wasm
                     string vals = "";
                     for (int j = 0; j + 3 < rawBytes.Length; j += 4)
                         vals += (j > 0 ? "," : "") + BitConverter.ToInt32(rawBytes, j);
-                    _dispatchLog += $"|D{dispNum}B{bi}=[{vals}]";
+                    if (WasmBackend.VerboseLogging) _dispatchLog += $"|D{dispNum}B{bi}=[{vals}]";
                 }
             }
 

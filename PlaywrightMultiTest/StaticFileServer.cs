@@ -1,5 +1,6 @@
 ﻿using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.FileProviders;
 using Microsoft.Extensions.Logging;
 using System.Net;
@@ -14,6 +15,7 @@ namespace PlaywrightMultiTest
         string RequestPath;
         string Url;
         string devcertPath;
+        string SolutionRoot;
         public StaticFileServer(string wwwroot, string url, string requestPath = "")
         {
             if (string.IsNullOrEmpty(wwwroot))
@@ -30,6 +32,21 @@ namespace PlaywrightMultiTest
             devcertPath = Path.GetFullPath("assets/testcert.pfx");
             if (!File.Exists(devcertPath))
                 throw new Exception("testcert.pfx not found. Cannot create static server");
+            SolutionRoot = FindSolutionRoot();
+        }
+
+        private static string FindSolutionRoot()
+        {
+            var dir = AppContext.BaseDirectory;
+            for (int i = 0; i < 10; i++)
+            {
+                if (Directory.GetFiles(dir, "*.slnx").Length > 0 || Directory.GetFiles(dir, "*.sln").Length > 0)
+                    return dir;
+                var parent = Directory.GetParent(dir);
+                if (parent == null) break;
+                dir = parent.FullName;
+            }
+            return AppContext.BaseDirectory;
         }
         public bool Running => runningTask?.IsCompleted == false;
         public void Start()
@@ -66,6 +83,64 @@ namespace PlaywrightMultiTest
                 {
                     context.Response.Headers["Cross-Origin-Embedder-Policy"] = "credentialless";
                     context.Response.Headers["Cross-Origin-Opener-Policy"] = "same-origin";
+                    await next();
+                });
+
+                // Filesystem API: read/write files relative to solution root.
+                // Blazor WASM apps running in PlaywrightMultiTest can use this to
+                // write debug dumps, log files, and test artifacts to disk.
+                app.Use(async (context, next) =>
+                {
+                    if (context.Request.Path.StartsWithSegments("/_fs", out var remaining) && remaining.HasValue)
+                    {
+                        var relativePath = remaining.Value.TrimStart('/');
+                        if (string.IsNullOrEmpty(relativePath))
+                        {
+                            context.Response.StatusCode = 400;
+                            await context.Response.WriteAsync("Path required");
+                            return;
+                        }
+                        var fullPath = Path.GetFullPath(Path.Combine(SolutionRoot, relativePath));
+                        if (!fullPath.StartsWith(SolutionRoot, StringComparison.OrdinalIgnoreCase))
+                        {
+                            context.Response.StatusCode = 403;
+                            await context.Response.WriteAsync("Path outside solution root");
+                            return;
+                        }
+                        if (context.Request.Method == "GET")
+                        {
+                            if (!File.Exists(fullPath))
+                            {
+                                context.Response.StatusCode = 404;
+                                await context.Response.WriteAsync("Not found");
+                                return;
+                            }
+                            context.Response.ContentType = "application/octet-stream";
+                            await context.Response.SendFileAsync(fullPath);
+                        }
+                        else if (context.Request.Method == "PUT")
+                        {
+                            var dir = Path.GetDirectoryName(fullPath);
+                            if (dir != null) Directory.CreateDirectory(dir);
+                            using var fs = new FileStream(fullPath, FileMode.Create);
+                            await context.Request.Body.CopyToAsync(fs);
+                            await context.Response.WriteAsync("OK");
+                        }
+                        else if (context.Request.Method == "POST")
+                        {
+                            var dir = Path.GetDirectoryName(fullPath);
+                            if (dir != null) Directory.CreateDirectory(dir);
+                            using var fs = new FileStream(fullPath, FileMode.Append);
+                            await context.Request.Body.CopyToAsync(fs);
+                            await context.Response.WriteAsync("OK");
+                        }
+                        else
+                        {
+                            context.Response.StatusCode = 405;
+                            await context.Response.WriteAsync("Method not allowed");
+                        }
+                        return;
+                    }
                     await next();
                 });
 

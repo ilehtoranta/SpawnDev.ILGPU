@@ -545,9 +545,14 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 Log(info);
                 Log("---");
             }
-            AllKernelInfos.Add(info);
+            // Only accumulate kernel info and binaries when debug dump is active.
+            // These static lists grow unbounded and cause memory pressure over long sessions.
+            if (WasmDumpPath != null || OnKernelCompiled != null)
+            {
+                AllKernelInfos.Add(info);
+                AllWasmBinaries.Add(wasmBinary);
+            }
             LastWasmBinary = wasmBinary;
-            AllWasmBinaries.Add(wasmBinary);
             try { OnKernelCompiled?.Invoke($"kernel_{AllWasmBinaries.Count}", wasmBinary, info); } catch { }
 
             return new WasmCompiledKernel(

@@ -30,7 +30,7 @@ Compiles ILGPU IR → WebAssembly binary. Dispatches via Web Workers with Shared
 - **AddressSpaceType views** (ArrayView): field 1 = **Index/Offset** → return 0
 
 This was hardcoded to 0 for ALL views, which broke `view.Length` for ArrayView1D params.
-The fix checks `param.Type is StructureType`. Current: 249 pass / 0 fail / 3 skip (v4.6.0). Full `hardwareConcurrency` multi-worker barrier dispatch with pure spin barriers (i32.atomic.load loops). In-Wasm phase dispatcher eliminates JS-Wasm boundary crossings between phases.
+The fix checks `param.Type is StructureType`. Current: 249 pass / 0 fail / 3 skip (v4.6.0). Full `hardwareConcurrency` multi-worker barrier dispatch with wait/notify barriers (memory.atomic.wait32/notify with spurious wakeup defense loop). In-Wasm phase dispatcher eliminates JS-Wasm boundary crossings between phases.
 
 **TRACE RULE**: Both `GetViewLength` and `GetField` must trace the view source back to
 the kernel Parameter through GetField/NewView/AddressSpaceCast chains (via `TraceToParameter()`).
@@ -45,7 +45,7 @@ ArrayView1D's BaseView access creates a GetField indirection that breaks direct 
 - **Fiber refactor (March 2026):** Kernels with barriers are compiled into a phase-based dispatch model. Each barrier becomes a yield point — the kernel saves its state (locals + phase counter) to scratch memory and returns. A **Wasm-native phase dispatcher** handles the entire thread/phase/group loop inside WebAssembly, eliminating JS-Wasm boundary crossings between phases.
 - **Dynamic block splitting:** Barrier-separated code blocks are split into phases automatically. Helper function calls (scan, sort) each get their own phase with yield points before and after.
 - **Completion state persist:** The kernel saves its exit state to scratch so the worker knows when all phases for a group are done before advancing to the next group.
-- **Pure spin barriers:** `atomic.fence` + `i32.atomic.rmw.add` + `i32.atomic.load` spin loop. Replaced `memory.atomic.wait32`/`memory.atomic.notify` due to a V8 visibility gap where `wait32` returning "not-equal" does not provide happens-before for third-party stores with 3+ workers.
+- **Wait/notify barriers (April 2026):** `atomic.fence` + `i32.atomic.rmw.add` + `memory.atomic.wait32`/`memory.atomic.notify` with spurious wakeup defense loop. Previously used pure spin barriers due to a misdiagnosed "V8 visibility bug" - the real cause was missing a `while` loop around `wait32` (standard spurious wakeup defense). Workers now sleep instead of spinning. Pattern: `while (load(gen) == savedGen) { wait32(gen, savedGen, -1); }` with `notify(gen, INT_MAX)` after gen bump.
 
 ## Tribal Knowledge: GridIndex vs BucketIndex Bug (March 2026)
 
@@ -73,7 +73,7 @@ If this test produces duplicates or non-deterministic results, the post-helper b
 
 **Test results: 249 pass / 0 fail / 3 skip** (up from 49/10/17 pre-refactor). All RadixSort (including SpawnSceneSimulation 1.4M multi-frame), scan, barrier, sort, and large sort (260K-4M) tests pass on the Wasm backend at full `hardwareConcurrency`.
 
-**Multi-worker:** Full `hardwareConcurrency` barrier dispatch with pure spin barriers (`i32.atomic.load` loops), `atomic.fence` at 3 sync points, float atomic stores via reinterpret, broadcast atomic store/load. In-Wasm phase dispatcher eliminates JS-Wasm boundary crossings. `hardwareConcurrency` workers for both barrier and non-barrier kernels.
+**Multi-worker:** Full `hardwareConcurrency` barrier dispatch with wait/notify barriers (`memory.atomic.wait32`/`notify` with spurious wakeup defense loop), `atomic.fence` at 3 sync points, float atomic stores via reinterpret, broadcast atomic store/load. In-Wasm phase dispatcher eliminates JS-Wasm boundary crossings. `hardwareConcurrency` workers for both barrier and non-barrier kernels.
 
 The fiber refactor resolved the multi-group barrier dispatch limitation. 20+ bugs were fixed collaboratively:
 
@@ -86,7 +86,7 @@ The fiber refactor resolved the multi-group barrier dispatch limitation. 20+ bug
 7. **Sync yield after helper done** — prevent shared memory stomping between sequential helper calls
 8. **Scratch zeroing** — zero from scratchBase (not 0) to prevent stale data between dispatches
 9. **Struct/scratch overlap** — struct body params placed AFTER per-thread scratch
-10. **Pure spin barrier** — replaced wait32/notify with i32.atomic.load spin loops (V8 visibility gap)
+10. **Wait/notify barrier** — original wait32 without loop had spurious wakeup bug; fixed with while-loop defense (April 2026), interim pure spin replaced
 11. **Shared memory alloca overlap** — same-size allocas deduped to same offset; fixed with distinct sizes
 12. **IR address space aliasing** — InferAddressSpaces guards for phi/predicate/general values with Shared sources
 13. **Zero region race** — between-group zeroing loop excluded fence slots to prevent deadlock
