@@ -461,5 +461,315 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                     throw new Exception($"Int16 end-to-end mismatch at [{i}]: expected {expected}, got {result[i]}. Input was {testData[i]}");
             }
         });
+
+        // ==================== Int8 Sub-Word Buffer Access Tests ====================
+
+        /// <summary>
+        /// Basic round-trip: CopyFromCPU sbyte[] -> CopyToHostAsync sbyte[] (no kernel).
+        /// Verifies buffer I/O works for sbyte type.
+        /// </summary>
+        [TestMethod]
+        public async Task Int8_RoundTrip_NoKernel_Test() => await RunTest(async accelerator =>
+        {
+            var testData = new sbyte[] { 0, 1, -1, 127, -128, 42, -42, 100 };
+            using var buffer = accelerator.Allocate1D<sbyte>(testData.Length);
+            buffer.CopyFromCPU(testData);
+            await accelerator.SynchronizeAsync();
+            var result = await buffer.CopyToHostAsync();
+            for (int i = 0; i < testData.Length; i++)
+            {
+                if (result[i] != testData[i])
+                    throw new Exception($"Int8 round-trip mismatch at [{i}]: expected {testData[i]}, got {result[i]}");
+            }
+        });
+
+        static void Int8DoubleKernel(Index1D idx, ArrayView<sbyte> src, ArrayView<int> dst)
+        {
+            dst[idx] = (int)src[idx] * 2;
+        }
+
+        /// <summary>
+        /// Verify ArrayView&lt;sbyte&gt; buffer read works correctly on all backends.
+        /// Writes sbyte[] via CopyFromCPU, kernel reads as sbyte, multiplies by 2, outputs to int buffer.
+        /// </summary>
+        [TestMethod]
+        public async Task Int8_BufferRead_Test() => await RunTest(async accelerator =>
+        {
+            var testData = new sbyte[] { 0, 1, -1, 127, -128, 42, -42, 100 };
+            using var input = accelerator.Allocate1D<sbyte>(testData.Length);
+            using var output = accelerator.Allocate1D<int>(testData.Length);
+
+            input.CopyFromCPU(testData);
+
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<sbyte>, ArrayView<int>>(Int8DoubleKernel);
+            kernel(testData.Length, input.View, output.View);
+            await accelerator.SynchronizeAsync();
+
+            var result = await output.CopyToHostAsync();
+            for (int i = 0; i < testData.Length; i++)
+            {
+                int expected = (int)testData[i] * 2;
+                if (result[i] != expected)
+                    throw new Exception($"Int8 read mismatch at [{i}]: expected {expected}, got {result[i]}. Input was {testData[i]}");
+            }
+        });
+
+        static void Int8WriteKernel(Index1D idx, ArrayView<sbyte> dst, ArrayView<int> src)
+        {
+            dst[idx] = (sbyte)src[idx];
+        }
+
+        /// <summary>
+        /// Verify ArrayView&lt;sbyte&gt; buffer write works correctly.
+        /// Kernel writes sbyte values to a sbyte buffer, read back and verify.
+        /// </summary>
+        [TestMethod]
+        public async Task Int8_BufferWrite_Test() => await RunTest(async accelerator =>
+        {
+            var srcData = new int[] { 1, -2, 100, -100, 127, -128, 0, 42 };
+            using var src = accelerator.Allocate1D<int>(srcData.Length);
+            using var dst = accelerator.Allocate1D<sbyte>(srcData.Length);
+
+            src.CopyFromCPU(srcData);
+
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<sbyte>, ArrayView<int>>(Int8WriteKernel);
+            kernel(srcData.Length, dst.View, src.View);
+            await accelerator.SynchronizeAsync();
+
+            var result = await dst.CopyToHostAsync();
+            for (int i = 0; i < srcData.Length; i++)
+            {
+                sbyte expected = (sbyte)srcData[i];
+                if (result[i] != expected)
+                    throw new Exception($"Int8 write mismatch at [{i}]: expected {expected}, got {result[i]}");
+            }
+        });
+
+        static void Int8EndToEndKernel(Index1D idx, ArrayView<sbyte> input, ArrayView<sbyte> output)
+        {
+            output[idx] = (sbyte)(input[idx] + (sbyte)5);
+        }
+
+        /// <summary>
+        /// End-to-end: write sbyte data, kernel reads AND writes sbyte buffers.
+        /// Tests both sub-word Load and sub-word Store in one kernel.
+        /// </summary>
+        [TestMethod]
+        public async Task Int8_EndToEnd_ReadWrite_Test() => await RunTest(async accelerator =>
+        {
+            var testData = new sbyte[] { 0, 1, -1, 50, -50, 122, -123, 42 };
+            using var input = accelerator.Allocate1D<sbyte>(testData.Length);
+            using var output = accelerator.Allocate1D<sbyte>(testData.Length);
+
+            input.CopyFromCPU(testData);
+
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<sbyte>, ArrayView<sbyte>>(Int8EndToEndKernel);
+            kernel(testData.Length, input.View, output.View);
+            await accelerator.SynchronizeAsync();
+
+            var result = await output.CopyToHostAsync();
+            for (int i = 0; i < testData.Length; i++)
+            {
+                sbyte expected = (sbyte)(testData[i] + 5);
+                if (result[i] != expected)
+                    throw new Exception($"Int8 end-to-end mismatch at [{i}]: expected {expected}, got {result[i]}. Input was {testData[i]}");
+            }
+        });
+
+        // ==================== UInt8 Sub-Word Buffer Access Tests ====================
+
+        /// <summary>
+        /// Basic round-trip: CopyFromCPU byte[] -> CopyToHostAsync byte[] (no kernel).
+        /// Verifies buffer I/O works for byte type.
+        /// </summary>
+        [TestMethod]
+        public async Task UInt8_RoundTrip_NoKernel_Test() => await RunTest(async accelerator =>
+        {
+            var testData = new byte[] { 0, 1, 127, 128, 254, 255, 42, 100 };
+            using var buffer = accelerator.Allocate1D<byte>(testData.Length);
+            buffer.CopyFromCPU(testData);
+            await accelerator.SynchronizeAsync();
+            var result = await buffer.CopyToHostAsync();
+            for (int i = 0; i < testData.Length; i++)
+            {
+                if (result[i] != testData[i])
+                    throw new Exception($"UInt8 round-trip mismatch at [{i}]: expected {testData[i]}, got {result[i]}");
+            }
+        });
+
+        static void UInt8DoubleKernel(Index1D idx, ArrayView<byte> src, ArrayView<int> dst)
+        {
+            dst[idx] = (int)src[idx] * 2;
+        }
+
+        /// <summary>
+        /// Verify ArrayView&lt;byte&gt; buffer read works correctly on all backends.
+        /// Writes byte[] via CopyFromCPU, kernel reads as byte, multiplies by 2, outputs to int buffer.
+        /// </summary>
+        [TestMethod]
+        public async Task UInt8_BufferRead_Test() => await RunTest(async accelerator =>
+        {
+            var testData = new byte[] { 0, 1, 127, 128, 254, 255, 42, 100 };
+            using var input = accelerator.Allocate1D<byte>(testData.Length);
+            using var output = accelerator.Allocate1D<int>(testData.Length);
+
+            input.CopyFromCPU(testData);
+
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<byte>, ArrayView<int>>(UInt8DoubleKernel);
+            kernel(testData.Length, input.View, output.View);
+            await accelerator.SynchronizeAsync();
+
+            var result = await output.CopyToHostAsync();
+            for (int i = 0; i < testData.Length; i++)
+            {
+                int expected = (int)testData[i] * 2;
+                if (result[i] != expected)
+                    throw new Exception($"UInt8 read mismatch at [{i}]: expected {expected}, got {result[i]}. Input was {testData[i]}");
+            }
+        });
+
+        static void UInt8WriteKernel(Index1D idx, ArrayView<byte> dst, ArrayView<int> src)
+        {
+            dst[idx] = (byte)src[idx];
+        }
+
+        /// <summary>
+        /// Verify ArrayView&lt;byte&gt; buffer write works correctly.
+        /// Kernel writes byte values to a byte buffer, read back and verify.
+        /// </summary>
+        [TestMethod]
+        public async Task UInt8_BufferWrite_Test() => await RunTest(async accelerator =>
+        {
+            var srcData = new int[] { 0, 1, 127, 128, 254, 255, 42, 100 };
+            using var src = accelerator.Allocate1D<int>(srcData.Length);
+            using var dst = accelerator.Allocate1D<byte>(srcData.Length);
+
+            src.CopyFromCPU(srcData);
+
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<byte>, ArrayView<int>>(UInt8WriteKernel);
+            kernel(srcData.Length, dst.View, src.View);
+            await accelerator.SynchronizeAsync();
+
+            var result = await dst.CopyToHostAsync();
+            for (int i = 0; i < srcData.Length; i++)
+            {
+                byte expected = (byte)srcData[i];
+                if (result[i] != expected)
+                    throw new Exception($"UInt8 write mismatch at [{i}]: expected {expected}, got {result[i]}");
+            }
+        });
+
+        static void UInt8EndToEndKernel(Index1D idx, ArrayView<byte> input, ArrayView<byte> output)
+        {
+            output[idx] = (byte)(input[idx] + (byte)5);
+        }
+
+        /// <summary>
+        /// End-to-end: write byte data, kernel reads AND writes byte buffers.
+        /// Tests both sub-word Load and sub-word Store in one kernel.
+        /// </summary>
+        [TestMethod]
+        public async Task UInt8_EndToEnd_ReadWrite_Test() => await RunTest(async accelerator =>
+        {
+            var testData = new byte[] { 0, 1, 100, 127, 250, 42, 0, 200 };
+            using var input = accelerator.Allocate1D<byte>(testData.Length);
+            using var output = accelerator.Allocate1D<byte>(testData.Length);
+
+            input.CopyFromCPU(testData);
+
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<byte>, ArrayView<byte>>(UInt8EndToEndKernel);
+            kernel(testData.Length, input.View, output.View);
+            await accelerator.SynchronizeAsync();
+
+            var result = await output.CopyToHostAsync();
+            for (int i = 0; i < testData.Length; i++)
+            {
+                byte expected = (byte)(testData[i] + 5);
+                if (result[i] != expected)
+                    throw new Exception($"UInt8 end-to-end mismatch at [{i}]: expected {expected}, got {result[i]}. Input was {testData[i]}");
+            }
+        });
+
+        // ==================== Half Intrinsics Tests ====================
+
+        static void HalfAbsKernel(Index1D idx, ArrayView<global::ILGPU.Half> src, ArrayView<global::ILGPU.Half> dst)
+        {
+            dst[idx] = global::ILGPU.Half.Abs(src[idx]);
+        }
+
+        /// <summary>
+        /// Verify Half.Abs intrinsic works correctly on all backends.
+        /// Writes Half values (including negatives), kernel applies Abs, verifies against CPU reference.
+        /// </summary>
+        [TestMethod]
+        public async Task Half_Abs_Test() => await RunTest(async accelerator =>
+        {
+            var testFloats = new float[] { 1.0f, -2.5f, 0.0f, -100.0f };
+            var testData = testFloats.Select(f => (global::ILGPU.Half)f).ToArray();
+            using var input = accelerator.Allocate1D<global::ILGPU.Half>(testData.Length);
+            using var output = accelerator.Allocate1D<global::ILGPU.Half>(testData.Length);
+
+            input.CopyFromCPU(testData);
+
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<global::ILGPU.Half>, ArrayView<global::ILGPU.Half>>(HalfAbsKernel);
+            kernel(testData.Length, input.View, output.View);
+            await accelerator.SynchronizeAsync();
+
+            var result = await output.CopyToHostAsync();
+            for (int i = 0; i < testData.Length; i++)
+            {
+                float expected = MathF.Abs(testFloats[i]);
+                float actual = (float)result[i];
+                // Half precision tolerance
+                if (MathF.Abs(actual - expected) > 0.1f)
+                    throw new Exception($"Half Abs mismatch at [{i}]: expected {expected}, got {actual}. Input was {testFloats[i]}");
+            }
+        });
+
+        static void HalfMinMaxKernel(Index1D idx, ArrayView<global::ILGPU.Half> a, ArrayView<global::ILGPU.Half> b, ArrayView<float> minOut, ArrayView<float> maxOut)
+        {
+            var va = (float)a[idx];
+            var vb = (float)b[idx];
+            minOut[idx] = va < vb ? va : vb;
+            maxOut[idx] = va > vb ? va : vb;
+        }
+
+        /// <summary>
+        /// Verify Half min/max operations via float comparison on all backends.
+        /// Reads two Half arrays, computes min and max via float cast, writes to float outputs.
+        /// </summary>
+        [TestMethod]
+        public async Task Half_MinMax_Test() => await RunTest(async accelerator =>
+        {
+            var aFloats = new float[] { 1f, 3f, -2f, 0f };
+            var bFloats = new float[] { 2f, 1f, -1f, 0f };
+            var aData = aFloats.Select(f => (global::ILGPU.Half)f).ToArray();
+            var bData = bFloats.Select(f => (global::ILGPU.Half)f).ToArray();
+            int length = aData.Length;
+
+            using var aBuffer = accelerator.Allocate1D<global::ILGPU.Half>(length);
+            using var bBuffer = accelerator.Allocate1D<global::ILGPU.Half>(length);
+            using var minBuffer = accelerator.Allocate1D<float>(length);
+            using var maxBuffer = accelerator.Allocate1D<float>(length);
+
+            aBuffer.CopyFromCPU(aData);
+            bBuffer.CopyFromCPU(bData);
+
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<global::ILGPU.Half>, ArrayView<global::ILGPU.Half>, ArrayView<float>, ArrayView<float>>(HalfMinMaxKernel);
+            kernel(length, aBuffer.View, bBuffer.View, minBuffer.View, maxBuffer.View);
+            await accelerator.SynchronizeAsync();
+
+            var minResult = await minBuffer.CopyToHostAsync();
+            var maxResult = await maxBuffer.CopyToHostAsync();
+            for (int i = 0; i < length; i++)
+            {
+                float expectedMin = MathF.Min(aFloats[i], bFloats[i]);
+                float expectedMax = MathF.Max(aFloats[i], bFloats[i]);
+                if (MathF.Abs(minResult[i] - expectedMin) > 0.1f)
+                    throw new Exception($"Half Min mismatch at [{i}]: expected {expectedMin}, got {minResult[i]}. a={aFloats[i]}, b={bFloats[i]}");
+                if (MathF.Abs(maxResult[i] - expectedMax) > 0.1f)
+                    throw new Exception($"Half Max mismatch at [{i}]: expected {expectedMax}, got {maxResult[i]}. a={aFloats[i]}, b={bFloats[i]}");
+            }
+        });
     }
 }

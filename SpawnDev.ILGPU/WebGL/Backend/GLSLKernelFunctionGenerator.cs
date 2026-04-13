@@ -519,7 +519,22 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                     if (elementType is PrimitiveType swPt)
                     {
                         if (swPt.BasicValueType == BasicValueType.Int8)
+                        {
                             _subWordParams[param.Index] = 1;
+                            glslType = "int"; // Force R32I for packed byte data
+                            // Detect unsigned (byte) via CLR param type
+                            int userIdx8 = param.Index - KernelParamOffset;
+                            if (userIdx8 >= 0 && userIdx8 < EntryPoint.Parameters.Count)
+                            {
+                                var clrType8 = EntryPoint.Parameters[userIdx8];
+                                if (clrType8.IsGenericType)
+                                {
+                                    var genArgs8 = clrType8.GetGenericArguments();
+                                    if (genArgs8.Length > 0 && genArgs8[0] == typeof(byte))
+                                        _subWordUnsignedParams.Add(param.Index);
+                                }
+                            }
+                        }
                         else if (swPt.BasicValueType == BasicValueType.Int16)
                         {
                             _subWordParams[param.Index] = 2;
@@ -1946,7 +1961,11 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                     var texelIdx = $"(({idx}) / 4 + u_param{subWordParamIdx}_offset)";
                     var shift = $"(({idx}) % 4) * 8";
                     var fetch = $"texelFetch(u_param{subWordParamIdx}, ivec2({texelIdx} % u_param{subWordParamIdx}_tileW, {texelIdx} / u_param{subWordParamIdx}_tileW), 0).r";
-                    extractExpr = $"({fetch} >> ({shift})) & 0xFF";
+                    var rawByte = $"(({fetch}) >> ({shift})) & 0xFF";
+                    if (_subWordUnsignedParams.Contains(subWordParamIdx))
+                        extractExpr = rawByte; // byte: zero-extend (0-255)
+                    else
+                        extractExpr = $"(({rawByte}) >= 128 ? ({rawByte}) - 256 : ({rawByte}))"; // sbyte: sign-extend
                 }
                 else if (_subWordFloat16Params.Contains(subWordParamIdx))
                 {

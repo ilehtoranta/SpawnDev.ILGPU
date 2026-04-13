@@ -2999,6 +2999,20 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     {
                         case BasicValueType.Int8:
                             _subWordParams[param.Index] = 1;
+                            // Detect unsigned (byte) via CLR param type
+                            {
+                                int userIdx8 = param.Index - KernelParamOffset;
+                                if (userIdx8 >= 0 && userIdx8 < EntryPoint.Parameters.Count)
+                                {
+                                    var clrType8 = EntryPoint.Parameters[userIdx8];
+                                    if (clrType8.IsGenericType)
+                                    {
+                                        var genArgs8 = clrType8.GetGenericArguments();
+                                        if (genArgs8.Length > 0 && genArgs8[0] == typeof(byte))
+                                            _subWordUnsignedParams.Add(param.Index);
+                                    }
+                                }
+                            }
                             break;
                         case BasicValueType.Int16:
                             _subWordParams[param.Index] = 2;
@@ -3838,10 +3852,13 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 if (elemSize == 1)
                 {
                     // Byte extraction: 4 bytes per atomic<u32> word
-                    // WGSL requires explicit parenthesization for mixed-precedence operators
                     var wordIdx = $"(u32({idx}) / 4u)";
                     var shift = $"((u32({idx}) % 4u) * 8u)";
-                    extractExpr = $"i32(((u32(atomicLoad(&param{subWordParamIdx}[{wordIdx}])) >> {shift}) & 0xFFu))";
+                    var rawByte = $"((u32(atomicLoad(&param{subWordParamIdx}[{wordIdx}])) >> {shift}) & 0xFFu)";
+                    if (_subWordUnsignedParams.Contains(subWordParamIdx))
+                        extractExpr = $"i32({rawByte})"; // byte: zero-extend (0-255)
+                    else
+                        extractExpr = $"select(i32({rawByte}), (i32({rawByte}) - 256), ({rawByte}) >= 128u)"; // sbyte: sign-extend
                 }
                 else if (_subWordFloat16Params.Contains(subWordParamIdx))
                 {

@@ -1604,6 +1604,8 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             bool isFloat16 = value.Type is PrimitiveType pt2 && pt2.BasicValueType == BasicValueType.Float16;
             // Check if this is an Int16 load (2-byte element, promoted to i32)
             bool isInt16 = value.Type is PrimitiveType ptI16 && ptI16.BasicValueType == BasicValueType.Int16;
+            // Check if this is an Int8 load (1-byte element, promoted to i32)
+            bool isInt8 = value.Type is PrimitiveType ptI8 && ptI8.BasicValueType == BasicValueType.Int8;
 
             // Push the address (byte offset in linear memory)
             EmitGetLocal(source2);
@@ -1672,6 +1674,57 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                     }
                     else
                         WasmModuleBuilder.EmitLoad(Code, WasmOpCodes.I32Load16S, 1, 0);
+                }
+            }
+            else if (isInt8)
+            {
+                // Detect unsigned (byte) vs signed (sbyte) via CLR param type
+                bool isUnsigned8 = false;
+                var resolvedSrc8 = value.Source.Resolve();
+                if (resolvedSrc8 is LoadElementAddress lea8)
+                {
+                    var leaSrc8 = lea8.Source.Resolve();
+                    if (leaSrc8 is global::ILGPU.IR.Values.Parameter srcParam8)
+                    {
+                        int userIdx8 = srcParam8.Index - 1;
+                        var ep8 = _generatorArgs.EntryPoint;
+                        if (userIdx8 >= 0 && userIdx8 < ep8.Parameters.Count)
+                        {
+                            var clrType8 = ep8.Parameters[userIdx8];
+                            if (clrType8.IsGenericType)
+                            {
+                                var genArgs8 = clrType8.GetGenericArguments();
+                                if (genArgs8.Length > 0 && genArgs8[0] == typeof(byte))
+                                    isUnsigned8 = true;
+                            }
+                        }
+                    }
+                }
+
+                if (isUnsigned8)
+                {
+                    // UInt8 (byte): load 1 byte with zero extension
+                    if (_hasBarriers)
+                    {
+                        Code.Add(WasmOpCodes.AtomicPrefix);
+                        WasmModuleBuilder.EmitU32Leb128(Code, WasmOpCodes.I32AtomicLoad8U);
+                        Code.Add(0x00); Code.Add(0x00); // align=0, offset=0
+                    }
+                    else
+                        WasmModuleBuilder.EmitLoad(Code, WasmOpCodes.I32Load8U, 0, 0);
+                }
+                else
+                {
+                    // Int8 (sbyte): load 1 byte with sign extension
+                    if (_hasBarriers)
+                    {
+                        Code.Add(WasmOpCodes.AtomicPrefix);
+                        WasmModuleBuilder.EmitU32Leb128(Code, WasmOpCodes.I32AtomicLoad8U);
+                        Code.Add(0x00); Code.Add(0x00);
+                        Code.Add(WasmOpCodes.I32Extend8S);
+                    }
+                    else
+                        WasmModuleBuilder.EmitLoad(Code, WasmOpCodes.I32Load8S, 0, 0);
                 }
             }
             // For barrier kernels, use atomic loads for ALL types for cross-worker visibility.
@@ -2331,6 +2384,32 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 }
                 else
                     WasmModuleBuilder.EmitStore(Code, WasmOpCodes.I32Store16, 1, 0);
+                return;
+            }
+
+            // Check if this is an Int8 store (i32 value -> 1-byte memory)
+            bool isInt8Store = false;
+            if (storeValue.Type is PrimitiveType ptI8Store
+                && ptI8Store.BasicValueType == BasicValueType.Int8)
+                isInt8Store = true;
+            if (!isInt8Store && target.Type is AddressSpaceType addrI8
+                && addrI8.ElementType is PrimitiveType ptAddrI8
+                && ptAddrI8.BasicValueType == BasicValueType.Int8)
+                isInt8Store = true;
+
+            if (isInt8Store)
+            {
+                // Int8: store lower 8 bits of i32 value as 1 byte
+                EmitGetLocal(target);
+                EmitGetLocal(storeValue);
+                if (_hasBarriers)
+                {
+                    Code.Add(WasmOpCodes.AtomicPrefix);
+                    WasmModuleBuilder.EmitU32Leb128(Code, WasmOpCodes.I32AtomicStore8);
+                    Code.Add(0x00); Code.Add(0x00); // align=0, offset=0
+                }
+                else
+                    WasmModuleBuilder.EmitStore(Code, WasmOpCodes.I32Store8, 0, 0);
                 return;
             }
 
