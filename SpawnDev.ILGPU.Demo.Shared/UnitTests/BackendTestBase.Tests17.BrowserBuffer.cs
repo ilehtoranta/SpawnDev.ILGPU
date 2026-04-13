@@ -250,6 +250,187 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             }
         });
 
+        // ==================== UInt16 Sub-Word Buffer Access Tests ====================
+
+        /// <summary>
+        /// Basic round-trip: CopyFromCPU ushort[] -> CopyToHostAsync ushort[] (no kernel).
+        /// Verifies buffer I/O works for ushort type.
+        /// </summary>
+        [TestMethod]
+        public async Task UInt16_RoundTrip_NoKernel_Test() => await RunTest(async accelerator =>
+        {
+            var testData = new ushort[] { 0, 1, 255, 256, 32767, 32768, 65534, 65535 };
+            using var buffer = accelerator.Allocate1D<ushort>(testData.Length);
+            buffer.CopyFromCPU(testData);
+            await accelerator.SynchronizeAsync();
+            var result = await buffer.CopyToHostAsync();
+            for (int i = 0; i < testData.Length; i++)
+            {
+                if (result[i] != testData[i])
+                    throw new Exception($"UInt16 round-trip mismatch at [{i}]: expected {testData[i]}, got {result[i]}");
+            }
+        });
+
+        static void UInt16DoubleKernel(Index1D idx, ArrayView<ushort> src, ArrayView<int> dst)
+        {
+            dst[idx] = (int)src[idx] * 2;
+        }
+
+        /// <summary>
+        /// Verify ArrayView&lt;ushort&gt; buffer read works correctly on all backends.
+        /// Writes ushort[] via CopyFromCPU, kernel reads as ushort, multiplies by 2, outputs to int buffer.
+        /// </summary>
+        [TestMethod]
+        public async Task UInt16_BufferRead_Test() => await RunTest(async accelerator =>
+        {
+            var testData = new ushort[] { 0, 1, 255, 256, 32767, 32768, 65534, 65535 };
+            using var input = accelerator.Allocate1D<ushort>(testData.Length);
+            using var output = accelerator.Allocate1D<int>(testData.Length);
+
+            input.CopyFromCPU(testData);
+
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<ushort>, ArrayView<int>>(UInt16DoubleKernel);
+            kernel(testData.Length, input.View, output.View);
+            await accelerator.SynchronizeAsync();
+
+            var result = await output.CopyToHostAsync();
+            for (int i = 0; i < testData.Length; i++)
+            {
+                int expected = (int)testData[i] * 2;
+                if (result[i] != expected)
+                    throw new Exception($"UInt16 read mismatch at [{i}]: expected {expected}, got {result[i]}. Input was {testData[i]}");
+            }
+        });
+
+        static void UInt16WriteKernel(Index1D idx, ArrayView<ushort> dst, ArrayView<int> src)
+        {
+            dst[idx] = (ushort)src[idx];
+        }
+
+        /// <summary>
+        /// Verify ArrayView&lt;ushort&gt; buffer write works correctly.
+        /// Kernel writes ushort values to a ushort buffer, read back and verify.
+        /// </summary>
+        [TestMethod]
+        public async Task UInt16_BufferWrite_Test() => await RunTest(async accelerator =>
+        {
+            var srcData = new int[] { 0, 1, 255, 256, 32767, 32768, 65534, 65535 };
+            using var src = accelerator.Allocate1D<int>(srcData.Length);
+            using var dst = accelerator.Allocate1D<ushort>(srcData.Length);
+
+            src.CopyFromCPU(srcData);
+
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<ushort>, ArrayView<int>>(UInt16WriteKernel);
+            kernel(srcData.Length, dst.View, src.View);
+            await accelerator.SynchronizeAsync();
+
+            var result = await dst.CopyToHostAsync();
+            for (int i = 0; i < srcData.Length; i++)
+            {
+                ushort expected = (ushort)srcData[i];
+                if (result[i] != expected)
+                    throw new Exception($"UInt16 write mismatch at [{i}]: expected {expected}, got {result[i]}");
+            }
+        });
+
+        static void UInt16EndToEndKernel(Index1D idx, ArrayView<ushort> input, ArrayView<ushort> output)
+        {
+            output[idx] = (ushort)(input[idx] + (ushort)10);
+        }
+
+        /// <summary>
+        /// End-to-end: write ushort data, kernel reads AND writes ushort buffers.
+        /// Tests both sub-word Load and sub-word Store in one kernel.
+        /// </summary>
+        [TestMethod]
+        public async Task UInt16_EndToEnd_ReadWrite_Test() => await RunTest(async accelerator =>
+        {
+            var testData = new ushort[] { 0, 1, 100, 32767, 65525, 42, 0, 255 };
+            using var input = accelerator.Allocate1D<ushort>(testData.Length);
+            using var output = accelerator.Allocate1D<ushort>(testData.Length);
+
+            input.CopyFromCPU(testData);
+
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<ushort>, ArrayView<ushort>>(UInt16EndToEndKernel);
+            kernel(testData.Length, input.View, output.View);
+            await accelerator.SynchronizeAsync();
+
+            var result = await output.CopyToHostAsync();
+            for (int i = 0; i < testData.Length; i++)
+            {
+                ushort expected = (ushort)(testData[i] + 10);
+                if (result[i] != expected)
+                    throw new Exception($"UInt16 end-to-end mismatch at [{i}]: expected {expected}, got {result[i]}. Input was {testData[i]}");
+            }
+        });
+
+        // ==================== Additional Float16 Sub-Word Buffer Access Tests ====================
+
+        static void Float16WriteKernel(Index1D idx, ArrayView<global::ILGPU.Half> dst, ArrayView<float> src)
+        {
+            dst[idx] = (global::ILGPU.Half)src[idx];
+        }
+
+        /// <summary>
+        /// Verify ArrayView&lt;Half&gt; buffer write works correctly.
+        /// Kernel converts float to Half and stores in Half buffer. Read back and compare as float.
+        /// </summary>
+        [TestMethod]
+        public async Task Float16_BufferWrite_Test() => await RunTest(async accelerator =>
+        {
+            var srcData = new float[] { 1.0f, -2.5f, 0.0f, 3.14f, 100.0f, -0.5f, 0.001f, 65504.0f };
+            using var src = accelerator.Allocate1D<float>(srcData.Length);
+            using var dst = accelerator.Allocate1D<global::ILGPU.Half>(srcData.Length);
+
+            src.CopyFromCPU(srcData);
+
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<global::ILGPU.Half>, ArrayView<float>>(Float16WriteKernel);
+            kernel(srcData.Length, dst.View, src.View);
+            await accelerator.SynchronizeAsync();
+
+            var result = await dst.CopyToHostAsync();
+            for (int i = 0; i < srcData.Length; i++)
+            {
+                float expected = (float)(global::ILGPU.Half)srcData[i];
+                float actual = (float)result[i];
+                if (MathF.Abs(actual - expected) > 0.01f)
+                    throw new Exception($"Float16 write mismatch at [{i}]: expected {expected}, got {actual}");
+            }
+        });
+
+        static void Float16EndToEndKernel(Index1D idx, ArrayView<global::ILGPU.Half> input, ArrayView<global::ILGPU.Half> output)
+        {
+            output[idx] = (global::ILGPU.Half)((float)input[idx] * 2.0f);
+        }
+
+        /// <summary>
+        /// End-to-end: write Half data, kernel reads Half, multiplies by 2 via float, writes Half.
+        /// Tests both sub-word Load and sub-word Store for Half in one kernel.
+        /// </summary>
+        [TestMethod]
+        public async Task Float16_EndToEnd_ReadWrite_Test() => await RunTest(async accelerator =>
+        {
+            var testFloats = new float[] { 1.0f, -2.5f, 0.0f, 3.14f };
+            var testData = testFloats.Select(f => (global::ILGPU.Half)f).ToArray();
+            using var input = accelerator.Allocate1D<global::ILGPU.Half>(testData.Length);
+            using var output = accelerator.Allocate1D<global::ILGPU.Half>(testData.Length);
+
+            input.CopyFromCPU(testData);
+
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<global::ILGPU.Half>, ArrayView<global::ILGPU.Half>>(Float16EndToEndKernel);
+            kernel(testData.Length, input.View, output.View);
+            await accelerator.SynchronizeAsync();
+
+            var result = await output.CopyToHostAsync();
+            for (int i = 0; i < testData.Length; i++)
+            {
+                float expected = (float)testData[i] * 2.0f;
+                float actual = (float)result[i];
+                if (MathF.Abs(actual - expected) > 0.05f)
+                    throw new Exception($"Float16 end-to-end mismatch at [{i}]: expected {expected}, got {actual}. Input was {(float)testData[i]}");
+            }
+        });
+
         static void Int16EndToEndKernel(Index1D idx, ArrayView<short> input, ArrayView<short> output)
         {
             output[idx] = (short)(input[idx] + (short)10);

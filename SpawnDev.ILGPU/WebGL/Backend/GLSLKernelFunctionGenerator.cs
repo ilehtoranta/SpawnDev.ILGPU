@@ -93,6 +93,8 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         private readonly Dictionary<int, int> _subWordParams = new();
         // Float16 sub-word params need f16-to-f32 conversion instead of sign extension
         private readonly HashSet<int> _subWordFloat16Params = new();
+        // Unsigned sub-word params need zero-extension instead of sign extension
+        private readonly HashSet<int> _subWordUnsignedParams = new();
         // Maps LEA variable names to their sub-word param index
         private readonly Dictionary<string, int> _subWordLEAVars = new();
 
@@ -522,6 +524,18 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                         {
                             _subWordParams[param.Index] = 2;
                             glslType = "int"; // Force R32I texture for packed sub-word data
+                            // Detect unsigned (ushort) via CLR param type
+                            int userIdx = param.Index - KernelParamOffset;
+                            if (userIdx >= 0 && userIdx < EntryPoint.Parameters.Count)
+                            {
+                                var clrType = EntryPoint.Parameters[userIdx];
+                                if (clrType.IsGenericType)
+                                {
+                                    var genArgs = clrType.GetGenericArguments();
+                                    if (genArgs.Length > 0 && genArgs[0] == typeof(ushort))
+                                        _subWordUnsignedParams.Add(param.Index);
+                                }
+                            }
                         }
                         else if (swPt.BasicValueType == BasicValueType.Float16)
                         {
@@ -1948,6 +1962,14 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                     // Normalized: bias adjust (127-15=112) and shift mantissa
                     extractExpr = $"(({exp}) == 0 && ({mant}) == 0) ? intBitsToFloat({sign}) : intBitsToFloat(({sign}) | ((({exp}) + 112) << 23) | (({mant}) << 13))";
                 }
+                else if (_subWordUnsignedParams.Contains(subWordParamIdx))
+                {
+                    // UInt16 extraction: 2 ushorts per texel, zero-extension
+                    var texelIdx = $"({idx} / 2 + u_param{subWordParamIdx}_offset)";
+                    var shift = $"(({idx}) % 2) * 16";
+                    var fetch = $"texelFetch(u_param{subWordParamIdx}, ivec2({texelIdx} % u_param{subWordParamIdx}_tileW, {texelIdx} / u_param{subWordParamIdx}_tileW), 0).r";
+                    extractExpr = $"(({fetch}) >> ({shift})) & 0xFFFF"; // zero-extend: & 0xFFFF gives 0-65535
+                }
                 else // elemSize == 2, Int16
                 {
                     // Int16 extraction: 2 shorts per texel, with sign extension
@@ -2121,6 +2143,26 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 _singleStoreIndex!.TryGetValue(leaParamIdx, out var output);
                 if (output != null)
                 {
+                    // Float16 sub-word Store: convert f32 to f16 bits before TF output
+                    if (_subWordFloat16Params.Contains(leaParamIdx))
+                    {
+                        // IEEE 754 single-to-half conversion in GLSL
+                        AppendLine($"{{");
+                        AppendLine($"  uint _f2h_bits = floatBitsToUint({val});");
+                        AppendLine($"  uint _f2h_sign = (_f2h_bits >> 16u) & 0x8000u;");
+                        AppendLine($"  uint _f2h_exp = (_f2h_bits >> 23u) & 0xFFu;");
+                        AppendLine($"  uint _f2h_mant = _f2h_bits & 0x7FFFFFu;");
+                        AppendLine($"  int _f2h_unbiased = int(_f2h_exp) - 127;");
+                        AppendLine($"  uint _f16 = _f2h_sign;"); // default: zero
+                        AppendLine($"  if (_f2h_exp != 0u) {{");
+                        AppendLine($"    if (_f2h_unbiased > 15) {{ _f16 = _f2h_sign | 0x7C00u; }}");
+                        AppendLine($"    else if (_f2h_unbiased >= -14) {{ _f16 = _f2h_sign | (uint(_f2h_unbiased + 15) << 10u) | (_f2h_mant >> 13u); }}");
+                        AppendLine($"  }}");
+                        AppendLine($"  {output.VaryingName} = int(_f16);");
+                        AppendLine($"}}");
+                        return;
+                    }
+
                     // Single-element TF output (one value per vertex invocation)
                     // GLSL ES 3.0: cast value to match output type if needed
                     string tfValExpr = CastIfNeeded(val, output.GlslType ?? "float");

@@ -1624,19 +1624,55 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             }
             else if (isInt16)
             {
-                // Int16: load 2 bytes with sign extension to i32.
-                if (_hasBarriers)
+                // Detect unsigned (ushort) via CLR param type
+                bool isUnsigned16 = false;
+                var resolvedSource = value.Source.Resolve();
+                if (resolvedSource is LoadElementAddress lea16)
                 {
-                    // Atomic loads are always zero-extending (I32AtomicLoad16U).
-                    // Manually sign-extend: if bit 15 set, OR with 0xFFFF0000.
-                    Code.Add(WasmOpCodes.AtomicPrefix);
-                    WasmModuleBuilder.EmitU32Leb128(Code, WasmOpCodes.I32AtomicLoad16U);
-                    Code.Add(0x01); Code.Add(0x00); // align=1, offset=0
-                    // Sign extend: i32.extend16_s (Wasm sign extension ops proposal, widely supported)
-                    Code.Add(WasmOpCodes.I32Extend16S);
+                    var leaSrc = lea16.Source.Resolve();
+                    if (leaSrc is global::ILGPU.IR.Values.Parameter srcParam)
+                    {
+                        int userIdx = srcParam.Index - 1; // KernelParamOffset is typically 1
+                        var ep = _generatorArgs.EntryPoint;
+                        if (userIdx >= 0 && userIdx < ep.Parameters.Count)
+                        {
+                            var clrType = ep.Parameters[userIdx];
+                            if (clrType.IsGenericType)
+                            {
+                                var genArgs = clrType.GetGenericArguments();
+                                if (genArgs.Length > 0 && genArgs[0] == typeof(ushort))
+                                    isUnsigned16 = true;
+                            }
+                        }
+                    }
+                }
+
+                if (isUnsigned16)
+                {
+                    // UInt16: load 2 bytes with zero extension to i32
+                    if (_hasBarriers)
+                    {
+                        Code.Add(WasmOpCodes.AtomicPrefix);
+                        WasmModuleBuilder.EmitU32Leb128(Code, WasmOpCodes.I32AtomicLoad16U);
+                        Code.Add(0x01); Code.Add(0x00);
+                        // No sign extension - zero-extend is correct for unsigned
+                    }
+                    else
+                        WasmModuleBuilder.EmitLoad(Code, WasmOpCodes.I32Load16U, 1, 0);
                 }
                 else
-                    WasmModuleBuilder.EmitLoad(Code, WasmOpCodes.I32Load16S, 1, 0);
+                {
+                    // Int16: load 2 bytes with sign extension to i32
+                    if (_hasBarriers)
+                    {
+                        Code.Add(WasmOpCodes.AtomicPrefix);
+                        WasmModuleBuilder.EmitU32Leb128(Code, WasmOpCodes.I32AtomicLoad16U);
+                        Code.Add(0x01); Code.Add(0x00);
+                        Code.Add(WasmOpCodes.I32Extend16S);
+                    }
+                    else
+                        WasmModuleBuilder.EmitLoad(Code, WasmOpCodes.I32Load16S, 1, 0);
+                }
             }
             // For barrier kernels, use atomic loads for ALL types for cross-worker visibility.
             // Float types use reinterpret: i32.atomic.load → f32.reinterpret_i32 (or i64 → f64).

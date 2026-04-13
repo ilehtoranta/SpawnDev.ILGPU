@@ -71,6 +71,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         private Dictionary<int, int> _subWordParams = new Dictionary<int, int>(); // paramIndex -> elementByteSize
         // Float16 sub-word params need f16-to-f32 conversion instead of sign extension
         private HashSet<int> _subWordFloat16Params = new HashSet<int>();
+        // Unsigned sub-word params need zero-extension instead of sign extension
+        private HashSet<int> _subWordUnsignedParams = new HashSet<int>();
         // Maps LEA variable names to their sub-word param index (for Load/Store extraction)
         private Dictionary<string, int> _subWordLEAVars = new Dictionary<string, int>();
         // Maps variable names to their emulation info (param index, is emu_f64)
@@ -3000,6 +3002,24 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                             break;
                         case BasicValueType.Int16:
                             _subWordParams[param.Index] = 2;
+                            // Detect unsigned (ushort) via CLR param type from EntryPoint.Parameters.
+                            // EntryPoint.Parameters[N] is the CLR Type of user param N (0-based).
+                            // For stream kernels with KernelParamOffset=1, IR param.Index=1 maps to
+                            // user param 0 (the first user param after the auto-generated Index1D).
+                            {
+                                int userIdx = param.Index - KernelParamOffset;
+                                if (userIdx >= 0 && userIdx < EntryPoint.Parameters.Count)
+                                {
+                                    var clrParamType = EntryPoint.Parameters[userIdx];
+                                    // Check if this is ArrayView<ushort> or similar generic with ushort element
+                                    if (clrParamType.IsGenericType)
+                                    {
+                                        var genArgs = clrParamType.GetGenericArguments();
+                                        if (genArgs.Length > 0 && genArgs[0] == typeof(ushort))
+                                            _subWordUnsignedParams.Add(param.Index);
+                                    }
+                                }
+                            }
                             break;
                         case BasicValueType.Float16:
                             if (!Backend.HasShaderF16)
@@ -3838,6 +3858,14 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     // Full subnormal support would need a loop, but those values are rare
                     extractExpr = $"select(bitcast<f32>(({sign}) | ((({exp}) + 112u) << 23u) | (({mant}) << 13u)), bitcast<f32>(({sign})), ({exp}) == 0u && ({mant}) == 0u)";
                 }
+                else if (_subWordUnsignedParams.Contains(subWordParamIdx))
+                {
+                    // UInt16 extraction: 2 ushorts per atomic<u32> word, zero-extension
+                    var wordIdx = $"(u32({idx}) / 2u)";
+                    var shift = $"((u32({idx}) % 2u) * 16u)";
+                    var rawExpr = $"((u32(atomicLoad(&param{subWordParamIdx}[{wordIdx}])) >> {shift}) & 0xFFFFu)";
+                    extractExpr = $"i32({rawExpr})"; // zero-extend: & 0xFFFF already ensures 0-65535
+                }
                 else
                 {
                     // Int16 extraction: 2 shorts per atomic<u32> word, with sign extension
@@ -3980,7 +4008,28 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     AppendLine($"atomicAnd(&param{storeParamIdx}[{wordIdx}], ~(0xFFu << {shift}));");
                     AppendLine($"atomicOr(&param{storeParamIdx}[{wordIdx}], ((u32({val}) & 0xFFu) << {shift}));");
                 }
-                else // elemSize == 2
+                else if (_subWordFloat16Params.Contains(storeParamIdx))
+                {
+                    // Float16 store: convert f32 to f16 bits, then pack into atomic<u32> word
+                    var wordIdx = $"(u32({idx}) / 2u)";
+                    var shift = $"((u32({idx}) % 2u) * 16u)";
+                    // IEEE 754 single-to-half conversion using let statements for clarity and WGSL precedence safety
+                    AppendLine($"{{");
+                    AppendLine($"  let _f2h_bits = bitcast<u32>({val});");
+                    AppendLine($"  let _f2h_sign = (_f2h_bits >> 16u) & 0x8000u;");
+                    AppendLine($"  let _f2h_exp = (_f2h_bits >> 23u) & 0xFFu;");
+                    AppendLine($"  let _f2h_mant = _f2h_bits & 0x7FFFFFu;");
+                    AppendLine($"  let _f2h_unbiased = i32(_f2h_exp) - 127;");
+                    AppendLine($"  var _f16 = _f2h_sign;"); // default: zero (exp==0)
+                    AppendLine($"  if (_f2h_exp != 0u) {{");
+                    AppendLine($"    if (_f2h_unbiased > 15) {{ _f16 = _f2h_sign | 0x7C00u; }}"); // overflow -> inf
+                    AppendLine($"    else if (_f2h_unbiased >= -14) {{ _f16 = _f2h_sign | (u32(_f2h_unbiased + 15) << 10u) | (_f2h_mant >> 13u); }}"); // normal
+                    AppendLine($"  }}");
+                    AppendLine($"  atomicAnd(&param{storeParamIdx}[{wordIdx}], ~(0xFFFFu << {shift}));");
+                    AppendLine($"  atomicOr(&param{storeParamIdx}[{wordIdx}], ((_f16 & 0xFFFFu) << {shift}));");
+                    AppendLine($"}}");
+                }
+                else // elemSize == 2, Int16/UInt16
                 {
                     // Short store: atomic RMW on atomic<u32> word (2 shorts per word)
                     // WGSL requires explicit parenthesization for mixed-precedence operators
