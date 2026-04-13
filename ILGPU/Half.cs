@@ -323,6 +323,24 @@ namespace ILGPU
         public static explicit operator Half(double doubleValue) =>
             (Half)(float)doubleValue;
 
+#if NET5_0_OR_GREATER
+        /// <summary>
+        /// Implicitly converts a System.Half to an ILGPU.Half.
+        /// </summary>
+        /// <param name="value">The System.Half to convert.</param>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static implicit operator Half(System.Half value) =>
+            new Half(BitConverter.HalfToUInt16Bits(value));
+
+        /// <summary>
+        /// Implicitly converts an ILGPU.Half to a System.Half.
+        /// </summary>
+        /// <param name="value">The ILGPU.Half to convert.</param>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static implicit operator System.Half(Half value) =>
+            BitConverter.UInt16BitsToHalf(value.RawValue);
+#endif
+
         #endregion
     }
 

@@ -207,6 +207,22 @@ namespace ILGPU.Algorithms.RadixSortOperations
     }
 
     /// <summary>
+    /// DescendingInt32 with configurable NumBits for per-pass partial sort testing.
+    /// </summary>
+    public struct DescendingInt32Partial : IRadixSortOperation<int>
+    {
+        public static int ConfiguredNumBits = 32;
+        public int NumBits => ConfiguredNumBits;
+        public int DefaultValue => 0;
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public int ExtractRadixBits(int value, int shift, int bitMask)
+        {
+            var bits = value ^ (1 << 31);
+            return (~((bits >> shift) & bitMask)) & bitMask;
+        }
+    }
+
+    /// <summary>
     /// Represents a descending radix sort operation of type int.
     /// </summary>
     public readonly struct DescendingInt32 :

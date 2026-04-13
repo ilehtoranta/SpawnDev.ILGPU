@@ -243,8 +243,21 @@ namespace ILGPU.Backends.OpenCL
             {
                 // Emit a specialized pointer type
                 var elementType = viewParameters[i].ElementType;
+                string paramTypeName;
+                // When cl_khr_fp16 is not available, Float16 views still use half* for correct
+                // 2-byte stride. OpenCL allows half* pointers with vload_half/vstore_half
+                // even without cl_khr_fp16 - only half arithmetic requires the extension.
+                if (elementType == typeof(Half)
+                    && !TypeGenerator.Capabilities.Float16)
+                {
+                    paramTypeName = "half";
+                }
+                else
+                {
+                    paramTypeName = TypeGenerator[elementType];
+                }
                 Builder.Append("\tglobal ");
-                Builder.Append(TypeGenerator[elementType]);
+                Builder.Append(paramTypeName);
                 Builder.Append(CLInstructions.DereferenceOperation);
                 Builder.Append(' ');
                 Builder.AppendFormat(KernelViewNameFormat, i.ToString());

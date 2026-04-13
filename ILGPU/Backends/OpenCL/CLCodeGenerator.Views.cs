@@ -22,16 +22,39 @@ namespace ILGPU.Backends.OpenCL
         {
             var elementIndex = LoadAs<PrimitiveVariable>(value.Offset);
             var source = Load(value.Source);
-            var target = AllocatePointerType(value.Type.AsNotNullCast<PointerType>());
 
-            using (var statement = BeginStatement(target))
+            // Float16 emulation: when cl_khr_fp16 is unavailable, don't compute &source[idx]
+            // (wrong stride - uses float size). Instead, store base pointer + element index
+            // for vload_half/vstore_half in the Load/Store handlers.
+            if (value.Type is PointerType ptrType
+                && ptrType.ElementType is PrimitiveType ptElem
+                && ptElem.BasicValueType == BasicValueType.Float16
+                && !TypeGenerator.Capabilities.Float16)
+            {
+                var target = AllocatePointerType(ptrType);
+                // Still emit the &source[idx] for the variable binding (won't be dereferenced)
+                using (var statement = BeginStatement(target))
+                {
+                    statement.AppendCommand(CLInstructions.AddressOfOperation);
+                    statement.Append(source);
+                    statement.AppendIndexer(elementIndex);
+                }
+                Bind(value, target);
+                // Track for vload_half/vstore_half: base pointer + element index
+                _f16EmulatedLEAs[target.ToString()] = (source, elementIndex);
+                return;
+            }
+
+            var target2 = AllocatePointerType(value.Type.AsNotNullCast<PointerType>());
+
+            using (var statement = BeginStatement(target2))
             {
                 statement.AppendCommand(CLInstructions.AddressOfOperation);
                 statement.Append(source);
                 statement.AppendIndexer(elementIndex);
             }
 
-            Bind(value, target);
+            Bind(value, target2);
         }
 
         /// <summary cref="IBackendCodeGenerator.GenerateCode(AddressSpaceCast)"/>

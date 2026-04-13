@@ -89,6 +89,12 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         private readonly Dictionary<int, int> _structFieldCounts = new();
         // Struct buffer field GLSL types: paramIndex → [fieldType0, fieldType1, ...]
         private readonly Dictionary<int, List<string>> _structFieldTypes = new();
+        // Sub-word element tracking: paramIndex → elementByteSize (1=byte, 2=short/half)
+        private readonly Dictionary<int, int> _subWordParams = new();
+        // Float16 sub-word params need f16-to-f32 conversion instead of sign extension
+        private readonly HashSet<int> _subWordFloat16Params = new();
+        // Maps LEA variable names to their sub-word param index
+        private readonly Dictionary<string, int> _subWordLEAVars = new();
 
         /// <summary>Kernel parameter offset: 1 for implicit index parameter.</summary>
         private int KernelParamOffset => 1;
@@ -503,6 +509,26 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                     else
                     {
                         glslType = GetBufferElementType(elementType);
+                    }
+
+                    // Track sub-word element types (Int16, etc.)
+                    // GLSL has no 16-bit types; texels are 32-bit.
+                    // Sub-word views pack 2 shorts per texel, requiring extraction in shader.
+                    if (elementType is PrimitiveType swPt)
+                    {
+                        if (swPt.BasicValueType == BasicValueType.Int8)
+                            _subWordParams[param.Index] = 1;
+                        else if (swPt.BasicValueType == BasicValueType.Int16)
+                        {
+                            _subWordParams[param.Index] = 2;
+                            glslType = "int"; // Force R32I texture for packed sub-word data
+                        }
+                        else if (swPt.BasicValueType == BasicValueType.Float16)
+                        {
+                            _subWordParams[param.Index] = 2; // WebGL has no native f16
+                            _subWordFloat16Params.Add(param.Index);
+                            glslType = "int"; // Force R32I texture for packed sub-word bit data
+                        }
                     }
 
                     // Only declare a sampler uniform for buffers that are actually READ.
@@ -1787,6 +1813,9 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                     Bind(value, new Variable(target.Name, "int"));
                     // Store the param index for Load/Store to use
                     _leaParamMap[target.Name] = param.Index;
+                    // Track sub-word LEA for Load extraction
+                    if (_subWordParams.ContainsKey(param.Index))
+                        _subWordLEAVars[target.Name] = param.Index;
                     return;
                 }
             }
@@ -1887,6 +1916,54 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 {
                     Declare(target);
                     AppendLine($"{target} = {castExpr};");
+                }
+                return;
+            }
+
+            // SUB-WORD VIEW: extract sub-word value from packed 32-bit texel
+            if (_subWordLEAVars.TryGetValue(source.ToString(), out var subWordParamIdx))
+            {
+                var idx = source.ToString();
+                var elemSize = _subWordParams[subWordParamIdx];
+                string extractExpr;
+                if (elemSize == 1)
+                {
+                    // Byte extraction: 4 bytes per texel
+                    var texelIdx = $"(({idx}) / 4 + u_param{subWordParamIdx}_offset)";
+                    var shift = $"(({idx}) % 4) * 8";
+                    var fetch = $"texelFetch(u_param{subWordParamIdx}, ivec2({texelIdx} % u_param{subWordParamIdx}_tileW, {texelIdx} / u_param{subWordParamIdx}_tileW), 0).r";
+                    extractExpr = $"({fetch} >> ({shift})) & 0xFF";
+                }
+                else if (_subWordFloat16Params.Contains(subWordParamIdx))
+                {
+                    // Float16 extraction: 2 halfs per texel, convert f16 bits to f32
+                    var texelIdx = $"({idx} / 2 + u_param{subWordParamIdx}_offset)";
+                    var shift = $"(({idx}) % 2) * 16";
+                    var fetch = $"texelFetch(u_param{subWordParamIdx}, ivec2({texelIdx} % u_param{subWordParamIdx}_tileW, {texelIdx} / u_param{subWordParamIdx}_tileW), 0).r";
+                    var rawExpr = $"(({fetch}) >> ({shift})) & 0xFFFF";
+                    // IEEE 754 half-to-single conversion in GLSL
+                    var sign = $"(({rawExpr}) & 0x8000) << 16";
+                    var exp = $"(({rawExpr}) >> 10) & 0x1F";
+                    var mant = $"(({rawExpr}) & 0x3FF)";
+                    // Normalized: bias adjust (127-15=112) and shift mantissa
+                    extractExpr = $"(({exp}) == 0 && ({mant}) == 0) ? intBitsToFloat({sign}) : intBitsToFloat(({sign}) | ((({exp}) + 112) << 23) | (({mant}) << 13))";
+                }
+                else // elemSize == 2, Int16
+                {
+                    // Int16 extraction: 2 shorts per texel, with sign extension
+                    var texelIdx = $"({idx} / 2 + u_param{subWordParamIdx}_offset)";
+                    var shift = $"(({idx}) % 2) * 16";
+                    var fetch = $"texelFetch(u_param{subWordParamIdx}, ivec2({texelIdx} % u_param{subWordParamIdx}_tileW, {texelIdx} / u_param{subWordParamIdx}_tileW), 0).r";
+                    var rawExpr = $"(({fetch}) >> ({shift})) & 0xFFFF";
+                    // Sign-extend: if bit 15 set, extend to full int negative
+                    extractExpr = $"(({rawExpr}) >= 32768 ? ({rawExpr}) - 65536 : ({rawExpr}))";
+                }
+                if (_hoistedPrimitives.Contains(loadVal))
+                    AppendLine($"{target} = {extractExpr};");
+                else
+                {
+                    Declare(target);
+                    AppendLine($"{target} = {extractExpr};");
                 }
                 return;
             }

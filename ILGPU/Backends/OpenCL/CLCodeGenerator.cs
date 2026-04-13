@@ -199,6 +199,11 @@ namespace ILGPU.Backends.OpenCL
             new Dictionary<BasicBlock, string>(new BasicBlock.Comparer());
         private readonly string labelPrefix;
 
+        // Float16 emulation: tracks LEAs into half* buffers when cl_khr_fp16 is unavailable.
+        // Key: target variable name, Value: (basePointer variable, elementIndex variable)
+        // Used by Load/Store to emit vload_half/vstore_half with correct index.
+        internal readonly Dictionary<string, (Variable BasePtr, Variable Index)> _f16EmulatedLEAs = new();
+
         private StringBuilder prefixBuilder = new StringBuilder();
         private StringBuilder suffixBuilder = new StringBuilder();
 

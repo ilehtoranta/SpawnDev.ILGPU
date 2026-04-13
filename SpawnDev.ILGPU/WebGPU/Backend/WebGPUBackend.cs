@@ -927,7 +927,9 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 UsesBarriers: wgslSource.Contains("workgroupBarrier()"),
                 UsesAtomics: wgslSource.Contains("atomicAdd(") || wgslSource.Contains("atomicMax(") ||
                     wgslSource.Contains("atomicMin(") || wgslSource.Contains("atomicStore(") ||
-                    wgslSource.Contains("atomicLoad(") || wgslSource.Contains("atomicCompareExchangeWeak("),
+                    wgslSource.Contains("atomicLoad(") || wgslSource.Contains("atomicCompareExchangeWeak(") ||
+                    wgslSource.Contains("atomicAnd(") || wgslSource.Contains("atomicOr(") ||
+                    wgslSource.Contains("atomicXor(") || wgslSource.Contains("atomicExchange("),
                 UsesSubgroups: wgslSource.Contains("enable subgroups;"),
                 UniformityTransformApplied: wgslSource.Contains("_uf_group_iter") || wgslSource.Contains("_uf_tile_iter"),
                 UsesI64Emulation: wgslSource.Contains("emu_i64"),

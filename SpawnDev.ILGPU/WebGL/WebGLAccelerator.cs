@@ -936,6 +936,11 @@ namespace SpawnDev.ILGPU.WebGL
 
                         if (contiguous?.Buffer is WebGLMemoryBuffer webGlMem)
                         {
+                            // Detect sub-word element types for TF packing
+                            int subWordElementSize = 0;
+                            if (contiguous.ElementSize < 4)
+                                subWordElementSize = contiguous.ElementSize;
+
                             outputs.Add(new
                             {
                                 bufferId = webGlMem.WorkerBufferId,
@@ -949,7 +954,8 @@ namespace SpawnDev.ILGPU.WebGL
                                 storeCount = outputInfo.StoreCount,
                                 isAtomicVote = outputInfo.IsAtomicVote,
                                 writeByteOffset = (int)(contiguous.Index * contiguous.ElementSize),
-                                writeLengthBytes = (int)contiguous.LengthInBytes
+                                writeLengthBytes = (int)contiguous.LengthInBytes,
+                                subWordElementSize
                             });
                         }
                     }

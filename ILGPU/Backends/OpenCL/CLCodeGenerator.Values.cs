@@ -377,9 +377,21 @@ namespace ILGPU.Backends.OpenCL
             var address = Load(load.Source);
             var target = Allocate(load);
 
-            using var statement = BeginStatement(target);
-            statement.AppendCommand(CLInstructions.DereferenceOperation);
-            statement.AppendArgument(address);
+            // Float16 emulation: use vload_half(index, basePtr) for correct 2-byte stride
+            if (_f16EmulatedLEAs.TryGetValue(address.ToString(), out var f16Lea))
+            {
+                using var statement = BeginStatement(target);
+                statement.AppendCommand($"vload_half(");
+                statement.AppendArgument(f16Lea.Index);
+                statement.AppendCommand(", ");
+                statement.AppendArgument(f16Lea.BasePtr);
+                statement.AppendCommand(")");
+                return;
+            }
+
+            using var statement2 = BeginStatement(target);
+            statement2.AppendCommand(CLInstructions.DereferenceOperation);
+            statement2.AppendArgument(address);
         }
 
         /// <summary cref="IBackendCodeGenerator.GenerateCode(Store)"/>
@@ -388,10 +400,23 @@ namespace ILGPU.Backends.OpenCL
             var address = Load(store.Target);
             var value = Load(store.Value);
 
-            using var statement = BeginStatement(CLInstructions.DereferenceOperation);
-            statement.AppendArgument(address);
-            statement.AppendCommand(CLInstructions.AssignmentOperation);
-            statement.AppendArgument(value);
+            // Float16 emulation: use vstore_half(value, index, basePtr)
+            if (_f16EmulatedLEAs.TryGetValue(address.ToString(), out var f16StoreLea))
+            {
+                using var statement = BeginStatement("vstore_half(");
+                statement.AppendArgument(value);
+                statement.AppendCommand(", ");
+                statement.AppendArgument(f16StoreLea.Index);
+                statement.AppendCommand(", ");
+                statement.AppendArgument(f16StoreLea.BasePtr);
+                statement.AppendCommand(")");
+                return;
+            }
+
+            using var statement2 = BeginStatement(CLInstructions.DereferenceOperation);
+            statement2.AppendArgument(address);
+            statement2.AppendCommand(CLInstructions.AssignmentOperation);
+            statement2.AppendArgument(value);
         }
 
         /// <summary cref="IBackendCodeGenerator.GenerateCode(LoadFieldAddress)"/>

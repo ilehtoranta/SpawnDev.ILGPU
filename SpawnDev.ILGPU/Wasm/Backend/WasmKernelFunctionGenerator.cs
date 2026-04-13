@@ -1602,6 +1602,8 @@ namespace SpawnDev.ILGPU.Wasm.Backend
 
             // Check if this is a Float16 load (2-byte element, promoted to f32)
             bool isFloat16 = value.Type is PrimitiveType pt2 && pt2.BasicValueType == BasicValueType.Float16;
+            // Check if this is an Int16 load (2-byte element, promoted to i32)
+            bool isInt16 = value.Type is PrimitiveType ptI16 && ptI16.BasicValueType == BasicValueType.Int16;
 
             // Push the address (byte offset in linear memory)
             EmitGetLocal(source2);
@@ -1619,6 +1621,22 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 else
                     WasmModuleBuilder.EmitLoad(Code, WasmOpCodes.I32Load16U, 1, 0);
                 EmitF16ToF32(); // inline conversion: i32 (f16 bits) → f32
+            }
+            else if (isInt16)
+            {
+                // Int16: load 2 bytes with sign extension to i32.
+                if (_hasBarriers)
+                {
+                    // Atomic loads are always zero-extending (I32AtomicLoad16U).
+                    // Manually sign-extend: if bit 15 set, OR with 0xFFFF0000.
+                    Code.Add(WasmOpCodes.AtomicPrefix);
+                    WasmModuleBuilder.EmitU32Leb128(Code, WasmOpCodes.I32AtomicLoad16U);
+                    Code.Add(0x01); Code.Add(0x00); // align=1, offset=0
+                    // Sign extend: i32.extend16_s (Wasm sign extension ops proposal, widely supported)
+                    Code.Add(WasmOpCodes.I32Extend16S);
+                }
+                else
+                    WasmModuleBuilder.EmitLoad(Code, WasmOpCodes.I32Load16S, 1, 0);
             }
             // For barrier kernels, use atomic loads for ALL types for cross-worker visibility.
             // Float types use reinterpret: i32.atomic.load → f32.reinterpret_i32 (or i64 → f64).
@@ -1901,6 +1919,8 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 var fieldType = structType.Fields[fieldIndex];
                 bool isFloat16Field = fieldType is PrimitiveType ptF16Gf
                     && ptF16Gf.BasicValueType == BasicValueType.Float16;
+                bool isInt16Field = fieldType is PrimitiveType ptI16Gf
+                    && ptI16Gf.BasicValueType == BasicValueType.Int16;
                 byte fieldWasmType = GetWasmTypeFromIR(fieldType);
 
                 // Push address: source + byteOffset
@@ -1919,6 +1939,17 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                     else
                         WasmModuleBuilder.EmitLoad(Code, WasmOpCodes.I32Load16U, 1, 0);
                     EmitF16ToF32();
+                }
+                else if (isInt16Field)
+                {
+                    // Int16: load 2 bytes with sign extension to i32
+                    if (_hasBarriers)
+                    {
+                        WasmModuleBuilder.EmitAtomicRmw(Code, WasmOpCodes.I32AtomicLoad16U, 1, 0);
+                        Code.Add(WasmOpCodes.I32Extend16S); // sign-extend after atomic unsigned load
+                    }
+                    else
+                        WasmModuleBuilder.EmitLoad(Code, WasmOpCodes.I32Load16S, 1, 0);
                 }
                 else
                 {
@@ -2234,6 +2265,33 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                     Code.Add(WasmOpCodes.AtomicPrefix);
                     WasmModuleBuilder.EmitU32Leb128(Code, WasmOpCodes.I32AtomicStore16);
                     Code.Add(0x01); Code.Add(0x00); // align=1 (2 bytes), offset=0
+                }
+                else
+                    WasmModuleBuilder.EmitStore(Code, WasmOpCodes.I32Store16, 1, 0);
+                return;
+            }
+
+            // Check if this is an Int16 store (i32 value → 2-byte memory)
+            bool isInt16Store = false;
+            if (storeValue.Type is PrimitiveType ptI16Store
+                && ptI16Store.BasicValueType == BasicValueType.Int16)
+                isInt16Store = true;
+            // Also check target pointer element type (kernel writes via pointer)
+            if (!isInt16Store && target.Type is AddressSpaceType addrI16
+                && addrI16.ElementType is PrimitiveType ptAddrI16
+                && ptAddrI16.BasicValueType == BasicValueType.Int16)
+                isInt16Store = true;
+
+            if (isInt16Store)
+            {
+                // Int16: store lower 16 bits of i32 value as 2 bytes
+                EmitGetLocal(target);
+                EmitGetLocal(storeValue);
+                if (_hasBarriers)
+                {
+                    Code.Add(WasmOpCodes.AtomicPrefix);
+                    WasmModuleBuilder.EmitU32Leb128(Code, WasmOpCodes.I32AtomicStore16);
+                    Code.Add(0x01); Code.Add(0x00); // align=1, offset=0
                 }
                 else
                     WasmModuleBuilder.EmitStore(Code, WasmOpCodes.I32Store16, 1, 0);

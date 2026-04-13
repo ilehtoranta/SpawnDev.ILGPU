@@ -478,7 +478,7 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                 await accelerator.SynchronizeAsync();
 
                 // Verify partial sort: output should be sorted by lower testBits (descending)
-                var gpuResult = keysBuf.GetAsArray1D();
+                var gpuResult = await keysBuf.CopyToHostAsync();
                 int partialViolations = 0;
                 for (int pi = 1; pi < n; pi++)
                 {

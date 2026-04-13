@@ -146,5 +146,34 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         /// <summary>Returns the larger of two double values.</summary>
         [MethodImpl(MethodImplOptions.NoInlining)]
         public static double Max(double val1, double val2) => val1 > val2 ? val1 : val2;
+
+        // --- Missing unsigned sub-word Min/Max ---
+
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        public static byte Min(byte val1, byte val2) => val1 < val2 ? val1 : val2;
+
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        public static ushort Min(ushort val1, ushort val2) => val1 < val2 ? val1 : val2;
+
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        public static byte Max(byte val1, byte val2) => val1 > val2 ? val1 : val2;
+
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        public static ushort Max(ushort val1, ushort val2) => val1 > val2 ? val1 : val2;
+
+        // --- Clamp for all sub-word + standard types ---
+
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        public static sbyte Clamp(sbyte value, sbyte min, sbyte max) => value < min ? min : value > max ? max : value;
+
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        public static short Clamp(short value, short min, short max) => value < min ? min : value > max ? max : value;
+
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        public static byte Clamp(byte value, byte min, byte max) => value < min ? min : value > max ? max : value;
+
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        public static ushort Clamp(ushort value, ushort min, ushort max) => value < min ? min : value > max ? max : value;
+
     }
 }

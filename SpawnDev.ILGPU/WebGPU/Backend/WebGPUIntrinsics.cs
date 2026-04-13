@@ -230,5 +230,42 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         /// <returns>The larger value.</returns>
         [MethodImpl(MethodImplOptions.NoInlining)]
         public static double Max(double val1, double val2) => val1 > val2 ? val1 : val2;
+
+        // --- Missing unsigned sub-word Min/Max ---
+
+        /// <summary>Returns the smaller of two byte values.</summary>
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        public static byte Min(byte val1, byte val2) => val1 < val2 ? val1 : val2;
+
+        /// <summary>Returns the smaller of two ushort values.</summary>
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        public static ushort Min(ushort val1, ushort val2) => val1 < val2 ? val1 : val2;
+
+        /// <summary>Returns the larger of two byte values.</summary>
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        public static byte Max(byte val1, byte val2) => val1 > val2 ? val1 : val2;
+
+        /// <summary>Returns the larger of two ushort values.</summary>
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        public static ushort Max(ushort val1, ushort val2) => val1 > val2 ? val1 : val2;
+
+        // --- Clamp for all sub-word + standard types ---
+
+        /// <summary>Clamps a sbyte value.</summary>
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        public static sbyte Clamp(sbyte value, sbyte min, sbyte max) => value < min ? min : value > max ? max : value;
+
+        /// <summary>Clamps a short value.</summary>
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        public static short Clamp(short value, short min, short max) => value < min ? min : value > max ? max : value;
+
+        /// <summary>Clamps a byte value.</summary>
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        public static byte Clamp(byte value, byte min, byte max) => value < min ? min : value > max ? max : value;
+
+        /// <summary>Clamps a ushort value.</summary>
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        public static ushort Clamp(ushort value, ushort min, ushort max) => value < min ? min : value > max ? max : value;
+
     }
 }

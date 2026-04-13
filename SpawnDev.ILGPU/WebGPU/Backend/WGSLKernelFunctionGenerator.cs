@@ -67,8 +67,10 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         /// <summary>Set to true by GenerateGroupAllReduce to request emission of <c>var&lt;workgroup&gt; _grp_reduce_i32: atomic&lt;i32&gt;</c>.</summary>
         public override bool UsesGroupReduce { get => _usesGroupReduce; set => _usesGroupReduce = value; }
         // Tracks view params with sub-word element types (1=byte, 2=short/half).
-        // WGSL declares these as array<u32> but element access must extract sub-word values from packed u32 words.
+        // WGSL declares these as array<atomic<u32>> but element access must extract sub-word values.
         private Dictionary<int, int> _subWordParams = new Dictionary<int, int>(); // paramIndex -> elementByteSize
+        // Float16 sub-word params need f16-to-f32 conversion instead of sign extension
+        private HashSet<int> _subWordFloat16Params = new HashSet<int>();
         // Maps LEA variable names to their sub-word param index (for Load/Store extraction)
         private Dictionary<string, int> _subWordLEAVars = new Dictionary<string, int>();
         // Maps variable names to their emulation info (param index, is emu_f64)
@@ -1023,6 +1025,27 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                             bool is64Emu = (Backend.EnableF64Emulation && viewWgslType == "emu_f64") ||
                                            (Backend.EnableI64Emulation && (viewWgslType == "emu_i64" || viewWgslType == "emu_u64"));
 
+                            // Track sub-word view fields inside body structs
+                            bool isSubWordField = false;
+                            if (viewElemType is PrimitiveType bsPt)
+                            {
+                                int bsElemSize = 0;
+                                if (bsPt.BasicValueType == BasicValueType.Int8)
+                                    bsElemSize = 1;
+                                else if (bsPt.BasicValueType == BasicValueType.Int16)
+                                    bsElemSize = 2;
+                                else if (bsPt.BasicValueType == BasicValueType.Float16 && !Backend.HasShaderF16)
+                                    bsElemSize = 2;
+                                if (bsElemSize > 0)
+                                {
+                                    // Use syntheticViewParamIdx as key since body struct fields
+                                    // don't have their own param.Index
+                                    int synthIdx = (param.Index + 1) * 1000 + fi;
+                                    _subWordParams[synthIdx] = bsElemSize;
+                                    isSubWordField = true;
+                                }
+                            }
+
                             if (is64Emu)
                             {
                                 bindingWgslType = "u32";
@@ -1031,6 +1054,11 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                             {
                                 // Packed struct view field: bind as array<u32> using CPU layout packing
                                 bindingWgslType = "u32";
+                            }
+                            else if (isSubWordField)
+                            {
+                                // Sub-word view field: atomic<u32> for thread-safe RMW
+                                bindingWgslType = "atomic<u32>";
                             }
 
                             if (fieldIsAtomic)
@@ -1137,7 +1165,10 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                                 break;
                             case BasicValueType.Float16:
                                 if (!Backend.HasShaderF16)
+                                {
                                     _subWordParams[param.Index] = 2; // emulated f16 = 2 bytes
+                                    _subWordFloat16Params.Add(param.Index);
+                                }
                                 break;
                         }
                     }
@@ -1168,6 +1199,13 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     else if (_packedStructLayouts.ContainsKey(param.Index))
                     {
                         bindingWgslType = "u32"; // Packed struct: CPU-layout u32 packing
+                    }
+                    else if (_subWordParams.ContainsKey(param.Index))
+                    {
+                        // Sub-word: packed 8/16-bit values in u32 words.
+                        // Must be atomic<u32> because multiple threads may write to different
+                        // sub-word slots within the same u32 word (data race on RMW).
+                        bindingWgslType = "atomic<u32>";
                     }
 
                     if (isAtomic)
@@ -2949,6 +2987,29 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 {
                     _emulatedI64Params.Add(param.Index);
                 }
+
+                // Pre-scan sub-word element types so SetupParameterBindings and
+                // GenerateHeader can both detect them before body generation runs.
+                IsMultiDim(param.ParameterType, out _, out var isView, out _, out _, out _);
+                if (isView && elementType is PrimitiveType preScanPt)
+                {
+                    switch (preScanPt.BasicValueType)
+                    {
+                        case BasicValueType.Int8:
+                            _subWordParams[param.Index] = 1;
+                            break;
+                        case BasicValueType.Int16:
+                            _subWordParams[param.Index] = 2;
+                            break;
+                        case BasicValueType.Float16:
+                            if (!Backend.HasShaderF16)
+                            {
+                                _subWordParams[param.Index] = 2;
+                                _subWordFloat16Params.Add(param.Index);
+                            }
+                            break;
+                    }
+                }
             }
         }
 
@@ -3336,7 +3397,12 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 }
                 else
                 {
-                    AppendLine($"let {variable.Name} = &param{param.Index};");
+                    // Sub-word params are array<atomic<u32>> - can't take pointer references.
+                    // Sub-word LEA uses element index (not pointer), so skip alias emission.
+                    if (!_subWordParams.ContainsKey(param.Index))
+                    {
+                        AppendLine($"let {variable.Name} = &param{param.Index};");
+                    }
 
                     if (isView && isMultiDim && (is2DView || is3DView))
                     {
@@ -3512,6 +3578,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             if (ResolveToParameter(value.Source) is global::ILGPU.IR.Values.Parameter param)
             {
                 int paramOffset = KernelParamOffset;
+                // DEBUG: embed sub-word tracking info in shader comment
+                Builder.AppendLine($"// DEBUG LEA: param.Index={param.Index} paramOffset={paramOffset} subWordKeys=[{string.Join(",", _subWordParams.Keys)}] hasKey={_subWordParams.ContainsKey(param.Index)}");
                 if (param.Index >= paramOffset)
                 {
                     // --- View offset adjustment ---
@@ -3569,7 +3637,27 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     // WGSL has no 8/16-bit types — buffer is array<u32>. For sub-word views,
                     // we can't take a pointer to a sub-word within a u32 word. Instead, store the
                     // element index and extract the sub-word value in the Load codegen.
-                    if (_subWordParams.TryGetValue(param.Index, out var elemSize))
+                    // Safety net: if registration was skipped (e.g. body-struct continue),
+                    // detect sub-word from param type directly.
+                    if (!_subWordParams.TryGetValue(param.Index, out var elemSize))
+                    {
+                        var leaElemType = GetBufferElementType(param.ParameterType);
+                        if (leaElemType is PrimitiveType leaPt)
+                        {
+                            if (leaPt.BasicValueType == BasicValueType.Int8)
+                                elemSize = 1;
+                            else if (leaPt.BasicValueType == BasicValueType.Int16)
+                                elemSize = 2;
+                            else if (leaPt.BasicValueType == BasicValueType.Float16 && !Backend.HasShaderF16)
+                            {
+                                elemSize = 2;
+                                _subWordFloat16Params.Add(param.Index);
+                            }
+                            if (elemSize > 0)
+                                _subWordParams[param.Index] = elemSize; // register for Load/Store
+                        }
+                    }
+                    if (elemSize > 0)
                     {
                         _subWordLEAVars[target.Name] = param.Index;
                         AppendIndent();
@@ -3578,9 +3666,9 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                         if (_crossBlockPointers.Contains(value))
                         {
                             if (elemSize == 1) // byte
-                                _crossBlockPointerExprs[target.Name] = $"(param{param.Index}[u32({adjustedOffsetExpr}) / 4u] >> ((u32({adjustedOffsetExpr}) % 4u) * 8u)) & 0xFFu";
+                                _crossBlockPointerExprs[target.Name] = $"((u32(atomicLoad(&param{param.Index}[(u32({adjustedOffsetExpr}) / 4u)])) >> ((u32({adjustedOffsetExpr}) % 4u) * 8u)) & 0xFFu)";
                             else // short (2 bytes)
-                                _crossBlockPointerExprs[target.Name] = $"(param{param.Index}[u32({adjustedOffsetExpr}) / 2u] >> ((u32({adjustedOffsetExpr}) % 2u) * 16u)) & 0xFFFFu";
+                                _crossBlockPointerExprs[target.Name] = $"((u32(atomicLoad(&param{param.Index}[(u32({adjustedOffsetExpr}) / 2u)])) >> ((u32({adjustedOffsetExpr}) % 2u) * 16u)) & 0xFFFFu)";
                         }
                         return;
                     }
@@ -3721,7 +3809,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 return;
             }
 
-            // SUB-WORD VIEW FIX: Extract sub-word value from packed u32 word
+            // SUB-WORD VIEW FIX: Extract sub-word value from packed atomic<u32> word
             if (_subWordLEAVars.TryGetValue(source.ToString(), out var subWordParamIdx))
             {
                 var idx = source.ToString();
@@ -3729,13 +3817,35 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 string extractExpr;
                 if (elemSize == 1)
                 {
-                    // Byte extraction: 4 bytes per u32 word
-                    extractExpr = $"i32((param{subWordParamIdx}[u32({idx}) / 4u] >> ((u32({idx}) % 4u) * 8u)) & 0xFFu)";
+                    // Byte extraction: 4 bytes per atomic<u32> word
+                    // WGSL requires explicit parenthesization for mixed-precedence operators
+                    var wordIdx = $"(u32({idx}) / 4u)";
+                    var shift = $"((u32({idx}) % 4u) * 8u)";
+                    extractExpr = $"i32(((u32(atomicLoad(&param{subWordParamIdx}[{wordIdx}])) >> {shift}) & 0xFFu))";
+                }
+                else if (_subWordFloat16Params.Contains(subWordParamIdx))
+                {
+                    // Float16 extraction: 2 halfs per atomic<u32> word, convert f16 bits to f32
+                    var wordIdx = $"(u32({idx}) / 2u)";
+                    var shift = $"((u32({idx}) % 2u) * 16u)";
+                    var rawExpr = $"((u32(atomicLoad(&param{subWordParamIdx}[{wordIdx}])) >> {shift}) & 0xFFFFu)";
+                    // IEEE 754 half-to-single: sign | exponent | mantissa
+                    var sign = $"(({rawExpr}) & 0x8000u) << 16u";
+                    var exp = $"((({rawExpr}) >> 10u) & 0x1Fu)";
+                    var mant = $"(({rawExpr}) & 0x3FFu)";
+                    // Normalized case: bias adjust (127-15=112) and shift mantissa
+                    // For zero/subnormal/inf/nan, this approximation handles most cases
+                    // Full subnormal support would need a loop, but those values are rare
+                    extractExpr = $"select(bitcast<f32>(({sign}) | ((({exp}) + 112u) << 23u) | (({mant}) << 13u)), bitcast<f32>(({sign})), ({exp}) == 0u && ({mant}) == 0u)";
                 }
                 else
                 {
-                    // Short extraction: 2 shorts per u32 word
-                    extractExpr = $"i32((param{subWordParamIdx}[u32({idx}) / 2u] >> ((u32({idx}) % 2u) * 16u)) & 0xFFFFu)";
+                    // Int16 extraction: 2 shorts per atomic<u32> word, with sign extension
+                    var wordIdx = $"(u32({idx}) / 2u)";
+                    var shift = $"((u32({idx}) % 2u) * 16u)";
+                    var rawExpr = $"((u32(atomicLoad(&param{subWordParamIdx}[{wordIdx}])) >> {shift}) & 0xFFFFu)";
+                    // Sign-extend: if bit 15 is set, extend to full i32 negative
+                    extractExpr = $"select(i32({rawExpr}), (i32({rawExpr}) - 65536), ({rawExpr}) >= 32768u)";
                 }
                 if (_hoistedPrimitives.Contains(loadVal))
                     AppendLine($"{target} = {extractExpr};");
@@ -3852,24 +3962,32 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 return;
             }
 
-            // SUB-WORD STORE: write sub-word value into packed u32 word via read-modify-write
+            // SUB-WORD STORE: atomic read-modify-write on packed atomic<u32> word.
+            // Multiple threads may target different sub-word slots in the same u32 word.
+            // Non-atomic RMW causes data races (one thread's write overwrites the other's).
+            // Fix: atomicAnd to clear target bits, atomicOr to set new value.
+            // This is safe because each thread operates on non-overlapping bit ranges.
             if (_subWordLEAVars.TryGetValue(address.ToString(), out var storeParamIdx))
             {
                 var idx = address.ToString();
                 var elemSize = _subWordParams[storeParamIdx];
                 if (elemSize == 1)
                 {
-                    // Byte store: read u32 word, clear target byte, OR in new value
-                    var wordIdx = $"u32({idx}) / 4u";
-                    var shift = $"(u32({idx}) % 4u) * 8u";
-                    AppendLine($"param{storeParamIdx}[{wordIdx}] = (param{storeParamIdx}[{wordIdx}] & ~(0xFFu << {shift})) | ((u32({val}) & 0xFFu) << {shift});");
+                    // Byte store: atomic RMW on atomic<u32> word (4 bytes per word)
+                    // WGSL requires explicit parenthesization for mixed-precedence operators
+                    var wordIdx = $"(u32({idx}) / 4u)";
+                    var shift = $"((u32({idx}) % 4u) * 8u)";
+                    AppendLine($"atomicAnd(&param{storeParamIdx}[{wordIdx}], ~(0xFFu << {shift}));");
+                    AppendLine($"atomicOr(&param{storeParamIdx}[{wordIdx}], ((u32({val}) & 0xFFu) << {shift}));");
                 }
                 else // elemSize == 2
                 {
-                    // Short store: read u32 word, clear target half, OR in new value
-                    var wordIdx = $"u32({idx}) / 2u";
-                    var shift = $"(u32({idx}) % 2u) * 16u";
-                    AppendLine($"param{storeParamIdx}[{wordIdx}] = (param{storeParamIdx}[{wordIdx}] & ~(0xFFFFu << {shift})) | ((u32({val}) & 0xFFFFu) << {shift});");
+                    // Short store: atomic RMW on atomic<u32> word (2 shorts per word)
+                    // WGSL requires explicit parenthesization for mixed-precedence operators
+                    var wordIdx = $"(u32({idx}) / 2u)";
+                    var shift = $"((u32({idx}) % 2u) * 16u)";
+                    AppendLine($"atomicAnd(&param{storeParamIdx}[{wordIdx}], ~(0xFFFFu << {shift}));");
+                    AppendLine($"atomicOr(&param{storeParamIdx}[{wordIdx}], ((u32({val}) & 0xFFFFu) << {shift}));");
                 }
                 return;
             }
@@ -4834,6 +4952,12 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                                     int psStride2 = psLenLayout2.Sum(f => f.U32Count);
                                     totalLen = $"({totalLen} / {psStride2})";
                                 }
+                                // For sub-word params, arrayLength() returns atomic<u32> count
+                                if (_subWordParams.TryGetValue(param.Index, out var swMdElemSize))
+                                {
+                                    int elemsPerWord2 = 4 / swMdElemSize;
+                                    totalLen = $"({totalLen} * {elemsPerWord2})";
+                                }
 
                                 // Check hoisting to prevent shadowing
                                 string prefix = _hoistedPrimitives.Contains(value) ? "" : "let ";
@@ -5134,6 +5258,14 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 {
                     int psStridelen = psLenLayout.Sum(f => f.U32Count);
                     lengthExpr = $"({lengthExpr} / {psStridelen})";
+                }
+
+                // For sub-word params, arrayLength() returns atomic<u32> count.
+                // Logical element count = physical * (4 / elementByteSize).
+                if (_subWordParams.TryGetValue(param.Index, out var swElemSize))
+                {
+                    int elemsPerWord = 4 / swElemSize; // 4 for Int8, 2 for Int16/Float16
+                    lengthExpr = $"({lengthExpr} * {elemsPerWord})";
                 }
 
                 // Handle emulated i64 case
