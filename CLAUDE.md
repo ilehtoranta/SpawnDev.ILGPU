@@ -44,7 +44,7 @@ Detailed constraints live in each directory's own `CLAUDE.md`. Read the relevant
 
 Tests in `SpawnDev.ILGPU.Demo.Shared/UnitTests/BackendTestBase*.cs` (~211 tests, Tests1-10). Backend-specific classes inherit and override unsupported tests. See `PlaywrightMultiTest/CLAUDE.md` for running tests.
 
-**Current results (March 2026):** Wasm: 249 pass / 0 fail / 3 skip (v4.6.0). Full `hardwareConcurrency` multi-worker barrier dispatch with wait/notify barriers (memory.atomic.wait32/notify with spurious wakeup defense loop) and in-Wasm phase dispatcher (no JS-Wasm boundary crossings between phases). All large sort tests (260K-4M) passing including SpawnSceneSimulation (1.4M elements, multi-frame). Key fixes: wait/notify barrier with wakeup loop (replaced pure spin after diagnosing spurious wakeup bug - not a V8 bug), shared memory alloca overlap (same-size dedup), IR address space aliasing (InferAddressSpaces guards), struct/scratch overlap, multi-pass scan, Float16, unsigned ops, 256 threads, memory.grow(), ViewSourceSequencer, subViewByteOffset, atomic RMW opcode table, CopyFromBuffer, onesComplementMask .tt template, per-worker scratch, atomic.fence at 3 sync points, float atomic stores, broadcast atomic store/load, barrier counter zeroing between groups.
+**Current version: 4.9.1** (April 2026). Full `hardwareConcurrency` multi-worker barrier dispatch with wait/notify barriers (memory.atomic.wait32/notify with spurious wakeup defense loop) and in-Wasm phase dispatcher (no JS-Wasm boundary crossings between phases). All large sort tests (260K-4M) passing including SpawnSceneSimulation (1.4M elements, multi-frame). Key fixes: wait/notify barrier with wakeup loop (replaced pure spin after diagnosing spurious wakeup bug - not a V8 bug), shared memory alloca overlap (same-size dedup), IR address space aliasing (InferAddressSpaces guards), struct/scratch overlap, multi-pass scan, Float16, unsigned ops, 256 threads, memory.grow(), ViewSourceSequencer, subViewByteOffset, atomic RMW opcode table, CopyFromBuffer, onesComplementMask .tt template, per-worker scratch, atomic.fence at 3 sync points, float atomic stores, broadcast atomic store/load, barrier counter zeroing between groups.
 
 ## Debugging Pipeline — ShaderDebugService
 
@@ -102,3 +102,82 @@ These apply everywhere, not just one directory:
 - **Blazor WASM is single-threaded** — all async, no blocking calls
 - **T4 Templates in `ILGPU/`** — check for `.tt` before editing `.cs`. Generated files are silently overwritten.
 - **Device loss detection** — WebGPU: `device.lost` promise. WebGL: `webglcontextlost` event. Guards on dispatch/synchronize. Intentional disposal filtered out.
+
+## WebGPU Binding Limits (v4.9.1+)
+
+**maxStorageBuffersPerShaderStage = 10 (Chrome).** WebGPU spec minimum is 8. Every `ArrayView` kernel parameter uses one storage buffer binding. Scalar parameters (int, float, etc.) are packed into a single `_scalar_params` buffer.
+
+**Total bindings = (number of ArrayView params) + 1 (_scalar_params) + (any struct params)**
+
+If total > 10: `InvalidOperationException` at dispatch time (v4.9.1+). Before v4.9.1, this silently produced "Invalid BindGroupLayout due to a previous error."
+
+**How to stay under the limit:**
+- Combine related ArrayViews using struct packing (e.g., `ArrayView<MyStruct>` with multiple fields instead of separate arrays)
+- Maximum safe ArrayView count: **9** (leaves room for _scalar_params)
+- Check `accelerator.MaxStorageBufferBindings` at runtime
+
+## Sub-Word Data Types (v4.9.0+)
+
+`ArrayView<byte>`, `ArrayView<sbyte>`, `ArrayView<short>`, `ArrayView<ushort>`, `ArrayView<Half>` (ILGPU.Half) supported on all 6 backends.
+
+**Use `ILGPU.Half`, NOT `System.Half`** in kernel signatures. Implicit conversion operators exist for interop.
+
+**Per-backend implementation:**
+- **WebGPU:** Packed into `array<atomic<u32>>`. Load via atomicLoad + shift + mask. Store via atomicAnd + atomicOr (thread-safe sub-word writes). Float16 via inline IEEE 754 f16<->f32 conversion.
+- **Wasm:** Native `i32.load8_s/u`, `i32.load16_s/u`, `i32.store8`, `i32.store16`.
+- **WebGL:** texelFetch from R32I with shift+mask in GLSL. Float16 via `_f16_to_f32`/`_f32_to_f16`.
+- **OpenCL:** Float16 promoted to float. `vload_half`/`vstore_half` for buffer access.
+- **CUDA/CPU:** Native support.
+
+**Gotchas:**
+- WGSL requires explicit parenthesization for mixed-precedence shift/mask expressions
+- WebGPU sub-word stores use atomic RMW (data race if non-atomic when threads write different halves of same u32)
+- `arrayLength()` on sub-word buffers returns u32 count, multiply by elements-per-word for actual element count
+
+## CopyFromJS (v4.9.0+)
+
+Zero-copy JS TypedArray/ArrayBuffer to GPU buffer transfer. Available on all 3 browser backends.
+
+```csharp
+var jsArray = new Int16Array(data);
+((IBrowserMemoryBuffer)buffer).CopyFromJS(jsArray);
+// or
+((IBrowserMemoryBuffer)buffer).CopyFromJS(arrayBuffer);
+```
+
+**Backend notes:**
+- WebGPU: Uses `queue.WriteBuffer` directly
+- WebGL: Copies to backing array, sets `NeedsUpload = true` (data uploaded on next dispatch, NOT immediately on GPU)
+- Wasm: Pure JS-to-JS copy within SharedArrayBuffer
+
+## CopyFromHost Buffer Rules
+
+- `CopyFromHost(sourceArray)`: source.Length must be <= buffer.Length - targetOffset. Throws if too large. Partial fills allowed.
+- Buffer sizes are padded to 4-byte alignment at creation (WebGPU requirement)
+- Use `EnsureBuffer` pattern for grow-only reallocation (avoid Dispose+Allocate churn)
+
+## Lambda Kernels (v4.4.0+)
+
+Captured scalar values (int, float, etc.) are automatically passed to GPU. ArrayViews CANNOT be captured - they must be explicit kernel parameters.
+
+```csharp
+int multiplier = 5;
+var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<float>>(
+    (index, buf) => { buf[index] = index * multiplier; });
+```
+
+## Feature Matrix by Backend
+
+| Feature | WebGPU | WebGL | Wasm | CUDA | OpenCL | CPU |
+|---------|--------|-------|------|------|--------|-----|
+| Shared Memory | Yes | No | Yes | Yes | Yes | Yes |
+| Barriers | Yes | No | Yes | Yes | Yes | Yes |
+| Atomics | Yes | No | Yes | Yes | Yes | Yes |
+| Sub-word types | Yes | Yes | Yes | Yes | Yes | Yes |
+| CopyFromJS | Yes | Yes | Yes | N/A | N/A | N/A |
+| ILGPU Algorithms | Yes | No | Yes | Yes | Yes | Yes |
+| Subgroups | Yes* | No | No | Yes | Yes* | N/A |
+| f64 native | No (emulated) | No (emulated) | Yes | Yes | Yes | Yes |
+| i64 native | No (emulated) | No (emulated) | Yes | Yes | Yes | Yes |
+
+*Subgroups: WebGPU requires browser support + adapter feature. OpenCL: device-dependent.
