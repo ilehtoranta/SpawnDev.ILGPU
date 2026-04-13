@@ -771,5 +771,107 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                     throw new Exception($"Half Max mismatch at [{i}]: expected {expectedMax}, got {maxResult[i]}. a={aFloats[i]}, b={bFloats[i]}");
             }
         });
+
+        // ==================== Half Clamp Test ====================
+
+        static void HalfClampKernel(Index1D idx, ArrayView<global::ILGPU.Half> input, ArrayView<float> output)
+        {
+            float val = (float)input[idx];
+            output[idx] = IntrinsicMath.Clamp(val, -1.0f, 1.0f);
+        }
+
+        [TestMethod]
+        public async Task Half_Clamp_Test() => await RunTest(async accelerator =>
+        {
+            var testFloats = new float[] { 0.5f, -0.5f, 2.0f, -3.0f, 0.0f, 1.0f, -1.0f, 0.001f };
+            var testData = testFloats.Select(f => (global::ILGPU.Half)f).ToArray();
+            using var input = accelerator.Allocate1D<global::ILGPU.Half>(testData.Length);
+            using var output = accelerator.Allocate1D<float>(testData.Length);
+
+            input.CopyFromCPU(testData);
+
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<global::ILGPU.Half>, ArrayView<float>>(HalfClampKernel);
+            kernel(testData.Length, input.View, output.View);
+            await accelerator.SynchronizeAsync();
+
+            var result = await output.CopyToHostAsync();
+            for (int i = 0; i < testData.Length; i++)
+            {
+                float val = (float)testData[i];
+                float expected = val < -1.0f ? -1.0f : (val > 1.0f ? 1.0f : val);
+                if (MathF.Abs(result[i] - expected) > 0.01f)
+                    throw new Exception($"Half Clamp mismatch at [{i}]: expected {expected}, got {result[i]}. Input was {val}");
+            }
+        });
+
+        // ==================== Float16 RoundTrip Test ====================
+
+        [TestMethod]
+        public async Task Float16_RoundTrip_NoKernel_Test() => await RunTest(async accelerator =>
+        {
+            var testFloats = new float[] { 1.0f, -2.5f, 0.0f, 3.14f, 100.0f, -0.5f, 0.001f, 65504.0f };
+            var testData = testFloats.Select(f => (global::ILGPU.Half)f).ToArray();
+            using var buffer = accelerator.Allocate1D<global::ILGPU.Half>(testData.Length);
+            buffer.CopyFromCPU(testData);
+            await accelerator.SynchronizeAsync();
+            var result = await buffer.CopyToHostAsync();
+            for (int i = 0; i < testData.Length; i++)
+            {
+                float expected = (float)testData[i];
+                float actual = (float)result[i];
+                if (MathF.Abs(actual - expected) > 0.01f)
+                    throw new Exception($"Float16 round-trip mismatch at [{i}]: expected {expected}, got {actual}");
+            }
+        });
+
+        // ==================== CopyFromJS Sub-Word Tests ====================
+
+        [TestMethod]
+        public async Task CopyFromJS_Int16_WritesCorrectDataTest() => await RunTest(async accelerator =>
+        {
+            if (accelerator.AcceleratorType is not (AcceleratorType.WebGPU or AcceleratorType.WebGL or AcceleratorType.Wasm))
+                throw new UnsupportedTestException("CopyFromJS only available on browser backends");
+
+            var testData = new short[] { 1, -2, 300, -400, 32767, -32768, 0, 42 };
+            using var buffer = accelerator.Allocate1D<short>(testData.Length);
+
+            var browserBuffer = buffer.Buffer as IBrowserMemoryBuffer;
+            if (browserBuffer == null)
+                throw new Exception("Buffer does not implement IBrowserMemoryBuffer");
+
+            using var jsArray = new Int16Array(testData);
+            browserBuffer.CopyFromJS(jsArray);
+
+            var result = await buffer.CopyToHostAsync();
+            for (int i = 0; i < testData.Length; i++)
+            {
+                if (result[i] != testData[i])
+                    throw new Exception($"CopyFromJS Int16 mismatch at [{i}]: expected {testData[i]}, got {result[i]}");
+            }
+        });
+
+        [TestMethod]
+        public async Task CopyFromJS_UInt8_WritesCorrectDataTest() => await RunTest(async accelerator =>
+        {
+            if (accelerator.AcceleratorType is not (AcceleratorType.WebGPU or AcceleratorType.WebGL or AcceleratorType.Wasm))
+                throw new UnsupportedTestException("CopyFromJS only available on browser backends");
+
+            var testData = new byte[] { 0, 1, 127, 128, 254, 255, 42, 100 };
+            using var buffer = accelerator.Allocate1D<byte>(testData.Length);
+
+            var browserBuffer = buffer.Buffer as IBrowserMemoryBuffer;
+            if (browserBuffer == null)
+                throw new Exception("Buffer does not implement IBrowserMemoryBuffer");
+
+            using var jsArray = new Uint8Array(testData);
+            browserBuffer.CopyFromJS(jsArray);
+
+            var result = await buffer.CopyToHostAsync();
+            for (int i = 0; i < testData.Length; i++)
+            {
+                if (result[i] != testData[i])
+                    throw new Exception($"CopyFromJS UInt8 mismatch at [{i}]: expected {testData[i]}, got {result[i]}");
+            }
+        });
     }
 }
