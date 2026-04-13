@@ -873,5 +873,194 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                     throw new Exception($"CopyFromJS UInt8 mismatch at [{i}]: expected {testData[i]}, got {result[i]}");
             }
         });
+
+        // ==================== Many-Binding Tests ====================
+        // These tests verify that kernels with many ArrayView parameters work
+        // within WebGPU's maxStorageBuffersPerShaderStage limit.
+        // AubsCraft's HeightmapMeshKernel has 11 ArrayView params + 1 scalar buffer = 12 bindings,
+        // which exceeds Chrome's typical limit of 10.
+
+        /// <summary>
+        /// Kernel with 8 ArrayView params (all int) + 2 scalars = 9 bindings (under limit).
+        /// Should pass on all backends.
+        /// </summary>
+        static void ManyViewsKernel_8Views(
+            Index1D index,
+            ArrayView<int> a, ArrayView<int> b, ArrayView<int> c, ArrayView<int> d,
+            ArrayView<float> e, ArrayView<float> f, ArrayView<float> g,
+            ArrayView<int> output,
+            int scalarA, int scalarB)
+        {
+            output[index] = a[index] + b[index] + c[index] + d[index] + scalarA + scalarB;
+        }
+
+        [TestMethod]
+        public async Task ManyViews_8Views_UnderLimit_Test() => await RunTest(async accelerator =>
+        {
+            int size = 64;
+            var data = Enumerable.Range(1, size).ToArray();
+            using var a = accelerator.Allocate1D<int>(size);
+            using var b = accelerator.Allocate1D<int>(size);
+            using var c = accelerator.Allocate1D<int>(size);
+            using var d = accelerator.Allocate1D<int>(size);
+            using var e = accelerator.Allocate1D<float>(size);
+            using var f = accelerator.Allocate1D<float>(size);
+            using var g = accelerator.Allocate1D<float>(size);
+            using var output = accelerator.Allocate1D<int>(size);
+            a.CopyFromCPU(data);
+            b.CopyFromCPU(data);
+            c.CopyFromCPU(data);
+            d.CopyFromCPU(data);
+
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<
+                Index1D,
+                ArrayView<int>, ArrayView<int>, ArrayView<int>, ArrayView<int>,
+                ArrayView<float>, ArrayView<float>, ArrayView<float>,
+                ArrayView<int>, int, int>(ManyViewsKernel_8Views);
+            kernel(size, a.View, b.View, c.View, d.View, e.View, f.View, g.View, output.View, 10, 20);
+            await accelerator.SynchronizeAsync();
+
+            var result = await output.CopyToHostAsync();
+            for (int i = 0; i < size; i++)
+            {
+                int expected = data[i] * 4 + 30; // a+b+c+d + 10 + 20
+                if (result[i] != expected)
+                    throw new Exception($"8-view kernel mismatch at [{i}]: expected {expected}, got {result[i]}");
+            }
+        });
+
+        /// <summary>
+        /// Kernel with 11 ArrayView params (including short) + 2 scalars.
+        /// This matches AubsCraft HeightmapMeshKernel's binding pattern:
+        /// 11 storage buffers + 1 scalar buffer = 12 total bindings.
+        /// Tests whether the backend handles exceeding maxStorageBuffersPerShaderStage.
+        /// </summary>
+        static void ManyViewsKernel_11Views_WithShort(
+            Index1D index,
+            ArrayView<int> heights,
+            ArrayView<short> blockIds,
+            ArrayView<float> paletteColors,
+            ArrayView<float> atlasUVs,
+            ArrayView<float> blockFlags,
+            ArrayView<int> seabedHeights,
+            ArrayView<short> seabedBlockIds,
+            ArrayView<float> opaqueVerts,
+            ArrayView<int> opaqueCounter,
+            ArrayView<float> waterVerts,
+            ArrayView<int> waterCounter,
+            int chunkX, int chunkZ)
+        {
+            int blockId = blockIds[index];
+            if (blockId == 0) return;
+
+            float wx = chunkX * 16 + (index % 16);
+            float wz = chunkZ * 16 + (index / 16);
+            float wy = heights[index];
+            float cr = paletteColors[blockId * 3];
+
+            int oo = Atomic.Add(ref opaqueCounter[0], 3);
+            opaqueVerts[oo] = wx;
+            opaqueVerts[oo + 1] = wy;
+            opaqueVerts[oo + 2] = cr;
+
+            int sbId = seabedBlockIds[index];
+            if (sbId > 0)
+            {
+                float sbwy = seabedHeights[index];
+                int wo = Atomic.Add(ref waterCounter[0], 2);
+                waterVerts[wo] = sbwy;
+                waterVerts[wo + 1] = blockFlags[blockId];
+            }
+        }
+
+        [TestMethod]
+        public async Task ManyViews_11Views_HeightmapPattern_Test() => await RunTest(async accelerator =>
+        {
+            int size = 256; // 16x16 chunk
+            int paletteSize = 16;
+
+            // Setup test data
+            var heights = new int[size];
+            var blockIds = new short[size];
+            var seabedHeights = new int[size];
+            var seabedBlockIds = new short[size];
+            var paletteColors = new float[paletteSize * 3];
+            var atlasUVs = new float[paletteSize * 4];
+            var blockFlags = new float[paletteSize];
+
+            for (int i = 0; i < size; i++)
+            {
+                heights[i] = 64 + (i % 16);
+                blockIds[i] = (short)(1 + (i % (paletteSize - 1))); // 1 to paletteSize-1
+                seabedHeights[i] = 32 + (i % 8);
+                seabedBlockIds[i] = (short)(1 + (i % 3));
+            }
+            for (int i = 0; i < paletteSize; i++)
+            {
+                paletteColors[i * 3] = i * 0.1f;
+                paletteColors[i * 3 + 1] = i * 0.2f;
+                paletteColors[i * 3 + 2] = i * 0.3f;
+                atlasUVs[i * 4] = 0f;
+                atlasUVs[i * 4 + 1] = 0f;
+                atlasUVs[i * 4 + 2] = 1f;
+                atlasUVs[i * 4 + 3] = 1f;
+                blockFlags[i] = 0f;
+            }
+
+            using var bufHeights = accelerator.Allocate1D<int>(size);
+            using var bufBlockIds = accelerator.Allocate1D<short>(size);
+            using var bufPaletteColors = accelerator.Allocate1D<float>(paletteSize * 3);
+            using var bufAtlasUVs = accelerator.Allocate1D<float>(paletteSize * 4);
+            using var bufBlockFlags = accelerator.Allocate1D<float>(paletteSize);
+            using var bufSeabedHeights = accelerator.Allocate1D<int>(size);
+            using var bufSeabedBlockIds = accelerator.Allocate1D<short>(size);
+            using var bufOpaqueVerts = accelerator.Allocate1D<float>(size * 3);
+            using var bufOpaqueCounter = accelerator.Allocate1D<int>(1);
+            using var bufWaterVerts = accelerator.Allocate1D<float>(size * 2);
+            using var bufWaterCounter = accelerator.Allocate1D<int>(1);
+
+            bufHeights.CopyFromCPU(heights);
+            bufBlockIds.CopyFromCPU(blockIds);
+            bufPaletteColors.CopyFromCPU(paletteColors);
+            bufAtlasUVs.CopyFromCPU(atlasUVs);
+            bufBlockFlags.CopyFromCPU(blockFlags);
+            bufSeabedHeights.CopyFromCPU(seabedHeights);
+            bufSeabedBlockIds.CopyFromCPU(seabedBlockIds);
+            bufOpaqueCounter.CopyFromCPU(new int[] { 0 });
+            bufWaterCounter.CopyFromCPU(new int[] { 0 });
+
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<
+                Index1D,
+                ArrayView<int>, ArrayView<short>, ArrayView<float>, ArrayView<float>,
+                ArrayView<float>, ArrayView<int>, ArrayView<short>,
+                ArrayView<float>, ArrayView<int>,
+                ArrayView<float>, ArrayView<int>,
+                int, int>(ManyViewsKernel_11Views_WithShort);
+
+            kernel(size,
+                bufHeights.View, bufBlockIds.View,
+                bufPaletteColors.View, bufAtlasUVs.View, bufBlockFlags.View,
+                bufSeabedHeights.View, bufSeabedBlockIds.View,
+                bufOpaqueVerts.View, bufOpaqueCounter.View,
+                bufWaterVerts.View, bufWaterCounter.View,
+                0, 0);
+            await accelerator.SynchronizeAsync();
+
+            // Verify counters - all 256 columns have non-zero blockIds, so all write
+            var opaqueCount = await bufOpaqueCounter.CopyToHostAsync();
+            var waterCount = await bufWaterCounter.CopyToHostAsync();
+
+            if (opaqueCount[0] != size * 3)
+                throw new Exception($"Opaque counter: expected {size * 3}, got {opaqueCount[0]}");
+            if (waterCount[0] != size * 2)
+                throw new Exception($"Water counter: expected {size * 2}, got {waterCount[0]}");
+
+            // Verify some opaque vertex data
+            var opaqueVerts = await bufOpaqueVerts.CopyToHostAsync();
+            // First vertex: wx = 0*16 + 0%16 = 0, wy = heights[0] = 64, cr = paletteColors[blockIds[0]*3]
+            float expectedCr = paletteColors[blockIds[0] * 3];
+            if (Math.Abs(opaqueVerts[2] - expectedCr) > 0.001f)
+                throw new Exception($"Opaque vertex color mismatch: expected {expectedCr}, got {opaqueVerts[2]}");
+        });
     }
 }

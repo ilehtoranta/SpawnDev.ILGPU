@@ -776,6 +776,14 @@ namespace ILGPU.Runtime
         public int MaxNumThreads => Device.MaxNumThreads;
 
         /// <summary>
+        /// Maximum number of storage buffer bindings per kernel dispatch.
+        /// Each ArrayView parameter uses one binding. Scalar parameters are packed
+        /// into a single buffer. Use structs to combine related data into fewer bindings.
+        /// WebGPU: typically 8-10. CUDA/OpenCL/CPU: effectively unlimited.
+        /// </summary>
+        public virtual int MaxStorageBufferBindings => int.MaxValue;
+
+        /// <summary>
         /// Returns the supported capabilities of this accelerator.
         /// </summary>
         public CapabilityContext Capabilities => Device.Capabilities;

@@ -52,6 +52,10 @@ namespace SpawnDev.ILGPU.WebGPU
         /// </summary>
         public HashSet<string> EnabledFeatures => NativeAccelerator?.EnabledFeatures ?? new HashSet<string>();
 
+        /// <inheritdoc/>
+        public override int MaxStorageBufferBindings =>
+            NativeAccelerator?.MaxStorageBuffersPerShaderStage ?? 10;
+
         /// <summary>
         /// WebGPU requires storage buffer binding offsets to be aligned to this value.
         /// Spec default: 256 bytes. Query from device.limits.minStorageBufferOffsetAlignment.
@@ -1343,6 +1347,22 @@ namespace SpawnDev.ILGPU.WebGPU
                     throw new InvalidOperationException(
                         $"[WebGPU] Bind group mismatch for kernel '{kernelName}': " +
                         $"layout expects {expectedCount} binding(s), but only {entries.Count} entries were built.");
+                }
+
+                // ── Binding count limit check ──────────────────────────────
+                // Validate that the kernel's storage buffer binding count does not
+                // exceed the device's maxStorageBuffersPerShaderStage limit.
+                // Without this check, the pipeline silently fails and produces
+                // cryptic "Invalid BindGroupLayout due to a previous error" messages.
+                var maxBindings = webGpuAccel.MaxStorageBufferBindings;
+                var finalBindingCount = entries.Count;
+                if (finalBindingCount > maxBindings)
+                {
+                    var kernelName = compiledKernel.Name ?? "unknown";
+                    throw new InvalidOperationException(
+                        $"[WebGPU] Kernel '{kernelName}' requires {finalBindingCount} storage buffer bindings " +
+                        $"but this device only supports {maxBindings} (maxStorageBuffersPerShaderStage). " +
+                        $"Reduce the number of ArrayView parameters by combining related data into structs.");
                 }
 
                 if (WebGPUBackend.VerboseLogging)

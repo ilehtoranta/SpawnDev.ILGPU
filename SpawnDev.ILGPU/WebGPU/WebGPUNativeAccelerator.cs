@@ -157,6 +157,7 @@ namespace SpawnDev.ILGPU.WebGPU
             {
                 // Limits query failed — use fallback
             }
+            MaxStorageBuffersPerShaderStage = maxStorageBuffers;
             if (WebGPUBackend.VerboseLogging) WebGPUBackend.Log($"[WebGPU] Adapter limits: maxStorageBuffers={maxStorageBuffers}, maxComputeInvocations={maxComputeInvocations}, maxWorkgroupSizeX={maxWorkgroupSizeX}, maxWorkgroupStorageSize={maxWorkgroupStorageSize}, maxStorageBufferBindingSize={maxStorageBufferBindingSize}");
 
             // Use Dictionary for RequiredLimits to ensure reliable JS interop serialization.
@@ -352,6 +353,14 @@ namespace SpawnDev.ILGPU.WebGPU
 
         /// <summary>Returns true if timestamp queries are enabled on this device.</summary>
         public bool HasTimestampQuery => EnabledFeatures.Contains("timestamp-query");
+
+        /// <summary>
+        /// Maximum number of storage buffer bindings per shader stage.
+        /// WebGPU spec default: 8. Chrome typically supports 10.
+        /// Kernels with more ArrayView parameters than this limit will fail at pipeline creation.
+        /// Use structs to pack related data into fewer bindings.
+        /// </summary>
+        public int MaxStorageBuffersPerShaderStage { get; private set; } = 10;
 
         /// <summary>
         /// Optional callback to flush pending batched ILGPU kernel dispatches.
