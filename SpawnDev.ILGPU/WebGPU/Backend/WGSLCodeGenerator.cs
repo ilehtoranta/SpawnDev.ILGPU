@@ -2514,7 +2514,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     AtomicKind.Max => $"max({floatOld}, {val})",
                     AtomicKind.Min => $"min({floatOld}, {val})",
                     AtomicKind.Exchange => $"{val}",
-                    _ => $"{floatOld} + {val}"  // fallback: Add
+                    _ => throw new NotSupportedException($"Unsupported float atomic kind: {value.Kind}")
                 };
 
                 AppendLine($"let {casNew} = {BitcastToU32(newFloat, floatType)};");
@@ -2537,7 +2537,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     AtomicKind.Max => "atomicMax",
                     AtomicKind.Min => "atomicMin",
                     AtomicKind.Exchange => "atomicExchange",
-                    _ => "atomicAdd"
+                    _ => throw new NotSupportedException($"Unsupported unsigned atomic kind: {value.Kind}")
                 };
 
                 // Bitcast value to u32 for unsigned atomic semantics
@@ -2554,7 +2554,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     AtomicKind.Max => "atomicMax",
                     AtomicKind.Min => "atomicMin",
                     AtomicKind.Exchange => "atomicExchange",
-                    _ => "atomicAdd"
+                    _ => throw new NotSupportedException($"Unsupported atomic kind: {value.Kind}")
                 };
 
                 AppendLine($"{target} = {op}({ptr}, {val});");

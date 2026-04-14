@@ -496,8 +496,10 @@ namespace SpawnDev.ILGPU.Wasm
                             // Unwrap LongIndex types to their underlying long value
                             object arg = args[i];
                             if (arg is LongIndex1D li1) arg = li1.X;
-                            else if (arg is LongIndex2D li2) arg = li2.X; // TODO: handle Y
-                            else if (arg is LongIndex3D li3) arg = li3.X; // TODO: handle Y,Z
+                            else if (arg is LongIndex2D)
+                                throw new NotSupportedException("LongIndex2D kernel parameters are not yet supported on the Wasm backend. Use LongIndex1D or restructure the kernel.");
+                            else if (arg is LongIndex3D)
+                                throw new NotSupportedException("LongIndex3D kernel parameters are not yet supported on the Wasm backend. Use LongIndex1D or restructure the kernel.");
                             wasmArgs.Add((false, null, 0, 0, 0, arg));
                         }
                     }

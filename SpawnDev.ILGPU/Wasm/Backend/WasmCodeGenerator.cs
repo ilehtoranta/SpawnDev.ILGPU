@@ -1366,11 +1366,8 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 return;
             }
 
-            // Fallback: non-atomic (shouldn't reach here)
-            if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm] WARNING: Unhandled atomic kind: {atomic.Kind} for type {wasmType:X2}");
-            EmitGetLocal(address);
-            EmitTypedLoad(wasmType);
-            WasmModuleBuilder.EmitLocalSet(Code, target);
+            // No silent fallback - throw for unhandled atomic kinds
+            throw new NotSupportedException($"Unsupported atomic kind: {atomic.Kind} for Wasm type 0x{wasmType:X2}");
         }
 
         /// <summary>
@@ -1394,7 +1391,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 (AtomicKind.Max, WasmOpCodes.I32, true) => WasmOpCodes.I32GtU,
                 (AtomicKind.Max, WasmOpCodes.I64, false) => WasmOpCodes.I64GtS,
                 (AtomicKind.Max, WasmOpCodes.I64, true) => WasmOpCodes.I64GtU,
-                _ => WasmOpCodes.I32LtS // fallback
+                _ => throw new NotSupportedException($"Unsupported atomic Min/Max kind/type/unsigned combination: {atomic.Kind}/{wasmType}/{isUnsigned}")
             };
 
             var newVal = AllocateNewLocal(wasmType);
@@ -1466,7 +1463,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 (WasmOpCodes.F64, AtomicKind.Add) => WasmOpCodes.F64Add,
                 (WasmOpCodes.F64, AtomicKind.Min) => WasmOpCodes.F64Min,
                 (WasmOpCodes.F64, AtomicKind.Max) => WasmOpCodes.F64Max,
-                _ => WasmOpCodes.F32Add // fallback
+                _ => throw new NotSupportedException($"Unsupported float atomic kind: {atomic.Kind} on type 0x{wasmType:X2}")
             };
 
             // loop $cas_loop
