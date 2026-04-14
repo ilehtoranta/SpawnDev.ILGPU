@@ -1695,21 +1695,23 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             AppendLine($"{target} = intBitsToFloat({source});");
         }
 
-        // Atomics & Barriers — not supported in WebGL2 vertex shaders
+        // Atomics & Barriers — not supported in WebGL2 vertex shaders.
+        // MUST throw at compile time - silent zeros produce wrong results
+        // that users trust as correct. No silent garbage.
         public virtual void GenerateCode(GenericAtomic value)
         {
-            var target = Load(value);
-            Declare(target);
-            AppendLine($"// Atomics not supported in WebGL2 vertex shaders");
-            AppendLine($"{target} = {target.Type}(0);");
+            throw new NotSupportedException(
+                $"Atomic operations ({value.Kind}) are not supported on the WebGL backend. " +
+                $"WebGL2 vertex shaders do not support atomic operations. " +
+                $"Use WebGPU, Wasm, or a desktop backend for kernels that require atomics.");
         }
 
         public virtual void GenerateCode(AtomicCAS value)
         {
-            var target = Load(value);
-            Declare(target);
-            AppendLine($"// AtomicCAS not supported in WebGL2 vertex shaders");
-            AppendLine($"{target} = {target.Type}(0);");
+            throw new NotSupportedException(
+                $"AtomicCAS operations are not supported on the WebGL backend. " +
+                $"WebGL2 vertex shaders do not support atomic operations. " +
+                $"Use WebGPU, Wasm, or a desktop backend for kernels that require atomics.");
         }
 
         public virtual void GenerateCode(MemoryBarrier value)

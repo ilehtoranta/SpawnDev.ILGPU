@@ -360,12 +360,18 @@ namespace PlaywrightMultiTest
                             }
                             else if (rowTest.Result == TestResult.Error)
                             {
-                                if (string.IsNullOrWhiteSpace(stateMessage))
+                                // Use the actual error details from the test runner, not just
+                                // the result enum name ("Error"). unitTest.Error contains the
+                                // real exception message and stack trace.
+                                var errorDetail = !string.IsNullOrWhiteSpace(unitTest.Error)
+                                    ? unitTest.Error
+                                    : stateMessage;
+                                if (string.IsNullOrWhiteSpace(errorDetail))
                                 {
-                                    stateMessage = "Failed";
+                                    errorDetail = "Failed";
                                 }
-                                rowTest.ResultMessage = stateMessage;
-                                throw new Exception(stateMessage);
+                                rowTest.ResultMessage = errorDetail;
+                                throw new Exception(errorDetail);
                             }
                             else
                             {

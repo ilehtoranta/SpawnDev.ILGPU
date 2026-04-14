@@ -973,6 +973,15 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             }
         }
 
+        /// <summary>
+        /// Negative test: verifies that ILGPU throws a clear error when a kernel
+        /// exceeds the maxStorageBuffersPerShaderStage binding limit on WebGPU.
+        /// This kernel intentionally uses 11 ArrayViews + 1 scalar = 12 bindings,
+        /// exceeding the 10-binding limit. The production fix is struct packing
+        /// (see AubsCraft's HeightmapMeshKernel which packs 12 down to 6).
+        /// On non-WebGPU backends (CPU, CUDA, OpenCL, Wasm), the kernel runs
+        /// normally since they have no binding limit.
+        /// </summary>
         [TestMethod]
         public async Task ManyViews_11Views_HeightmapPattern_Test() => await RunTest(async accelerator =>
         {
@@ -1029,24 +1038,36 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             bufOpaqueCounter.CopyFromCPU(new int[] { 0 });
             bufWaterCounter.CopyFromCPU(new int[] { 0 });
 
-            var kernel = accelerator.LoadAutoGroupedStreamKernel<
-                Index1D,
-                ArrayView<int>, ArrayView<short>, ArrayView<float>, ArrayView<float>,
-                ArrayView<float>, ArrayView<int>, ArrayView<short>,
-                ArrayView<float>, ArrayView<int>,
-                ArrayView<float>, ArrayView<int>,
-                int, int>(ManyViewsKernel_11Views_WithShort);
+            // This kernel intentionally uses 11 ArrayViews + 1 scalar = 12 bindings.
+            // On WebGPU this exceeds maxStorageBuffersPerShaderStage (10) and should
+            // throw InvalidOperationException at load or dispatch time. On other backends
+            // it runs normally.
+            try
+            {
+                var kernel = accelerator.LoadAutoGroupedStreamKernel<
+                    Index1D,
+                    ArrayView<int>, ArrayView<short>, ArrayView<float>, ArrayView<float>,
+                    ArrayView<float>, ArrayView<int>, ArrayView<short>,
+                    ArrayView<float>, ArrayView<int>,
+                    ArrayView<float>, ArrayView<int>,
+                    int, int>(ManyViewsKernel_11Views_WithShort);
 
-            kernel(size,
-                bufHeights.View, bufBlockIds.View,
-                bufPaletteColors.View, bufAtlasUVs.View, bufBlockFlags.View,
-                bufSeabedHeights.View, bufSeabedBlockIds.View,
-                bufOpaqueVerts.View, bufOpaqueCounter.View,
-                bufWaterVerts.View, bufWaterCounter.View,
-                0, 0);
-            await accelerator.SynchronizeAsync();
+                kernel(size,
+                    bufHeights.View, bufBlockIds.View,
+                    bufPaletteColors.View, bufAtlasUVs.View, bufBlockFlags.View,
+                    bufSeabedHeights.View, bufSeabedBlockIds.View,
+                    bufOpaqueVerts.View, bufOpaqueCounter.View,
+                    bufWaterVerts.View, bufWaterCounter.View,
+                    0, 0);
+                await accelerator.SynchronizeAsync();
+            }
+            catch (InvalidOperationException ex) when (ex.Message.Contains("storage buffer binding"))
+            {
+                // WebGPU correctly rejected the kernel - binding limit enforced. PASS.
+                return;
+            }
 
-            // Verify counters - all 256 columns have non-zero blockIds, so all write
+            // Non-WebGPU backends: kernel ran, verify output
             var opaqueCount = await bufOpaqueCounter.CopyToHostAsync();
             var waterCount = await bufWaterCounter.CopyToHostAsync();
 
@@ -1055,12 +1076,24 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             if (waterCount[0] != size * 2)
                 throw new Exception($"Water counter: expected {size * 2}, got {waterCount[0]}");
 
-            // Verify some opaque vertex data
+            // Verify vertex colors are valid palette values.
+            // Atomic.Add slot allocation means ANY thread can get slot 0, so we check
+            // that the color at opaqueVerts[2] matches paletteColors[blockId * 3] for
+            // SOME valid blockId, not specifically thread 0's blockId.
             var opaqueVerts = await bufOpaqueVerts.CopyToHostAsync();
-            // First vertex: wx = 0*16 + 0%16 = 0, wy = heights[0] = 64, cr = paletteColors[blockIds[0]*3]
-            float expectedCr = paletteColors[blockIds[0] * 3];
-            if (Math.Abs(opaqueVerts[2] - expectedCr) > 0.001f)
-                throw new Exception($"Opaque vertex color mismatch: expected {expectedCr}, got {opaqueVerts[2]}");
+            float actualCr = opaqueVerts[2];
+            bool foundMatch = false;
+            for (int i = 0; i < size; i++)
+            {
+                float candidateCr = paletteColors[blockIds[i] * 3];
+                if (Math.Abs(actualCr - candidateCr) < 0.001f)
+                {
+                    foundMatch = true;
+                    break;
+                }
+            }
+            if (!foundMatch)
+                throw new Exception($"Opaque vertex color {actualCr} does not match any valid palette color");
         });
     }
 }

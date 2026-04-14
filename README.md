@@ -7,6 +7,55 @@ Write parallel compute code in C# and let the library pick the best available ba
 
 > **Your existing ILGPU kernels run in the browser with zero changes to the kernel code - and the same code runs on desktop too.**
 
+## What's New in 4.9.2
+
+### i64 Atomic.Add on WebGPU - Lock-Free CAS Loop
+
+`Atomic.Add` on `long`/`ulong` now works correctly on WebGPU with concurrent writers. The implementation uses a lock-free CAS loop on the lo half + `atomicAdd` on the hi half with carry propagation. No lock buffer, no extra binding slot, no spinlock.
+
+Previously, i64 arithmetic atomics used a non-atomic read-modify-write that silently produced wrong results under contention. Now they're correct.
+
+i64 bitwise atomics (`Atomic.And`, `Atomic.Or`, `Atomic.Xor`) continue to use dual independent i32 atomics, which is correct because bitwise operations are component-independent.
+
+i64 `Atomic.Min`, `Atomic.Max`, `Atomic.Exchange`, and `Atomic.CompareExchange` throw `NotSupportedException` - these require 64-bit CAS which WGSL does not provide. f64 atomics also throw for the same reason.
+
+See **[Docs/atomic-operations.md](Docs/atomic-operations.md)** for the full per-operation, per-backend support matrix.
+
+### WGSL Break-in-Loop Codegen Fix
+
+Fixed WGSL transpiler emitting `break` instead of `return` for early kernel exits inside loops. The `IsReturnExit` helper now correctly traces exit chains through empty pass-through blocks to distinguish "exit the loop" from "exit the kernel." This fixes kernels with `return` or value-assigning `break` inside `for`/`while` loops.
+
+Also fixed: WGSL codegen losing value assignments before `break` statements inside loops. The `HasNonPhiInstructions` check now correctly identifies post-loop merge code folded into the break path by the IR optimizer.
+
+### Mixed Atomic/Non-Atomic Buffer Access Fix
+
+When a buffer has both atomic operations (`Atomic.And(ref buf[x], mask)`) and non-atomic reads (`long val = buf[y]`), the WGSL codegen now correctly emits `atomicLoad` for ALL reads from that buffer. Previously, non-atomic reads on atomic buffers produced invalid WGSL that Chrome's validator rejected, causing silent pipeline creation failure.
+
+### WGSL Shader Validation Errors Surfaced
+
+Invalid WGSL shaders now produce hard failures instead of silent no-op pipelines. `CheckShaderAsync` feeds compilation errors into `_pendingGpuErrors`, which are thrown on the next `Synchronize()` or `ThrowIfGpuErrors()` call. Previously, a shader that failed Chrome's WGSL validator would silently dispatch as a no-op, producing all-zero output with no error.
+
+### Implicit SynchronizeAsync Before Readback
+
+Browser backends now implicitly call `SynchronizeAsync()` before GPU-to-CPU readback, matching the behavior of desktop backends (CUDA calls `cuStreamSynchronize`, OpenCL calls `clFinish`, CPU uses synchronous memcpy). Previously, the Wasm backend's `CopyToHostAsync` read directly from `SharedArrayBuffer` without waiting for pending kernel dispatches to complete, which could return stale data. WebGPU and WebGL already had implicit sync. All 5 Wasm readback paths are now patched, bringing all 6 backends to parity.
+
+### Stream Ordering Verified Correct
+
+Extensive testing confirmed that same-stream dispatch ordering is already correct on all 3 browser backends:
+- **WebGPU:** Single command encoder batches compute passes in recording order
+- **WebGL:** PostMessage to single-threaded JS worker processes messages sequentially
+- **Wasm:** Each `RunKernelAsync` awaits all prior pending work before dispatching
+
+Five new stream ordering tests (`Tests18`) verify the implicit ordering contract and will catch future regressions.
+
+### WebGL Unsupported Atomic Guards
+
+WebGL now throws `NotSupportedException` at kernel compilation time for all atomic operations except `Atomic.Add`. Previously, unsupported atomics silently emitted `target = int(0)`, producing wrong results with no error. `Atomic.Add` on WebGL uses the Transform Feedback vote pattern (partial support - the return value is always 0).
+
+### GLSL IsReturnExit Defense-in-Depth
+
+The GLSL codegen now has the same `IsReturnExit` helper as WGSL, correctly distinguishing loop-break from kernel-return in generated shaders. This prevents the same class of break-vs-return bug that was fixed in WGSL.
+
 ## What's New in 4.9.0
 
 ### Complete Sub-Word Data Type Support

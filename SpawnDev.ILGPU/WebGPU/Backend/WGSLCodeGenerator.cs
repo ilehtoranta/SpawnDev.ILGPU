@@ -2402,19 +2402,14 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     string oldVar = $"_emu64_old_{target.Name}";
                     if (valWgslType == "emu_f64")
                     {
-                        // emu_f64 (Dekker vec2<f32>) is NOT bit-compatible with IEEE-754 double.
-                        // The output buffer stores IEEE-754 bytes written by the C# host.
-                        // Must: (1) read raw f32 pair, bitcast to u32, convert to Dekker for arithmetic,
-                        //        (2) after op, convert Dekker result back to IEEE-754 bits before storing.
-                        string rawOldVar = $"_raw_old_{target.Name}";
-                        string resultVar = $"_result_{target.Name}";
-                        string ieeeBitsVar = $"_ieee_bits_{target.Name}";
-                        AppendLine($"let {rawOldVar} = *{ptr};");
-                        AppendLine($"let {oldVar} = f64_from_ieee754_bits(bitcast<u32>({rawOldVar}.x), bitcast<u32>({rawOldVar}.y));");
-                        AppendLine($"let {resultVar} = {emuOp}({oldVar}, {val});");
-                        AppendLine($"let {ieeeBitsVar} = f64_to_ieee754_bits({resultVar});");
-                        AppendLine($"*{ptr} = emu_f64(bitcast<f32>({ieeeBitsVar}.x), bitcast<f32>({ieeeBitsVar}.y));");
-                        AppendLine($"{target} = {oldVar};");
+                        // emu_f64 (Dekker/Ozaki) atomics: f64 is stored as two u32 words
+                        // (IEEE-754 bits). Like i64, we can't atomically update both words.
+                        // No lock-free solution exists for f64 arithmetic atomics on WebGPU.
+                        throw new NotSupportedException(
+                            $"Atomic.{value.Kind} on Float64 is not supported on the WebGPU backend. " +
+                            $"Float64 is emulated as two 32-bit words; atomic arithmetic requires both " +
+                            $"words to update atomically, which WGSL does not provide. " +
+                            $"Use Float32 atomics or restructure to avoid Float64 atomics.");
                     }
                     else
                     {
@@ -2442,21 +2437,58 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                             AppendLine($"let {oldHiVar} = {atomicOp}(&(*{ptr}).y, {val}.y);");
                             AppendLine($"{target} = {valWgslType}({oldLoVar}, {oldHiVar});");
                         }
+                        else if (value.Kind == AtomicKind.Add)
+                        {
+                            // i64 atomicAdd: lock-free CAS loop on lo half + atomicAdd on hi half.
+                            // CAS on lo serializes lo-half updates. atomicAdd on hi is commutative,
+                            // so concurrent carries from multiple threads produce the correct result
+                            // regardless of ordering. No lock buffer needed.
+                            string oldLoVar = $"_emu64_old_lo_{target.Name}";
+                            string newLoVar = $"_emu64_new_lo_{target.Name}";
+                            string carryVar = $"_emu64_carry_{target.Name}";
+                            string casResVar = $"_emu64_cas_{target.Name}";
+                            AppendLine($"// i64 atomicAdd: CAS-lo + atomicAdd-hi (lock-free)");
+                            AppendLine($"var {oldLoVar} = atomicLoad(&(*{ptr}).x);");
+                            AppendLine($"loop {{");
+                            PushIndent();
+                            AppendLine($"let {newLoVar} = {oldLoVar} + {val}.x;");
+                            AppendLine($"let {carryVar} = select(0u, 1u, {newLoVar} < {oldLoVar});");
+                            AppendLine($"let {casResVar} = atomicCompareExchangeWeak(&(*{ptr}).x, {oldLoVar}, {newLoVar});");
+                            AppendLine($"if ({casResVar}.exchanged) {{");
+                            PushIndent();
+                            AppendLine($"let _old_hi_{target.Name} = atomicAdd(&(*{ptr}).y, {val}.y + {carryVar});");
+                            AppendLine($"{target} = {valWgslType}({oldLoVar}, _old_hi_{target.Name});");
+                            AppendLine($"break;");
+                            PopIndent();
+                            AppendLine($"}}");
+                            AppendLine($"{oldLoVar} = {casResVar}.old_value;");
+                            PopIndent();
+                            AppendLine($"}}");
+                        }
                         else
                         {
-                            // Arithmetic atomics - non-atomic fallback (safe for reductions where thread 0 writes)
-                            AppendLine($"let {oldVar} = *{ptr};");
-                            AppendLine($"*{ptr} = {emuOp}({oldVar}, {val});");
-                            AppendLine($"{target} = {oldVar};");
+                            // i64 Min/Max: not safely implementable with only i32 atomics
+                            // without a spinlock. Both halves must be read and compared as a
+                            // single 64-bit value, which requires atomic consistency across
+                            // two separate u32 words. Throw rather than silently produce
+                            // wrong results.
+                            throw new NotSupportedException(
+                                $"Atomic.{value.Kind} on Int64/UInt64 is not supported on the WebGPU backend. " +
+                                $"WebGPU only has 32-bit atomics; i64 {value.Kind} requires 64-bit compare-and-swap " +
+                                $"which WGSL does not provide. Use i32 atomics or restructure to avoid i64 {value.Kind}.");
                         }
                     }
                 }
 
                 else
                 {
-                    // Exchange: plain store
-                    AppendLine($"*{ptr} = {val};");
-                    AppendLine($"{target} = {val};");
+                    // i64 Exchange: not safely implementable with only i32 atomics.
+                    // Both halves must update atomically or a reader sees torn state.
+                    // Plain store was here before - silently produced wrong results.
+                    throw new NotSupportedException(
+                        $"Atomic.Exchange on Int64/UInt64 is not supported on the WebGPU backend. " +
+                        $"WebGPU only has 32-bit atomics; i64 Exchange requires both halves to update " +
+                        $"atomically, which WGSL does not provide. Use i32 atomics or restructure.");
                 }
                 return;
             }
@@ -2536,6 +2568,19 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             var ptr = Load(value.Target);
             var cmp = Load(value.Value);
             var val = Load(value.CompareValue);
+
+            // i64 CAS: WGSL has no 64-bit atomicCompareExchangeWeak.
+            // i64 is emulated as vec2<u32> and WGSL only has 32-bit CAS.
+            // Cannot CAS two u32 halves atomically without hardware support.
+            var targetType = TypeGenerator[value.Type];
+            if (targetType == "emu_i64" || targetType == "emu_u64")
+            {
+                throw new NotSupportedException(
+                    "Atomic.CompareExchange on Int64/UInt64 is not supported on the WebGPU backend. " +
+                    "WebGPU only has 32-bit atomicCompareExchangeWeak; i64 CAS requires a 64-bit " +
+                    "compare-and-swap which WGSL does not provide.");
+            }
+
             Declare(target);
             AppendLine($"{target} = atomicCompareExchangeWeak({ptr}, {cmp}, {val}).old_value;");
         }

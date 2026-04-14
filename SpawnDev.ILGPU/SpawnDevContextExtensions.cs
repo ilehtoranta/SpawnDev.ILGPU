@@ -226,6 +226,10 @@ namespace SpawnDev.ILGPU
             // Check for Wasm buffer
             if (iView.Buffer is WasmMemoryBuffer wasmBuffer)
             {
+                // Implicit sync before readback - match desktop behavior where
+                // CopyToCPU calls stream.Synchronize() before reading
+                if (buffer.Accelerator is WasmAccelerator wasmAccel)
+                    await wasmAccel.SynchronizeAsync();
                 var byteData = wasmBuffer.TypedArrayView.ReadBytes();
                 var result = new T[buffer.Length];
                 MemoryMarshal.Cast<byte, T>(byteData).CopyTo(new Span<T>(result));
@@ -268,6 +272,9 @@ namespace SpawnDev.ILGPU
             // Check for Wasm buffer
             if (iView.Buffer is WasmMemoryBuffer wasmBuffer)
             {
+                // Implicit sync before readback - match desktop behavior
+                if (buffer.Accelerator is WasmAccelerator wasmAccel)
+                    await wasmAccel.SynchronizeAsync();
                 using var uint8Array = new Uint8Array(wasmBuffer.SharedBuffer);
                 return copyBytes == null ? uint8Array.SubArray(sourceByteOffset) : uint8Array.SubArray(sourceByteOffset, copyBytes.Value + sourceByteOffset);
             }
@@ -314,6 +321,9 @@ namespace SpawnDev.ILGPU
             // Check for Wasm buffer
             if (iView.Buffer is WasmMemoryBuffer wasmBuffer)
             {
+                // Implicit sync before readback - match desktop behavior
+                if (buffer.Accelerator is WasmAccelerator wasmAccel)
+                    await wasmAccel.SynchronizeAsync();
                 return new Uint8Array(wasmBuffer.SharedBuffer).ReCast<T>();
             }
 

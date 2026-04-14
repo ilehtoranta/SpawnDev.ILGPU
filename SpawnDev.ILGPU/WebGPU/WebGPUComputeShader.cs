@@ -74,9 +74,9 @@ namespace SpawnDev.ILGPU.WebGPU
             // Get bind group layout
             _bindGroupLayout = _pipeline.GetBindGroupLayout(0);
 
-            // Fire-and-forget: log WGSL compilation messages and pipeline validation errors
+            // Fire-and-forget but errors are fed into _pendingGpuErrors for hard failure on next sync
             var capturedModule = _shaderModule;
-            _ = CheckShaderAsync(capturedModule, entryPoint, device);
+            _ = CheckShaderAsync(capturedModule, entryPoint, device, accelerator);
         }
 
         #endregion
@@ -160,34 +160,57 @@ namespace SpawnDev.ILGPU.WebGPU
             Accelerator.Dispatch(this, workgroupCountX, workgroupCountY, workgroupCountZ);
         }
 
-        private static async Task CheckShaderAsync(GPUShaderModule shaderModule, string entryPoint, GPUDevice device)
+        private static async Task CheckShaderAsync(GPUShaderModule shaderModule, string entryPoint, GPUDevice device, WebGPUNativeAccelerator accelerator)
         {
             try
             {
-                // Always pop the error scope — leaving it open leaks and masks subsequent errors
+                // Always pop the error scope - leaving it open leaks and masks subsequent errors
                 using var error = await device.PopErrorScope();
                 if (error != null)
                 {
-                    var msg = $"[WebGPU-ValidationError] {entryPoint}: {error.Message}";
+                    // ALWAYS build the error message and feed into pending errors for hard failure.
+                    // Invalid shader = throw on next sync. No silent zeros.
+                    var errorMsg = $"[WebGPU] Shader '{entryPoint}' failed validation: {error.Message}";
                     if (Backend.WebGPUBackend.VerboseLogging)
-                        Backend.WebGPUBackend.Log(msg);
-                    // Even without verbose logging, the error is still captured and scope is popped
-                }
+                        Backend.WebGPUBackend.Log(errorMsg);
 
-                if (Backend.WebGPUBackend.VerboseLogging)
+                    // Get detailed compilation info for the error message
+                    try
+                    {
+                        using var info = await shaderModule.GetCompilationInfo();
+                        foreach (var msg in info.Messages)
+                        {
+                            if (msg.Type == "error")
+                            {
+                                errorMsg += $"\n  L{msg.LineNum}:{msg.LinePos} - {msg.Message}";
+                                if (Backend.WebGPUBackend.VerboseLogging)
+                                    Backend.WebGPUBackend.Log($"[WGSL-ERROR] {entryPoint} L{msg.LineNum}:{msg.LinePos} - {msg.Message}");
+                            }
+                        }
+                    }
+                    catch { }
+
+                    // Feed into pending errors so ThrowIfGpuErrors() surfaces the REAL error
+                    accelerator.AddShaderError(errorMsg);
+                }
+                else if (Backend.WebGPUBackend.VerboseLogging)
                 {
+                    // No validation error - still check for warnings if verbose
                     using var info = await shaderModule.GetCompilationInfo();
                     foreach (var msg in info.Messages)
                     {
-                        if (msg.Type == "error" || msg.Type == "warning")
-                            Backend.WebGPUBackend.Log($"[WGSL-{msg.Type.ToUpper()}] {entryPoint} L{msg.LineNum}:{msg.LinePos} - {msg.Message}");
+                        if (msg.Type == "warning")
+                            Backend.WebGPUBackend.Log($"[WGSL-WARNING] {entryPoint} L{msg.LineNum}:{msg.LinePos} - {msg.Message}");
                     }
                 }
             }
             catch (Exception ex)
             {
+                // Don't swallow - feed the exception into pending errors
+                var msg = $"[WebGPU] Shader check failed for '{entryPoint}': {ex.Message}";
                 if (Backend.WebGPUBackend.VerboseLogging)
-                    Backend.WebGPUBackend.Log($"[WGSL-Check] Exception for {entryPoint}: {ex.Message}");
+                    Backend.WebGPUBackend.Log(msg);
+                accelerator.AddShaderError(msg);
             }
         }
 

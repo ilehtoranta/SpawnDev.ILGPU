@@ -1629,7 +1629,13 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 }
             }
 
-            AppendLine("break;");
+            // Check if the exit path leads directly to a ReturnTerminator
+            // (through empty pass-through blocks). If so, this is a genuine kernel
+            // return inside the loop, not a break to post-loop code.
+            if (IsReturnExit(current))
+                AppendLine("return;");
+            else
+                AppendLine("break;");
         }
 
         /// <summary>
@@ -1718,6 +1724,31 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         }
 
         /// <summary>
+        /// Checks if a block (or chain of unconditional branches from it) leads DIRECTLY
+        /// to a ReturnTerminator without passing through any blocks that contain real code.
+        /// Only follows empty pass-through blocks (PHI-only + unconditional branch/return).
+        /// A block with non-PHI instructions is post-loop code, not a direct return path.
+        /// Ported from WGSLKernelFunctionGenerator.IsReturnExit.
+        /// </summary>
+        private static bool IsReturnExit(BasicBlock block)
+        {
+            int limit = 10;
+            var current = block;
+            while (current != null && limit-- > 0)
+            {
+                if (HasNonPhiInstructions(current))
+                    return false;
+                if (current.Terminator is ReturnTerminator)
+                    return true;
+                if (current.Terminator is UnconditionalBranch ub)
+                    current = ub.Target;
+                else
+                    break;
+            }
+            return false;
+        }
+
+        /// <summary>
         /// Override EmitPhiAssignments for state machine path to propagate
         /// _leaParamMap and _crossBlockPointerExprs through phi nodes.
         /// Without this, multi-block kernels lose their buffer pointer mappings
@@ -1787,26 +1818,34 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         /// </summary>
         public override void GenerateCode(GenericAtomic value)
         {
+            // WebGL only supports Atomic.Add via the vote TF varying workaround.
+            // All other atomic operations (And, Or, Xor, Min, Max, Exchange) are
+            // unsupported and MUST throw - silent zeros produce wrong results.
+            if (value.Kind != AtomicKind.Add)
+            {
+                throw new NotSupportedException(
+                    $"Atomic.{value.Kind} is not supported on the WebGL backend. " +
+                    $"Only Atomic.Add has partial support (via Transform Feedback vote pattern). " +
+                    $"Use WebGPU, Wasm, or a desktop backend for kernels that require {value.Kind} atomics.");
+            }
+
             var target = Load(value);
             var address = Load(value.Target);
             var atomicVal = Load(value.Value);
 
-            // Return value: approximate as 0 (already declared if hoisted)
+            // Return value: approximate as 0 (WebGL Add vote pattern does not return old value)
             if (!_hoistedPrimitives.Contains(value))
                 Declare(target);
-            AppendLine($"{target} = {target.Type}(0); // atomic return (WebGL2 emulation)");
+            AppendLine($"{target} = {target.Type}(0); // atomic return (WebGL2 Add vote emulation)");
 
-            if (value.Kind == AtomicKind.Add)
+            // Emit the increment to the atomic vote TF varying so JS can accumulate it
+            if (_leaParamMap.TryGetValue(address.ToString(), out var paramIdx))
             {
-                // Emit the increment to the atomic vote TF varying so JS can accumulate it
-                if (_leaParamMap.TryGetValue(address.ToString(), out var paramIdx))
+                _atomicVoteIndex!.TryGetValue(paramIdx, out var atomicVarying);
+                if (atomicVarying != null)
                 {
-                    _atomicVoteIndex!.TryGetValue(paramIdx, out var atomicVarying);
-                    if (atomicVarying != null)
-                    {
-                        string castVal = CastIfNeeded(atomicVal, atomicVarying.GlslType ?? "int");
-                        AppendLine($"{atomicVarying.VaryingName} = {castVal}; // atomic vote emit");
-                    }
+                    string castVal = CastIfNeeded(atomicVal, atomicVarying.GlslType ?? "int");
+                    AppendLine($"{atomicVarying.VaryingName} = {castVal}; // atomic vote emit");
                 }
             }
         }

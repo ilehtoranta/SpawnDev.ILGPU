@@ -7,7 +7,10 @@
 <PageTitle>Unit Tests</PageTitle>
 
 <h3>Unit Tests</h3>
-
+<div style="font-size:0.85rem;color:#888;margin-top:-0.5rem;display:flex;align-items:center;gap:0.5rem;">
+    <span>Build: <strong style="color:#ccc;">@BuildTimestamp.Value</strong></span>
+    <button style="font-size:0.75rem;padding:2px 8px;" @onclick="CopyBuildInfo" @onclick:stopPropagation="true" title="Copy build time + library versions to clipboard">Copy</button>
+</div>
 
 <hr />
 <h4>Shader Debug Output</h4>
@@ -15,13 +18,13 @@
     @if (_shaderDebug.HasDebugFolder && _shaderDebug.HasWritePermission)
     {
         <span style="color:green;">Auto-dumping to: <strong>@_shaderDebug.FolderName</strong></span>
-        <button @onclick="() => { _shaderDebug.ClearAsync(); StateHasChanged(); }">Clear</button>
+        <button @onclick="() => { _shaderDebug.ClearAsync(); }">Clear</button>
     }
     else if (_shaderDebug.NeedsPermissionGrant)
     {
         <span style="color:orange;">Debug folder: <strong>@_shaderDebug.FolderName</strong> (needs write access)</span>
         <button @onclick="GrantWriteAccess">Grant Write Access</button>
-        <button @onclick="() => { _shaderDebug.ClearAsync(); StateHasChanged(); }">Clear</button>
+        <button @onclick="() => { _shaderDebug.ClearAsync(); }">Clear</button>
     }
     else
     {
@@ -79,9 +82,17 @@ else
     IServiceCollection ServiceDescriptors { get; set; } = default!;
     string? _copyStatus;
     string? _dumpStatus;
+    async Task CopyBuildInfo()
+    {
+        try
+        {
+            await JS.CallVoidAsync("navigator.clipboard.writeText", BuildTimestamp.FullBuildInfo);
+        }
+        catch { }
+    }
 
-    async Task PickDebugFolder() { if (await _shaderDebug.PickFolderAsync()) StateHasChanged(); }
-    async Task GrantWriteAccess() { await _shaderDebug.RequestWritePermissionAsync(); StateHasChanged(); }
+    async Task PickDebugFolder() { await _shaderDebug.PickFolderAsync(); }
+    async Task GrantWriteAccess() { await _shaderDebug.RequestWritePermissionAsync(); }
     List<Assembly>? Assemblies = new List<Assembly>();
     List<Type>? Types = new List<Type>();
     object? TestTypeResolver(Type testType)

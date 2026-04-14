@@ -756,6 +756,31 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
         public new async Task SequentialLoops_LargerTest() =>
             throw new UnsupportedTestException("WebGL: per-row kernels with inner write loops unsupported (TF limitation)");
 
+        // Tests19: GreedyMerge construct isolation tests — WebGL TF limitations
+        // WebGL Transform Feedback captures ONE value per varying per vertex invocation.
+        // Kernels that write to multiple array positions per thread are incompatible.
+        [TestMethod]
+        public new async Task NestedWhileBreakI32Test() =>
+            throw new UnsupportedTestException("WebGL: kernel writes multiple array positions per thread (TF captures only last write)");
+        [TestMethod]
+        public new async Task AtomicAndLongTest() =>
+            throw new UnsupportedTestException("WebGL: Atomic.And not supported (no atomics in vertex shaders)");
+        [TestMethod]
+        public new async Task NestedWhileTrailingZerosLongTest() =>
+            throw new UnsupportedTestException("WebGL: kernel writes multiple array positions per thread (TF captures only last write)");
+        [TestMethod]
+        public new async Task InlinedStaticMethodCallsTest() =>
+            throw new UnsupportedTestException("WebGL: multiple atomic counter outputs per thread unsupported (TF captures only last write per varying)");
+        [TestMethod]
+        public new async Task FullCombinedPatternTest() =>
+            throw new UnsupportedTestException("WebGL: Atomic.And + multiple array writes per thread not supported");
+        [TestMethod]
+        public new async Task AtomicAddLongConcurrentTest() =>
+            throw new UnsupportedTestException("WebGL: Atomic.Add on Int64 not supported (no atomics in vertex shaders)");
+        [TestMethod]
+        public new async Task AtomicAddLongCarryTest() =>
+            throw new UnsupportedTestException("WebGL: Atomic.Add on Int64 not supported (no atomics in vertex shaders)");
+
         // ====================================================================
         // Boids Pipeline Diagnostic Tests
         // These run sub-components of the Boids3D demo in isolation to pinpoint

@@ -87,12 +87,18 @@ Updated: 2026-04-13
 
 ## Atomic Operations
 
+See **[Docs/atomic-operations.md](atomic-operations.md)** for the complete per-operation support matrix.
+
 | Type | C# Type | WebGPU | Wasm | WebGL | CUDA | OpenCL | CPU |
 |------|---------|:------:|:----:|:-----:|:----:|:------:|:---:|
-| Int32 | int | [x] | [x] | N/A | [x] | [x] | [x] |
-| UInt32 | uint | [x] | [x] | N/A | [x] | [x] | [x] |
-| Int64 | long | [-] | [x] | N/A | [x] | [x] | [x] |
-| Float32 | float | [x] | [x] | N/A | [x] | [x] | [x] |
+| Int32 | int | [x] | [x] | [!] Add only (vote TF) | [x] | [x] | [x] |
+| UInt32 | uint | [x] | [x] | [!] Add only (vote TF) | [x] | [x] | [x] |
+| Int64 | long | [x] Add/bitwise, [!] Min/Max/Exch/CAS | [x] | [!] | [x] | [x] | [x] |
+| UInt64 | ulong | [x] Add/bitwise, [!] Min/Max/Exch/CAS | [x] | [!] | [x] | [x] | [x] |
+| Float32 | float | [x] CAS loop | [x] CAS loop | [!] | [x] | [x] | [x] |
+| Float64 | double | [!] | [x] CAS loop | [!] | [x] | [x] | [x] |
+
+**[!]** = Throws `NotSupportedException` at kernel compilation time. See [atomic-operations.md](atomic-operations.md) for details.
 
 ---
 

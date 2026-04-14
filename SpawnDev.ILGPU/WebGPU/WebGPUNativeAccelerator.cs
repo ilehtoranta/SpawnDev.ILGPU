@@ -57,6 +57,15 @@ namespace SpawnDev.ILGPU.WebGPU
         private readonly List<string> _pendingGpuErrors = new();
 
         /// <summary>
+        /// Called by CheckShaderAsync to feed shader compilation errors into the pending
+        /// error list. These errors are surfaced as hard failures on the next Synchronize() call.
+        /// </summary>
+        internal void AddShaderError(string errorMessage)
+        {
+            _pendingGpuErrors.Add(errorMessage);
+        }
+
+        /// <summary>
         /// True once the GPU device has been lost (driver crash, GPU reset, etc.).
         /// All subsequent dispatch and synchronize calls will throw.
         /// </summary>

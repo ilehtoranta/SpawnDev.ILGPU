@@ -3785,17 +3785,25 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             {
                 // This is loading from an emulated buffer - need to read 2 u32 values and convert
                 string baseIdxVar = $"{source}_base_idx";
+                // If the buffer is atomic (mixed atomic + non-atomic access), use atomicLoad
+                bool isAtomicBuf = IsAtomicPointer(loadVal.Source);
+                string lo = isAtomicBuf
+                    ? $"atomicLoad(&(*{source})[u32({baseIdxVar})])"
+                    : $"(*{source})[u32({baseIdxVar})]";
+                string hi = isAtomicBuf
+                    ? $"atomicLoad(&(*{source})[u32({baseIdxVar}) + 1u])"
+                    : $"(*{source})[u32({baseIdxVar}) + 1u]";
                 if (emulInfo.IsF64)
                 {
                     // emu_f64: convert IEEE 754 bits to double-float
                     Declare(target);
-                    AppendLine($"{target} = f64_from_ieee754_bits((*{source})[u32({baseIdxVar})], (*{source})[u32({baseIdxVar}) + 1u]);");
+                    AppendLine($"{target} = f64_from_ieee754_bits({lo}, {hi});");
                 }
                 else
                 {
                     // emu_i64: just combine two u32 into vec2<u32>
                     Declare(target);
-                    AppendLine($"{target} = emu_i64((*{source})[u32({baseIdxVar})], (*{source})[u32({baseIdxVar}) + 1u]);");
+                    AppendLine($"{target} = emu_i64({lo}, {hi});");
                 }
                 return;
             }
@@ -3919,7 +3927,11 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
             // Local alloca variables are WGSL 'var' value types, not pointers — no dereference.
             bool isAllocaVar = _localAllocaVarNames.Contains(source.Name);
-            string rhs = isAllocaVar ? $"{source}" : $"*{source}";
+            // Atomic buffers require atomicLoad instead of *ptr dereference.
+            // When a buffer has both atomic ops (Atomic.And) and non-atomic reads,
+            // the buffer is declared array<atomic<T>> and ALL reads must use atomicLoad.
+            bool isAtomic = !isAllocaVar && IsAtomicPointer(loadVal.Source);
+            string rhs = isAllocaVar ? $"{source}" : isAtomic ? $"atomicLoad({source})" : $"*{source}";
 
             // Check if we already declared this at the top
             if (_hoistedPrimitives.Contains(loadVal))
@@ -3943,18 +3955,36 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             if (_emulatedVarMappings.TryGetValue(address.ToString(), out var emulInfo))
             {
                 string baseIdxVar = $"{address}_base_idx";
+                // If the buffer is atomic (mixed atomic + non-atomic access), use atomicStore
+                bool isAtomicBuf = IsAtomicPointer(storeVal.Target);
                 if (emulInfo.IsF64)
                 {
                     // emu_f64: convert double-float back to IEEE 754 bits
                     AppendLine($"let _bits_{address} = f64_to_ieee754_bits({val});");
-                    AppendLine($"(*{address})[u32({baseIdxVar})] = _bits_{address}.x;");
-                    AppendLine($"(*{address})[u32({baseIdxVar}) + 1u] = _bits_{address}.y;");
+                    if (isAtomicBuf)
+                    {
+                        AppendLine($"atomicStore(&(*{address})[u32({baseIdxVar})], _bits_{address}.x);");
+                        AppendLine($"atomicStore(&(*{address})[u32({baseIdxVar}) + 1u], _bits_{address}.y);");
+                    }
+                    else
+                    {
+                        AppendLine($"(*{address})[u32({baseIdxVar})] = _bits_{address}.x;");
+                        AppendLine($"(*{address})[u32({baseIdxVar}) + 1u] = _bits_{address}.y;");
+                    }
                 }
                 else
                 {
                     // emu_i64: split vec2<u32> into two u32 values
-                    AppendLine($"(*{address})[u32({baseIdxVar})] = {val}.x;");
-                    AppendLine($"(*{address})[u32({baseIdxVar}) + 1u] = {val}.y;");
+                    if (isAtomicBuf)
+                    {
+                        AppendLine($"atomicStore(&(*{address})[u32({baseIdxVar})], {val}.x);");
+                        AppendLine($"atomicStore(&(*{address})[u32({baseIdxVar}) + 1u], {val}.y);");
+                    }
+                    else
+                    {
+                        AppendLine($"(*{address})[u32({baseIdxVar})] = {val}.x;");
+                        AppendLine($"(*{address})[u32({baseIdxVar}) + 1u] = {val}.y;");
+                    }
                 }
                 return;
             }
@@ -4068,6 +4098,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             // Local alloca variables are WGSL 'var' value types, not pointers — no dereference.
             if (_localAllocaVarNames.Contains(address.Name))
                 AppendLine($"{address} = {val};");
+            else if (IsAtomicPointer(storeVal.Target))
+                AppendLine($"atomicStore({address}, {val});");
             else
                 AppendLine($"*{address} = {val};");
         }
@@ -4108,19 +4140,12 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                      string oldVar = $"_emu64_old_{target.Name}";
                      if (valWgslType == "emu_f64")
                      {
-                         string rawOldVarX = $"_raw_old_x_{target.Name}";
-                         string rawOldVarY = $"_raw_old_y_{target.Name}";
-                         string resultVar = $"_result_{target.Name}";
-                         string ieeeBitsVar = $"_ieee_bits_{target.Name}";
-                         
-                         AppendLine($"let {rawOldVarX} = (*{ptrStr})[u32({baseIdxVar})];");
-                         AppendLine($"let {rawOldVarY} = (*{ptrStr})[u32({baseIdxVar}) + 1u];");
-                         AppendLine($"let {oldVar} = f64_from_ieee754_bits(bitcast<u32>({rawOldVarX}), bitcast<u32>({rawOldVarY}));");
-                         AppendLine($"let {resultVar} = {emuOp}({oldVar}, {val});");
-                         AppendLine($"let {ieeeBitsVar} = f64_to_ieee754_bits({resultVar});");
-                         AppendLine($"(*{ptrStr})[u32({baseIdxVar})] = {ieeeBitsVar}.x;");
-                         AppendLine($"(*{ptrStr})[u32({baseIdxVar}) + 1u] = {ieeeBitsVar}.y;");
-                         AppendLine($"{target} = {oldVar};");
+                         // f64 atomics: stored as two u32 words (IEEE-754 bits).
+                         // Can't atomically update both words - same problem as i64.
+                         throw new System.NotSupportedException(
+                             $"Atomic.{value.Kind} on Float64 is not supported on the WebGPU backend. " +
+                             $"Float64 is emulated as two 32-bit words; atomic arithmetic requires both " +
+                             $"words to update atomically, which WGSL does not provide.");
                      }
                      else
                      {
@@ -4148,34 +4173,51 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                              AppendLine($"let {oldHiVar} = {atomicOp}(&(*{ptrStr})[u32({baseIdxVar}) + 1u], {val}.y);");
                              AppendLine($"{target} = {valWgslType}({oldLoVar}, {oldHiVar});");
                          }
+                         else if (value.Kind == global::ILGPU.IR.Values.AtomicKind.Add)
+                         {
+                             // i64 atomicAdd: lock-free CAS loop on lo half + atomicAdd on hi half.
+                             // CAS on lo serializes low-half updates. atomicAdd on hi is commutative,
+                             // so concurrent carries produce the correct result regardless of order.
+                             string oldLoVar = $"_emu64_old_lo_{target.Name}";
+                             string newLoVar = $"_emu64_new_lo_{target.Name}";
+                             string carryVar = $"_emu64_carry_{target.Name}";
+                             string casResVar = $"_emu64_cas_{target.Name}";
+                             AppendLine($"// i64 atomicAdd: CAS-lo + atomicAdd-hi (lock-free)");
+                             AppendLine($"var {oldLoVar} = atomicLoad(&(*{ptrStr})[u32({baseIdxVar})]);");
+                             AppendLine($"loop {{");
+                             PushIndent();
+                             AppendLine($"let {newLoVar} = {oldLoVar} + {val}.x;");
+                             AppendLine($"let {carryVar} = select(0u, 1u, {newLoVar} < {oldLoVar});");
+                             AppendLine($"let {casResVar} = atomicCompareExchangeWeak(&(*{ptrStr})[u32({baseIdxVar})], {oldLoVar}, {newLoVar});");
+                             AppendLine($"if ({casResVar}.exchanged) {{");
+                             PushIndent();
+                             AppendLine($"let _old_hi_{target.Name} = atomicAdd(&(*{ptrStr})[u32({baseIdxVar}) + 1u], {val}.y + {carryVar});");
+                             AppendLine($"{target} = {valWgslType}({oldLoVar}, _old_hi_{target.Name});");
+                             AppendLine($"break;");
+                             PopIndent();
+                             AppendLine($"}}");
+                             AppendLine($"{oldLoVar} = {casResVar}.old_value;");
+                             PopIndent();
+                             AppendLine($"}}");
+                         }
                          else
                          {
-                             // Arithmetic atomics (Add, Max, Min, Exchange) - non-atomic fallback
-                             // TODO: Implement CAS loop for Add when needed
-                             string resultVar = $"_result_{target.Name}";
-                             AppendLine($"let {oldVar} = {valWgslType}((*{ptrStr})[u32({baseIdxVar})], (*{ptrStr})[u32({baseIdxVar}) + 1u]);");
-                             AppendLine($"let {resultVar} = {emuOp}({oldVar}, {val});");
-                             AppendLine($"(*{ptrStr})[u32({baseIdxVar})] = {resultVar}.x;");
-                             AppendLine($"(*{ptrStr})[u32({baseIdxVar}) + 1u] = {resultVar}.y;");
-                             AppendLine($"{target} = {oldVar};");
+                             // i64 Min/Max: not safely implementable with only i32 atomics.
+                             throw new System.NotSupportedException(
+                                 $"Atomic.{value.Kind} on Int64/UInt64 is not supported on the WebGPU backend. " +
+                                 $"WebGPU only has 32-bit atomics; i64 {value.Kind} requires 64-bit compare-and-swap " +
+                                 $"which WGSL does not provide.");
                          }
                      }
                  }
                  else
                  {
-                     if (valWgslType == "emu_f64")
-                     {
-                         string ieeeBitsVar = $"_ieee_bits_{target.Name}";
-                         AppendLine($"let {ieeeBitsVar} = f64_to_ieee754_bits({val});");
-                         AppendLine($"(*{ptrStr})[u32({baseIdxVar})] = {ieeeBitsVar}.x;");
-                         AppendLine($"(*{ptrStr})[u32({baseIdxVar}) + 1u] = {ieeeBitsVar}.y;");
-                     }
-                     else
-                     {
-                         AppendLine($"(*{ptrStr})[u32({baseIdxVar})] = {val}.x;");
-                         AppendLine($"(*{ptrStr})[u32({baseIdxVar}) + 1u] = {val}.y;");
-                     }
-                     AppendLine($"{target} = {val};");
+                     // i64/f64 Exchange: not safely implementable with only i32 atomics.
+                     // Both halves must update atomically or a reader sees torn state.
+                     throw new System.NotSupportedException(
+                         $"Atomic.Exchange on Int64/UInt64/Float64 is not supported on the WebGPU backend. " +
+                         $"WebGPU only has 32-bit atomics; Exchange requires both halves to update " +
+                         $"atomically, which WGSL does not provide.");
                  }
                  return;
             }
@@ -5897,8 +5939,11 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         }
 
         /// <summary>
-        /// Checks if a block (or chain of unconditional branches from it) leads to a ReturnTerminator.
-        /// Used to distinguish 'break' (exit loop to post-loop code) from 'return' (exit kernel entirely).
+        /// Checks if a block (or chain of unconditional branches from it) leads DIRECTLY
+        /// to a ReturnTerminator without passing through any blocks that contain real code.
+        /// Only follows empty pass-through blocks (PHI-only + unconditional branch/return).
+        /// A block with non-PHI instructions is post-loop code, not a direct return path -
+        /// even if it ends with ReturnTerminator.
         /// </summary>
         private static bool IsReturnExit(BasicBlock block)
         {
@@ -5906,6 +5951,11 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             var current = block;
             while (current != null && limit-- > 0)
             {
+                // A block with real instructions is post-loop code, not a direct return.
+                // This catches the case where break exits to a block that has post-loop
+                // logic (second loop, assignments, stores) before eventually returning.
+                if (HasNonPhiInstructions(current))
+                    return false;
                 if (current.Terminator is global::ILGPU.IR.Values.ReturnTerminator)
                     return true;
                 if (current.Terminator is global::ILGPU.IR.Values.UnconditionalBranch ub)

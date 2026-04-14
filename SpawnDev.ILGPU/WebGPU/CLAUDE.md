@@ -61,6 +61,22 @@ await accelerator.SynchronizeAsync(); // Safe — only waits for last small batc
 
 **`CopyToHostAsync` internally:** FlushPendingCommands → CopyBufferToBuffer → Submit → `MapAsync(Read)`. The `MapAsync` waits for the copy to finish, which is queued behind all prior work. If prior work is large, `MapAsync` may timeout.
 
+## i64/f64 Atomic Operations (v4.9.2-rc.5+)
+
+WGSL only has 32-bit atomics. i64 is emulated as `vec2<u32>`. Atomic support:
+
+| Operation | i64 | f64 | Method |
+|-----------|-----|-----|--------|
+| And/Or/Xor | Supported | N/A | Dual i32 atomics on lo/hi halves (independent) |
+| Add | Supported | Not supported | CAS loop on lo half + atomicAdd on hi half with carry (lock-free) |
+| Min/Max | Not supported | Not supported | Throws `NotSupportedException` - requires 64-bit CAS |
+| Exchange | Not supported | Not supported | Throws `NotSupportedException` - requires atomic dual-word update |
+| CAS | Not supported | Not supported | Throws `NotSupportedException` - WGSL has no 64-bit CAS |
+
+**i32/f32 atomics are fully supported** via native WGSL atomics (i32) or CAS loops (f32).
+
+**Why Add works but Min/Max don't:** Add uses `atomicAdd` on the hi half for carry, which is commutative - multiple threads can add carry in any order. Min/Max require comparing BOTH halves as a single 64-bit value, which needs atomicity across two u32 words that WGSL can't provide.
+
 ## Diagnostics
 - `WebGPUBackend.WGSLDumpPath` — dump shaders to files (desktop only)
 - `WebGPUBackend.WGSLRegistry` — named registry of compiled shaders

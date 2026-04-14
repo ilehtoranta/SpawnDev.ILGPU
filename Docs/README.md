@@ -21,6 +21,8 @@ Comprehensive documentation for SpawnDev.ILGPU — run ILGPU C# kernels on WebGP
 
 ### Reference
 - **[API Reference](api-reference.md)** — Public classes, methods, and extension methods organized by namespace
+- **[Data Type Support](data-type-support.md)** — Per-type, per-backend verification matrix (buffer read/write, end-to-end, atomics)
+- **[Atomic Operations](atomic-operations.md)** — Per-operation, per-backend atomic support (Add, And, Min, Max, Exchange, CAS) with emulation details
 
 ## Quick Links
 

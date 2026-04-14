@@ -105,15 +105,24 @@ namespace SpawnDev.ILGPU.Wasm
 
         /// <summary>
         /// Copies data from this buffer to host asynchronously.
+        /// Awaits all pending kernel dispatches before reading, matching
+        /// desktop backends' implicit synchronization on readback.
         /// </summary>
-        public Task<T[]> CopyToHostAsync<T>(long length) where T : unmanaged
+        public async Task<T[]> CopyToHostAsync<T>(long length) where T : unmanaged
         {
-            return Task.FromResult(CopyToHost<T>(length));
+            // Implicit sync before readback - match CUDA/OpenCL behavior where
+            // CopyToCPU calls stream.Synchronize() before reading data
+            if (Accelerator is WasmAccelerator wasmAccel)
+                await wasmAccel.SynchronizeAsync();
+            return CopyToHost<T>(length);
         }
 
-        public Task<Uint8Array> CopyToHostUint8ArrayAsync(long sourceByteOffset = 0, long? copyBytes = null)
+        public async Task<Uint8Array> CopyToHostUint8ArrayAsync(long sourceByteOffset = 0, long? copyBytes = null)
         {
-            if (SharedBuffer == null) return Task.FromResult(new Uint8Array());
+            if (SharedBuffer == null) return new Uint8Array();
+            // Implicit sync before readback - match desktop behavior
+            if (Accelerator is WasmAccelerator wasmAccel)
+                await wasmAccel.SynchronizeAsync();
             long bufferSize = SharedBuffer.ByteLength;
             long actualCopyBytes = copyBytes ?? (bufferSize - sourceByteOffset);
             if (sourceByteOffset < 0 || sourceByteOffset > bufferSize)
@@ -123,8 +132,8 @@ namespace SpawnDev.ILGPU.Wasm
                 throw new ArgumentOutOfRangeException(nameof(copyBytes),
                     $"Copy range [{sourceByteOffset}, {sourceByteOffset + actualCopyBytes}) exceeds buffer size {bufferSize}");
             return copyBytes == null ?
-                Task.FromResult(new Uint8Array(SharedBuffer, sourceByteOffset)) :
-                Task.FromResult(new Uint8Array(SharedBuffer, sourceByteOffset, copyBytes.Value));
+                new Uint8Array(SharedBuffer, sourceByteOffset) :
+                new Uint8Array(SharedBuffer, sourceByteOffset, copyBytes.Value);
         }
 
         /// <inheritdoc/>
