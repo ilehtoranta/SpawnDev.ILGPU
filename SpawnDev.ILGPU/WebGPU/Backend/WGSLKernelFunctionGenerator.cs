@@ -4504,10 +4504,17 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             var targetIndex = GetBlockIndex(branch.Target);
             AppendIndent();
             Builder.AppendLine($"current_block = {targetIndex};");
-            // Note: NO continue; here. In WGSL switch, cases don't fall through.
-            // Control naturally flows to after the switch, where workgroupBarrier()
-            // is placed for uniform control flow. The loop's implicit continuation
-            // returns to the top for the next state machine iteration.
+
+            // Must emit control flow to reach the state machine loop header.
+            // Without this, code inside nested loops (for/while) falls through
+            // instead of transitioning to the target block. This was the root
+            // cause of 'return' inside for-loops not exiting the kernel.
+            //
+            // For barrier kernels: use 'continue' to reach the barrier at the
+            // loop header (uniform control flow requirement).
+            // For non-barrier kernels: 'continue' is also correct and safe.
+            AppendIndent();
+            Builder.AppendLine("continue;");
         }
         private new void GenerateCodeInternal()
         {
@@ -4686,19 +4693,27 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         // 3. Handles 'return' to exit the kernel
         public override void GenerateCode(ReturnTerminator returnTerminator)
         {
-            // In state machine mode, we can't use 'return;' directly because it would
-            // skip the workgroupBarrier() placed after the switch statement, violating
-            // WGSL's uniform control flow requirement. Instead, set the exit signal
-            // and let the loop's exit check handle the termination.
-            if (_loops.Count > 0 && Method.Blocks.Count > 1)
+            // For kernels WITH barriers, we can't use 'return;' directly because it
+            // would skip the workgroupBarrier() after the switch, violating WGSL's
+            // uniform control flow. Use current_block = -1 + continue to jump back
+            // to the loop header where the exit check handles termination.
+            //
+            // For kernels WITHOUT barriers (the common case), 'return;' is safe and
+            // correct. The previous approach of just setting current_block = -1
+            // without break/continue/return caused execution to fall through to
+            // subsequent code in the same block (e.g., return inside a for loop
+            // would continue past the loop to code that should be unreachable).
+            bool hasBarriers = _usesBarriers;
+
+            if (hasBarriers && _loops.Count > 0 && Method.Blocks.Count > 1)
             {
-                AppendIndent();
-                Builder.AppendLine("current_block = -1;");
+                // Barrier kernel: signal exit, continue to loop header for barrier-safe exit
+                AppendLine("current_block = -1;");
+                AppendLine("continue;");
             }
             else
             {
-                // Single-block or non-state-machine: direct return
-                AppendIndent();
+                // No barriers or single block: direct return is safe
                 AppendLine("return;");
             }
         }
@@ -5527,28 +5542,34 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                         bool trueIsBackEdge = IsLoopHeader(trueTarget, currentLoop);
                         bool falseIsBackEdge = IsLoopHeader(falseTarget, currentLoop);
 
-                        // Case: if (cond) break; — true exits loop (directly or transitively)
+                        // Case: if (cond) break/return; — true exits loop (directly or transitively)
                         if (trueExitsLoop && !falseExitsLoop)
                         {
                             AppendLine($"if ({Load(branch.Condition)}) {{");
                             PushIndent();
-                            // Emit intermediate blocks' code and PHI values before break
                             EmitIntermediateBlocksToExit(trueTarget, trueExitBlock, block, currentLoop, visited);
-                            AppendLine("break;");
+                            // If the exit leads to a return, emit return; not break;
+                            // break only exits the loop; return exits the kernel.
+                            if (IsReturnExit(trueExitBlock ?? trueTarget))
+                                AppendLine("return;");
+                            else
+                                AppendLine("break;");
                             PopIndent();
                             AppendLine("}");
                             PushPhiValues(falseTarget, block);
                             block = falseTarget;
                             continue;
                         }
-                        // Case: if (!cond) break; — false exits loop (directly or transitively)
+                        // Case: if (!cond) break/return; — false exits loop (directly or transitively)
                         else if (falseExitsLoop && !trueExitsLoop)
                         {
                             AppendLine($"if (!{Load(branch.Condition)}) {{");
                             PushIndent();
-                            // Emit intermediate blocks' code and PHI values before break
                             EmitIntermediateBlocksToExit(falseTarget, falseExitBlock, block, currentLoop, visited);
-                            AppendLine("break;");
+                            if (IsReturnExit(falseExitBlock ?? falseTarget))
+                                AppendLine("return;");
+                            else
+                                AppendLine("break;");
                             PopIndent();
                             AppendLine("}");
                             PushPhiValues(trueTarget, block);
@@ -5872,6 +5893,26 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             }
 
             exitBlock = target;
+            return false;
+        }
+
+        /// <summary>
+        /// Checks if a block (or chain of unconditional branches from it) leads to a ReturnTerminator.
+        /// Used to distinguish 'break' (exit loop to post-loop code) from 'return' (exit kernel entirely).
+        /// </summary>
+        private static bool IsReturnExit(BasicBlock block)
+        {
+            int limit = 10;
+            var current = block;
+            while (current != null && limit-- > 0)
+            {
+                if (current.Terminator is global::ILGPU.IR.Values.ReturnTerminator)
+                    return true;
+                if (current.Terminator is global::ILGPU.IR.Values.UnconditionalBranch ub)
+                    current = ub.Target;
+                else
+                    break;
+            }
             return false;
         }
 

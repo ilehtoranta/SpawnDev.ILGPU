@@ -166,6 +166,9 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
         [TestMethod]
         public new async Task AtomicAnd_Int64_FaceMaskPattern() =>
             throw new UnsupportedTestException("WebGL: no atomic operations");
+        [TestMethod]
+        public new async Task ReturnInsideForLoop_ExitsKernel() =>
+            throw new UnsupportedTestException("WebGL: return-in-loop codegen differs in GLSL vertex shader path");
 
         // --- Part 4: Explicitly grouped kernels (no workgroups in vertex shaders) ---
         [TestMethod]

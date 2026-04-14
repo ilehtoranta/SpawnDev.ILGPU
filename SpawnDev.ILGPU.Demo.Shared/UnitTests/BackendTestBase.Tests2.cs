@@ -749,5 +749,50 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             if (maskResult[1] != expectedMask)
                 throw new Exception($"FaceMask[1] failed. Expected {expectedMask:X16}, got {maskResult[1]:X16}");
         });
+
+        // ══════════════════════════════════════════════════════════════
+        //  Return-inside-loop test
+        //  Verifies that `return` inside a for loop exits the kernel,
+        //  not just the loop. This was a WGSL codegen bug where
+        //  `return` was transpiled as `break`.
+        // ══════════════════════════════════════════════════════════════
+
+        /// <summary>
+        /// Kernel: threads 0-31 should write 1, threads 32-63 should write 0.
+        /// The `return` inside the for loop must exit the kernel entirely.
+        /// If it only breaks the loop, all threads would write 1 (bug).
+        /// </summary>
+        static void ReturnInsideForLoopKernel(Index1D index, ArrayView<int> output)
+        {
+            // This loop iterates 4 times. If index >= 32, we return on the first iteration.
+            // If return is incorrectly transpiled as break, execution falls through to output[index] = 1.
+            for (int i = 0; i < 4; i++)
+            {
+                if (index >= 32 && i == 0)
+                    return; // MUST exit the kernel, not just break the loop
+            }
+            output[index] = 1;
+        }
+
+        [TestMethod]
+        public async Task ReturnInsideForLoop_ExitsKernel() => await RunTest(async accelerator =>
+        {
+            var data = new int[64];
+            using var buf = accelerator.Allocate1D(data);
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<int>>(ReturnInsideForLoopKernel);
+
+            kernel((Index1D)64, buf.View);
+            await accelerator.SynchronizeAsync();
+
+            var result = await buf.CopyToHostAsync<int>();
+
+            // Threads 0-31: survive the loop, write 1
+            for (int i = 0; i < 32; i++)
+                if (result[i] != 1) throw new Exception($"Thread {i} should have written 1, got {result[i]}");
+
+            // Threads 32-63: return inside loop, should NOT write 1
+            for (int i = 32; i < 64; i++)
+                if (result[i] != 0) throw new Exception($"Thread {i} should have written 0 (return should exit kernel), got {result[i]}");
+        });
     }
 }

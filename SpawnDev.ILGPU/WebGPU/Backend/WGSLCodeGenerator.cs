@@ -1813,30 +1813,27 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         // Control Flow
         public virtual void GenerateCode(ReturnTerminator value)
         {
-            if (IsStateMachineActive)
+            // WGSL supports `return;` anywhere - inside loops, switch cases, etc.
+            // Always emit `return;` for void returns. For non-void returns, assign
+            // the return variable first (state machine reads it after the loop).
+            //
+            // Previously, state machine mode emitted `break;` which only exits the
+            // innermost loop - NOT the function. This caused `return` inside for-loops
+            // to fall through to code after the loop instead of exiting the kernel.
+            if (value.IsVoidReturn)
             {
-                // In state machine: Assign to return var and break loop
-                if (!value.IsVoidReturn)
-                {
-                    var retVal = Load(value.ReturnValue);
-                    AppendLine($"_ilgpu_return_val = {retVal};");
-                }
-
-                AppendLine("current_block = -1;");
-                AppendLine("break;");
+                AppendLine("return;");
+            }
+            else if (IsStateMachineActive)
+            {
+                var retVal = Load(value.ReturnValue);
+                AppendLine($"_ilgpu_return_val = {retVal};");
+                AppendLine("return;");
             }
             else
             {
-                // Direct return (Single block)
-                if (value.IsVoidReturn)
-                {
-                    AppendLine("return;");
-                }
-                else
-                {
-                    var retVal = Load(value.ReturnValue);
-                    AppendLine($"return {retVal};");
-                }
+                var retVal = Load(value.ReturnValue);
+                AppendLine($"return {retVal};");
             }
         }
 
