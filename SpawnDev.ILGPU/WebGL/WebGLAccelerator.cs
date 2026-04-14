@@ -236,7 +236,8 @@ namespace SpawnDev.ILGPU.WebGL
         protected override WebGLKernel CreateKernel(WebGLCompiledKernel compiledKernel)
         {
             LastGeneratedGLSL = compiledKernel.GLSLSource;
-            try { OnShaderCompiled?.Invoke("glsl_kernel", compiledKernel.GLSLSource); } catch { }
+            var kernelName = compiledKernel.EntryPoint.MethodInfo?.Name ?? "glsl_kernel";
+            try { OnShaderCompiled?.Invoke(kernelName, compiledKernel.GLSLSource); } catch { }
             return new WebGLKernel(this, compiledKernel, null);
         }
 
@@ -244,7 +245,8 @@ namespace SpawnDev.ILGPU.WebGL
         protected override WebGLKernel CreateKernel(WebGLCompiledKernel compiledKernel, MethodInfo launcher)
         {
             LastGeneratedGLSL = compiledKernel.GLSLSource;
-            try { OnShaderCompiled?.Invoke("glsl_kernel", compiledKernel.GLSLSource); } catch { }
+            var kernelName = compiledKernel.EntryPoint.MethodInfo?.Name ?? "glsl_kernel";
+            try { OnShaderCompiled?.Invoke(kernelName, compiledKernel.GLSLSource); } catch { }
             return new WebGLKernel(this, compiledKernel, launcher);
         }
 
