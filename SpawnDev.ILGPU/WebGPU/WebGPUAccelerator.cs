@@ -1307,6 +1307,27 @@ namespace SpawnDev.ILGPU.WebGPU
                 }
 
 
+                // Allocate and bind spinlock buffers for i64 Min/Max/Exchange atomics
+                if (compiledKernel.HasI64Spinlocks)
+                {
+                    foreach (var paramIdx in compiledKernel.I64SpinlockParamIndices.OrderBy(x => x))
+                    {
+                        // Find the data buffer for this param to determine lock count
+                        // Each i64 element = 2 u32s, so lock count = data buffer element count / 2
+                        // Use a fixed size that covers any reasonable buffer
+                        var lockBuffer = GetPooledScalarBuffer(device);
+                        // Zero the lock buffer before dispatch (all locks start unlocked)
+                        device.Queue.WriteBuffer(lockBuffer, 0, new byte[256]);
+                        scalarBuffersToReturn.Add(lockBuffer);
+                        entries.Add(new GPUBindGroupEntry
+                        {
+                            Binding = (uint)currentBindingIndex,
+                            Resource = new GPUBufferBinding { Buffer = lockBuffer, Offset = 0, Size = 256 }
+                        });
+                        currentBindingIndex++;
+                    }
+                }
+
                 // Validate/fix entry count to match WGSL layout (avoids "binding index N not present" errors)
                 int expectedCount = compiledKernel.ExpectedBindingCount;
                 // When WGSL declares only 1 binding (the _scalar_params buffer) but the runtime

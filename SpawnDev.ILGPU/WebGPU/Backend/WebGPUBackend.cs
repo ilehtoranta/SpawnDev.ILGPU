@@ -964,7 +964,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 wgslSource,
                 data.DynamicSharedOverrides.Count > 0 ? data.DynamicSharedOverrides : null,
                 data.ScalarPackingManifest.Count > 0 ? data.ScalarPackingManifest : null,
-                data.ExpectedBindingCountHolder.Count > 0 ? data.ExpectedBindingCountHolder[0] : 0);
+                data.ExpectedBindingCountHolder.Count > 0 ? data.ExpectedBindingCountHolder[0] : 0,
+                data.I64SpinlockParamIndices.Count > 0 ? data.I64SpinlockParamIndices : null);
         }
 
         #endregion
@@ -1009,6 +1010,17 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         public int ExpectedBindingCount { get; }
 
         /// <summary>
+        /// Param indices that need spinlock companion buffers for i64 Min/Max/Exchange atomics.
+        /// The dispatch code auto-allocates one lock buffer per entry and binds it.
+        /// </summary>
+        public IReadOnlySet<int> I64SpinlockParamIndices { get; }
+
+        /// <summary>
+        /// Returns true if this kernel needs spinlock buffers for i64 atomics.
+        /// </summary>
+        public bool HasI64Spinlocks => I64SpinlockParamIndices.Count > 0;
+
+        /// <summary>
         /// Creates a new compiled WebGPU kernel.
         /// </summary>
         public WebGPUCompiledKernel(
@@ -1017,13 +1029,15 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             string wgslSource,
             IReadOnlyList<DynamicSharedOverrideInfo>? dynamicSharedOverrides = null,
             IReadOnlyList<ScalarPackingEntry>? scalarPackingManifest = null,
-            int expectedBindingCount = 0)
+            int expectedBindingCount = 0,
+            IReadOnlySet<int>? i64SpinlockParamIndices = null)
             : base(context, entryPoint, null)
         {
             WGSLSource = wgslSource;
             DynamicSharedOverrides = dynamicSharedOverrides ?? Array.Empty<DynamicSharedOverrideInfo>();
             ScalarPackingManifest = scalarPackingManifest ?? Array.Empty<ScalarPackingEntry>();
             ExpectedBindingCount = expectedBindingCount;
+            I64SpinlockParamIndices = i64SpinlockParamIndices ?? new HashSet<int>();
         }
     }
 

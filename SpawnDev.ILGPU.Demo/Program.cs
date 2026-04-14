@@ -17,9 +17,12 @@ WebGPUBackend.VerboseLogging = false;
 builder.Services.AddBlazorJSRuntime();
 builder.Services.AddPlatformCrypto();
 
-// P2P: WebTorrent client with DI crypto for piece verification
+// P2P: WebTorrent client
 builder.Services.AddSingleton(sp =>
     new SpawnDev.WebTorrent.WebTorrentClient());
+
+// P2P: Ed25519 signer - singleton identity for the app
+builder.Services.AddSingleton<SpawnDev.WebTorrent.Ed25519Signer>();
 
 // P2P: Shared swarm service — holds the active compute swarm for all pages
 builder.Services.AddSingleton<SpawnDev.ILGPU.Demo.Shared.Services.P2PSwarmService>();

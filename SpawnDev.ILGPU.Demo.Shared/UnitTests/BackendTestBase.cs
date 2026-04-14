@@ -17,10 +17,22 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
         /// <summary>DI-configured WebTorrent client with tracker discovery.</summary>
         protected SpawnDev.WebTorrent.WebTorrentClient WebTorrentClient { get; }
 
-        protected BackendTestBase(IPortableCrypto crypto, SpawnDev.WebTorrent.WebTorrentClient webTorrentClient)
+        /// <summary>DI-configured Ed25519 signer factory. Each call to CreateEd25519Signer gets a fresh instance.</summary>
+        private readonly Func<SpawnDev.WebTorrent.Ed25519Signer> _signerFactory;
+
+        protected BackendTestBase(IPortableCrypto crypto, SpawnDev.WebTorrent.WebTorrentClient webTorrentClient, Func<SpawnDev.WebTorrent.Ed25519Signer> signerFactory)
         {
             Crypto = crypto;
             WebTorrentClient = webTorrentClient;
+            _signerFactory = signerFactory;
+        }
+
+        /// <summary>Creates an Ed25519 signer with a fresh key pair via DI. Each call generates a new identity.</summary>
+        protected async Task<SpawnDev.WebTorrent.Ed25519Signer> CreateEd25519Signer()
+        {
+            var signer = _signerFactory();
+            await signer.GenerateKeyAsync();
+            return signer;
         }
 
         /// <summary>Creates the backend-specific accelerator. Caller is responsible for disposing both.</summary>

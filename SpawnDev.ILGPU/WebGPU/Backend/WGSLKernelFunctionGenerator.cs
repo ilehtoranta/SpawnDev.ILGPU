@@ -46,6 +46,12 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         // WGSL's atomicMin/atomicMax on i32 do signed comparisons, so unsigned
         // reductions need atomic<u32> buffers and u32 values.
         private HashSet<int> _unsignedAtomicParameters = new HashSet<int>();
+        // Params that need spinlock companion buffers for i64 Min/Max/Exchange atomics.
+        // These operations require both halves of the i64 to be updated atomically,
+        // which WGSL can't do without a lock.
+        private HashSet<int> _i64SpinlockParams = new HashSet<int>();
+        // Maps param index to lock buffer binding name (set during GenerateHeader)
+        private Dictionary<int, string> _lockBufferNames = new Dictionary<int, string>();
         private HashSet<Value> _hoistedPrimitives = new HashSet<Value>();
         // Tracks WGSL variable names that hold pointer aliases (e.g., "v_27_f0" which is 'let v_27_f0 = &param1_f0;').
         // The post-processor checks this to avoid converting 'let v_28 = v_27_f0;' to 'v_28 = v_27_f0;'
@@ -260,6 +266,18 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                                     _floatAtomicParameters.Add(param.Index);
                                 if (atomic.IsUnsigned)
                                     _unsignedAtomicParameters.Add(param.Index);
+                                // Detect i64 params needing spinlock (Min/Max/Exchange on emulated i64)
+                                var valType = TypeGenerator[atomic.Value.Type];
+                                bool isI64 = valType == "emu_i64" || valType == "emu_u64";
+                                bool needsLock = atomic.Kind == global::ILGPU.IR.Values.AtomicKind.Min
+                                    || atomic.Kind == global::ILGPU.IR.Values.AtomicKind.Max
+                                    || atomic.Kind == global::ILGPU.IR.Values.AtomicKind.Exchange;
+                                if (isI64 && needsLock)
+                                    _i64SpinlockParams.Add(param.Index);
+                                // Also detect f64 needing spinlock (same dual-word problem)
+                                bool isF64 = valType == "emu_f64";
+                                if (isF64 && needsLock)
+                                    _i64SpinlockParams.Add(param.Index);
                             }
                         }
                     }
@@ -1371,6 +1389,18 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 {
                     if (WebGPUBackend.VerboseLogging) WebGPUBackend.Log("[WGSL] Skipping unused _scalar_params binding — body does not reference it");
                 }
+            }
+
+            // Emit spinlock companion buffers for i64 Min/Max/Exchange atomics.
+            // One lock buffer per param that needs it. One atomic<u32> per i64 element.
+            foreach (var paramIdx in _i64SpinlockParams.OrderBy(x => x))
+            {
+                var lockName = $"_lock_param{paramIdx}";
+                _lockBufferNames[paramIdx] = lockName;
+                builder.AppendLine($"@group(0) @binding({bindingIdx}) var<storage, read_write> {lockName} : array<atomic<u32>>;");
+                builder.AppendLine($"// Spinlock buffer for i64 Min/Max/Exchange on param{paramIdx}");
+                bindingIdx++;
+                _generatorArgs.I64SpinlockParamIndices.Add(paramIdx);
             }
 
             // Record expected binding count for runtime validation (bind group must match WGSL layout)
@@ -4141,11 +4171,65 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                      if (valWgslType == "emu_f64")
                      {
                          // f64 atomics: stored as two u32 words (IEEE-754 bits).
-                         // Can't atomically update both words - same problem as i64.
-                         throw new System.NotSupportedException(
-                             $"Atomic.{value.Kind} on Float64 is not supported on the WebGPU backend. " +
-                             $"Float64 is emulated as two 32-bit words; atomic arithmetic requires both " +
-                             $"words to update atomically, which WGSL does not provide.");
+                         // Min/Max/Exchange need spinlock (both words must be consistent).
+                         // Add needs a different approach (CAS loop with IEEE-754 conversion).
+                         bool needsF64Lock = value.Kind == global::ILGPU.IR.Values.AtomicKind.Min
+                             || value.Kind == global::ILGPU.IR.Values.AtomicKind.Max
+                             || value.Kind == global::ILGPU.IR.Values.AtomicKind.Exchange;
+                         if (needsF64Lock)
+                         {
+                             int paramIdxF64 = emulInfo.ParamIndex;
+                             if (!_lockBufferNames.TryGetValue(paramIdxF64, out var lockNameF64))
+                                 throw new System.InvalidOperationException($"No lock buffer for param{paramIdxF64} - ScanForAtomicUsage should have detected f64 {value.Kind}");
+                             string lockIdxF64 = $"u32({baseIdxVar}) / 2u";
+                             string oldLoF64 = $"_sl_old_lo_{target.Name}";
+                             string oldHiF64 = $"_sl_old_hi_{target.Name}";
+
+                             AppendLine($"// f64 {value.Kind}: spinlock on {lockNameF64}");
+                             AppendLine($"loop {{");
+                             PushIndent();
+                             AppendLine($"let _sl_cas_{target.Name} = atomicCompareExchangeWeak(&{lockNameF64}[{lockIdxF64}], 0u, 1u);");
+                             AppendLine($"if (_sl_cas_{target.Name}.exchanged) {{");
+                             PushIndent();
+                             // Critical section: read raw bits, convert to f64, compare, write if needed
+                             AppendLine($"let {oldLoF64} = atomicLoad(&(*{ptrStr})[u32({baseIdxVar})]);");
+                             AppendLine($"let {oldHiF64} = atomicLoad(&(*{ptrStr})[u32({baseIdxVar}) + 1u]);");
+                             AppendLine($"let _sl_old_f64_{target.Name} = f64_from_ieee754_bits(bitcast<u32>({oldLoF64}), bitcast<u32>({oldHiF64}));");
+                             if (value.Kind == global::ILGPU.IR.Values.AtomicKind.Exchange)
+                             {
+                                 string ieeeBitsExch = $"_sl_ieee_{target.Name}";
+                                 AppendLine($"let {ieeeBitsExch} = f64_to_ieee754_bits({val});");
+                                 AppendLine($"atomicStore(&(*{ptrStr})[u32({baseIdxVar})], bitcast<i32>({ieeeBitsExch}.x));");
+                                 AppendLine($"atomicStore(&(*{ptrStr})[u32({baseIdxVar}) + 1u], bitcast<i32>({ieeeBitsExch}.y));");
+                             }
+                             else
+                             {
+                                 // Min/Max: compare using f64 emulation, conditionally write
+                                 string cmpFnF64 = value.Kind == global::ILGPU.IR.Values.AtomicKind.Max ? "f64_gt" : "f64_lt";
+                                 AppendLine($"if ({cmpFnF64}({val}, _sl_old_f64_{target.Name})) {{");
+                                 PushIndent();
+                                 string ieeeBitsNew = $"_sl_ieee_{target.Name}";
+                                 AppendLine($"let {ieeeBitsNew} = f64_to_ieee754_bits({val});");
+                                 AppendLine($"atomicStore(&(*{ptrStr})[u32({baseIdxVar})], bitcast<i32>({ieeeBitsNew}.x));");
+                                 AppendLine($"atomicStore(&(*{ptrStr})[u32({baseIdxVar}) + 1u], bitcast<i32>({ieeeBitsNew}.y));");
+                                 PopIndent();
+                                 AppendLine($"}}");
+                             }
+                             AppendLine($"{target} = _sl_old_f64_{target.Name};");
+                             AppendLine($"atomicStore(&{lockNameF64}[{lockIdxF64}], 0u);");
+                             AppendLine($"break;");
+                             PopIndent();
+                             AppendLine($"}}");
+                             PopIndent();
+                             AppendLine($"}}");
+                         }
+                         else
+                         {
+                             // f64 Add: not yet implemented with spinlock. Throw for now.
+                             throw new System.NotSupportedException(
+                                 $"Atomic.Add on Float64 is not yet supported on the WebGPU backend. " +
+                                 $"Float64 is emulated as two 32-bit words.");
+                         }
                      }
                      else
                      {
@@ -4202,22 +4286,83 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                          }
                          else
                          {
-                             // i64 Min/Max: not safely implementable with only i32 atomics.
-                             throw new System.NotSupportedException(
-                                 $"Atomic.{value.Kind} on Int64/UInt64 is not supported on the WebGPU backend. " +
-                                 $"WebGPU only has 32-bit atomics; i64 {value.Kind} requires 64-bit compare-and-swap " +
-                                 $"which WGSL does not provide.");
+                             // i64 Min/Max/Exchange: spinlock on companion lock buffer.
+                             // Both halves must be read/written atomically. A per-element
+                             // spinlock serializes access to the i64 value.
+                             int paramIdx = emulInfo.ParamIndex;
+                             if (!_lockBufferNames.TryGetValue(paramIdx, out var lockName))
+                                 throw new System.InvalidOperationException($"No lock buffer for param{paramIdx} - ScanForAtomicUsage should have detected i64 {value.Kind}");
+                             string lockIdx = $"u32({baseIdxVar}) / 2u"; // one lock per i64 element (2 u32s)
+                             string oldLoVar2 = $"_sl_old_lo_{target.Name}";
+                             string oldHiVar2 = $"_sl_old_hi_{target.Name}";
+                             string prefix2 = valWgslType == "emu_u64" || value.IsUnsigned ? "u64" : "i64";
+
+                             AppendLine($"// i64 {value.Kind}: spinlock on {lockName}");
+                             AppendLine($"loop {{");
+                             PushIndent();
+                             AppendLine($"let _sl_cas_{target.Name} = atomicCompareExchangeWeak(&{lockName}[{lockIdx}], 0u, 1u);");
+                             AppendLine($"if (_sl_cas_{target.Name}.exchanged) {{");
+                             PushIndent();
+                             // Critical section: read both halves, compute, write if needed
+                             AppendLine($"let {oldLoVar2} = atomicLoad(&(*{ptrStr})[u32({baseIdxVar})]);");
+                             AppendLine($"let {oldHiVar2} = atomicLoad(&(*{ptrStr})[u32({baseIdxVar}) + 1u]);");
+                             AppendLine($"let _sl_old_{target.Name} = {valWgslType}({oldLoVar2}, {oldHiVar2});");
+                             if (value.Kind == global::ILGPU.IR.Values.AtomicKind.Exchange)
+                             {
+                                 // Exchange: unconditionally write new value
+                                 AppendLine($"atomicStore(&(*{ptrStr})[u32({baseIdxVar})], {val}.x);");
+                                 AppendLine($"atomicStore(&(*{ptrStr})[u32({baseIdxVar}) + 1u], {val}.y);");
+                             }
+                             else
+                             {
+                                 // Min/Max: compare and conditionally write
+                                 string cmpFn = value.Kind == global::ILGPU.IR.Values.AtomicKind.Max
+                                     ? $"{prefix2}_gt" : $"{prefix2}_lt";
+                                 AppendLine($"if ({cmpFn}({val}, _sl_old_{target.Name})) {{");
+                                 PushIndent();
+                                 AppendLine($"atomicStore(&(*{ptrStr})[u32({baseIdxVar})], {val}.x);");
+                                 AppendLine($"atomicStore(&(*{ptrStr})[u32({baseIdxVar}) + 1u], {val}.y);");
+                                 PopIndent();
+                                 AppendLine($"}}");
+                             }
+                             AppendLine($"{target} = _sl_old_{target.Name};");
+                             // Release lock
+                             AppendLine($"atomicStore(&{lockName}[{lockIdx}], 0u);");
+                             AppendLine($"break;");
+                             PopIndent();
+                             AppendLine($"}}");
+                             PopIndent();
+                             AppendLine($"}}");
                          }
                      }
                  }
                  else
                  {
-                     // i64/f64 Exchange: not safely implementable with only i32 atomics.
-                     // Both halves must update atomically or a reader sees torn state.
-                     throw new System.NotSupportedException(
-                         $"Atomic.Exchange on Int64/UInt64/Float64 is not supported on the WebGPU backend. " +
-                         $"WebGPU only has 32-bit atomics; Exchange requires both halves to update " +
-                         $"atomically, which WGSL does not provide.");
+                     // Exchange on i64/f64: uses the same spinlock pattern
+                     int paramIdx2 = emulInfo.ParamIndex;
+                     if (!_lockBufferNames.TryGetValue(paramIdx2, out var lockName2))
+                         throw new System.InvalidOperationException($"No lock buffer for param{paramIdx2} - ScanForAtomicUsage should have detected i64 Exchange");
+                     string lockIdx2 = $"u32({baseIdxVar}) / 2u";
+                     string oldLoVar3 = $"_sl_old_lo_{target.Name}";
+                     string oldHiVar3 = $"_sl_old_hi_{target.Name}";
+
+                     AppendLine($"// i64 Exchange: spinlock on {lockName2}");
+                     AppendLine($"loop {{");
+                     PushIndent();
+                     AppendLine($"let _sl_cas_{target.Name} = atomicCompareExchangeWeak(&{lockName2}[{lockIdx2}], 0u, 1u);");
+                     AppendLine($"if (_sl_cas_{target.Name}.exchanged) {{");
+                     PushIndent();
+                     AppendLine($"let {oldLoVar3} = atomicLoad(&(*{ptrStr})[u32({baseIdxVar})]);");
+                     AppendLine($"let {oldHiVar3} = atomicLoad(&(*{ptrStr})[u32({baseIdxVar}) + 1u]);");
+                     AppendLine($"atomicStore(&(*{ptrStr})[u32({baseIdxVar})], {val}.x);");
+                     AppendLine($"atomicStore(&(*{ptrStr})[u32({baseIdxVar}) + 1u], {val}.y);");
+                     AppendLine($"{target} = {valWgslType}({oldLoVar3}, {oldHiVar3});");
+                     AppendLine($"atomicStore(&{lockName2}[{lockIdx2}], 0u);");
+                     AppendLine($"break;");
+                     PopIndent();
+                     AppendLine($"}}");
+                     PopIndent();
+                     AppendLine($"}}");
                  }
                  return;
             }

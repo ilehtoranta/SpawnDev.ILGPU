@@ -1693,7 +1693,7 @@ public abstract partial class BackendTestBase
     {
         var client = WebTorrentClient;
         var dht = new SpawnDev.WebTorrent.DhtDiscovery();
-        var channel = new SpawnDev.WebTorrent.AgentChannel(dht, new SpawnDev.WebTorrent.NoOpSigner(new byte[32]));
+        var channel = new SpawnDev.WebTorrent.AgentChannel(dht, await CreateEd25519Signer());
         await using var coordinator = new P2PSwarmCoordinator(client);
         await coordinator.CreateSwarmAsync("state-test");
 
@@ -1710,7 +1710,7 @@ public abstract partial class BackendTestBase
     {
         var client = WebTorrentClient;
         var dht = new SpawnDev.WebTorrent.DhtDiscovery();
-        var channel = new SpawnDev.WebTorrent.AgentChannel(dht, new SpawnDev.WebTorrent.NoOpSigner(new byte[32]));
+        var channel = new SpawnDev.WebTorrent.AgentChannel(dht, await CreateEd25519Signer());
         await using var coordinator = new P2PSwarmCoordinator(client);
         await coordinator.CreateSwarmAsync("publish-test");
 
@@ -1732,7 +1732,7 @@ public abstract partial class BackendTestBase
     {
         var client = WebTorrentClient;
         var dht = new SpawnDev.WebTorrent.DhtDiscovery();
-        var channel = new SpawnDev.WebTorrent.AgentChannel(dht, new SpawnDev.WebTorrent.NoOpSigner(new byte[32]));
+        var channel = new SpawnDev.WebTorrent.AgentChannel(dht, await CreateEd25519Signer());
         await using var coordinator = new P2PSwarmCoordinator(client);
         // Don't call CreateSwarmAsync — stays as Worker role
 
@@ -1747,7 +1747,7 @@ public abstract partial class BackendTestBase
     {
         var client = WebTorrentClient;
         var dht = new SpawnDev.WebTorrent.DhtDiscovery();
-        var channel = new SpawnDev.WebTorrent.AgentChannel(dht, new SpawnDev.WebTorrent.NoOpSigner(new byte[32]));
+        var channel = new SpawnDev.WebTorrent.AgentChannel(dht, await CreateEd25519Signer());
         await using var coordinator = new P2PSwarmCoordinator(client);
 
         var stateManager = new P2PStateManager(channel, coordinator);
@@ -2074,7 +2074,9 @@ public abstract partial class BackendTestBase
         };
 
         await coordinator.DisposeAsync();
-        await client.DisposeAsync();
+        // Do NOT dispose the WebTorrentClient - it's a DI singleton shared across all tests.
+        // Disposing it here kills every subsequent P2P test with "Client is destroyed".
+        // The coordinator's DisposeAsync is what sends the disconnect messages we're testing.
 
         if (disconnectsSent != 2)
             throw new Exception($"Should send 2 disconnect messages: {disconnectsSent}");
