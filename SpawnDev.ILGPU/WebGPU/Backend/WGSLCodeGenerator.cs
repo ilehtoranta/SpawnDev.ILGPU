@@ -2421,9 +2421,37 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     }
                     else
                     {
-                        AppendLine($"let {oldVar} = *{ptr};");
-                        AppendLine($"*{ptr} = {emuOp}({oldVar}, {val});");
-                        AppendLine($"{target} = {oldVar};");
+                        // Check if this is a bitwise op - can use independent i32 atomics
+                        bool isBitwiseOp = value.Kind == AtomicKind.And
+                            || value.Kind == AtomicKind.Or
+                            || value.Kind == AtomicKind.Xor;
+
+                        if (isBitwiseOp)
+                        {
+                            // Bitwise atomics on emulated i64: two independent i32 atomics
+                            string atomicOp = value.Kind switch
+                            {
+                                AtomicKind.And => "atomicAnd",
+                                AtomicKind.Or => "atomicOr",
+                                AtomicKind.Xor => "atomicXor",
+                                _ => "atomicAnd"
+                            };
+                            // ptr points to vec2<u32> backed by atomic<u32> storage
+                            // Access individual components via pointer arithmetic
+                            string oldLoVar = $"_emu64_old_lo_{target.Name}";
+                            string oldHiVar = $"_emu64_old_hi_{target.Name}";
+                            AppendLine($"// i64 bitwise atomic: independent i32 atomics on lo/hi halves");
+                            AppendLine($"let {oldLoVar} = {atomicOp}(&(*{ptr}).x, {val}.x);");
+                            AppendLine($"let {oldHiVar} = {atomicOp}(&(*{ptr}).y, {val}.y);");
+                            AppendLine($"{target} = {valWgslType}({oldLoVar}, {oldHiVar});");
+                        }
+                        else
+                        {
+                            // Arithmetic atomics - non-atomic fallback (safe for reductions where thread 0 writes)
+                            AppendLine($"let {oldVar} = *{ptr};");
+                            AppendLine($"*{ptr} = {emuOp}({oldVar}, {val});");
+                            AppendLine($"{target} = {oldVar};");
+                        }
                     }
                 }
 

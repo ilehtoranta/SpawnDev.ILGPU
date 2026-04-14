@@ -638,8 +638,125 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                 throw new Exception($"Reduce<AddUInt64> expected {expectedSum}, got {sumResult[0]}");
         });
 
-        // StructArrayRoundTripTest removed — was a diagnostic for RadixSort pairs investigation.
-        // Passed on Wasm (struct array I/O works) but failed on CPU/CUDA (TestPair struct layout).
-        // The finding: basic struct array I/O works on Wasm; pairs sort issue is in RadixSortKernel1/2.
+        // ══════════════════════════════════════════════════════════════
+        //  i64 Bitwise Atomic Tests
+        //  Verifies Atomic.And/Or/Xor on long work correctly when
+        //  multiple threads operate on the same 64-bit value.
+        //  On WebGPU: i64 is emulated as vec2<u32>, these use
+        //  independent i32 atomics on lo/hi halves.
+        // ══════════════════════════════════════════════════════════════
+
+        /// <summary>N threads each clear a different bit. Final value should have all N bits cleared.</summary>
+        static void AtomicAndInt64Kernel(Index1D index, ArrayView<long> buffer)
+        {
+            // Each thread clears its own bit: AND with ~(1L << index)
+            long mask = ~(1L << (index % 64));
+            Atomic.And(ref buffer[0], mask);
+        }
+
+        [TestMethod]
+        public async Task AtomicAnd_Int64_MultithreadedBitClear() => await RunTest(async accelerator =>
+        {
+            // Start with all bits set (0xFFFFFFFFFFFFFFFF = -1L)
+            using var buf = accelerator.Allocate1D(new long[] { -1L });
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<long>>(AtomicAndInt64Kernel);
+
+            // 64 threads, each clearing one bit
+            kernel((Index1D)64, buf.View);
+            await accelerator.SynchronizeAsync();
+
+            var result = await buf.CopyToHostAsync<long>();
+            if (result[0] != 0L)
+                throw new Exception($"AtomicAnd i64 failed. Expected 0 (all bits cleared), got {result[0]:X16}");
+        });
+
+        /// <summary>N threads each set a different bit. Final value should have all N bits set.</summary>
+        static void AtomicOrInt64Kernel(Index1D index, ArrayView<long> buffer)
+        {
+            // Each thread sets its own bit: OR with (1L << index)
+            long mask = 1L << (index % 64);
+            Atomic.Or(ref buffer[0], mask);
+        }
+
+        [TestMethod]
+        public async Task AtomicOr_Int64_MultithreadedBitSet() => await RunTest(async accelerator =>
+        {
+            // Start with no bits set
+            using var buf = accelerator.Allocate1D(new long[] { 0L });
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<long>>(AtomicOrInt64Kernel);
+
+            // 64 threads, each setting one bit
+            kernel((Index1D)64, buf.View);
+            await accelerator.SynchronizeAsync();
+
+            var result = await buf.CopyToHostAsync<long>();
+            if (result[0] != -1L) // -1L = all bits set = 0xFFFFFFFFFFFFFFFF
+                throw new Exception($"AtomicOr i64 failed. Expected -1 (all bits set), got {result[0]:X16}");
+        });
+
+        /// <summary>N threads each XOR the same bit. Even count = original, odd count = flipped.</summary>
+        static void AtomicXorInt64Kernel(Index1D index, ArrayView<long> buffer)
+        {
+            // All threads XOR bit 0. With 64 threads (even), bit 0 should be unchanged.
+            // Threads 0-31 XOR low bits, threads 32-63 XOR high bits for coverage.
+            long mask = 1L << (index % 64);
+            Atomic.Xor(ref buffer[0], mask);
+        }
+
+        [TestMethod]
+        public async Task AtomicXor_Int64_MultithreadedBitFlip() => await RunTest(async accelerator =>
+        {
+            // Start with all bits set. 64 threads each XOR a unique bit once = all bits flipped to 0.
+            using var buf = accelerator.Allocate1D(new long[] { -1L });
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<long>>(AtomicXorInt64Kernel);
+
+            // 64 threads, each flipping one unique bit
+            kernel((Index1D)64, buf.View);
+            await accelerator.SynchronizeAsync();
+
+            var result = await buf.CopyToHostAsync<long>();
+            if (result[0] != 0L)
+                throw new Exception($"AtomicXor i64 failed. Expected 0 (all bits flipped), got {result[0]:X16}");
+        });
+
+        /// <summary>Realistic VoxelEngine pattern: multiple threads clearing bits in a shared face mask.</summary>
+        static void AtomicAndInt64_FaceMaskKernel(Index1D index, ArrayView<long> masks, ArrayView<int> results)
+        {
+            int maskIdx = index / 32; // 2 masks, 32 threads per mask
+            int bit = index % 32;
+
+            // Clear bits 0-31 in each mask (simulating greedy merge consuming faces)
+            long clearMask = ~(1L << bit);
+            Atomic.And(ref masks[maskIdx], clearMask);
+
+            // After all clears, the remaining bits (32-63) should still be set
+            // Use a barrier or just read at the end
+            if (bit == 0)
+            {
+                // Thread 0 of each group reads the final value
+                results[maskIdx] = (int)(masks[maskIdx] >> 32);
+            }
+        }
+
+        [TestMethod]
+        public async Task AtomicAnd_Int64_FaceMaskPattern() => await RunTest(async accelerator =>
+        {
+            // 2 face masks, each with all 64 bits set
+            // 32 threads per mask clear bits 0-31, leaving bits 32-63 set
+            using var masks = accelerator.Allocate1D(new long[] { -1L, -1L });
+            using var results = accelerator.Allocate1D(new int[] { 0, 0 });
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<long>, ArrayView<int>>(AtomicAndInt64_FaceMaskKernel);
+
+            kernel((Index1D)64, masks.View, results.View);
+            await accelerator.SynchronizeAsync();
+
+            var maskResult = await masks.CopyToHostAsync<long>();
+            // Bits 0-31 should be cleared, bits 32-63 should remain set
+            long expectedMask = unchecked((long)0xFFFFFFFF00000000L);
+            if (maskResult[0] != expectedMask)
+                throw new Exception($"FaceMask[0] failed. Expected {expectedMask:X16}, got {maskResult[0]:X16}");
+            if (maskResult[1] != expectedMask)
+                throw new Exception($"FaceMask[1] failed. Expected {expectedMask:X16}, got {maskResult[1]:X16}");
+        });
     }
 }

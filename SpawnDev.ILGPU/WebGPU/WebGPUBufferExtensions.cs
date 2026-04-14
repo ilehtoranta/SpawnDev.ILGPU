@@ -14,12 +14,13 @@ namespace SpawnDev.ILGPU.WebGPU
     {
         /// <summary>
         /// Copies a sub-range of data from the GPU buffer back to the host asynchronously.
-        /// Allocates and returns a new T[] array of the specified length.
+        /// WebGPU-optimized: uses staging buffer to copy only the requested range (unlike the
+        /// cross-platform version which reads the entire buffer then slices).
         /// </summary>
         /// <param name="buffer">The source GPU buffer.</param>
         /// <param name="sourceOffset">Offset in elements from the start of the GPU buffer.</param>
         /// <param name="length">Number of elements to copy.</param>
-        public static async Task<T[]> CopyToHostAsync<T>(this MemoryBuffer1D<T, Stride1D.Dense> buffer, long sourceOffset, long length) where T : unmanaged
+        public static async Task<T[]> CopyToHostRangeAsync<T>(this MemoryBuffer1D<T, Stride1D.Dense> buffer, long sourceOffset, long length) where T : unmanaged
         {
             var result = new T[length];
             await CopyToHostAsync(buffer, result, sourceOffset, length);

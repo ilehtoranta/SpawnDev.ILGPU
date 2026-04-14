@@ -4125,12 +4125,40 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                      else
                      {
                          // emu_i64 / emu_u64
-                         string resultVar = $"_result_{target.Name}";
-                         AppendLine($"let {oldVar} = {valWgslType}((*{ptrStr})[u32({baseIdxVar})], (*{ptrStr})[u32({baseIdxVar}) + 1u]);");
-                         AppendLine($"let {resultVar} = {emuOp}({oldVar}, {val});");
-                         AppendLine($"(*{ptrStr})[u32({baseIdxVar})] = {resultVar}.x;");
-                         AppendLine($"(*{ptrStr})[u32({baseIdxVar}) + 1u] = {resultVar}.y;");
-                         AppendLine($"{target} = {oldVar};");
+                         // Check if this is a bitwise op (And/Or/Xor) - these can use
+                         // independent i32 atomics on lo/hi halves (no carry between halves)
+                         bool isBitwiseOp = value.Kind == global::ILGPU.IR.Values.AtomicKind.And
+                             || value.Kind == global::ILGPU.IR.Values.AtomicKind.Or
+                             || value.Kind == global::ILGPU.IR.Values.AtomicKind.Xor;
+
+                         if (isBitwiseOp)
+                         {
+                             // Bitwise atomics on emulated i64: two independent i32 atomics
+                             // No carry between halves - each bit is independent
+                             string atomicOp = value.Kind switch
+                             {
+                                 global::ILGPU.IR.Values.AtomicKind.And => "atomicAnd",
+                                 global::ILGPU.IR.Values.AtomicKind.Or => "atomicOr",
+                                 global::ILGPU.IR.Values.AtomicKind.Xor => "atomicXor",
+                                 _ => "atomicAnd" // unreachable
+                             };
+                             string oldLoVar = $"_emu64_old_lo_{target.Name}";
+                             string oldHiVar = $"_emu64_old_hi_{target.Name}";
+                             AppendLine($"let {oldLoVar} = {atomicOp}(&(*{ptrStr})[u32({baseIdxVar})], {val}.x);");
+                             AppendLine($"let {oldHiVar} = {atomicOp}(&(*{ptrStr})[u32({baseIdxVar}) + 1u], {val}.y);");
+                             AppendLine($"{target} = {valWgslType}({oldLoVar}, {oldHiVar});");
+                         }
+                         else
+                         {
+                             // Arithmetic atomics (Add, Max, Min, Exchange) - non-atomic fallback
+                             // TODO: Implement CAS loop for Add when needed
+                             string resultVar = $"_result_{target.Name}";
+                             AppendLine($"let {oldVar} = {valWgslType}((*{ptrStr})[u32({baseIdxVar})], (*{ptrStr})[u32({baseIdxVar}) + 1u]);");
+                             AppendLine($"let {resultVar} = {emuOp}({oldVar}, {val});");
+                             AppendLine($"(*{ptrStr})[u32({baseIdxVar})] = {resultVar}.x;");
+                             AppendLine($"(*{ptrStr})[u32({baseIdxVar}) + 1u] = {resultVar}.y;");
+                             AppendLine($"{target} = {oldVar};");
+                         }
                      }
                  }
                  else
