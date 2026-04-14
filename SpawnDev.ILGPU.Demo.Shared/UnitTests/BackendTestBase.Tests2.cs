@@ -720,7 +720,7 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
         });
 
         /// <summary>Realistic VoxelEngine pattern: multiple threads clearing bits in a shared face mask.</summary>
-        static void AtomicAndInt64_FaceMaskKernel(Index1D index, ArrayView<long> masks, ArrayView<int> results)
+        static void AtomicAndInt64_FaceMaskKernel(Index1D index, ArrayView<long> masks)
         {
             int maskIdx = index / 32; // 2 masks, 32 threads per mask
             int bit = index % 32;
@@ -728,14 +728,6 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             // Clear bits 0-31 in each mask (simulating greedy merge consuming faces)
             long clearMask = ~(1L << bit);
             Atomic.And(ref masks[maskIdx], clearMask);
-
-            // After all clears, the remaining bits (32-63) should still be set
-            // Use a barrier or just read at the end
-            if (bit == 0)
-            {
-                // Thread 0 of each group reads the final value
-                results[maskIdx] = (int)(masks[maskIdx] >> 32);
-            }
         }
 
         [TestMethod]
@@ -744,10 +736,9 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             // 2 face masks, each with all 64 bits set
             // 32 threads per mask clear bits 0-31, leaving bits 32-63 set
             using var masks = accelerator.Allocate1D(new long[] { -1L, -1L });
-            using var results = accelerator.Allocate1D(new int[] { 0, 0 });
-            var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<long>, ArrayView<int>>(AtomicAndInt64_FaceMaskKernel);
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<long>>(AtomicAndInt64_FaceMaskKernel);
 
-            kernel((Index1D)64, masks.View, results.View);
+            kernel((Index1D)64, masks.View);
             await accelerator.SynchronizeAsync();
 
             var maskResult = await masks.CopyToHostAsync<long>();

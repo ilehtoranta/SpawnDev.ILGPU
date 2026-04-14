@@ -153,6 +153,20 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
         public new async Task AtomicAndOrXorTest() =>
             throw new UnsupportedTestException("WebGL: GLSL ES 3.0 lacks atomicAnd/atomicOr/atomicXor");
 
+        // --- i64 bitwise atomics (WebGL has no atomics at all) ---
+        [TestMethod]
+        public new async Task AtomicAnd_Int64_MultithreadedBitClear() =>
+            throw new UnsupportedTestException("WebGL: no atomic operations");
+        [TestMethod]
+        public new async Task AtomicOr_Int64_MultithreadedBitSet() =>
+            throw new UnsupportedTestException("WebGL: no atomic operations");
+        [TestMethod]
+        public new async Task AtomicXor_Int64_MultithreadedBitFlip() =>
+            throw new UnsupportedTestException("WebGL: no atomic operations");
+        [TestMethod]
+        public new async Task AtomicAnd_Int64_FaceMaskPattern() =>
+            throw new UnsupportedTestException("WebGL: no atomic operations");
+
         // --- Part 4: Explicitly grouped kernels (no workgroups in vertex shaders) ---
         [TestMethod]
         public new async Task ExplicitGroupKernelTest() =>
