@@ -187,7 +187,7 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                     var diag = "";
                     try
                     {
-                        var gpuKeys = keysBuf.GetAsArray1D();
+                        var gpuKeys = await keysBuf.CopyToHostAsync();
                         // CPU reference sort (descending)
                         var cpuKeys = (int[])gpuKeys.Clone();
                         Array.Sort(cpuKeys);
@@ -238,7 +238,7 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                     var intDiag = "";
                     try
                     {
-                        var gpuKeys = keysBuf.GetAsArray1D();
+                        var gpuKeys = await keysBuf.CopyToHostAsync();
                         var cpuKeys = (int[])gpuKeys.Clone();
                         Array.Sort(cpuKeys);
                         Array.Reverse(cpuKeys);
