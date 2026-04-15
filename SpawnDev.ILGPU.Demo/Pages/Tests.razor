@@ -82,17 +82,24 @@ else
     IServiceCollection ServiceDescriptors { get; set; } = default!;
     string? _copyStatus;
     string? _dumpStatus;
-    async Task CopyBuildInfo()
+
+    // Suppress re-renders from button clicks so UnitTestsView doesn't lose test state
+    private bool _suppressRender;
+    protected override bool ShouldRender()
     {
-        try
-        {
-            await JS.CallVoidAsync("navigator.clipboard.writeText", BuildTimestamp.FullBuildInfo);
-        }
+        if (_suppressRender) { _suppressRender = false; return false; }
+        return true;
+    }
+
+    void CopyBuildInfo()
+    {
+        _suppressRender = true;
+        try { JS.CallVoid("navigator.clipboard.writeText", BuildTimestamp.FullBuildInfo); }
         catch { }
     }
 
-    async Task PickDebugFolder() { await _shaderDebug.PickFolderAsync(); }
-    async Task GrantWriteAccess() { await _shaderDebug.RequestWritePermissionAsync(); }
+    async Task PickDebugFolder() { _suppressRender = true; await _shaderDebug.PickFolderAsync(); }
+    async Task GrantWriteAccess() { _suppressRender = true; await _shaderDebug.RequestWritePermissionAsync(); }
     List<Assembly>? Assemblies = new List<Assembly>();
     List<Type>? Types = new List<Type>();
     object? TestTypeResolver(Type testType)
