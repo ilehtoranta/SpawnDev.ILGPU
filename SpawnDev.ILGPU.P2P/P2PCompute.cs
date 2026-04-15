@@ -45,6 +45,9 @@ public class P2PCompute : IAsyncDisposable
     /// <summary>The worker (worker side).</summary>
     public P2PWorker? Worker { get; }
 
+    /// <summary>BEP 46 DHT state persistence - swarm state survives coordinator loss.</summary>
+    public P2PStateManager? StateManager { get; private set; }
+
     /// <summary>The cryptographic identity.</summary>
     public SwarmIdentity Identity { get; }
 
@@ -171,7 +174,7 @@ public class P2PCompute : IAsyncDisposable
             await transport.SendSignedMessageAsync(peerId, msg);
         };
 
-        // Wire bridge peer discovery to coordinator — when a compute peer connects
+        // Wire bridge peer discovery to coordinator - when a compute peer connects
         // via WebRTC + sd_compute handshake, register them with capabilities
         bridge.OnComputePeerCapabilities += (peerId, caps) =>
         {
@@ -181,7 +184,32 @@ public class P2PCompute : IAsyncDisposable
             Console.WriteLine($"[P2PCompute] HandlePeerConnected result: {result}, PeerCount: {coordinator.PeerCount}");
         };
 
-        return new P2PCompute(client, identity, coordinator, accelerator, dispatcher, transport, bridge, context: context);
+        var compute = new P2PCompute(client, identity, coordinator, accelerator, dispatcher, transport, bridge, context: context);
+
+        // Wire BEP 46 DHT state persistence if DHT is available
+        if (client.Dht != null)
+        {
+            var signer = new Ed25519Signer(crypto);
+            await signer.ImportKeyAsync(
+                await crypto.ExportPublicKeySpki(identity.Key),
+                await crypto.ExportPrivateKeyPkcs8(identity.Key));
+            var channel = new AgentChannel(client.Dht, signer);
+            compute.StateManager = new P2PStateManager(channel, coordinator);
+
+            // Auto-publish state when peers join or leave
+            coordinator.OnPeerJoined += async (_) =>
+            {
+                if (compute.StateManager != null)
+                    await compute.StateManager.PublishStateAsync();
+            };
+            coordinator.OnPeerLeft += async (_) =>
+            {
+                if (compute.StateManager != null)
+                    await compute.StateManager.PublishStateAsync();
+            };
+        }
+
+        return compute;
     }
 
     /// <summary>
@@ -249,7 +277,32 @@ public class P2PCompute : IAsyncDisposable
             Console.WriteLine($"[P2PCompute Join] HandlePeerConnected result: {result}, PeerCount: {coordinator.PeerCount}");
         };
 
-        return new P2PCompute(client, identity, coordinator, p2pAccel, dispatcher, transport, bridge, worker);
+        var compute = new P2PCompute(client, identity, coordinator, p2pAccel, dispatcher, transport, bridge, worker);
+
+        // Wire BEP 46 DHT state subscription if DHT is available
+        if (client.Dht != null)
+        {
+            var signer = new Ed25519Signer(crypto);
+            await signer.GenerateKeyAsync();
+            var channel = new AgentChannel(client.Dht, signer);
+            compute.StateManager = new P2PStateManager(channel, coordinator);
+
+            // Subscribe to coordinator's state updates via DHT
+            // The coordinator's public key is obtained from the magnet link or handshake
+            compute.StateManager.OnStateUpdated += (state) =>
+            {
+                Console.WriteLine($"[P2PCompute Join] DHT state update: coordinator={state.CoordinatorPeerId}, " +
+                    $"peers={state.PeerCount}, TFLOPS={state.TotalTflops:F1}");
+            };
+
+            compute.StateManager.OnCoordinatorAnnounced += (announcement) =>
+            {
+                Console.WriteLine($"[P2PCompute Join] New coordinator announced: {announcement.CoordinatorPeerId}");
+                worker.NotifyCoordinatorChanged();
+            };
+        }
+
+        return compute;
     }
 
     /// <summary>

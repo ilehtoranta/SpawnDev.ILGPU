@@ -130,6 +130,9 @@ async Task RunSelfTest()
         Capabilities = caps,
     });
 
+    // Register kernel type for P2P security allowlist
+    P2PKernelSerializer.RegisterKernelType(typeof(TestKernels));
+
     // Pre-compile kernel
     var method = typeof(TestKernels).GetMethod(nameof(TestKernels.VectorAdd))!;
     var compiled = worker.PreCompileKernel(method);
@@ -137,31 +140,78 @@ async Task RunSelfTest()
 
     // Create dispatch
     var request = P2PKernelSerializer.CreateDispatch(method, gridDimX: 1024);
+    // Index1D is param 0 (auto-filled), ArrayView params start at index 1
     request.Buffers = new[]
     {
-        new BufferBinding { ParameterIndex = 0, BufferId = "a", Length = 1024, ElementSize = 4 },
-        new BufferBinding { ParameterIndex = 1, BufferId = "b", Length = 1024, ElementSize = 4 },
-        new BufferBinding { ParameterIndex = 2, BufferId = "result", Length = 1024, ElementSize = 4 },
+        new BufferBinding { ParameterIndex = 1, BufferId = "a", Length = 1024, ElementSize = 4 },
+        new BufferBinding { ParameterIndex = 2, BufferId = "b", Length = 1024, ElementSize = 4 },
+        new BufferBinding { ParameterIndex = 3, BufferId = "result", Length = 1024, ElementSize = 4 },
     };
 
-    // Send buffers
-    worker.ReceiveBuffer("a", new byte[4096]);
-    worker.ReceiveBuffer("b", new byte[4096]);
+    // Prepare real data: a[i] = i, b[i] = i * 2, expected result[i] = i * 3
+    int n = 1024;
+    var aData = new byte[n * 4];
+    var bData = new byte[n * 4];
+    var aFloats = new float[n];
+    var bFloats = new float[n];
+    for (int i = 0; i < n; i++)
+    {
+        aFloats[i] = i;
+        bFloats[i] = i * 2;
+    }
+    Buffer.BlockCopy(aFloats, 0, aData, 0, n * 4);
+    Buffer.BlockCopy(bFloats, 0, bData, 0, n * 4);
+
+    worker.ReceiveBuffer("a", aData);
+    worker.ReceiveBuffer("b", bData);
 
     // Dispatch and handle
     bool completed = false;
-    worker.OnKernelCompleted += (id, success, ms) =>
+    bool success = false;
+    double durationMs = 0;
+    worker.OnKernelCompleted += (id, s, ms) =>
     {
-        Console.WriteLine($"[SelfTest] Dispatch {id}: success={success}, {ms:N0}ms");
+        Console.WriteLine($"[SelfTest] Dispatch {id}: success={s}, {ms:N1}ms");
         completed = true;
+        success = s;
+        durationMs = ms;
     };
 
     await worker.HandleDispatchAsync("coordinator", request);
 
-    if (completed)
-        Console.WriteLine("[SelfTest] PASS — Full pipeline works.");
+    if (!completed || !success)
+    {
+        Console.WriteLine("[SelfTest] FAIL - Dispatch did not complete successfully.");
+        return;
+    }
+
+    // Verify result buffer: result[i] should equal a[i] + b[i] = i + i*2 = i*3
+    var resultData = worker.GetBuffer("result");
+    if (resultData == null || resultData.Length != n * 4)
+    {
+        Console.WriteLine($"[SelfTest] FAIL - Result buffer missing or wrong size (expected {n * 4}, got {resultData?.Length ?? 0}).");
+        return;
+    }
+
+    var resultFloats = new float[n];
+    Buffer.BlockCopy(resultData, 0, resultFloats, 0, n * 4);
+
+    int violations = 0;
+    for (int i = 0; i < n; i++)
+    {
+        float expected = i * 3.0f;
+        if (Math.Abs(resultFloats[i] - expected) > 0.001f)
+        {
+            if (violations < 5)
+                Console.WriteLine($"[SelfTest] Mismatch at [{i}]: expected {expected}, got {resultFloats[i]}");
+            violations++;
+        }
+    }
+
+    if (violations > 0)
+        Console.WriteLine($"[SelfTest] FAIL - {violations} / {n} elements incorrect.");
     else
-        Console.WriteLine("[SelfTest] FAIL — Dispatch did not complete.");
+        Console.WriteLine($"[SelfTest] PASS - All {n} elements verified correct. VectorAdd dispatched in {durationMs:N1}ms.");
 }
 
 /// <summary>
