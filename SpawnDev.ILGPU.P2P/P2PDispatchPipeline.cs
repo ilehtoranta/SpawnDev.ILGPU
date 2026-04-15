@@ -68,53 +68,78 @@ public class P2PDispatchPipeline
 
         var sw = System.Diagnostics.Stopwatch.StartNew();
         var stageResults = new List<KernelDispatchResult>();
+        // Track all intermediate buffer IDs for cleanup on failure
+        var intermediateBufferIds = new HashSet<string>();
 
-        // Execute each stage sequentially — all on the same peer
-        // The dispatcher's buffer locality tracking keeps data on the first peer
-        for (int i = 0; i < _stages.Count; i++)
+        try
         {
-            var stage = _stages[i];
-            var request = P2PKernelSerializer.CreateDispatch(stage.KernelMethod, stage.GridDimX);
-
-            var bindings = new BufferBinding[stage.Buffers.Length];
-            for (int j = 0; j < stage.Buffers.Length; j++)
+            // Execute each stage sequentially - all on the same peer
+            // The dispatcher's buffer locality tracking keeps data on the first peer
+            for (int i = 0; i < _stages.Count; i++)
             {
-                bindings[j] = new BufferBinding
+                var stage = _stages[i];
+                var request = P2PKernelSerializer.CreateDispatch(stage.KernelMethod, stage.GridDimX);
+
+                var bindings = new BufferBinding[stage.Buffers.Length];
+                for (int j = 0; j < stage.Buffers.Length; j++)
                 {
-                    ParameterIndex = j + 1,
-                    BufferId = stage.Buffers[j].BufferId,
-                    Length = stage.Buffers[j].Data?.Length / stage.Buffers[j].ElementSize ?? 0,
-                    ElementSize = stage.Buffers[j].ElementSize,
-                };
+                    var buf = stage.Buffers[j];
+                    bindings[j] = new BufferBinding
+                    {
+                        ParameterIndex = j + 1,
+                        BufferId = buf.BufferId,
+                        Length = buf.Data?.Length / buf.ElementSize ?? 0,
+                        ElementSize = buf.ElementSize,
+                    };
+                    // Track intermediate buffers (those without initial data that are
+                    // created by the pipeline, not supplied by the caller)
+                    if (buf.Data == null)
+                        intermediateBufferIds.Add(buf.BufferId);
+                }
+                request.Buffers = bindings;
+
+                // First stage sends data; subsequent stages reuse buffers on the peer
+                var result = await _accelerator.Dispatcher.DispatchAsync(request);
+                stageResults.Add(result);
+
+                if (!result.Success)
+                {
+                    sw.Stop();
+                    return new PipelineResult
+                    {
+                        Success = false,
+                        FailedStage = i,
+                        Error = $"Stage {i} ({stage.KernelMethod.Name}) failed: {result.Error}",
+                        WallTimeMs = sw.Elapsed.TotalMilliseconds,
+                        StageResults = stageResults.ToArray(),
+                        IntermediateBufferIds = intermediateBufferIds.ToArray(),
+                    };
+                }
             }
-            request.Buffers = bindings;
 
-            // First stage sends data; subsequent stages reuse buffers on the peer
-            var result = await _accelerator.Dispatcher.DispatchAsync(request);
-            stageResults.Add(result);
-
-            if (!result.Success)
+            sw.Stop();
+            return new PipelineResult
             {
-                sw.Stop();
-                return new PipelineResult
-                {
-                    Success = false,
-                    FailedStage = i,
-                    Error = $"Stage {i} ({stage.KernelMethod.Name}) failed: {result.Error}",
-                    WallTimeMs = sw.Elapsed.TotalMilliseconds,
-                    StageResults = stageResults.ToArray(),
-                };
-            }
+                Success = true,
+                WallTimeMs = sw.Elapsed.TotalMilliseconds,
+                StageResults = stageResults.ToArray(),
+                TotalStages = _stages.Count,
+                IntermediateBufferIds = intermediateBufferIds.ToArray(),
+            };
         }
-
-        sw.Stop();
-        return new PipelineResult
+        catch (Exception ex)
         {
-            Success = true,
-            WallTimeMs = sw.Elapsed.TotalMilliseconds,
-            StageResults = stageResults.ToArray(),
-            TotalStages = _stages.Count,
-        };
+            sw.Stop();
+            return new PipelineResult
+            {
+                Success = false,
+                FailedStage = stageResults.Count,
+                Error = $"Pipeline exception at stage {stageResults.Count}: {ex.Message}",
+                WallTimeMs = sw.Elapsed.TotalMilliseconds,
+                StageResults = stageResults.ToArray(),
+                IntermediateBufferIds = intermediateBufferIds.ToArray(),
+            };
+        }
     }
 
     /// <summary>Number of stages in the pipeline.</summary>
@@ -157,6 +182,10 @@ public record PipelineResult
 
     /// <summary>Per-stage results.</summary>
     public KernelDispatchResult[] StageResults { get; init; } = Array.Empty<KernelDispatchResult>();
+
+    /// <summary>IDs of intermediate buffers created during pipeline execution.
+    /// Callers should clean these up on the worker when the pipeline is done or fails.</summary>
+    public string[] IntermediateBufferIds { get; init; } = Array.Empty<string>();
 
     /// <summary>Sum of all stage durations (ms).</summary>
     public double TotalStageDurationMs => StageResults.Sum(s => s.DurationMs);

@@ -5,7 +5,7 @@
 // File: SwarmIdentity.cs
 //
 // Cryptographic identity for swarm ownership. An owner is identified by their
-// ECDSA key pair — not by device, IP, or peer ID. The same key works from any
+// Ed25519 key pair - not by device, IP, or peer ID. The same key works from any
 // device (desktop, browser, YubiKey, passkey).
 // ---------------------------------------------------------------------------------------
 
@@ -16,20 +16,21 @@ namespace SpawnDev.ILGPU.P2P
 {
     /// <summary>
     /// Represents a cryptographic identity for swarm ownership and role management.
-    /// Uses ECDSA-P256 via SpawnDev.BlazorJS.Cryptography for cross-platform signing
-    /// (browser SubtleCrypto + desktop System.Security.Cryptography).
+    /// Uses Ed25519 via SpawnDev.BlazorJS.Cryptography for cross-platform signing
+    /// (browser SubtleCrypto with managed fallback + desktop managed Ed25519).
     /// </summary>
     public class SwarmIdentity : IAsyncDisposable
     {
         private readonly IPortableCrypto _crypto;
 
         /// <summary>
-        /// The ECDSA key pair for this identity.
+        /// The Ed25519 key pair for this identity.
         /// </summary>
-        public PortableECDSAKey Key { get; }
+        public PortableEd25519Key Key { get; }
 
         /// <summary>
         /// The public key in SPKI format (for sharing with peers).
+        /// Ed25519 SPKI is always 44 bytes (12-byte DER prefix + 32-byte raw key).
         /// </summary>
         public byte[] PublicKeySpki { get; private set; } = Array.Empty<byte>();
 
@@ -44,17 +45,10 @@ namespace SpawnDev.ILGPU.P2P
         /// </summary>
         public string Label { get; set; } = "";
 
-        /// <summary>
-        /// The named curve used for this identity.
-        /// </summary>
-        public string CurveName { get; }
-
-        private SwarmIdentity(IPortableCrypto crypto, PortableECDSAKey key,
-            string namedCurve = PortableCrypto.NamedCurve.P256)
+        private SwarmIdentity(IPortableCrypto crypto, PortableEd25519Key key)
         {
             _crypto = crypto;
             Key = key;
-            CurveName = namedCurve;
         }
 
         /// <summary>
@@ -69,18 +63,16 @@ namespace SpawnDev.ILGPU.P2P
         }
 
         /// <summary>
-        /// Creates a new identity with a fresh ECDSA key pair.
+        /// Creates a new identity with a fresh Ed25519 key pair.
         /// </summary>
         /// <param name="crypto">The cross-platform crypto provider.</param>
         /// <param name="label">Optional human-readable label.</param>
-        /// <param name="namedCurve">The ECDSA curve (default P-256).</param>
         public static async Task<SwarmIdentity> CreateAsync(
             IPortableCrypto crypto,
-            string label = "",
-            string namedCurve = PortableCrypto.NamedCurve.P256)
+            string label = "")
         {
-            var key = await crypto.GenerateECDSAKey(namedCurve, extractable: true);
-            var identity = new SwarmIdentity(crypto, key, namedCurve) { Label = label };
+            var key = await crypto.GenerateEd25519Key(extractable: true);
+            var identity = new SwarmIdentity(crypto, key) { Label = label };
             await identity.InitializeAsync();
             return identity;
         }
@@ -89,20 +81,18 @@ namespace SpawnDev.ILGPU.P2P
         /// Imports an identity from exported key material (SPKI public + PKCS8 private).
         /// </summary>
         /// <param name="crypto">The cross-platform crypto provider.</param>
-        /// <param name="publicKeySpki">The public key in SPKI format.</param>
-        /// <param name="privateKeyPkcs8">The private key in PKCS8 format.</param>
+        /// <param name="publicKeySpki">The public key in SPKI format (44 bytes).</param>
+        /// <param name="privateKeyPkcs8">The private key in PKCS8 format (48 bytes).</param>
         /// <param name="label">Optional human-readable label.</param>
-        /// <param name="namedCurve">The ECDSA curve (default P-256).</param>
         public static async Task<SwarmIdentity> ImportAsync(
             IPortableCrypto crypto,
             byte[] publicKeySpki,
             byte[] privateKeyPkcs8,
-            string label = "",
-            string namedCurve = PortableCrypto.NamedCurve.P256)
+            string label = "")
         {
-            var key = await crypto.ImportECDSAKey(publicKeySpki, privateKeyPkcs8,
-                namedCurve, extractable: true);
-            var identity = new SwarmIdentity(crypto, key, namedCurve) { Label = label };
+            var key = await crypto.ImportEd25519Key(publicKeySpki, privateKeyPkcs8,
+                extractable: true);
+            var identity = new SwarmIdentity(crypto, key) { Label = label };
             await identity.InitializeAsync();
             return identity;
         }
@@ -111,23 +101,21 @@ namespace SpawnDev.ILGPU.P2P
         /// Imports a public-key-only identity (for verification, not signing).
         /// </summary>
         /// <param name="crypto">The cross-platform crypto provider.</param>
-        /// <param name="publicKeySpki">The public key in SPKI format.</param>
-        /// <param name="namedCurve">The ECDSA curve (default P-256).</param>
+        /// <param name="publicKeySpki">The public key in SPKI format (44 bytes).</param>
         public static async Task<SwarmIdentity> ImportPublicKeyAsync(
             IPortableCrypto crypto,
-            byte[] publicKeySpki,
-            string namedCurve = PortableCrypto.NamedCurve.P256)
+            byte[] publicKeySpki)
         {
-            var key = await crypto.ImportECDSAKey(publicKeySpki, namedCurve,
+            var key = await crypto.ImportEd25519Key(publicKeySpki,
                 extractable: false);
-            var identity = new SwarmIdentity(crypto, key, namedCurve);
+            var identity = new SwarmIdentity(crypto, key);
             await identity.InitializeAsync();
             return identity;
         }
 
         /// <summary>
         /// Creates an identity backed by a hardware security key (YubiKey, passkey).
-        /// The hardware key holds the private key — signing happens through WebAuthn.
+        /// The hardware key holds the private key - signing happens through WebAuthn.
         /// The public key from registration is used for KeyRegistry verification.
         /// </summary>
         /// <param name="crypto">The cross-platform crypto provider.</param>
@@ -137,15 +125,15 @@ namespace SpawnDev.ILGPU.P2P
             IPortableCrypto crypto,
             HardwareKeyCredential credential)
         {
-            // Import the public key for verification — the private key lives in the authenticator
-            var key = await crypto.ImportECDSAKey(credential.PublicKeySpki,
-                PortableCrypto.NamedCurve.P256, extractable: false);
-            var identity = new SwarmIdentity(crypto, key, PortableCrypto.NamedCurve.P256)
+            // Import the public key for verification - the private key lives in the authenticator
+            var key = await crypto.ImportEd25519Key(credential.PublicKeySpki,
+                extractable: false);
+            var identity = new SwarmIdentity(crypto, key)
             {
                 Label = credential.Label,
                 HardwareCredentialId = credential.CredentialId,
                 IsHardwareBacked = true,
-                // Set directly from the credential — no re-export needed
+                // Set directly from the credential - no re-export needed
                 // (the key is not extractable since the private key is in the authenticator)
                 PublicKeySpki = credential.PublicKeySpki,
             };
@@ -169,51 +157,45 @@ namespace SpawnDev.ILGPU.P2P
         /// <summary>
         /// Exports the private key material for storage.
         /// </summary>
-        /// <returns>The private key in PKCS8 format.</returns>
+        /// <returns>The private key in PKCS8 format (48 bytes for Ed25519).</returns>
         public Task<byte[]> ExportPrivateKeyAsync() =>
             _crypto.ExportPrivateKeyPkcs8(Key);
 
         /// <summary>
-        /// Signs data using this identity's private key.
+        /// Signs data using this identity's Ed25519 private key.
+        /// Ed25519 uses SHA-512 internally per RFC 8032 - no hash parameter needed.
         /// </summary>
         /// <param name="data">The data to sign.</param>
-        /// <param name="hashName">The hash algorithm (default SHA-256).</param>
-        /// <returns>The ECDSA signature.</returns>
-        public Task<byte[]> SignAsync(byte[] data, string hashName = "SHA-256") =>
-            _crypto.Sign(Key, data, hashName);
+        /// <returns>The Ed25519 signature (always 64 bytes).</returns>
+        public Task<byte[]> SignAsync(byte[] data) =>
+            _crypto.Sign(Key, data);
 
         /// <summary>
-        /// Verifies a signature against this identity's public key.
+        /// Verifies a signature against this identity's Ed25519 public key.
         /// </summary>
         /// <param name="data">The signed data.</param>
-        /// <param name="signature">The signature to verify.</param>
-        /// <param name="hashName">The hash algorithm (default SHA-256).</param>
+        /// <param name="signature">The signature to verify (64 bytes).</param>
         /// <returns>True if the signature is valid.</returns>
-        public Task<bool> VerifyAsync(byte[] data, byte[] signature,
-            string hashName = "SHA-256") =>
-            _crypto.Verify(Key, data, signature, hashName);
+        public Task<bool> VerifyAsync(byte[] data, byte[] signature) =>
+            _crypto.Verify(Key, data, signature);
 
         /// <summary>
         /// Verifies a signature using a public key (static, no identity instance needed).
         /// </summary>
         /// <param name="crypto">The cross-platform crypto provider.</param>
-        /// <param name="publicKeySpki">The signer's public key in SPKI format.</param>
+        /// <param name="publicKeySpki">The signer's Ed25519 public key in SPKI format (44 bytes).</param>
         /// <param name="data">The signed data.</param>
-        /// <param name="signature">The signature to verify.</param>
-        /// <param name="namedCurve">The ECDSA curve (default P-256).</param>
-        /// <param name="hashName">The hash algorithm (default SHA-256).</param>
+        /// <param name="signature">The signature to verify (64 bytes).</param>
         /// <returns>True if the signature is valid.</returns>
         public static async Task<bool> VerifyAsync(
             IPortableCrypto crypto,
             byte[] publicKeySpki,
             byte[] data,
-            byte[] signature,
-            string namedCurve = PortableCrypto.NamedCurve.P256,
-            string hashName = "SHA-256")
+            byte[] signature)
         {
-            var key = await crypto.ImportECDSAKey(publicKeySpki, namedCurve,
+            var key = await crypto.ImportEd25519Key(publicKeySpki,
                 extractable: false);
-            return await crypto.Verify(key, data, signature, hashName);
+            return await crypto.Verify(key, data, signature);
         }
 
         /// <summary>
@@ -244,8 +226,8 @@ namespace SpawnDev.ILGPU.P2P
         /// <inheritdoc/>
         public ValueTask DisposeAsync()
         {
-            // PortableECDSAKey may hold native handles (SubtleCrypto CryptoKey).
-            // Let GC handle cleanup since PortableECDSAKey doesn't expose IDisposable.
+            // PortableEd25519Key zeros seed memory on dispose (DotNetEd25519Key).
+            Key.Dispose();
             return ValueTask.CompletedTask;
         }
     }
@@ -291,7 +273,7 @@ namespace SpawnDev.ILGPU.P2P
         /// <summary>Optional expiration (UTC ticks). Null = no expiration.</summary>
         public long? ExpiresAt { get; set; }
 
-        /// <summary>ECDSA signature of this assignment (base64). Excludes this field when signing.</summary>
+        /// <summary>Ed25519 signature of this assignment (base64, 64 bytes). Excludes this field when signing.</summary>
         public string Signature { get; set; } = "";
 
         /// <summary>

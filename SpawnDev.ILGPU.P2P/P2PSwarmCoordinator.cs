@@ -28,7 +28,7 @@ public class P2PSwarmCoordinator : IAsyncDisposable
     public Torrent? Swarm { get; private set; }
 
     /// <summary>
-    /// This node's cryptographic identity (ECDSA key pair).
+    /// This node's cryptographic identity (Ed25519 key pair).
     /// Null until CreateSwarmAsync or SetIdentity is called.
     /// </summary>
     public SwarmIdentity? Identity { get; private set; }
@@ -94,7 +94,7 @@ public class P2PSwarmCoordinator : IAsyncDisposable
     public string? JoinLinkBaseUrl { get; set; }
 
     /// <summary>
-    /// The swarm's ECDSA public key (BEP 46) for signed coordination messages.
+    /// The swarm's Ed25519 public key (BEP 46) for signed coordination messages.
     /// </summary>
     public byte[]? PublicKey { get; private set; }
 

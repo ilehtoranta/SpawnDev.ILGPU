@@ -14,7 +14,7 @@ namespace SpawnDev.ILGPU.P2P;
 /// </summary>
 public static class P2PProtocol
 {
-    public const string Version = "1.1";
+    public const string Version = "2.0";
 
     /// <summary>
     /// Serialize a message to JSON bytes for transmission over WebRTC.
@@ -128,7 +128,7 @@ public class P2PMessage
     public string? ReplyTo { get; set; }
 
     /// <summary>
-    /// Sender's ECDSA public key in SPKI format (base64).
+    /// Sender's Ed25519 public key in SPKI format (base64).
     /// Present on signed messages for authority verification.
     /// </summary>
     public string? SenderPublicKey { get; set; }
@@ -140,7 +140,7 @@ public class P2PMessage
     public string? SenderFingerprint { get; set; }
 
     /// <summary>
-    /// ECDSA signature of the message (base64).
+    /// Ed25519 signature of the message (base64, always 64 bytes decoded).
     /// Covers Type, Version, MessageId, ReplyTo, SenderPublicKey, SenderFingerprint, and Payload.
     /// </summary>
     public string? Signature { get; set; }
@@ -272,7 +272,7 @@ public class PeerCapabilities
     public int ThermalState { get; set; } = 0;
 
     /// <summary>
-    /// Peer's ECDSA public key in SPKI format (base64).
+    /// Peer's Ed25519 public key in SPKI format (base64).
     /// Null/empty = anonymous peer (no cryptographic identity).
     /// </summary>
     public string? PublicKey { get; set; }

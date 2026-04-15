@@ -25,6 +25,7 @@ public class ComputeBoardClient
     public ComputeBoardClient(HttpClient? httpClient = null)
     {
         _http = httpClient ?? new HttpClient();
+        _http.Timeout = TimeSpan.FromSeconds(15);
     }
 
     /// <summary>

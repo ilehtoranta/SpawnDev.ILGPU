@@ -19,6 +19,7 @@ public class P2PWorker : IAsyncDisposable
     private Accelerator? _accelerator;
     private P2PKernelLauncher? _launcher;
     private readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte[]> _bufferStore = new();
+    private readonly System.Collections.Concurrent.ConcurrentQueue<string> _bufferInsertionOrder = new();
     private readonly System.Collections.Concurrent.ConcurrentDictionary<string, CompiledKernel> _kernelCache = new();
 
     /// <summary>
@@ -279,26 +280,28 @@ public class P2PWorker : IAsyncDisposable
     /// </summary>
     public void ReceiveBuffer(string bufferId, byte[] data)
     {
+        if (!_bufferStore.ContainsKey(bufferId))
+            _bufferInsertionOrder.Enqueue(bufferId);
         _bufferStore[bufferId] = data;
         EvictIfNeeded();
     }
 
     private void EvictIfNeeded()
     {
-        // Check count limit
+        // Count limit - evict oldest by insertion order
         while (_bufferStore.Count > MaxBuffers)
         {
-            var oldest = _bufferStore.Keys.FirstOrDefault();
-            if (oldest != null) _bufferStore.TryRemove(oldest, out _);
+            if (_bufferInsertionOrder.TryDequeue(out var oldest))
+                _bufferStore.TryRemove(oldest, out _);
             else break;
         }
 
-        // Check byte limit
+        // Byte limit - evict oldest by insertion order
         long totalBytes = _bufferStore.Values.Sum(b => (long)b.Length);
         while (totalBytes > MaxBufferBytes && _bufferStore.Count > 0)
         {
-            var oldest = _bufferStore.Keys.FirstOrDefault();
-            if (oldest != null && _bufferStore.TryRemove(oldest, out var removed))
+            if (_bufferInsertionOrder.TryDequeue(out var oldest) &&
+                _bufferStore.TryRemove(oldest, out var removed))
                 totalBytes -= removed.Length;
             else break;
         }
@@ -445,6 +448,7 @@ public class P2PWorker : IAsyncDisposable
     public ValueTask DisposeAsync()
     {
         _bufferStore.Clear();
+        _bufferInsertionOrder.Clear();
         _kernelCache.Clear();
         return ValueTask.CompletedTask;
     }
