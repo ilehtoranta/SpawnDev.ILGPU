@@ -259,15 +259,14 @@ public class P2PDispatcher : IDisposable
     {
         var candidates = _accelerator.Peers
             .Where(p => p.IsConnected && p.PeerId != exclude && !IsStale(p))
+            .Select(p => (peer: p, score: ScorePeer(p)))
+            .Where(x => x.score > 0.0) // Exclude thermally critical / dead battery peers
+            .OrderByDescending(x => x.score)
             .ToList();
 
         if (candidates.Count == 0) return null;
 
-        // Score each peer: higher = better candidate
-        // Factors: TFLOPS (ability), available memory, current load, reliability
-        return candidates
-            .OrderByDescending(p => ScorePeer(p))
-            .First();
+        return candidates.First().peer;
     }
 
     /// <summary>

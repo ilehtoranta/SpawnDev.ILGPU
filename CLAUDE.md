@@ -24,6 +24,7 @@ Detailed constraints live in each directory's own `CLAUDE.md`. Read the relevant
 | `SpawnDev.ILGPU/WebGL/` | GLSL transpiler, Transform Feedback | [`WebGL/CLAUDE.md`](SpawnDev.ILGPU/WebGL/CLAUDE.md) |
 | `ILGPU/` | Forked ILGPU core (IR, types, runtime) | [`ILGPU/CLAUDE.md`](ILGPU/CLAUDE.md) |
 | `ILGPU.Algorithms/` | Forked algorithms (Scan, RadixSort) | [`ILGPU.Algorithms/CLAUDE.md`](ILGPU.Algorithms/CLAUDE.md) |
+| `SpawnDev.ILGPU.P2P/` | Distributed GPU compute via WebRTC | [`SpawnDev.ILGPU.P2P/CLAUDE.md`](SpawnDev.ILGPU.P2P/CLAUDE.md) |
 | `PlaywrightMultiTest/` | Unified test runner | [`PlaywrightMultiTest/CLAUDE.md`](PlaywrightMultiTest/CLAUDE.md) |
 | `.claude/skills/ilgpu_transpiler/` | Hard-won transpiler mapping rules | [SKILL.md](.claude/skills/ilgpu_transpiler/SKILL.md) |
 

@@ -20,6 +20,7 @@ public class P2PWorker : IAsyncDisposable
     private P2PKernelLauncher? _launcher;
     private readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte[]> _bufferStore = new();
     private readonly System.Collections.Concurrent.ConcurrentQueue<string> _bufferInsertionOrder = new();
+    private readonly object _bufferLock = new();
     private readonly System.Collections.Concurrent.ConcurrentDictionary<string, CompiledKernel> _kernelCache = new();
 
     /// <summary>
@@ -280,10 +281,13 @@ public class P2PWorker : IAsyncDisposable
     /// </summary>
     public void ReceiveBuffer(string bufferId, byte[] data)
     {
-        if (!_bufferStore.ContainsKey(bufferId))
-            _bufferInsertionOrder.Enqueue(bufferId);
-        _bufferStore[bufferId] = data;
-        EvictIfNeeded();
+        lock (_bufferLock)
+        {
+            if (!_bufferStore.ContainsKey(bufferId))
+                _bufferInsertionOrder.Enqueue(bufferId);
+            _bufferStore[bufferId] = data;
+            EvictIfNeeded();
+        }
     }
 
     private void EvictIfNeeded()

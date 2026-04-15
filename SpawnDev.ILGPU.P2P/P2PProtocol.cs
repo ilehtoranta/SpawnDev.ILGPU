@@ -45,6 +45,7 @@ public static class P2PProtocol
         P2PMessageType.RoleAssign => true,
         P2PMessageType.RegistryUpdate => true,
         P2PMessageType.KernelDispatch => true,
+        P2PMessageType.ElectionRequest => true,
         _ => false,
     };
 

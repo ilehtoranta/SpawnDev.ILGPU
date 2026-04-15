@@ -21,6 +21,8 @@ public static class P2PKernelSerializer
     public static void RegisterKernelType(Type type)
     {
         _allowedTypes[type] = true;
+        // Clear resolve cache - a previously-rejected type may now be allowed
+        _resolveCache.Clear();
     }
 
     /// <summary>
@@ -81,26 +83,32 @@ public static class P2PKernelSerializer
     public static MethodInfo? ResolveKernel(KernelDispatchRequest request)
     {
         var cacheKey = $"{request.KernelType}::{request.KernelMethod}";
-        return _resolveCache.GetOrAdd(cacheKey, _ =>
+
+        // Check cache first - only successful resolutions are cached
+        if (_resolveCache.TryGetValue(cacheKey, out var cached))
+            return cached;
+
+        var type = Type.GetType(request.KernelType);
+        if (type == null)
         {
-            var type = Type.GetType(request.KernelType);
-            if (type == null)
+            foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
             {
-                foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
-                {
-                    type = assembly.GetType(request.KernelType);
-                    if (type != null) break;
-                }
+                type = assembly.GetType(request.KernelType);
+                if (type != null) break;
             }
-            if (type == null) return null;
+        }
+        if (type == null) return null;
 
-            // SECURITY: Only allow registered types
-            if (_allowedTypes.Count > 0 && !_allowedTypes.ContainsKey(type))
-                return null;
+        // SECURITY: Only allow registered types. Fail-closed - if no types
+        // are registered, reject ALL dispatches. Never allow arbitrary code execution.
+        if (!_allowedTypes.ContainsKey(type))
+            return null;
 
-            return type.GetMethod(request.KernelMethod,
-                BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static);
-        });
+        var method = type.GetMethod(request.KernelMethod,
+            BindingFlags.Public | BindingFlags.Static);
+        if (method != null)
+            _resolveCache[cacheKey] = method;
+        return method;
     }
 
     /// <summary>

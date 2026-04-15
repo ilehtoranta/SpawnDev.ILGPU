@@ -397,7 +397,9 @@ public class P2PCompute : IAsyncDisposable
         if (Bridge != null) await Bridge.DisposeAsync();
         if (Transport != null) await Transport.DisposeAsync();
         Dispatcher?.Dispose();
+        Accelerator?.Dispose();
         await Coordinator.DisposeAsync();
         await Identity.DisposeAsync();
+        _context?.Dispose();
     }
 }

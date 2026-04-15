@@ -193,7 +193,7 @@ namespace SpawnDev.ILGPU.P2P
             byte[] data,
             byte[] signature)
         {
-            var key = await crypto.ImportEd25519Key(publicKeySpki,
+            using var key = await crypto.ImportEd25519Key(publicKeySpki,
                 extractable: false);
             return await crypto.Verify(key, data, signature);
         }
