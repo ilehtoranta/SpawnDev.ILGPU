@@ -11,26 +11,22 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
     /// </summary>
     public abstract partial class BackendTestBase : IDisposable
     {
-        /// <summary>Platform-appropriate crypto provider (injected via DI).</summary>
+        /// <summary>Platform-appropriate crypto provider (injected via DI). All crypto goes through this.</summary>
         protected IPortableCrypto Crypto { get; }
 
         /// <summary>DI-configured WebTorrent client with tracker discovery.</summary>
         protected SpawnDev.WebTorrent.WebTorrentClient WebTorrentClient { get; }
 
-        /// <summary>DI-configured Ed25519 signer factory. Each call to CreateEd25519Signer gets a fresh instance.</summary>
-        private readonly Func<SpawnDev.WebTorrent.Ed25519Signer> _signerFactory;
-
-        protected BackendTestBase(IPortableCrypto crypto, SpawnDev.WebTorrent.WebTorrentClient webTorrentClient, Func<SpawnDev.WebTorrent.Ed25519Signer> signerFactory)
+        protected BackendTestBase(IPortableCrypto crypto, SpawnDev.WebTorrent.WebTorrentClient webTorrentClient)
         {
             Crypto = crypto;
             WebTorrentClient = webTorrentClient;
-            _signerFactory = signerFactory;
         }
 
-        /// <summary>Creates an Ed25519 signer with a fresh key pair via DI. Each call generates a new identity.</summary>
+        /// <summary>Creates an Ed25519 signer with a fresh key pair from IPortableCrypto. Each call generates a new identity.</summary>
         protected async Task<SpawnDev.WebTorrent.Ed25519Signer> CreateEd25519Signer()
         {
-            var signer = _signerFactory();
+            var signer = new SpawnDev.WebTorrent.Ed25519Signer(Crypto);
             await signer.GenerateKeyAsync();
             return signer;
         }

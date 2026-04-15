@@ -15,7 +15,7 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
     /// </summary>
     public class WebGLTests : BackendTestBase
     {
-        public WebGLTests(IPortableCrypto crypto, SpawnDev.WebTorrent.WebTorrentClient webTorrentClient, Func<SpawnDev.WebTorrent.Ed25519Signer> signerFactory) : base(crypto, webTorrentClient, signerFactory) { }
+        public WebGLTests(IPortableCrypto crypto, SpawnDev.WebTorrent.WebTorrentClient webTorrentClient) : base(crypto, webTorrentClient) { }
         protected override string BackendName => "WebGL";
 
         protected override async Task<(Context context, Accelerator accelerator)> CreateAcceleratorAsync()
