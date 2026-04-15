@@ -21,8 +21,10 @@ builder.Services.AddPlatformCrypto();
 builder.Services.AddSingleton(sp =>
     new SpawnDev.WebTorrent.WebTorrentClient());
 
-// P2P: Ed25519 signer - singleton identity for the app
-builder.Services.AddSingleton<SpawnDev.WebTorrent.Ed25519Signer>();
+// P2P: Ed25519 signer - transient (each P2P test gets a fresh instance)
+builder.Services.AddTransient<SpawnDev.WebTorrent.Ed25519Signer>();
+builder.Services.AddSingleton<Func<SpawnDev.WebTorrent.Ed25519Signer>>(sp =>
+    () => sp.GetRequiredService<SpawnDev.WebTorrent.Ed25519Signer>());
 
 // P2P: Shared swarm service — holds the active compute swarm for all pages
 builder.Services.AddSingleton<SpawnDev.ILGPU.Demo.Shared.Services.P2PSwarmService>();
