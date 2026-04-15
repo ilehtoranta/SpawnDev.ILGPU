@@ -13,16 +13,16 @@
 
 ## Progress Checklist
 
-### Phase 1: Foundation [IN PROGRESS]
-- [ ] Create `SpawnDev.ILGPU.P2P.IntegrationTests` NUnit project
-- [ ] Create `Infrastructure/TestNodeProcess.cs` - subprocess orchestration
-- [ ] Create `Infrastructure/LocalTrackerFixture.cs` - starts/stops ServerApp
-- [ ] Create `Infrastructure/DataIntegrityHelper.cs` - float comparison, SHA256
-- [ ] Create `P2PTestKernels.cs` - VectorAdd, VectorScale, Identity, FillSequence
+### Phase 1: Foundation [COMPLETE - 82403de]
+- [x] Create `SpawnDev.ILGPU.P2P.IntegrationTests` NUnit project
+- [x] Create `Infrastructure/TestNodeProcess.cs` - subprocess orchestration
+- [x] Create `Infrastructure/LocalTrackerFixture.cs` - starts/stops ServerApp
+- [x] Create `Infrastructure/DataIntegrityHelper.cs` - float comparison, SHA256
+- [x] Create `P2PTestKernels.cs` - VectorAdd, VectorScale, Identity, FillSequence, IntDoubler
 - [ ] Extend `P2P.TestNode/Program.cs` with structured output protocol
 - [ ] Extend `P2P.TestNode/Program.cs` with CLI flags (--tracker, --tflops, --thermal, --verify, --policy, --always-fail)
-- [ ] Add project to solution
-- [ ] Verify foundation builds and selftest baseline passes
+- [x] Add project to solution
+- [x] Verify foundation builds and 3 baseline tests pass (319ms)
 
 ### Phase 2: Core Pipeline (Desktop-Desktop) [NOT STARTED]
 - [ ] `CorePipeline_VectorAdd_1024` - a[i]=i, b[i]=i*2, verify result[i]==i*3 for ALL 1024 elements over real WebRTC
