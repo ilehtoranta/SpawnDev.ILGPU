@@ -13,7 +13,7 @@
 		<PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.*" />
 		<PackageReference Include="NUnit" Version="4.*" />
 		<PackageReference Include="NUnit3TestAdapter" Version="4.*" />
-		<PackageReference Include="SpawnDev.BlazorJS.Cryptography" Version="3.*" />
+		<PackageReference Include="SpawnDev.BlazorJS.Cryptography" Version="3.2.0" />
 	</ItemGroup>
 
 	<ItemGroup>
