@@ -234,7 +234,57 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
         private void ScanForAtomicUsage()
         {
+            // Scan the kernel's own blocks for atomic operations
+            ScanBlocksForAtomics(Method.Blocks, paramIndex => paramIndex);
+
+            // Also scan called helper functions (e.g., Reduce/Scan algorithm helpers).
+            // These are inlined at codegen time but their atomic ops need to be detected
+            // during this pre-scan so lock buffers are allocated before code generation.
+            // We need to map helper function parameters back to kernel parameters
+            // through the call site arguments.
             foreach (var block in Method.Blocks)
+            {
+                foreach (var entry in block)
+                {
+                    if (entry.Value is global::ILGPU.IR.Values.MethodCall methodCall)
+                    {
+                        var targetMethod = methodCall.Target;
+                        // Build a mapping: helper param index -> kernel param index
+                        // by tracing each call argument back to a kernel parameter
+                        var paramMap = new Dictionary<int, int>();
+                        for (int argIdx = 0; argIdx < methodCall.Count; argIdx++)
+                        {
+                            var arg = methodCall[argIdx];
+                            if (ResolveToParameterWithFieldChain(arg, out var kernelParam, out _))
+                            {
+                                // The helper's parameter at this position maps to kernelParam
+                                paramMap[argIdx] = kernelParam!.Index;
+                            }
+                        }
+
+                        if (paramMap.Count > 0)
+                        {
+                            // Scan the helper method's blocks, remapping param indices
+                            ScanBlocksForAtomics(targetMethod.Blocks, helperParamIdx =>
+                                paramMap.TryGetValue(helperParamIdx, out var kernelIdx) ? kernelIdx : -1);
+                        }
+                    }
+                }
+            }
+        }
+
+        /// <summary>
+        /// Scans IR blocks for atomic operations and records which parameters need
+        /// special handling (float atomics, unsigned atomics, i64/f64 spinlocks).
+        /// The paramMapper converts a parameter index from the scanned method's scope
+        /// to the kernel's parameter index. For the kernel itself, this is identity.
+        /// For helper functions, it maps through the call site arguments.
+        /// </summary>
+        private void ScanBlocksForAtomics(
+            IEnumerable<global::ILGPU.IR.BasicBlock> blocks,
+            Func<int, int> paramMapper)
+        {
+            foreach (var block in blocks)
             {
                 foreach (var entry in block)
                 {
@@ -243,29 +293,32 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                         // Resolve the atomic target to a parameter, tracking GetField chain
                         if (ResolveToParameterWithFieldChain(atomic.Target, out var param, out var fieldIdx))
                         {
+                            int kernelParamIdx = paramMapper(param!.Index);
+                            if (kernelParamIdx < 0) continue; // couldn't map to kernel param
+
                             if (fieldIdx >= 0)
                             {
-                                // Atomic on a field of a body struct — track the specific field
-                                _bodyStructAtomicFields.Add((param!.Index, fieldIdx));
+                                // Atomic on a field of a body struct - track the specific field
+                                _bodyStructAtomicFields.Add((kernelParamIdx, fieldIdx));
                                 var elemType = atomic.Value.Type;
                                 if (elemType is global::ILGPU.IR.Types.PrimitiveType pt &&
                                     (pt.BasicValueType == global::ILGPU.BasicValueType.Float32 ||
                                      pt.BasicValueType == global::ILGPU.BasicValueType.Float16))
-                                    _bodyStructAtomicFloatFields.Add((param.Index, fieldIdx));
+                                    _bodyStructAtomicFloatFields.Add((kernelParamIdx, fieldIdx));
                                 if (atomic.IsUnsigned)
-                                    _bodyStructUnsignedAtomicFields.Add((param.Index, fieldIdx));
+                                    _bodyStructUnsignedAtomicFields.Add((kernelParamIdx, fieldIdx));
                             }
                             else
                             {
                                 // Atomic directly on a parameter
-                                _atomicParameters.Add(param!.Index);
+                                _atomicParameters.Add(kernelParamIdx);
                                 var elemType = atomic.Value.Type;
                                 if (elemType is global::ILGPU.IR.Types.PrimitiveType pt &&
                                     (pt.BasicValueType == global::ILGPU.BasicValueType.Float32 ||
                                      pt.BasicValueType == global::ILGPU.BasicValueType.Float16))
-                                    _floatAtomicParameters.Add(param.Index);
+                                    _floatAtomicParameters.Add(kernelParamIdx);
                                 if (atomic.IsUnsigned)
-                                    _unsignedAtomicParameters.Add(param.Index);
+                                    _unsignedAtomicParameters.Add(kernelParamIdx);
                                 // Detect i64 params needing spinlock (Min/Max/Exchange on emulated i64)
                                 var valType = TypeGenerator[atomic.Value.Type];
                                 bool isI64 = valType == "emu_i64" || valType == "emu_u64";
@@ -273,11 +326,11 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                                     || atomic.Kind == global::ILGPU.IR.Values.AtomicKind.Max
                                     || atomic.Kind == global::ILGPU.IR.Values.AtomicKind.Exchange;
                                 if (isI64 && needsLock)
-                                    _i64SpinlockParams.Add(param.Index);
+                                    _i64SpinlockParams.Add(kernelParamIdx);
                                 // Also detect f64 needing spinlock (same dual-word problem)
                                 bool isF64 = valType == "emu_f64";
                                 if (isF64 && needsLock)
-                                    _i64SpinlockParams.Add(param.Index);
+                                    _i64SpinlockParams.Add(kernelParamIdx);
                             }
                         }
                     }
@@ -285,10 +338,13 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     {
                         if (ResolveToParameterWithFieldChain(cas.Target, out var param, out var fieldIdx))
                         {
+                            int kernelParamIdx = paramMapper(param!.Index);
+                            if (kernelParamIdx < 0) continue;
+
                             if (fieldIdx >= 0)
-                                _bodyStructAtomicFields.Add((param!.Index, fieldIdx));
+                                _bodyStructAtomicFields.Add((kernelParamIdx, fieldIdx));
                             else
-                                _atomicParameters.Add(param!.Index);
+                                _atomicParameters.Add(kernelParamIdx);
                         }
                     }
                 }
