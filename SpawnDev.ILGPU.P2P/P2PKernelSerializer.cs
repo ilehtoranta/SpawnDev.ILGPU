@@ -104,8 +104,11 @@ public static class P2PKernelSerializer
         if (!_allowedTypes.ContainsKey(type))
             return null;
 
+        // Include NonPublic so private/internal static kernel methods (the C# default when
+        // no access modifier is specified) resolve correctly. Type allowlist is the
+        // security boundary, not method visibility.
         var method = type.GetMethod(request.KernelMethod,
-            BindingFlags.Public | BindingFlags.Static);
+            BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static);
         if (method != null)
             _resolveCache[cacheKey] = method;
         return method;

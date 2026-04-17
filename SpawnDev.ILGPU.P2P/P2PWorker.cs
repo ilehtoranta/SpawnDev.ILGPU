@@ -97,6 +97,12 @@ public class P2PWorker : IAsyncDisposable
     public event Action<string, bool, double>? OnKernelCompleted; // dispatchId, success, durationMs
 
     /// <summary>
+    /// Full exception text from the most recent failed dispatch, or null if the last dispatch succeeded.
+    /// Useful for diagnosing dispatch failures from tests.
+    /// </summary>
+    public string? LastDispatchError { get; private set; }
+
+    /// <summary>
     /// Fired when a kernel is compiled for the first time on this worker.
     /// </summary>
     public event Action<string>? OnKernelCompiled; // kernelType.kernelMethod
@@ -233,7 +239,8 @@ public class P2PWorker : IAsyncDisposable
         catch (Exception ex)
         {
             result.Success = false;
-            result.Error = ex.Message;
+            result.Error = ex.ToString();
+            LastDispatchError = ex.ToString();
         }
 
         sw.Stop();

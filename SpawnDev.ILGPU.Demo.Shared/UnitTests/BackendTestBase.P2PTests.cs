@@ -1233,6 +1233,8 @@ public abstract partial class BackendTestBase
     [TestMethod]
     public async Task P2P_KernelSerializer_ResolveKernel()
     {
+        P2PKernelSerializer.RegisterKernelType(typeof(BackendTestBase));
+
         var method = typeof(BackendTestBase).GetMethod(nameof(TestVectorAdd),
             System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)!;
 
@@ -1249,6 +1251,8 @@ public abstract partial class BackendTestBase
     [TestMethod]
     public async Task P2P_KernelSerializer_CanExecute()
     {
+        P2PKernelSerializer.RegisterKernelType(typeof(BackendTestBase));
+
         var method = typeof(BackendTestBase).GetMethod(nameof(TestVectorAdd),
             System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)!;
 
@@ -1342,6 +1346,8 @@ public abstract partial class BackendTestBase
         await using var worker = new P2PWorker(transport);
         worker.Initialize(ctx, cpuAccel);
 
+        P2PKernelSerializer.RegisterKernelType(typeof(BackendTestBase));
+
         // Track worker events
         string? startedId = null;
         string? completedId = null;
@@ -1373,9 +1379,11 @@ public abstract partial class BackendTestBase
         if (startedId != request.DispatchId)
             throw new Exception($"OnKernelStarted not fired: {startedId}");
         if (completedId != request.DispatchId)
-            throw new Exception($"OnKernelCompleted not fired: {completedId}");
+            throw new Exception($"OnKernelCompleted not fired: {completedId}, worker error: {worker.LastDispatchError}");
         if (completedSuccess != true)
-            throw new Exception($"Should succeed: {completedSuccess}");
+            throw new Exception($"Should succeed: {completedSuccess}, worker error: {worker.LastDispatchError}");
+
+        P2PKernelSerializer.ClearAllowlist();
     }
 
     [TestMethod]
@@ -1454,6 +1462,8 @@ public abstract partial class BackendTestBase
         // Real backend
         worker.Initialize(accelerator.Context, accelerator);
 
+        P2PKernelSerializer.RegisterKernelType(typeof(BackendTestBase));
+
         string? compiledKernel = null;
         bool? dispatchSuccess = null;
         worker.OnKernelCompiled += name => compiledKernel = name;
@@ -1476,9 +1486,11 @@ public abstract partial class BackendTestBase
         await worker.HandleDispatchAsync("coordinator", request);
 
         if (compiledKernel == null)
-            throw new Exception("OnKernelCompiled should fire");
+            throw new Exception($"OnKernelCompiled should fire, worker error: {worker.LastDispatchError}");
         if (dispatchSuccess != true)
-            throw new Exception($"Dispatch should succeed on {accelerator.AcceleratorType}");
+            throw new Exception($"Dispatch should succeed on {accelerator.AcceleratorType}, worker error: {worker.LastDispatchError}");
+
+        P2PKernelSerializer.ClearAllowlist();
     });
 
     // ═══════════════════════════════════════════════════════════
@@ -1843,6 +1855,8 @@ public abstract partial class BackendTestBase
         // Worker uses the REAL backend (CPU/CUDA/WebGPU — whatever this test class runs)
         worker.Initialize(accelerator.Context, accelerator);
 
+        P2PKernelSerializer.RegisterKernelType(typeof(BackendTestBase));
+
         // === Wire mock transport: bidirectional ===
         // Coordinator → Worker
         coordTransport.RegisterPeer("worker-node", async (data) =>
@@ -1899,9 +1913,9 @@ public abstract partial class BackendTestBase
 
         // === Verify ===
         if (compiledKernel == null)
-            throw new Exception($"Worker should compile kernel on {accelerator.AcceleratorType}");
+            throw new Exception($"Worker should compile kernel on {accelerator.AcceleratorType}, worker error: {worker.LastDispatchError}");
         if (completedSuccess != true)
-            throw new Exception($"Dispatch should succeed on {accelerator.AcceleratorType}");
+            throw new Exception($"Dispatch should succeed on {accelerator.AcceleratorType}, worker error: {worker.LastDispatchError}");
         if (completedId != request.DispatchId)
             throw new Exception("Dispatch ID mismatch");
 
@@ -1911,6 +1925,8 @@ public abstract partial class BackendTestBase
             throw new Exception("Worker should have result buffer");
 
         Console.WriteLine($"[P2P TwoNode] Coordinator → Worker → Compile({accelerator.AcceleratorType}) → Result. PASS.");
+
+        P2PKernelSerializer.ClearAllowlist();
     });
 
     // ═══════════════════════════════════════════════════════════
@@ -2585,9 +2601,9 @@ public abstract partial class BackendTestBase
         await worker.HandleDispatchAsync("coordinator-peer", request);
 
         if (completedId != request.DispatchId)
-            throw new Exception($"Wrong dispatch ID: {completedId}");
+            throw new Exception($"Wrong dispatch ID: {completedId}, worker error: {worker.LastDispatchError}");
         if (completedSuccess != true)
-            throw new Exception("Dispatch failed");
+            throw new Exception($"Dispatch failed: {worker.LastDispatchError}");
 
         // Verify buffer was modified
         var result = worker.GetBuffer("buf-0");
@@ -2659,7 +2675,7 @@ public abstract partial class BackendTestBase
         worker.OnKernelCompleted += (_, s, _) => success = s;
         await worker.HandleDispatchAsync("coordinator", request);
 
-        if (!success) throw new Exception("Dispatch failed");
+        if (!success) throw new Exception($"Dispatch failed: {worker.LastDispatchError}");
 
         var result = worker.GetBuffer("r")!;
         var outFloats = new float[count];
