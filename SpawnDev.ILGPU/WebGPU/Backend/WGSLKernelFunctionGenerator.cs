@@ -46,12 +46,15 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         // WGSL's atomicMin/atomicMax on i32 do signed comparisons, so unsigned
         // reductions need atomic<u32> buffers and u32 values.
         private HashSet<int> _unsignedAtomicParameters = new HashSet<int>();
-        // Params that need spinlock companion buffers for i64 Min/Max/Exchange atomics.
-        // These operations require both halves of the i64 to be updated atomically,
-        // which WGSL can't do without a lock.
-        private HashSet<int> _i64SpinlockParams = new HashSet<int>();
-        // Maps param index to lock buffer binding name (set during GenerateHeader)
-        private Dictionary<int, string> _lockBufferNames = new Dictionary<int, string>();
+        // Params (or body-struct view fields) that need spinlock companion buffers for
+        // i64/f64 Min/Max/Exchange atomics. These require both halves of the emulated
+        // 64-bit value to update atomically, which WGSL can't do without a lock.
+        // Key: (ParamIdx, FieldIdx). FieldIdx=-1 for direct view params; FieldIdx>=0
+        // for a view field of a body struct parameter at that field index.
+        private HashSet<(int ParamIdx, int FieldIdx)> _i64SpinlockParams = new HashSet<(int, int)>();
+        // Maps spinlock key -> lock buffer binding name (set during GenerateHeader /
+        // pre-populated in the constructor so body generation can resolve the name first).
+        private Dictionary<(int ParamIdx, int FieldIdx), string> _lockBufferNames = new Dictionary<(int, int), string>();
         private HashSet<Value> _hoistedPrimitives = new HashSet<Value>();
         // Tracks WGSL variable names that hold pointer aliases (e.g., "v_27_f0" which is 'let v_27_f0 = &param1_f0;').
         // The post-processor checks this to avoid converting 'let v_28 = v_27_f0;' to 'v_28 = v_27_f0;'
@@ -81,8 +84,11 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         private HashSet<int> _subWordUnsignedParams = new HashSet<int>();
         // Maps LEA variable names to their sub-word param index (for Load/Store extraction)
         private Dictionary<string, int> _subWordLEAVars = new Dictionary<string, int>();
-        // Maps variable names to their emulation info (param index, is emu_f64)
-        private Dictionary<string, (int ParamIndex, bool IsF64)> _emulatedVarMappings = new Dictionary<string, (int, bool)>();
+        // Maps variable names to their emulation info (param index, body-struct field index, is emu_f64).
+        // FieldIdx=-1 for direct view-param access; FieldIdx>=0 for body-struct view-field access.
+        // The spinlock lookup uses (ParamIndex, FieldIdx) as the key so body-struct view fields
+        // get their own lock buffer separate from direct-param locks.
+        private Dictionary<string, (int ParamIndex, int FieldIdx, bool IsF64)> _emulatedVarMappings = new Dictionary<string, (int, int, bool)>();
         // Maps cross-block pointer variable names to inline expressions (e.g. "param1[v_3_idx]")
         // This fixes WGSL scoping: pointers declared in one switch case are not visible in another.
         private Dictionary<string, string> _crossBlockPointerExprs = new Dictionary<string, string>();
@@ -208,6 +214,15 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             _loops = _cfg.CreateLoops();
 
             ScanForAtomicUsage();
+            // Pre-populate lock buffer names immediately after scan, BEFORE body generation.
+            // GenerateHeader creates these names too (for WGSL emission), but body generation
+            // runs first and needs the names to exist when it encounters GenericAtomic nodes.
+            foreach (var key in _i64SpinlockParams)
+            {
+                _lockBufferNames[key] = key.FieldIdx >= 0
+                    ? $"_lock_bs{key.ParamIdx}_f{key.FieldIdx}"
+                    : $"_lock_param{key.ParamIdx}";
+            }
             // CRITICAL: ScanBodyStructParams must run before body generation
             // because SetupParameterBindings (called during body generation) needs _bodyStructParams.
             // GenerateHeader runs AFTER body generation, so we cannot rely on GenerateHeader
@@ -237,36 +252,62 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             // Scan the kernel's own blocks for atomic operations
             ScanBlocksForAtomics(Method.Blocks, paramIndex => paramIndex);
 
-            // Also scan called helper functions (e.g., Reduce/Scan algorithm helpers).
-            // These are inlined at codegen time but their atomic ops need to be detected
-            // during this pre-scan so lock buffers are allocated before code generation.
-            // We need to map helper function parameters back to kernel parameters
-            // through the call site arguments.
-            foreach (var block in Method.Blocks)
+            // Also scan called helper functions recursively
+            var visited = new HashSet<global::ILGPU.IR.Method>();
+            ScanMethodCallsRecursive(Method, paramIndex => paramIndex, visited);
+        }
+
+        /// <summary>
+        /// Recursively walks MethodCall nodes in a method, scanning each called helper
+        /// for atomic operations and mapping helper parameters back to kernel parameters.
+        /// Handles multi-level call chains (kernel -> helper -> sub-helper -> atomic).
+        /// </summary>
+        private void ScanMethodCallsRecursive(
+            global::ILGPU.IR.Method method,
+            Func<int, int> parentParamMapper,
+            HashSet<global::ILGPU.IR.Method> visited)
+        {
+            if (!visited.Add(method)) return; // avoid cycles
+
+            foreach (var block in method.Blocks)
             {
                 foreach (var entry in block)
                 {
                     if (entry.Value is global::ILGPU.IR.Values.MethodCall methodCall)
                     {
                         var targetMethod = methodCall.Target;
-                        // Build a mapping: helper param index -> kernel param index
-                        // by tracing each call argument back to a kernel parameter
+
+                        // Build mapping: target method param index -> kernel param index
+                        // MethodCall arguments correspond to the target method's parameters
                         var paramMap = new Dictionary<int, int>();
-                        for (int argIdx = 0; argIdx < methodCall.Count; argIdx++)
+                        int targetParamOffset = 0;
+                        var targetParams = targetMethod.Parameters.ToArray();
+
+                        for (int argIdx = 0; argIdx < methodCall.Count && argIdx < targetParams.Length; argIdx++)
                         {
                             var arg = methodCall[argIdx];
-                            if (ResolveToParameterWithFieldChain(arg, out var kernelParam, out _))
+                            int targetParamIdx = targetParams[argIdx].Index;
+
+                            // Try to resolve the argument back to a parameter in the parent method
+                            if (ResolveToParameterWithFieldChain(arg, out var parentParam, out _))
                             {
-                                // The helper's parameter at this position maps to kernelParam
-                                paramMap[argIdx] = kernelParam!.Index;
+                                // Map through parent's mapper to get kernel param index
+                                int kernelIdx = parentParamMapper(parentParam!.Index);
+                                if (kernelIdx >= 0)
+                                    paramMap[targetParamIdx] = kernelIdx;
                             }
                         }
 
                         if (paramMap.Count > 0)
                         {
-                            // Scan the helper method's blocks, remapping param indices
-                            ScanBlocksForAtomics(targetMethod.Blocks, helperParamIdx =>
-                                paramMap.TryGetValue(helperParamIdx, out var kernelIdx) ? kernelIdx : -1);
+                            Func<int, int> childMapper = helperParamIdx =>
+                                paramMap.TryGetValue(helperParamIdx, out var kernelIdx) ? kernelIdx : -1;
+
+                            // Scan this helper's blocks for atomics
+                            ScanBlocksForAtomics(targetMethod.Blocks, childMapper);
+
+                            // Recurse into sub-helpers
+                            ScanMethodCallsRecursive(targetMethod, childMapper, visited);
                         }
                     }
                 }
@@ -296,6 +337,16 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                             int kernelParamIdx = paramMapper(param!.Index);
                             if (kernelParamIdx < 0) continue; // couldn't map to kernel param
 
+                            // Emulated 64-bit Min/Max/Exchange atomics need a spinlock companion
+                            // buffer regardless of whether the target is a direct param or a
+                            // body-struct view field — both end up doing dual-u32 CAS loops.
+                            var valType = TypeGenerator[atomic.Value.Type];
+                            bool isEmu64 = valType == "emu_i64" || valType == "emu_u64" || valType == "emu_f64";
+                            bool needsLock = atomic.Kind == global::ILGPU.IR.Values.AtomicKind.Min
+                                || atomic.Kind == global::ILGPU.IR.Values.AtomicKind.Max
+                                || atomic.Kind == global::ILGPU.IR.Values.AtomicKind.Exchange
+                                || (valType == "emu_f64" && atomic.Kind == global::ILGPU.IR.Values.AtomicKind.Add);
+
                             if (fieldIdx >= 0)
                             {
                                 // Atomic on a field of a body struct - track the specific field
@@ -307,6 +358,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                                     _bodyStructAtomicFloatFields.Add((kernelParamIdx, fieldIdx));
                                 if (atomic.IsUnsigned)
                                     _bodyStructUnsignedAtomicFields.Add((kernelParamIdx, fieldIdx));
+                                if (isEmu64 && needsLock)
+                                    _i64SpinlockParams.Add((kernelParamIdx, fieldIdx));
                             }
                             else
                             {
@@ -319,18 +372,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                                     _floatAtomicParameters.Add(kernelParamIdx);
                                 if (atomic.IsUnsigned)
                                     _unsignedAtomicParameters.Add(kernelParamIdx);
-                                // Detect i64 params needing spinlock (Min/Max/Exchange on emulated i64)
-                                var valType = TypeGenerator[atomic.Value.Type];
-                                bool isI64 = valType == "emu_i64" || valType == "emu_u64";
-                                bool needsLock = atomic.Kind == global::ILGPU.IR.Values.AtomicKind.Min
-                                    || atomic.Kind == global::ILGPU.IR.Values.AtomicKind.Max
-                                    || atomic.Kind == global::ILGPU.IR.Values.AtomicKind.Exchange;
-                                if (isI64 && needsLock)
-                                    _i64SpinlockParams.Add(kernelParamIdx);
-                                // Also detect f64 needing spinlock (same dual-word problem)
-                                bool isF64 = valType == "emu_f64";
-                                if (isF64 && needsLock)
-                                    _i64SpinlockParams.Add(kernelParamIdx);
+                                if (isEmu64 && needsLock)
+                                    _i64SpinlockParams.Add((kernelParamIdx, -1));
                             }
                         }
                     }
@@ -1141,9 +1184,12 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                             {
                                 if (is64Emu)
                                 {
-                                    // WGSL doesn't support atomic on 64-bit structs.
-                                    // Use plain storage (u32); only thread 0 writes the final value.
-                                    bindingWgslType = "u32";
+                                    // Emulated 64-bit atomic body-struct field: stored as two u32
+                                    // words per element. The per-word atomic ops (atomicLoad,
+                                    // atomicStore, atomicCompareExchangeWeak, atomicAdd-on-hi)
+                                    // used by the Min/Max/Exchange spinlock and Add CAS loop
+                                    // require the binding type to be atomic<u32>.
+                                    bindingWgslType = "atomic<u32>";
                                     _bodyStructEmulated64AtomicFields.Add((param.Index, fi));
                                 }
                                 else if (fieldIsFloatAtomic || fieldIsUnsignedAtomic)
@@ -1447,16 +1493,22 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 }
             }
 
-            // Emit spinlock companion buffers for i64 Min/Max/Exchange atomics.
-            // One lock buffer per param that needs it. One atomic<u32> per i64 element.
-            foreach (var paramIdx in _i64SpinlockParams.OrderBy(x => x))
+            // Emit spinlock companion buffers for i64/f64 Min/Max/Exchange atomics.
+            // One lock buffer per (ParamIdx, FieldIdx) pair. One atomic<u32> per emulated-64 element.
+            // Emission order must match runtime's OrderBy in WebGPUAccelerator.
+            foreach (var key in _i64SpinlockParams.OrderBy(x => x.ParamIdx).ThenBy(x => x.FieldIdx))
             {
-                var lockName = $"_lock_param{paramIdx}";
-                _lockBufferNames[paramIdx] = lockName;
+                var lockName = key.FieldIdx >= 0
+                    ? $"_lock_bs{key.ParamIdx}_f{key.FieldIdx}"
+                    : $"_lock_param{key.ParamIdx}";
+                _lockBufferNames[key] = lockName;
                 builder.AppendLine($"@group(0) @binding({bindingIdx}) var<storage, read_write> {lockName} : array<atomic<u32>>;");
-                builder.AppendLine($"// Spinlock buffer for i64 Min/Max/Exchange on param{paramIdx}");
+                if (key.FieldIdx >= 0)
+                    builder.AppendLine($"// Spinlock buffer for i64/f64 Min/Max/Exchange on body-struct param{key.ParamIdx} field{key.FieldIdx}");
+                else
+                    builder.AppendLine($"// Spinlock buffer for i64/f64 Min/Max/Exchange on param{key.ParamIdx}");
                 bindingIdx++;
-                _generatorArgs.I64SpinlockParamIndices.Add(paramIdx);
+                _generatorArgs.I64SpinlockParamIndices.Add(key);
             }
 
             // Record expected binding count for runtime validation (bind group must match WGSL layout)
@@ -3628,7 +3680,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
                     if (isEmuF64Field || isEmuI64Field)
                     {
-                        _emulatedVarMappings[target.Name] = (bsParam.Index, isEmuF64Field);
+                        _emulatedVarMappings[target.Name] = (bsParam.Index, fieldIdx, isEmuF64Field);
 
                         AppendIndent();
                         if (bsFields[fieldIdx].ViewOffsetSlot >= 0)
@@ -3698,8 +3750,6 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             if (ResolveToParameter(value.Source) is global::ILGPU.IR.Values.Parameter param)
             {
                 int paramOffset = KernelParamOffset;
-                // DEBUG: embed sub-word tracking info in shader comment
-                Builder.AppendLine($"// DEBUG LEA: param.Index={param.Index} paramOffset={paramOffset} subWordKeys=[{string.Join(",", _subWordParams.Keys)}] hasKey={_subWordParams.ContainsKey(param.Index)}");
                 if (param.Index >= paramOffset)
                 {
                     // --- View offset adjustment ---
@@ -3719,8 +3769,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     if (_emulatedF64Params.Contains(param.Index) || _emulatedI64Params.Contains(param.Index))
                     {
                         bool isF64 = _emulatedF64Params.Contains(param.Index);
-                        // Register for Load/Store to know this needs conversion
-                        _emulatedVarMappings[target.Name] = (param.Index, isF64);
+                        // Register for Load/Store to know this needs conversion. FieldIdx=-1 means direct view param.
+                        _emulatedVarMappings[target.Name] = (param.Index, -1, isF64);
 
                         // base_idx = u32Offset + i * 2  (u32Offset already in scalar params as padding/4)
                         AppendIndent();
@@ -3781,7 +3831,13 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     {
                         _subWordLEAVars[target.Name] = param.Index;
                         AppendIndent();
-                        Builder.Append($"let {target.Name} = {adjustedOffsetExpr};");
+                        // SUB-WORD LEA STORES AN i32 OFFSET, NOT A POINTER.
+                        // We emit 'var : i32' (not 'let') so the var-hoist post-processing
+                        // picks it up as i32. Using 'let' would trigger the let→var converter
+                        // which inspects valueVariables.Type (ptr<...> for a LEA target) and
+                        // then skips the var declaration (ptr types aren't constructible),
+                        // leaving v_N used without any declaration.
+                        Builder.Append($"var {target.Name} : i32 = {adjustedOffsetExpr};");
                         Builder.AppendLine();
                         if (_crossBlockPointers.Contains(value))
                         {
@@ -4227,16 +4283,16 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                      if (valWgslType == "emu_f64")
                      {
                          // f64 atomics: stored as two u32 words (IEEE-754 bits).
-                         // Min/Max/Exchange need spinlock (both words must be consistent).
-                         // Add needs a different approach (CAS loop with IEEE-754 conversion).
+                         // Min/Max/Exchange/Add all need spinlock (both words must be consistent).
                          bool needsF64Lock = value.Kind == global::ILGPU.IR.Values.AtomicKind.Min
                              || value.Kind == global::ILGPU.IR.Values.AtomicKind.Max
-                             || value.Kind == global::ILGPU.IR.Values.AtomicKind.Exchange;
+                             || value.Kind == global::ILGPU.IR.Values.AtomicKind.Exchange
+                             || value.Kind == global::ILGPU.IR.Values.AtomicKind.Add;
                          if (needsF64Lock)
                          {
-                             int paramIdxF64 = emulInfo.ParamIndex;
-                             if (!_lockBufferNames.TryGetValue(paramIdxF64, out var lockNameF64))
-                                 throw new System.InvalidOperationException($"No lock buffer for param{paramIdxF64} - ScanForAtomicUsage should have detected f64 {value.Kind}");
+                             var lockKeyF64 = (emulInfo.ParamIndex, emulInfo.FieldIdx);
+                             if (!_lockBufferNames.TryGetValue(lockKeyF64, out var lockNameF64))
+                                 throw new System.InvalidOperationException($"No lock buffer for param{emulInfo.ParamIndex} field{emulInfo.FieldIdx} - ScanForAtomicUsage should have detected f64 {value.Kind}");
                              string lockIdxF64 = $"u32({baseIdxVar}) / 2u";
                              string oldLoF64 = $"_sl_old_lo_{target.Name}";
                              string oldHiF64 = $"_sl_old_hi_{target.Name}";
@@ -4250,13 +4306,22 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                              // Critical section: read raw bits, convert to f64, compare, write if needed
                              AppendLine($"let {oldLoF64} = atomicLoad(&(*{ptrStr})[u32({baseIdxVar})]);");
                              AppendLine($"let {oldHiF64} = atomicLoad(&(*{ptrStr})[u32({baseIdxVar}) + 1u]);");
-                             AppendLine($"let _sl_old_f64_{target.Name} = f64_from_ieee754_bits(bitcast<u32>({oldLoF64}), bitcast<u32>({oldHiF64}));");
+                             AppendLine($"let _sl_old_f64_{target.Name} = f64_from_ieee754_bits({oldLoF64}, {oldHiF64});");
                              if (value.Kind == global::ILGPU.IR.Values.AtomicKind.Exchange)
                              {
                                  string ieeeBitsExch = $"_sl_ieee_{target.Name}";
                                  AppendLine($"let {ieeeBitsExch} = f64_to_ieee754_bits({val});");
-                                 AppendLine($"atomicStore(&(*{ptrStr})[u32({baseIdxVar})], bitcast<i32>({ieeeBitsExch}.x));");
-                                 AppendLine($"atomicStore(&(*{ptrStr})[u32({baseIdxVar}) + 1u], bitcast<i32>({ieeeBitsExch}.y));");
+                                 AppendLine($"atomicStore(&(*{ptrStr})[u32({baseIdxVar})], {ieeeBitsExch}.x);");
+                                 AppendLine($"atomicStore(&(*{ptrStr})[u32({baseIdxVar}) + 1u], {ieeeBitsExch}.y);");
+                             }
+                             else if (value.Kind == global::ILGPU.IR.Values.AtomicKind.Add)
+                             {
+                                 // Add: compute new = f64_add(old, val), store unconditionally
+                                 string ieeeBitsNew = $"_sl_ieee_{target.Name}";
+                                 AppendLine($"let _sl_new_f64_{target.Name} = f64_add(_sl_old_f64_{target.Name}, {val});");
+                                 AppendLine($"let {ieeeBitsNew} = f64_to_ieee754_bits(_sl_new_f64_{target.Name});");
+                                 AppendLine($"atomicStore(&(*{ptrStr})[u32({baseIdxVar})], {ieeeBitsNew}.x);");
+                                 AppendLine($"atomicStore(&(*{ptrStr})[u32({baseIdxVar}) + 1u], {ieeeBitsNew}.y);");
                              }
                              else
                              {
@@ -4266,8 +4331,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                                  PushIndent();
                                  string ieeeBitsNew = $"_sl_ieee_{target.Name}";
                                  AppendLine($"let {ieeeBitsNew} = f64_to_ieee754_bits({val});");
-                                 AppendLine($"atomicStore(&(*{ptrStr})[u32({baseIdxVar})], bitcast<i32>({ieeeBitsNew}.x));");
-                                 AppendLine($"atomicStore(&(*{ptrStr})[u32({baseIdxVar}) + 1u], bitcast<i32>({ieeeBitsNew}.y));");
+                                 AppendLine($"atomicStore(&(*{ptrStr})[u32({baseIdxVar})], {ieeeBitsNew}.x);");
+                                 AppendLine($"atomicStore(&(*{ptrStr})[u32({baseIdxVar}) + 1u], {ieeeBitsNew}.y);");
                                  PopIndent();
                                  AppendLine($"}}");
                              }
@@ -4278,13 +4343,6 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                              AppendLine($"}}");
                              PopIndent();
                              AppendLine($"}}");
-                         }
-                         else
-                         {
-                             // f64 Add: not yet implemented with spinlock. Throw for now.
-                             throw new System.NotSupportedException(
-                                 $"Atomic.Add on Float64 is not yet supported on the WebGPU backend. " +
-                                 $"Float64 is emulated as two 32-bit words.");
                          }
                      }
                      else
@@ -4345,9 +4403,9 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                              // i64 Min/Max/Exchange: spinlock on companion lock buffer.
                              // Both halves must be read/written atomically. A per-element
                              // spinlock serializes access to the i64 value.
-                             int paramIdx = emulInfo.ParamIndex;
-                             if (!_lockBufferNames.TryGetValue(paramIdx, out var lockName))
-                                 throw new System.InvalidOperationException($"No lock buffer for param{paramIdx} - ScanForAtomicUsage should have detected i64 {value.Kind}");
+                             var lockKey = (emulInfo.ParamIndex, emulInfo.FieldIdx);
+                             if (!_lockBufferNames.TryGetValue(lockKey, out var lockName))
+                                 throw new System.InvalidOperationException($"No lock buffer for param{emulInfo.ParamIndex} field{emulInfo.FieldIdx} - ScanForAtomicUsage should have detected i64 {value.Kind}");
                              string lockIdx = $"u32({baseIdxVar}) / 2u"; // one lock per i64 element (2 u32s)
                              string oldLoVar2 = $"_sl_old_lo_{target.Name}";
                              string oldHiVar2 = $"_sl_old_hi_{target.Name}";
@@ -4395,9 +4453,9 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                  else
                  {
                      // Exchange on i64/f64: uses the same spinlock pattern
-                     int paramIdx2 = emulInfo.ParamIndex;
-                     if (!_lockBufferNames.TryGetValue(paramIdx2, out var lockName2))
-                         throw new System.InvalidOperationException($"No lock buffer for param{paramIdx2} - ScanForAtomicUsage should have detected i64 Exchange");
+                     var lockKey2 = (emulInfo.ParamIndex, emulInfo.FieldIdx);
+                     if (!_lockBufferNames.TryGetValue(lockKey2, out var lockName2))
+                         throw new System.InvalidOperationException($"No lock buffer for param{emulInfo.ParamIndex} field{emulInfo.FieldIdx} - ScanForAtomicUsage should have detected i64 Exchange");
                      string lockIdx2 = $"u32({baseIdxVar}) / 2u";
                      string oldLoVar3 = $"_sl_old_lo_{target.Name}";
                      string oldHiVar3 = $"_sl_old_hi_{target.Name}";
@@ -4455,12 +4513,6 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     isEmulatedF64 = true;
                     leftType = "emu_f64";
                 }
-            }
-            
-            // DIAGNOSTIC: Log all Max/Min operations to trace 64-bit detection
-            if (value.Kind == BinaryArithmeticKind.Max || value.Kind == BinaryArithmeticKind.Min)
-            {
-                if (WebGPUBackend.VerboseLogging) WebGPUBackend.Log($"[DIAG-BinaryArith] Kind={value.Kind} BVT={value.BasicValueType} leftType={leftType} rightType={rightType} isEmuI64={isEmulatedI64} isEmuF64={isEmulatedF64} I64Emu={Backend.EnableI64Emulation} LeftIRType={value.Left.Type} IsUnsigned={value.IsUnsigned}");
             }
 
             if (isEmulatedF64)
@@ -5538,9 +5590,9 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     AppendLine($"let {target.Name}_base_idx = {sourceBaseIdx} + {field.U32Offset};");
                     AppendLine($"let {target.Name} = &{psLFA.BindingName};");
                     if (field.IsEmuF64)
-                        _emulatedVarMappings[target.Name] = (-1, true);
+                        _emulatedVarMappings[target.Name] = (-1, -1, true);
                     else if (field.IsEmuI64OrU64)
-                        _emulatedVarMappings[target.Name] = (-1, false);
+                        _emulatedVarMappings[target.Name] = (-1, -1, false);
                     else
                         _packedScalarFieldPtrs[target.Name] = (psLFA.BindingName, field);
                     return;

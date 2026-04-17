@@ -1010,10 +1010,12 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         public int ExpectedBindingCount { get; }
 
         /// <summary>
-        /// Param indices that need spinlock companion buffers for i64 Min/Max/Exchange atomics.
-        /// The dispatch code auto-allocates one lock buffer per entry and binds it.
+        /// Spinlock-companion-buffer keys for i64/f64 Min/Max/Exchange atomics.
+        /// Key: (ParamIdx, FieldIdx). FieldIdx=-1 for direct view params;
+        /// FieldIdx>=0 for body-struct view fields. The dispatch code auto-allocates one
+        /// lock buffer per entry and binds it (in OrderBy order, matching WGSL emission).
         /// </summary>
-        public IReadOnlySet<int> I64SpinlockParamIndices { get; }
+        public IReadOnlySet<(int ParamIdx, int FieldIdx)> I64SpinlockParamIndices { get; }
 
         /// <summary>
         /// Returns true if this kernel needs spinlock buffers for i64 atomics.
@@ -1030,14 +1032,14 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             IReadOnlyList<DynamicSharedOverrideInfo>? dynamicSharedOverrides = null,
             IReadOnlyList<ScalarPackingEntry>? scalarPackingManifest = null,
             int expectedBindingCount = 0,
-            IReadOnlySet<int>? i64SpinlockParamIndices = null)
+            IReadOnlySet<(int ParamIdx, int FieldIdx)>? i64SpinlockParamIndices = null)
             : base(context, entryPoint, null)
         {
             WGSLSource = wgslSource;
             DynamicSharedOverrides = dynamicSharedOverrides ?? Array.Empty<DynamicSharedOverrideInfo>();
             ScalarPackingManifest = scalarPackingManifest ?? Array.Empty<ScalarPackingEntry>();
             ExpectedBindingCount = expectedBindingCount;
-            I64SpinlockParamIndices = i64SpinlockParamIndices ?? new HashSet<int>();
+            I64SpinlockParamIndices = i64SpinlockParamIndices ?? new HashSet<(int, int)>();
         }
     }
 

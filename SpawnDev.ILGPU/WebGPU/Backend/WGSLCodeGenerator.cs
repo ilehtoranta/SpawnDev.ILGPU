@@ -140,10 +140,12 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             public List<int> ExpectedBindingCountHolder { get; } = new() { 0 };
 
             /// <summary>
-            /// Param indices that need spinlock companion buffers for i64 Min/Max/Exchange.
-            /// Populated during ScanForAtomicUsage, used by dispatch to allocate lock buffers.
+            /// Spinlock-companion-buffer keys for i64/f64 Min/Max/Exchange atomics.
+            /// Key: (ParamIdx, FieldIdx). FieldIdx=-1 for direct view params;
+            /// FieldIdx>=0 for body-struct view fields. Populated during ScanForAtomicUsage,
+            /// used by dispatch to allocate lock buffers (one per key, in OrderBy order).
             /// </summary>
-            public HashSet<int> I64SpinlockParamIndices { get; } = new();
+            public HashSet<(int ParamIdx, int FieldIdx)> I64SpinlockParamIndices { get; } = new();
 
             /// <summary>
             /// Manages shared memory allocation, matching, and WGSL emission.

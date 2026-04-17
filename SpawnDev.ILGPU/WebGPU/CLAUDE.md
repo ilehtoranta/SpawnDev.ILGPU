@@ -68,14 +68,14 @@ WGSL only has 32-bit atomics. i64 is emulated as `vec2<u32>`. Atomic support:
 | Operation | i64 | f64 | Method |
 |-----------|-----|-----|--------|
 | And/Or/Xor | Supported | N/A | Dual i32 atomics on lo/hi halves (independent) |
-| Add | Supported | Not supported | CAS loop on lo half + atomicAdd on hi half with carry (lock-free) |
-| Min/Max | Not supported | Not supported | Throws `NotSupportedException` - requires 64-bit CAS |
-| Exchange | Not supported | Not supported | Throws `NotSupportedException` - requires atomic dual-word update |
+| Add | Supported | Supported | i64: CAS on lo + atomicAdd on hi (lock-free). f64: spinlock + f64_add. |
+| Min/Max | Supported | Supported | Spinlock companion buffer + dual-u32 atomicLoad/atomicStore critical section |
+| Exchange | Supported | Supported | Spinlock companion buffer + dual-u32 atomicStore critical section |
 | CAS | Not supported | Not supported | Throws `NotSupportedException` - WGSL has no 64-bit CAS |
 
 **i32/f32 atomics are fully supported** via native WGSL atomics (i32) or CAS loops (f32).
 
-**Why Add works but Min/Max don't:** Add uses `atomicAdd` on the hi half for carry, which is commutative - multiple threads can add carry in any order. Min/Max require comparing BOTH halves as a single 64-bit value, which needs atomicity across two u32 words that WGSL can't provide.
+**Spinlock pattern:** For operations that need atomicity across both u32 words (Min/Max/Exchange on i64/f64, and Add on f64), a companion `array<atomic<u32>>` lock buffer is auto-provisioned by `ScanForAtomicUsage`. Each 64-bit slot gets its own lock word; threads `atomicCompareExchangeWeak` to acquire, perform `atomicLoad`/`atomicStore` on both halves inside the critical section, then release with `atomicStore(lock, 0u)`. i64 Add uses a lock-free dual-atomic path instead (commutative carry).
 
 ## Diagnostics
 - `WebGPUBackend.WGSLDumpPath` — dump shaders to files (desktop only)

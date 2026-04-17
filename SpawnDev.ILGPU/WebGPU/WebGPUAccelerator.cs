@@ -1310,7 +1310,7 @@ namespace SpawnDev.ILGPU.WebGPU
                 // Allocate and bind spinlock buffers for i64 Min/Max/Exchange atomics
                 if (compiledKernel.HasI64Spinlocks)
                 {
-                    foreach (var paramIdx in compiledKernel.I64SpinlockParamIndices.OrderBy(x => x))
+                    foreach (var lockKey in compiledKernel.I64SpinlockParamIndices.OrderBy(k => k.ParamIdx).ThenBy(k => k.FieldIdx))
                     {
                         // Find the data buffer for this param to determine lock count
                         // Each i64 element = 2 u32s, so lock count = data buffer element count / 2

@@ -1095,5 +1095,181 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             if (!foundMatch)
                 throw new Exception($"Opaque vertex color {actualCr} does not match any valid palette color");
         });
+
+        // ==================== Index3D + ArrayView<short> BindGroupLayout Regression Tests ====================
+        // Repros Data's VoxelEngine SDF/DMC WebGPU bug (2026-04-16). CPU/OpenCL/CUDA pass, WebGPU fails
+        // with "[Invalid BindGroupLayout (unlabeled)] is invalid" at CreateBindGroup time.
+        // Common factors: ArrayView<short> + Index3D + multiple buffers/scalars.
+
+        // Mirrors ModifySdfSphereKernel - Index3D + i16 view + 8 float + 3 int scalars
+        static void Repro_Index3D_Short_ManyScalarsKernel(
+            Index3D index,
+            ArrayView<short> output,
+            float a, float b, float c,
+            float d,
+            int mode,
+            float e, float f, float g,
+            float h,
+            int size)
+        {
+            int x = index.X;
+            int y = index.Y;
+            int z = index.Z;
+            if (x >= size || y >= size || z >= size) return;
+
+            int idx = x + z * size + y * size * size;
+            float v = a + b + c + d + e + f + g + h + mode;
+            output[idx] = (short)(v);
+        }
+
+        [TestMethod]
+        public async Task ShortBuffer_Index3D_ManyScalars_DispatchSucceedsTest() => await RunTest(async accelerator =>
+        {
+            const int size = 4;
+            using var buf = accelerator.Allocate1D<short>(size * size * size);
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<
+                Index3D, ArrayView<short>,
+                float, float, float, float, int,
+                float, float, float, float, int>(Repro_Index3D_Short_ManyScalarsKernel);
+
+            kernel(new Index3D(size, size, size),
+                buf.View,
+                1f, 2f, 3f, 4f, 0,
+                5f, 6f, 7f, 8f, size);
+            await accelerator.SynchronizeAsync();
+
+            var result = await buf.CopyToHostAsync();
+            short expected = (short)(1 + 2 + 3 + 4 + 5 + 6 + 7 + 8 + 0);
+            for (int i = 0; i < result.Length; i++)
+                if (result[i] != expected)
+                    throw new Exception($"[{i}] expected {expected}, got {result[i]}");
+        });
+
+        // Mirrors ClassifyActiveCellsKernel - Index3D + i16 read + 2x i32 write + 1 int scalar
+        static void Repro_Index3D_Short_MultiBufferKernel(
+            Index3D index,
+            ArrayView<short> sdfInput,
+            ArrayView<int> intOutput1,
+            ArrayView<int> intOutput2,
+            int size)
+        {
+            int x = index.X;
+            int y = index.Y;
+            int z = index.Z;
+            if (x >= size || y >= size || z >= size) return;
+
+            int idx = x + z * size + y * size * size;
+            short v = sdfInput[idx];
+            intOutput1[idx] = v;
+            intOutput2[idx] = v > 0 ? 1 : 0;
+        }
+
+        [TestMethod]
+        public async Task ShortBuffer_Index3D_MultiBuffer_DispatchSucceedsTest() => await RunTest(async accelerator =>
+        {
+            const int size = 4;
+            int total = size * size * size;
+            var sdfData = new short[total];
+            for (int i = 0; i < total; i++) sdfData[i] = (short)((i % 2 == 0) ? 10 : -10);
+
+            using var sdfBuf = accelerator.Allocate1D<short>(total);
+            sdfBuf.CopyFromCPU(sdfData);
+            using var intBuf1 = accelerator.Allocate1D<int>(total);
+            using var intBuf2 = accelerator.Allocate1D<int>(total);
+
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<
+                Index3D, ArrayView<short>, ArrayView<int>, ArrayView<int>, int>(
+                Repro_Index3D_Short_MultiBufferKernel);
+
+            kernel(new Index3D(size, size, size), sdfBuf.View, intBuf1.View, intBuf2.View, size);
+            await accelerator.SynchronizeAsync();
+
+            var out1 = await intBuf1.CopyToHostAsync();
+            var out2 = await intBuf2.CopyToHostAsync();
+            for (int i = 0; i < total; i++)
+            {
+                int expected1 = sdfData[i];
+                int expected2 = sdfData[i] > 0 ? 1 : 0;
+                if (out1[i] != expected1)
+                    throw new Exception($"out1[{i}] expected {expected1}, got {out1[i]}");
+                if (out2[i] != expected2)
+                    throw new Exception($"out2[{i}] expected {expected2}, got {out2[i]}");
+            }
+        });
+
+        // Mirrors GenerateDualVerticesKernel - Index1D + mixed i32/i16/i32/f32/f32 views + many scalars
+        static void Repro_Index1D_MixedTypesKernel(
+            Index1D idx,
+            ArrayView<int> activeIds,
+            ArrayView<short> sdfInput,
+            ArrayView<int> caseInput,
+            ArrayView<float> positionOut,
+            ArrayView<float> normalOut,
+            int size,
+            float a, float b, float c, float d,
+            int activeCount)
+        {
+            int i = idx.X;
+            if (i >= activeCount) return;
+            int cellId = activeIds[i];
+            short s = sdfInput[cellId % (int)sdfInput.IntLength];
+            int cs = caseInput[cellId % (int)caseInput.IntLength];
+
+            positionOut[i * 3 + 0] = a + s;
+            positionOut[i * 3 + 1] = b + cs;
+            positionOut[i * 3 + 2] = c;
+            normalOut[i * 3 + 0] = d;
+            normalOut[i * 3 + 1] = 0f;
+            normalOut[i * 3 + 2] = 1f;
+        }
+
+        [TestMethod]
+        public async Task ShortBuffer_Index1D_MixedTypes_DispatchSucceedsTest() => await RunTest(async accelerator =>
+        {
+            const int activeCount = 8;
+            const int size = 4;
+
+            var activeIdsData = Enumerable.Range(0, activeCount).ToArray();
+            var sdfData = Enumerable.Range(0, 16).Select(i => (short)i).ToArray();
+            var caseData = Enumerable.Range(0, 16).ToArray();
+
+            using var activeIds = accelerator.Allocate1D<int>(activeCount);
+            activeIds.CopyFromCPU(activeIdsData);
+            using var sdfBuf = accelerator.Allocate1D<short>(16);
+            sdfBuf.CopyFromCPU(sdfData);
+            using var caseBuf = accelerator.Allocate1D<int>(16);
+            caseBuf.CopyFromCPU(caseData);
+            using var posBuf = accelerator.Allocate1D<float>(activeCount * 3);
+            using var normBuf = accelerator.Allocate1D<float>(activeCount * 3);
+
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<
+                Index1D, ArrayView<int>, ArrayView<short>, ArrayView<int>,
+                ArrayView<float>, ArrayView<float>,
+                int, float, float, float, float, int>(Repro_Index1D_MixedTypesKernel);
+
+            kernel(new Index1D(activeCount),
+                activeIds.View, sdfBuf.View, caseBuf.View, posBuf.View, normBuf.View,
+                size, 1f, 2f, 3f, 4f, activeCount);
+            await accelerator.SynchronizeAsync();
+
+            var pos = await posBuf.CopyToHostAsync();
+            var norm = await normBuf.CopyToHostAsync();
+            for (int i = 0; i < activeCount; i++)
+            {
+                float expX = 1f + i;
+                float expY = 2f + i;
+                float expZ = 3f;
+                if (MathF.Abs(pos[i * 3 + 0] - expX) > 0.001f)
+                    throw new Exception($"pos[{i}].x expected {expX}, got {pos[i * 3 + 0]}");
+                if (MathF.Abs(pos[i * 3 + 1] - expY) > 0.001f)
+                    throw new Exception($"pos[{i}].y expected {expY}, got {pos[i * 3 + 1]}");
+                if (MathF.Abs(pos[i * 3 + 2] - expZ) > 0.001f)
+                    throw new Exception($"pos[{i}].z expected {expZ}, got {pos[i * 3 + 2]}");
+                if (MathF.Abs(norm[i * 3 + 0] - 4f) > 0.001f)
+                    throw new Exception($"norm[{i}].x expected 4, got {norm[i * 3 + 0]}");
+                if (MathF.Abs(norm[i * 3 + 2] - 1f) > 0.001f)
+                    throw new Exception($"norm[{i}].z expected 1, got {norm[i * 3 + 2]}");
+            }
+        });
     }
 }
