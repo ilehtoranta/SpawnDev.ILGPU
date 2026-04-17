@@ -582,6 +582,13 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
         [TestMethod(Timeout = 120000)]
         public new async Task RadixSortAscending1_4MTest() => await base.RadixSortAscending1_4MTest();
 
+        // 500 sequential dispatches x 2 kernels x SynchronizeAsync is genuinely slow on Wasm
+        // under full-suite load (JS<->Wasm boundary + multi-worker barrier cost per dispatch).
+        // Came in at 120173ms (just over the base 120s). Defense-in-depth headroom at 240s;
+        // the cascade-safety fix lives in WasmAccelerator.DisposeAccelerator_SyncRoot.
+        [TestMethod(Timeout = 240000)]
+        public new async Task SubViewRange_HighDispatchCount() => await base.SubViewRange_HighDispatchCount();
+
         // ═══════════════════════════════════════════════════════════════
         // MULTI-GROUP SCAN
         // ═══════════════════════════════════════════════════════════════

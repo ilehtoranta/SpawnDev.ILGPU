@@ -72,6 +72,23 @@ namespace SpawnDev.ILGPU.Wasm
         /// </summary>
         internal int _activeDispatchCount;
 
+        // Tracks every per-worker TaskCompletionSource currently awaiting a worker response.
+        // On Dispose, these are faulted with ObjectDisposedException so that callers awaiting
+        // Task.WhenAll do not hang forever after workers are terminated (zombie dispatch).
+        private readonly List<TaskCompletionSource> _pendingTcs = new();
+        private readonly object _pendingTcsLock = new();
+        private volatile bool _disposed;
+
+        private void RegisterTcs(TaskCompletionSource tcs)
+        {
+            lock (_pendingTcsLock) _pendingTcs.Add(tcs);
+        }
+
+        private void UnregisterTcs(TaskCompletionSource tcs)
+        {
+            lock (_pendingTcsLock) _pendingTcs.Remove(tcs);
+        }
+
         // --- Reflection caches for hot-path stride extraction and struct marshaling ---
         private static readonly ConcurrentDictionary<Type, StrideReflectionCache> _strideCache = new();
         private static readonly ConcurrentDictionary<Type, MethodInfo> _unsafeWriteCache = new();
@@ -232,6 +249,11 @@ namespace SpawnDev.ILGPU.Wasm
             var wasmKernel = (WasmKernel)kernel;
             var compiledKernel = (WasmCompiledKernel)wasmKernel.CompiledKernel;
 
+            // Reject dispatches on a disposed accelerator so the caller fails fast instead of
+            // silently hanging on a worker pool that was already torn down.
+            if (wasmAccel._disposed)
+                throw new ObjectDisposedException(nameof(WasmAccelerator), "Cannot dispatch kernels on a disposed WasmAccelerator.");
+
             int dispNum = ++_dispatchCount;
 
             if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm-Debug] RunKernel called with {args.Length} args");
@@ -249,6 +271,9 @@ namespace SpawnDev.ILGPU.Wasm
             object[] args,
             int dispNum = 0)
         {
+            if (_disposed)
+                throw new ObjectDisposedException(nameof(WasmAccelerator));
+
             // Serialize kernel execution: wait for all previous dispatches to complete
             // before starting a new one. Prevents data races in multi-kernel algorithms.
             if (_pendingWork.Count > 0)
@@ -257,6 +282,11 @@ namespace SpawnDev.ILGPU.Wasm
                 _pendingWork.Clear();
                 await Task.WhenAll(pending);
             }
+
+            // A Dispose could have happened while we awaited above. Bail out before
+            // re-creating the worker pool below, which would resurrect a disposed accelerator.
+            if (_disposed)
+                throw new ObjectDisposedException(nameof(WasmAccelerator));
 
             try
             {
@@ -1133,6 +1163,7 @@ namespace SpawnDev.ILGPU.Wasm
                 {
                     var worker = workers[w];
                     var tcs = new TaskCompletionSource();
+                    RegisterTcs(tcs);
                     int workerIdx = w;
 
                     Action<MessageEvent>? msgHandler = null;
@@ -1143,6 +1174,7 @@ namespace SpawnDev.ILGPU.Wasm
                         worker.OnMessage -= msgHandler!;
                         worker.OnError -= errHandler!;
                         _workerPool?.Return(worker);
+                        UnregisterTcs(tcs);
 
                         // Capture diagnostic from worker 0
                         if (workerIdx == 0 && _dispatchCount <= 6)
@@ -1171,6 +1203,7 @@ namespace SpawnDev.ILGPU.Wasm
                         worker.OnMessage -= msgHandler!;
                         worker.OnError -= errHandler!;
                         _workerPool?.Return(worker);
+                        UnregisterTcs(tcs);
                         tcs.TrySetException(new Exception($"[Wasm] Worker {workerIdx} error during kernel execution"));
                     });
 
@@ -1223,6 +1256,7 @@ namespace SpawnDev.ILGPU.Wasm
                     int myScratch = scratchBase + w * scratchPerThread; // per-worker scratch
 
                     var tcs = new TaskCompletionSource();
+                    RegisterTcs(tcs);
                     int workerIdx = w;
 
                     Action<MessageEvent>? msgHandler = null;
@@ -1233,6 +1267,7 @@ namespace SpawnDev.ILGPU.Wasm
                         worker.OnMessage -= msgHandler!;
                         worker.OnError -= errHandler!;
                         _workerPool?.Return(worker);
+                        UnregisterTcs(tcs);
 
                         var done = msg.JSRef!.Get<bool>("data.done");
                         if (!done)
@@ -1249,6 +1284,7 @@ namespace SpawnDev.ILGPU.Wasm
                         worker.OnMessage -= msgHandler!;
                         worker.OnError -= errHandler!;
                         _workerPool?.Return(worker);
+                        UnregisterTcs(tcs);
                         tcs.TrySetException(new Exception($"[Wasm] Worker {workerIdx} error during kernel execution"));
                     });
 
@@ -1846,6 +1882,24 @@ namespace SpawnDev.ILGPU.Wasm
         {
             if (disposing)
             {
+                // Mark disposed before tearing down workers so any in-flight RunKernel call
+                // rejects cleanly instead of queuing work onto a dead pool.
+                _disposed = true;
+
+                // Fault every TCS that's still waiting on a worker response. Worker.Terminate()
+                // below kills the Promise chain without replying, so without this the awaiting
+                // Task.WhenAll would hang forever — the "zombie dispatch" that holds worker state
+                // alive in the test runner and cascades into the next test.
+                TaskCompletionSource[] stranded;
+                lock (_pendingTcsLock)
+                {
+                    stranded = _pendingTcs.ToArray();
+                    _pendingTcs.Clear();
+                }
+                foreach (var tcs in stranded)
+                    tcs.TrySetException(new ObjectDisposedException(nameof(WasmAccelerator),
+                        "WasmAccelerator disposed while a kernel dispatch was in flight. The worker pool has been terminated."));
+
                 _pendingWork.Clear();
                 _initializedWorkers.Clear();
                 _activeDispatchCount = 0;
