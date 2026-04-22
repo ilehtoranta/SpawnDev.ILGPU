@@ -17,10 +17,6 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
         public WebGPUTests(IPortableCrypto crypto, SpawnDev.WebTorrent.WebTorrentClient webTorrentClient) : base(crypto, webTorrentClient) { }
         protected override string BackendName => "WebGPU";
 
-        [TestMethod]
-        public new async Task ILGPUReduceHalfTest() =>
-            throw new UnsupportedTestException("WebGPU: Reduce<Half> is a Phase 4 follow-up item - widen-to-f32 conversion kernel returns zero intermediate values on WebGPU despite ILGPUReduceFloatTest passing. Under investigation. Use GroupExtensions.AllReduce<Half> for single-workgroup cases (works on WebGPU). See Plans/f16-emulation-plan.md.");
-
         protected override async Task<(Context context, Accelerator accelerator)> CreateAcceleratorAsync()
         {
             return await CreateAcceleratorAsync(enableEmulation: true);
@@ -398,10 +394,6 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
     {
         public WebGPUNoSubgroupsTests(IPortableCrypto crypto, SpawnDev.WebTorrent.WebTorrentClient webTorrentClient) : base(crypto, webTorrentClient) { }
         protected override string BackendName => "WebGPU (No Subgroups)";
-
-        [TestMethod]
-        public new async Task ILGPUReduceHalfTest() =>
-            throw new UnsupportedTestException("WebGPU (No Subgroups): Reduce<Half> is a Phase 4 follow-up item - same limitation as parent WebGPU backend. See Plans/f16-emulation-plan.md.");
 
         protected override void RequireFeature(Accelerator accelerator, string featureName, string? reason = null)
         {

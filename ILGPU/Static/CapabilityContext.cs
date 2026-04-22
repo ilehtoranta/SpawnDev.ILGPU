@@ -204,15 +204,6 @@ namespace ILGPU.Runtime.OpenCL
     /// <summary>
     /// Represents capabilities available to OpenCL accelerators.
     /// </summary>
-    /// <remarks>
-    /// **Manually-modified file — NOT in sync with <c>CapabilityContext.tt</c>** (as of
-    /// 2026-04-22 Phase 3 of f16-emulation-plan). The ctors here always set
-    /// <c>Float16 = true</c> (emulation always available via <c>vload_half</c> /
-    /// <c>vstore_half</c>) and track native <c>cl_khr_fp16</c> separately in
-    /// <c>Float16Native</c>. If you re-run Transform All Templates in VS, these edits
-    /// will be overwritten — re-apply them or port the logic into the .tt's
-    /// capability generation loop before regenerating.
-    /// </remarks>
     public sealed class CLCapabilityContext : CapabilityContext
     {
         #region Static
@@ -260,10 +251,12 @@ namespace ILGPU.Runtime.OpenCL
             )
         {
             var extensions = ImmutableArray.CreateBuilder<string>();
-            // Float16 is always supported on OpenCL: native when cl_khr_fp16 is present,
-            // emulated via vload_half/vstore_half + f32 arithmetic otherwise. The
-            // `float16` ctor parameter now describes native hardware support and is
-            // tracked separately as Float16Native so callers can distinguish the two.
+            // f16-emulation-plan Phase 3: Float16 always true on OpenCL (emulated via
+            // vload_half/vstore_half when cl_khr_fp16 unavailable). Float16Native
+            // tracks the real extension. MANUAL edit - NOT in sync with .tt. If you
+            // run Transform All Templates in VS, re-apply this. See also the 6 gate
+            // points in CLCodeGenerator.Views.cs / CLKernelFunctionGenerator.cs /
+            // CLTypeGenerator.cs that depend on !Float16Native.
             Float16 = true;
             Float16Native = float16;
             if (Float16Native)
@@ -283,11 +276,7 @@ namespace ILGPU.Runtime.OpenCL
         internal CLCapabilityContext(CLDevice device)
         {
             var extensions = ImmutableArray.CreateBuilder<string>();
-            // Float16 is always true on OpenCL: the library emits vload_half / vstore_half
-            // + f32 arithmetic when cl_khr_fp16 is unavailable. Those helpers are core
-            // OpenCL C built-ins available without any extension. Float16Native reflects
-            // the real cl_khr_fp16 presence so codegen can choose the native `half` type
-            // when available or the emulation path when not.
+            // f16-emulation-plan Phase 3: see note in the public ctor above.
             Float16Native = device.HasAllExtensions(Float16Extensions);
             Float16 = true;
             if (Float16Native)
@@ -319,6 +308,7 @@ namespace ILGPU.Runtime.OpenCL
         /// are emulated via <c>vload_half</c> / <c>vstore_half</c> plus <c>float</c>
         /// arithmetic. In both cases <see cref="CapabilityContext.Float16"/> is true;
         /// <c>Float16Native</c> distinguishes which path the codegen will take.
+        /// Added by f16-emulation-plan Phase 3. MANUAL addition, NOT in sync with .tt.
         /// </summary>
         public bool Float16Native { get; internal set; }
 

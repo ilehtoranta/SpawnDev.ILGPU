@@ -207,26 +207,11 @@ namespace ILGPU.Algorithms
             // see that without a runtime cast).
             //
             // Backend coverage (Phase 4, 2026-04-22):
-            //   CPU     : supported (widen-to-f32)
-            //   CUDA    : supported (widen-to-f32)
-            //   OpenCL  : supported (widen-to-f32)
-            //   WebGPU  : NOT SUPPORTED - open codegen issue with the Half-to-float
-            //             conversion kernel producing zero-valued f32 intermediate
-            //             despite ILGPUReduceFloatTest passing on the same backend.
-            //             Under investigation. See Plans/f16-emulation-plan.md Phase 4.
-            //   Wasm    : NOT SUPPORTED - related browser-side RangeError, TBD root cause.
-            //   WebGL   : NOT SUPPORTED - no vertex-shader atomics at all (existing skip).
+            //   CPU    / CUDA / OpenCL / WebGPU / Wasm : supported (widen-to-f32)
+            //   WebGL  : NOT SUPPORTED - no vertex-shader atomics at all. Existing
+            //            ILGPUReduce<T> skip pattern covers this.
             if (typeof(T) == typeof(Half))
             {
-                var accType = accelerator.AcceleratorType;
-                if (accType == AcceleratorType.WebGPU || accType == AcceleratorType.Wasm)
-                {
-                    throw new NotSupportedException(
-                        $"Reduce<Half, {typeof(TReduction).Name}> on {accType} is an open " +
-                        "Phase 4 follow-up item. CPU / CUDA / OpenCL work today. Use " +
-                        "GroupExtensions.AllReduce<Half, ...> for single-workgroup cases " +
-                        "(supported on WebGPU and Wasm). See Plans/f16-emulation-plan.md.");
-                }
                 var halfInput = input.Cast<Half>();
                 var halfOutput = output.Cast<Half>();
                 if (typeof(TReduction) == typeof(AddHalf))
@@ -257,20 +242,32 @@ namespace ILGPU.Algorithms
             where TFloatReduction : struct, IScanReduceOperation<float>
         {
             // 1. Allocate f32 temp buffers (input-sized + 1-element output).
-            using var f32Input = accelerator.Allocate1D<float>(input.Length);
-            using var f32Output = accelerator.Allocate1D<float>(1);
+            // NOTE: intentionally NOT using `using var` here. WebGPU uses a deferred
+            // command encoder: the dispatches below are queued and submitted later.
+            // If we dispose these temp buffers on scope-exit, WebGPU logs
+            // "Buffer used in submit while destroyed" and the submitted work reads
+            // zero-valued memory. Letting GC finalize them after GPU completes is
+            // the simplest correct behavior; refinement (explicit lifetime tie to
+            // the next Synchronize) is a Phase 4 optimization. TODO.
+            var f32Input = accelerator.Allocate1D<float>(input.Length);
+            var f32Output = accelerator.Allocate1D<float>(1);
 
             // 2. Convert Half input -> f32 temp via a trivial copy kernel.
             var widenKernel = accelerator.LoadAutoGroupedStreamKernel<
                 Index1D, ArrayView<Half>, ArrayView<float>>(
                 HalfToFloatCopyKernel);
             widenKernel((Index1D)(int)input.Length, input, f32Input.View);
+            // Flush the widen kernel before the Reduce reads the f32 buffer. On
+            // backends with deferred command encoding (WebGPU) the Reduce's compute
+            // pass may otherwise race with the widen writes.
+            accelerator.Synchronize();
 
             // 3. Reduce the f32 view with the widened reduction op.
             accelerator.CreateReduction<float, Stride1D.Dense, TFloatReduction>()(
                 stream,
                 f32Input.View,
                 f32Output.View);
+            accelerator.Synchronize();
 
             // 4. Convert final f32 result back to Half in the user's output slot.
             var narrowKernel = accelerator.LoadAutoGroupedStreamKernel<

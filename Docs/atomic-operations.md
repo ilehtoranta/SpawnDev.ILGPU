@@ -69,6 +69,26 @@ i64 is emulated as `vec2<u32>` on WebGPU and WebGL. Native on Wasm, CUDA, OpenCL
 
 ---
 
+## Float16 (Half) Atomics
+
+Half-precision hardware atomics are not available on any backend (f16 is 2 bytes; atomics require 4+ byte alignment and operate on u32/u64 granularity). There is no direct `Atomic.Add(ref Half, Half)` primitive. Use cases that need Half reductions go through the `accelerator.Reduce<Half, AddHalf/MaxHalf/MinHalf>` widen-to-f32 dispatch (see `ILGPU.Algorithms/ReductionExtensions.cs`) or group-level `GroupExtensions.AllReduce<Half, AddHalf>` for single-workgroup cases.
+
+| Operation | WebGPU | Wasm | WebGL | CUDA | OpenCL | CPU |
+|-----------|:------:|:----:|:-----:|:----:|:------:|:---:|
+| Reduce (multi-workgroup) | [W2F] | [W2F] | [!] | [W2F] | [W2F] | [W2F] |
+| AllReduce (single-workgroup) | [x] | [x] | [!] | [x] | [x] | [x] |
+| Direct Atomic.Add(ref Half) | n/a | n/a | n/a | n/a | n/a | n/a |
+
+**[W2F] Widen-to-f32:** `accelerator.Reduce<Half, AddHalf>` intercepts at the public entry in `ReductionExtensions`, allocates an f32 temp buffer, runs `Reduce<float, AddFloat>` through the existing `Atomic.Add(ref float)` CAS infrastructure, converts the final f32 result back to Half. Lossless (f16 is a strict subset of f32 encoding) and bit-for-bit identical across all 6 supported backends on the same inputs.
+
+**Single-workgroup AllReduce** uses a lock-free shared-memory pattern (per-warp first-lane writes into private slots, first thread serially combines). No atomics required; works on every backend that has shared memory + barriers.
+
+**WebGL:** no vertex shader atomics at all, so `Reduce<Half>` legitimately throws. Matches the existing WebGL skip pattern for every `accelerator.Reduce<T>` variant.
+
+**Long-term:** proper `Atomic.CompareExchange(ref Half, Half, Half)` intrinsics would allow a single-pass path without the widen-to-f32 temp buffer. Design parked in `Plans/PLAN-Atomic-Half-Intrinsics.md` for a future cycle; not needed for the shipping Half Reduce.
+
+---
+
 ## Float64 Atomics
 
 | Operation | WebGPU | Wasm | WebGL | CUDA | OpenCL | CPU |

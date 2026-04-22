@@ -9,6 +9,14 @@ Write parallel compute code in C# and let the library pick the best available ba
 
 ## What's New in 4.9.2
 
+### Float16 (Half) Everywhere - Native or Emulated
+
+`Capabilities.Float16 = true` on every backend. Half kernels compile and run correctly across CPU, CUDA, OpenCL, WebGPU, WebGL, and Wasm - native when the hardware exposes it (CUDA SM_53+, OpenCL `cl_khr_fp16`, WebGPU `shader-f16`), emulated otherwise via `_f16_to_f32` / `_f32_to_f16` helpers with f32 arithmetic. `Capabilities.Float16Native` on WebGPU and OpenCL exposes whether native hardware f16 is active so downstream code can branch without a backend-type check. Emulation is lossless - f16 is a strict subset of f32's encoding, so values round-trip bit-for-bit. `WebGPUBackend.ForceEmulatedF16` test flag lets you force the emulation path on shader-f16-capable hardware for verification.
+
+`accelerator.Reduce<Half, AddHalf/MaxHalf/MinHalf>` (the Accelerator-level multi-workgroup reduction API) now works on 6 of 7 backend variants (CPU, CUDA, OpenCL, WebGPU with or without subgroups, Wasm). Routes through a widen-to-f32 dispatch: per-workgroup reduction in Half, cross-workgroup atomic combine in f32 via the existing `Atomic.Add(ref float)` / `Atomic.Min(ref float)` / `Atomic.Max(ref float)` CAS infrastructure, convert back to Half. Lossless and bit-for-bit identical across all 6 backends on the same inputs. WebGL legitimately skips - vertex shaders have no atomic operations (same structural wall every `ILGPUReduce<T>` variant hits).
+
+See **[Plans/f16-emulation-plan.md](Plans/f16-emulation-plan.md)** for the per-phase design notes and **[Docs/atomic-operations.md](Docs/atomic-operations.md)** Float16 row for the atomic-operation support matrix.
+
 ### i64 Atomic.Add on WebGPU - Lock-Free CAS Loop
 
 `Atomic.Add` on `long`/`ulong` now works correctly on WebGPU with concurrent writers. The implementation uses a lock-free CAS loop on the lo half + `atomicAdd` on the hi half with carry propagation. No lock buffer, no extra binding slot, no spinlock.

@@ -380,9 +380,6 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
         [TestMethod]
         public new async Task ReduceMinMaxTest() =>
             throw new UnsupportedTestException("Wasm: Warp.Shuffle requires subgroup support");
-        [TestMethod]
-        public new async Task ILGPUReduceHalfTest() =>
-            throw new UnsupportedTestException("Wasm: Reduce<Half> is a Phase 4 follow-up item - widen-to-f32 conversion kernel triggers a RangeError on Wasm that CPU/CUDA/OpenCL don't hit. Use GroupExtensions.AllReduce<Half> for single-workgroup cases. See Plans/f16-emulation-plan.md.");
 
         // ═══════════════════════════════════════════════════════════════
         // HALF PRECISION — codegen wrong values (7). f16 promoted to f32 but
