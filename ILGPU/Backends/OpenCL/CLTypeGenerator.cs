@@ -119,7 +119,7 @@ namespace ILGPU.Backends.OpenCL
         /// <param name="basicValueType">The basic-value type to resolve.</param>
         /// <returns>The resolved OpenCL type name.</returns>
         public string GetBasicValueType(BasicValueType basicValueType) =>
-            basicValueType == BasicValueType.Float16 && !Capabilities.Float16
+            basicValueType == BasicValueType.Float16 && !Capabilities.Float16Native
             ? "float" // Emulate: promote Half to float when cl_khr_fp16 unavailable
             : basicValueType == BasicValueType.Float64 && !Capabilities.Float64
                 ? throw CLCapabilityContext.GetNotSupportedFloat64Exception()
@@ -131,7 +131,7 @@ namespace ILGPU.Backends.OpenCL
         /// <param name="basicValueType">The basic-value type to resolve.</param>
         /// <returns>The resolved OpenCL type name.</returns>
         public string GetBasicValueType(ArithmeticBasicValueType basicValueType) =>
-            basicValueType == ArithmeticBasicValueType.Float16 && !Capabilities.Float16
+            basicValueType == ArithmeticBasicValueType.Float16 && !Capabilities.Float16Native
             ? "float" // Emulate: promote Half to float when cl_khr_fp16 unavailable
             : basicValueType == ArithmeticBasicValueType.Float64 && !Capabilities.Float64
                 ? throw CLCapabilityContext.GetNotSupportedFloat64Exception()
@@ -143,7 +143,7 @@ namespace ILGPU.Backends.OpenCL
         /// <param name="basicValueType">The basic-value type to resolve.</param>
         /// <returns>The resolved atomic OpenCL type name.</returns>
         public string? GetAtomicType(ArithmeticBasicValueType basicValueType) =>
-            basicValueType == ArithmeticBasicValueType.Float16 && !Capabilities.Float16
+            basicValueType == ArithmeticBasicValueType.Float16 && !Capabilities.Float16Native
             ? null // No atomic support for emulated Half
             : basicValueType == ArithmeticBasicValueType.Float64 && !Capabilities.Float64
                 ? throw CLCapabilityContext.GetNotSupportedFloat64Exception()
@@ -292,7 +292,7 @@ namespace ILGPU.Backends.OpenCL
             }
             else if (typeNode is PrimitiveType primitiveType16
                 && primitiveType16.BasicValueType == BasicValueType.Float16
-                && !Capabilities.Float16)
+                && !Capabilities.Float16Native)
             {
                 // Emulate: treat Half as float when cl_khr_fp16 unavailable
                 clName = "float";

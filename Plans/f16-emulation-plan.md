@@ -17,9 +17,9 @@
 ## Shipping status (2026-04-22)
 
 - **Phase 1 (WebGPU `!shader-f16` emulation): SHIPPED** at commit `30eb12c`. 8/8 WebGPU Half tests green on native and emulated paths. WGSL dump of `HalfArithmeticKernel` confirms helpers emitted.
-- **Phase 2 (WebGL emulation): CODE COMPLETE** at HEAD (not yet committed). GLSL helpers in `GLSLEmulationLibrary.F16Functions`; load refactored to call `_f16_to_f32`; store refactored to call `_f32_to_f16`; capability flipped to true; `Float16Native` field added. Verification in progress.
-- **Phase 3 (OpenCL `!cl_khr_fp16`): deferred** — no device in testing needs it.
-- **Phase 4 (`ILGPUReduceHalfTest`): pending** — unblocked by Phase 1.
+- **Phase 2 (WebGL emulation): SHIPPED** at commit `f391042`. 8/8 WebGL Half tests green. Existing inline load/store refactored to helper calls. `KernelUsesEmulatedTypes` extended to detect Float16 via IR scan so emulation library emits before param scan.
+- **Phase 3 (OpenCL emulation): SHIPPED (code complete at HEAD)**. OpenCL already had `vload_half` / `vstore_half` emulation code for devices without `cl_khr_fp16`, but `Capabilities.Float16` tracked `cl_khr_fp16` — so tests skipped on such devices. Fix: `Capabilities.Float16 = true` always on OpenCL; new `Capabilities.Float16Native` tracks `cl_khr_fp16`; six gate points in `CLCodeGenerator.Views.cs`, `CLKernelFunctionGenerator.cs`, `CLTypeGenerator.cs` re-pointed from `!Float16` to `!Float16Native`. Manual edit to forked `ILGPU/Static/CapabilityContext.cs` — NOT in sync with `.tt`; re-apply if Transform All regenerates.
+- **Phase 4 (`ILGPUReduceHalfTest`): DEFERRED** — original plan was test-only but `accelerator.Reduce<Half, *>()` requires library refactor (AtomicApply for Half throws). Group-level equivalents (`AlgorithmAllReduceHalfTest`, `AlgorithmGroupReduceHalfTest`) already work. See Phase 4 section for real scope.
 
 ---
 
@@ -299,9 +299,14 @@ Lower priority; same pattern as WebGPU/WebGL via OpenCL C helpers. Deferred unti
 
 ### Phase 4 — `ILGPUReduceHalfTest`
 
+**Scope reassessment 2026-04-22:** Original plan implied this was a test-only task. After attempting it, the reality is bigger: `accelerator.Reduce<T, TReduction>()` (the Accelerator-level Reduce API) uses `AtomicApply` internally for the cross-workgroup combine step. `ScanReduceOperationsHalf.cs` explicitly throws `NotSupportedException` from `AddHalf.AtomicApply` / `MaxHalf.AtomicApply` / `MinHalf.AtomicApply` with the comment "Half-precision atomics are not supported by hardware. Use group-level scan/reduce operations instead." ILGPU's kernel compiler then fails with "Not supported IL instruction of type 'Throw'". Actual work needed:
+
 | ID | Task | File(s) | Acceptance |
 |----|------|---------|------------|
-| **W4.1** | Write the missing test following the lock-free AllReduce pattern already used for Half | `BackendTestBase.Tests*.cs` | Test runs on every backend where Half + AllReduce are supported; CPU-reference verified |
+| **W4.1** | Route Half through the lock-free pattern at the Accelerator.Reduce level (not just GroupExtensions.AllReduce where it already works). Either (a) detect Half type in `ReduceExtensions` and dispatch to a lock-free multi-workgroup implementation, or (b) replace `AtomicApply` for Half structs with a per-warp shared-memory slot write + first-thread serialization, matching the pattern `ILGroupExtensions.AllReduce` already uses. | `ILGPU.Algorithms/ReduceExtensions.cs` + possibly `ScanReduceOperationsHalf.cs` | `accelerator.Reduce<Half, AddHalf>(...)` compiles and returns correct result on all backends that support Half |
+| **W4.2** | Write `ILGPUReduceHalfTest` mirroring `ILGPUReduceFloatTest` / `ILGPUReduceDoubleTest` pattern, count=32 (stays in Half exact integer range). WebGL skip override (no shared memory / barriers). | `BackendTestBase.Tests2.cs`, `WebGLTests.cs` | Test green on CPU + CUDA + OpenCL + WebGPU (native and emulated) + Wasm; legitimately skipped on WebGL |
+
+Status: DEFERRED until a consuming project actually needs Half multi-workgroup reduction. The group-level equivalents (`AlgorithmAllReduceHalfTest`, `AlgorithmGroupReduceHalfTest`) already work and are sufficient for kernels that stay within a single workgroup.
 
 ### Scheduling / Dependencies
 

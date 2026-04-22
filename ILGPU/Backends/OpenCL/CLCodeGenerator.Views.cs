@@ -23,13 +23,15 @@ namespace ILGPU.Backends.OpenCL
             var elementIndex = LoadAs<PrimitiveVariable>(value.Offset);
             var source = Load(value.Source);
 
-            // Float16 emulation: when cl_khr_fp16 is unavailable, don't compute &source[idx]
-            // (wrong stride - uses float size). Instead, store base pointer + element index
-            // for vload_half/vstore_half in the Load/Store handlers.
+            // Float16 emulation: when cl_khr_fp16 is unavailable (Float16Native=false),
+            // don't compute &source[idx] (wrong stride - uses float size). Instead,
+            // store base pointer + element index for vload_half/vstore_half in the
+            // Load/Store handlers. Gated on !Float16Native because Capabilities.Float16
+            // is now always true on OpenCL (emulation always works via vload_half).
             if (value.Type is PointerType ptrType
                 && ptrType.ElementType is PrimitiveType ptElem
                 && ptElem.BasicValueType == BasicValueType.Float16
-                && !TypeGenerator.Capabilities.Float16)
+                && !TypeGenerator.Capabilities.Float16Native)
             {
                 var target = AllocatePointerType(ptrType);
                 // Still emit the &source[idx] for the variable binding (won't be dereferenced)

@@ -638,6 +638,16 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                 throw new Exception($"Reduce<AddUInt64> expected {expectedSum}, got {sumResult[0]}");
         });
 
+        // ILGPUReduceHalfTest is NOT implemented yet - blocked by the library, not test-writing.
+        // accelerator.Reduce<T, TReduction>() uses AtomicApply internally for the cross-
+        // workgroup combine step. AddHalf / MaxHalf / MinHalf's AtomicApply explicitly
+        // throws NotSupportedException ("Half-precision atomics are not supported - use
+        // group-level scan/reduce operations instead"). To unlock the test we need to
+        // route Half through the lock-free pattern that ILGroupExtensions.AllReduce
+        // already uses internally (per-warp shared-memory slots), but at the multi-
+        // workgroup Accelerator.Reduce level. See Plans/f16-emulation-plan.md Phase 4
+        // for the full scope.
+
         // ══════════════════════════════════════════════════════════════
         //  i64 Bitwise Atomic Tests
         //  Verifies Atomic.And/Or/Xor on long work correctly when

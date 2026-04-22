@@ -248,7 +248,7 @@ namespace ILGPU.Backends.OpenCL
                 // 2-byte stride. OpenCL allows half* pointers with vload_half/vstore_half
                 // even without cl_khr_fp16 - only half arithmetic requires the extension.
                 if (elementType == typeof(Half)
-                    && !TypeGenerator.Capabilities.Float16)
+                    && !TypeGenerator.Capabilities.Float16Native)
                 {
                     paramTypeName = "half";
                 }
