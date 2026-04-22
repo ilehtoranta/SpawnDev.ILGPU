@@ -111,6 +111,10 @@ namespace SpawnDev.ILGPU.WebGPU
                 using var features = externalDevice.Features;
                 foreach (var featureName in new[] { "shader-f16", "subgroups", "timestamp-query" })
                 {
+                    // Honor ForceEmulatedF16 even on the external-device path so EnabledFeatures
+                    // stays consistent with HasShaderF16.
+                    if (featureName == "shader-f16" && Backend.WebGPUBackend.ForceEmulatedF16)
+                        continue;
                     if (features.Has(featureName))
                         EnabledFeatures.Add(featureName);
                 }
@@ -136,6 +140,11 @@ namespace SpawnDev.ILGPU.WebGPU
 
             var adapter = Device.Adapter;
             var requestedFeatures = Device.SupportedFeatures.ToList();
+            // Test-only: when ForceEmulatedF16 is set, never request shader-f16 from the
+            // adapter even if it supports it. This drops the device onto the emulation
+            // codegen path for test verification.
+            if (Backend.WebGPUBackend.ForceEmulatedF16)
+                requestedFeatures.Remove("shader-f16");
 
             // Query the adapter's actual limits so we can request the maximum supported.
             // WebGPU defaults are conservative (e.g. 256 for workgroup size, 8 for storage buffers).
@@ -354,8 +363,11 @@ namespace SpawnDev.ILGPU.WebGPU
         /// </summary>
         public HashSet<string> EnabledFeatures { get; private set; } = new(StringComparer.OrdinalIgnoreCase);
 
-        /// <summary>Returns true if shader-f16 is enabled on this device.</summary>
-        public bool HasShaderF16 => EnabledFeatures.Contains("shader-f16");
+        /// <summary>
+        /// Returns true if shader-f16 is enabled on this device AND the test-only
+        /// override <see cref="Backend.WebGPUBackend.ForceEmulatedF16"/> is not set.
+        /// </summary>
+        public bool HasShaderF16 => !Backend.WebGPUBackend.ForceEmulatedF16 && EnabledFeatures.Contains("shader-f16");
 
         /// <summary>Returns true if subgroups are enabled on this device.</summary>
         public bool HasSubgroups => EnabledFeatures.Contains("subgroups");

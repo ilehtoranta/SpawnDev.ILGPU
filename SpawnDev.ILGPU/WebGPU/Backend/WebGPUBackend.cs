@@ -288,8 +288,24 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         /// <summary>Always true — i64 emulation is required by ILGPU IR.</summary>
         internal bool EnableI64Emulation => true;
 
-        /// <summary>Returns true if shader-f16 is enabled.</summary>
-        public bool HasShaderF16 => EnabledFeatures.Contains("shader-f16");
+        /// <summary>
+        /// Test-only switch. When set to <c>true</c> before the WebGPU device is
+        /// created, <c>shader-f16</c> is never requested from the adapter and
+        /// <see cref="HasShaderF16"/> returns <c>false</c> regardless of the device's
+        /// enabled feature set. Forces the WGSL f16 emulation codegen path even on
+        /// adapters that expose native <c>shader-f16</c>. Pairs with
+        /// <see cref="WebGPUCapabilityContext.Float16Native"/> so consumers can tell
+        /// whether they're on the native or emulated path.
+        /// Default: <c>false</c>.
+        /// </summary>
+        public static bool ForceEmulatedF16 { get; set; } = false;
+
+        /// <summary>
+        /// Returns true if shader-f16 is enabled AND the test override
+        /// <see cref="ForceEmulatedF16"/> is not set. False forces the emulation
+        /// codegen path (WGSL <c>_f16_to_f32</c> / <c>_f32_to_f16</c> helpers).
+        /// </summary>
+        public bool HasShaderF16 => !ForceEmulatedF16 && EnabledFeatures.Contains("shader-f16");
 
         /// <summary>Returns true if subgroups are enabled and not force-disabled by options.</summary>
         public bool HasSubgroups => !Options.ForceDisableSubgroups && EnabledFeatures.Contains("subgroups");
@@ -728,22 +744,21 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 if (VerboseLogging) Log($"WebGPU: Error registering group/warp reduction intrinsics: {ex.Message}");
             }
 
-            // Register Half ↔ float conversion intrinsics.
+            // Register Half ↔ float conversion intrinsics unconditionally.
             // The default HalfExtensions.ConvertHalfToFloat / ConvertFloatToHalf use
             // static lookup tables that cannot be accessed from GPU code. When inlined,
-            // all table reads return zero, producing incorrect results. Replace with
-            // native WGSL f32()/f16() conversions when shader-f16 is available.
-            if (HasShaderF16)
-            {
-                RegisterIntrinsic(
-                    typeof(HalfExtensions),
-                    nameof(HalfExtensions.ConvertHalfToFloat),
-                    WGSLCodeGenerator.GenerateConvertHalfToFloat);
-                RegisterIntrinsic(
-                    typeof(HalfExtensions),
-                    nameof(HalfExtensions.ConvertFloatToHalf),
-                    WGSLCodeGenerator.GenerateConvertFloatToHalf);
-            }
+            // all table reads return zero, producing incorrect results. The generators
+            // below handle both modes: native WGSL f32()/f16() when shader-f16 is
+            // available, or an f32 pass-through / _f16_to_f32(_f32_to_f16()) round-trip
+            // in emulated mode where Half locals are already represented as f32.
+            RegisterIntrinsic(
+                typeof(HalfExtensions),
+                nameof(HalfExtensions.ConvertHalfToFloat),
+                WGSLCodeGenerator.GenerateConvertHalfToFloat);
+            RegisterIntrinsic(
+                typeof(HalfExtensions),
+                nameof(HalfExtensions.ConvertFloatToHalf),
+                WGSLCodeGenerator.GenerateConvertFloatToHalf);
         }
 
 

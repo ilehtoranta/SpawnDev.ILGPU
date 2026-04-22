@@ -935,12 +935,80 @@ fn f64_max(a: emu_f64, b: emu_f64) -> emu_f64 {
 
         #endregion
 
+        #region f16 Emulation (Bit Conversion Helpers)
+
+        /// <summary>
+        /// WGSL helper functions for emulated Float16 when the browser does not expose
+        /// the `shader-f16` feature. Arithmetic happens in native f32; the helpers only
+        /// convert between the 16-bit IEEE 754 bit pattern (held in a u32) and f32 at
+        /// buffer load/store boundaries. Storage layout is one Half per u32 (Option B).
+        ///
+        /// Behaviour matches the Wasm reference implementation
+        /// (WasmKernelFunctionGenerator.cs EmitF16ToF32 / EmitF32ToF16) so the two
+        /// emulated backends produce identical results for the same inputs.
+        /// </summary>
+        public const string F16Functions = @"
+// ============================================================================
+// Float16 Emulation Functions (16-bit IEEE 754 in u32, f32 arithmetic)
+// ============================================================================
+
+// Expand a 16-bit Float16 bit pattern (held in the low 16 bits of a u32)
+// into a native f32 value. Denormals flush to signed zero.
+fn _f16_to_f32(h: u32) -> f32 {
+    let sign = (h >> 15u) & 1u;
+    let exp  = (h >> 10u) & 0x1Fu;
+    let mant = h & 0x3FFu;
+    // exp == 0: zero or denormal - flush to signed zero
+    if (exp == 0u) {
+        return bitcast<f32>(sign << 31u);
+    }
+    // exp == 31: Inf or NaN - preserve sign, propagate mantissa into f32 NaN/Inf
+    if (exp == 31u) {
+        return bitcast<f32>((sign << 31u) | (0xFFu << 23u) | (mant << 13u));
+    }
+    // Normal: rebias exponent (-15 + 127 = +112), shift mantissa (10 -> 23 bits)
+    return bitcast<f32>((sign << 31u) | ((exp + 112u) << 23u) | (mant << 13u));
+}
+
+// Compress a native f32 into the 16-bit Float16 bit pattern (returned in low 16
+// bits of the u32). Underflow clamps to signed zero; overflow clamps to signed
+// Inf while preserving mantissa bits so NaNs stay NaN.
+fn _f32_to_f16(f: f32) -> u32 {
+    let bits = bitcast<u32>(f);
+    let sign = (bits >> 31u) & 1u;
+    var exp: i32 = i32((bits >> 23u) & 0xFFu) - 112;
+    var mant: u32 = (bits >> 13u) & 0x3FFu;
+    // Underflow: f32 exponent below f16 min normal -> flush to signed zero
+    if (exp < 0) {
+        exp = 0;
+        mant = 0u;
+    }
+    // Overflow: f32 exponent above f16 max normal -> clamp exponent to f16 Inf/NaN
+    if (exp > 31) {
+        exp = 31;
+    }
+    return (sign << 15u) | (u32(exp) << 10u) | mant;
+}
+";
+
+        #endregion
+
         #region Combined Library
 
         /// <summary>
         /// Gets the full emulation library based on which features are enabled.
+        /// Overload that defaults <c>includeF16</c> to false for source compatibility.
         /// </summary>
         public static string GetEmulationLibrary(bool includeF64, bool useOzakiF64, bool includeI64)
+            => GetEmulationLibrary(includeF64, useOzakiF64, includeI64, includeF16: false);
+
+        /// <summary>
+        /// Gets the full emulation library based on which features are enabled.
+        /// </summary>
+        /// <param name="includeF16">When true, emits the Float16 bit-conversion helpers
+        /// (<c>_f16_to_f32</c>, <c>_f32_to_f16</c>). Required when the kernel touches
+        /// Float16 and the browser lacks the <c>shader-f16</c> feature.</param>
+        public static string GetEmulationLibrary(bool includeF64, bool useOzakiF64, bool includeI64, bool includeF16)
         {
             var sb = new System.Text.StringBuilder();
 
@@ -965,6 +1033,11 @@ fn f64_max(a: emu_f64, b: emu_f64) -> emu_f64 {
                 sb.AppendLine(I64Functions);
             }
 
+            if (includeF16)
+            {
+                sb.AppendLine(F16Functions);
+            }
+
             return sb.ToString();
         }
 
@@ -977,19 +1050,33 @@ fn f64_max(a: emu_f64, b: emu_f64) -> emu_f64 {
         private static readonly List<EmulationFunc> _dekkerF64Funcs;
         private static readonly List<EmulationFunc> _ozakiF64Funcs;
         private static readonly List<EmulationFunc> _i64Funcs;
+        private static readonly List<EmulationFunc> _f16Funcs;
         private static readonly Dictionary<string, HashSet<string>> _dekkerF64Deps;
         private static readonly Dictionary<string, HashSet<string>> _ozakiF64Deps;
         private static readonly Dictionary<string, HashSet<string>> _i64Deps;
+        private static readonly Dictionary<string, HashSet<string>> _f16Deps;
 
         static WGSLEmulationLibrary()
         {
             _dekkerF64Funcs = SplitIntoFunctions(F64Functions);
             _ozakiF64Funcs = SplitIntoFunctions(OzakiF64Functions);
             _i64Funcs = SplitIntoFunctions(I64Functions);
+            _f16Funcs = SplitIntoFunctions(F16Functions);
             _dekkerF64Deps = BuildDependencies(_dekkerF64Funcs);
             _ozakiF64Deps = BuildDependencies(_ozakiF64Funcs);
             _i64Deps = BuildDependencies(_i64Funcs);
+            _f16Deps = BuildDependencies(_f16Funcs);
         }
+
+        /// <summary>
+        /// Gets a minimal emulation library containing only the functions actually
+        /// used by the kernel body, plus their transitive dependencies.
+        /// Overload that defaults <c>includeF16</c> to false for source compatibility.
+        /// </summary>
+        public static string GetMinimalEmulationLibrary(
+            bool includeF64, bool useOzakiF64, bool includeI64,
+            string kernelBody)
+            => GetMinimalEmulationLibrary(includeF64, useOzakiF64, includeI64, includeF16: false, kernelBody);
 
         /// <summary>
         /// Gets a minimal emulation library containing only the functions actually
@@ -997,8 +1084,11 @@ fn f64_max(a: emu_f64, b: emu_f64) -> emu_f64 {
         /// Scans <paramref name="kernelBody"/> for emulation function calls and
         /// includes only the needed subset, preserving dependency order.
         /// </summary>
+        /// <param name="includeF16">When true, considers the Float16 bit-conversion
+        /// helpers (<c>_f16_to_f32</c>, <c>_f32_to_f16</c>) for inclusion. Each is
+        /// emitted only if the kernel body actually calls it.</param>
         public static string GetMinimalEmulationLibrary(
-            bool includeF64, bool useOzakiF64, bool includeI64,
+            bool includeF64, bool useOzakiF64, bool includeI64, bool includeF16,
             string kernelBody)
         {
             var sb = new System.Text.StringBuilder();
@@ -1016,6 +1106,11 @@ fn f64_max(a: emu_f64, b: emu_f64) -> emu_f64 {
                 sb.AppendLine(I64TypeAlias);
                 sb.AppendLine(U64TypeAlias);
                 AppendUsedFunctions(sb, _i64Funcs, _i64Deps, kernelBody);
+            }
+
+            if (includeF16)
+            {
+                AppendUsedFunctions(sb, _f16Funcs, _f16Deps, kernelBody);
             }
 
             return sb.ToString();

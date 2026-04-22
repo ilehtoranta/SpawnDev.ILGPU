@@ -2792,6 +2792,10 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         /// that the CPU path uses. The lookup tables are static .NET arrays that cannot
         /// be accessed from GPU code, so inlining the default implementation produces
         /// all-zero results.
+        ///
+        /// Emulated path (<c>!HasShaderF16</c>): Half locals are already represented as
+        /// <c>f32</c> values in WGSL (see <c>WGSLTypeGenerator</c>), so Half→float is a
+        /// pass-through at the IR level. No conversion needed.
         /// </summary>
         public static void GenerateConvertHalfToFloat(WebGPUBackend backend, WGSLCodeGenerator codeGenerator, Value value)
         {
@@ -2800,13 +2804,22 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 var target = codeGenerator.LoadIntrinsicValue(value);
                 var operand = codeGenerator.LoadIntrinsicValue(methodCall[0].Resolve());
                 codeGenerator.Declare(target);
-                codeGenerator.AppendLine($"{target} = f32({operand});");
+                if (backend.HasShaderF16)
+                    codeGenerator.AppendLine($"{target} = f32({operand});");
+                else
+                    // In emulated mode Half is already f32 - pass through
+                    codeGenerator.AppendLine($"{target} = {operand};");
             }
         }
 
         /// <summary>
         /// Handles <c>HalfExtensions.ConvertFloatToHalf(float)</c> by emitting a native
         /// WGSL <c>f16(source)</c> conversion.
+        ///
+        /// Emulated path (<c>!HasShaderF16</c>): Half locals are <c>f32</c>, but must carry
+        /// Float16 precision. Emits <c>_f16_to_f32(_f32_to_f16(source))</c> to round-trip
+        /// through the 16-bit bit pattern, which applies Float16 precision while keeping
+        /// the WGSL type <c>f32</c>.
         /// </summary>
         public static void GenerateConvertFloatToHalf(WebGPUBackend backend, WGSLCodeGenerator codeGenerator, Value value)
         {
@@ -2815,7 +2828,11 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 var target = codeGenerator.LoadIntrinsicValue(value);
                 var operand = codeGenerator.LoadIntrinsicValue(methodCall[0].Resolve());
                 codeGenerator.Declare(target);
-                codeGenerator.AppendLine($"{target} = f16({operand});");
+                if (backend.HasShaderF16)
+                    codeGenerator.AppendLine($"{target} = f16({operand});");
+                else
+                    // In emulated mode Half is f32-typed but needs f16 precision - round-trip
+                    codeGenerator.AppendLine($"{target} = _f16_to_f32(_f32_to_f16({operand}));");
             }
         }
 

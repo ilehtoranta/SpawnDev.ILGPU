@@ -77,6 +77,23 @@ WGSL only has 32-bit atomics. i64 is emulated as `vec2<u32>`. Atomic support:
 
 **Spinlock pattern:** For operations that need atomicity across both u32 words (Min/Max/Exchange on i64/f64, and Add on f64), a companion `array<atomic<u32>>` lock buffer is auto-provisioned by `ScanForAtomicUsage`. Each 64-bit slot gets its own lock word; threads `atomicCompareExchangeWeak` to acquire, perform `atomicLoad`/`atomicStore` on both halves inside the critical section, then release with `atomicStore(lock, 0u)`. i64 Add uses a lock-free dual-atomic path instead (commutative carry).
 
+## Float16 (Half) — Native and Emulated
+
+`Capabilities.Float16` is always `true` on WebGPU. Two codegen paths handle it:
+
+| Mode | Condition | Type mapping | Buffer storage | Conversion |
+|------|-----------|--------------|----------------|------------|
+| **Native** | Browser exposes `shader-f16` feature | `f16` locals, native `f16(x)` / `f32(y)` casts | `array<f16>` native | Hardware |
+| **Emulated** | `!shader-f16` | `f32` locals, `_f16_to_f32` / `_f32_to_f16` helpers from `WGSLEmulationLibrary.F16Functions` | 2 halves packed per `atomic<u32>` | Inline IEEE 754 bit conversion on load/store |
+
+`Capabilities.Float16Native` exposes which mode is active — `true` only when the device enabled native `shader-f16`. `Capabilities.Float16` stays `true` in both modes so test capability checks don't skip on `!shader-f16` browsers.
+
+**Emulation is lossless.** Every f16 value is exactly representable as f32 (f16 is a strict subset of f32's encoding). The bit-conversion helpers match Wasm's `EmitF16ToF32` / `EmitF32ToF16` behavior byte-for-byte so results on emulated WebGPU and emulated Wasm agree on the same inputs. Denormals flush to signed zero, Inf/NaN propagate via mantissa preservation.
+
+**Packed storage layout:** In emulated mode, `ArrayView<Half>` buffers use the existing `_subWordFloat16Params` machinery — 2 halves per u32 word, thread-safe stores via `atomicAnd` mask + `atomicOr` set. Load extracts the u16 bits with shift/mask then calls `_f16_to_f32`; store calls `_f32_to_f16` then packs via RMW.
+
+**Half conversion intrinsics** (`HalfExtensions.ConvertHalfToFloat` / `ConvertFloatToHalf`) are registered in both modes. Native path emits `f32(x)` / `f16(y)`. Emulated path for Half→float is a pass-through (Half locals are already f32); float→Half rounds through `_f16_to_f32(_f32_to_f16(x))` to apply Float16 precision.
+
 ## Diagnostics
 - `WebGPUBackend.WGSLDumpPath` — dump shaders to files (desktop only)
 - `WebGPUBackend.WGSLRegistry` — named registry of compiled shaders

@@ -2,7 +2,17 @@
 
 **Author:** Data (with Captain's approval from 2026-04-04)
 **Date:** 2026-04-08
-**Status:** DRAFT - Awaiting review
+**Status:** **APPROVED 2026-04-22 by Captain — ACTIVE**
+**Owner (implementation):** Geordi (SpawnDev.ILGPU editor)
+**Target version:** Floating (lands on next rc after Riker's RTC/WebTorrent chain settles; does not gate 4.9.2-rc.7 nuget.org promotion of main ILGPU)
+
+---
+
+## Promotion Notes (2026-04-22)
+
+- Captain approved promotion off DRAFT after Geordi's audit confirmed Phase 1 + Phase 2 are still unimplemented: `WebGPUCapabilityContext.cs:33` still conditional on `shader-f16`, `WebGLCapabilityContext.cs:16` still hardcodes `Float16 = false`, and `_f16_to_f32` / `_f32_to_f16` helpers are absent from both `WebGPU/` and `WebGL/` source trees.
+- Work scope is additive — no existing code path changes for the native-f16 WebGPU case or the Wasm emulation case. New code only fires when `!HasShaderF16` (WebGPU) or `backend == WebGL`.
+- Rule 1 applies. Every test that currently skips on `!Capabilities.Float16` must run and pass on the unlocked backend, with CPU-reference verification, before the emulation is declared done.
 
 ---
 
@@ -241,6 +251,57 @@ Plus `ILGPUReduceHalfTest` (currently unimplemented - blocked on Half atomics, b
 2. **WebGL emulation** (Phase 2) - follows naturally from WebGPU work
 3. **OpenCL** (Phase 3) - only if devices without cl_khr_fp16 are encountered
 4. **ILGPUReduceHalfTest** - write the missing test using the lock-free pattern
+
+---
+
+## Work Item Breakdown (2026-04-22)
+
+### Phase 1 — WebGPU Emulation (`!HasShaderF16`)
+
+| ID | Task | File(s) | Acceptance |
+|----|------|---------|------------|
+| **W1.1** | Add `_f16_to_f32(h: u32) -> f32` and `_f32_to_f16(f: f32) -> u32` helper functions | `SpawnDev.ILGPU/WebGPU/Backend/WGSLEmulationLibrary.cs` | Functions emit in shader prelude when needed; ShaderDebugService dump shows them verbatim |
+| **W1.2** | Confirm storage layout: **Option A (packed: 2 Halves per u32)** — matches the existing `_subWordFloat16Params` machinery at `WGSLKernelFunctionGenerator.cs:1289,3177,3821`. No buffer-sizing changes needed; same layout used for Int16 sub-word buffers. Atomic RMW at store keeps it thread-safe across adjacent-index writes. | Doc only | Plan reflects actual code state |
+| **W1.3** | **Refactor existing inline `!HasShaderF16` load bit-conversion at `WGSLKernelFunctionGenerator.cs:4013-4026` to call `_f16_to_f32(rawU16Bits)`.** The existing inline logic has two latent bugs: (a) it mishandles f16 denormals (`exp==0, mant!=0` takes the "normal" branch producing wrong values) and (b) it maps `exp==31` (Inf/NaN) as if it were normal, producing huge finite numbers instead of Inf/NaN. Helper fixes both. | `WGSLKernelFunctionGenerator.cs:4013-4026` | Emits `_f16_to_f32(rawBits)` call; existing inline bit-math removed; Inf/NaN and denormals now correct |
+| **W1.4** | **Refactor existing inline `!HasShaderF16` store bit-conversion at `WGSLKernelFunctionGenerator.cs:4200-4220` to call `_f32_to_f16(fVal)`.** The inline store is mostly OK but loses NaN on overflow (zeroes mantissa). Helper preserves mantissa bits on overflow so NaN propagates. Packed atomic RMW around the converted bits is unchanged. | `WGSLKernelFunctionGenerator.cs:4200-4220` | Emits `_f32_to_f16(fValue)` call; atomic RMW preserved; NaN correctly propagates |
+| **W1.5** | Flip capability: `Float16 = true` unconditional; add `Float16Native` property for callers that care about native-vs-emulated | `SpawnDev.ILGPU/WebGPU/WebGPUCapabilityContext.cs` | `Float16 = true`; `Float16Native = enabledFeatures.Contains("shader-f16")` |
+| **W1.6** | Verify `GenerateConvertHalfToFloat` / `GenerateConvertFloatToHalf` intrinsic handlers work in emulated path | `WGSLCodeGenerator.cs` + conversion test | Round-trip Half↔float intrinsics match CPU reference on non-native browser |
+| **W1.7** | Run full Half test suite on WebGPU **without** `shader-f16` (force-disable the feature request in test harness); expect the 5 non-algorithm Half tests + 5 Algorithm Half tests to pass | `PlaywrightMultiTest` harness + backend config | 10/10 Half tests pass; ShaderDebugService dump confirms `_f16_to_f32` / `_f32_to_f16` emitted |
+| **W1.8** | Zero-regression sweep with `shader-f16` **enabled** | Full suite | 3352/0/242 baseline holds |
+| **W1.9** | Docs — update `WebGPU/CLAUDE.md` f16 section; update main `CLAUDE.md` Feature Matrix Float16 row | Docs | Accurate native-vs-emulated status |
+
+**Phase 1 acceptance (definition of done):** On Chrome/Edge **with** `shader-f16`, all Half tests pass as before. On any WebGPU browser **without** `shader-f16` (or when the feature is deliberately suppressed), the 5 non-algorithm Half tests + 5 Algorithm Half tests run and pass with CPU-reference verification. Zero regressions on the 3352-test sweep. WGSL dumps in `_debugdump/wgsl/` show the helper functions emitted only when needed.
+
+### Phase 2 — WebGL Emulation
+
+| ID | Task | File(s) | Acceptance |
+|----|------|---------|------------|
+| **W2.1** | Add `_f16_to_f32(uint h) -> float` and `_f32_to_f16(float f) -> uint` GLSL helpers | `SpawnDev.ILGPU/WebGL/Backend/GLSLEmulationLibrary.cs` | Helpers emit in shader prelude when needed; dump in `_debugdump/glsl/` |
+| **W2.2** | Half buffer **load** path: `texelFetch` from R32UI, bit-extract, route through `_f16_to_f32` | `GLSLKernelFunctionGenerator.cs` (search `_subWordFloat16Params` line ~555) | Shader reads packed u16 bits via texel fetch; Capture `TFloat16*.glsl` dump |
+| **W2.3** | Half buffer **store** path: Transform Feedback varying as `uint`, packed f16 bits; CPU-side readback handles the u16 → bytes mapping | `GLSLKernelFunctionGenerator.cs` store path + `WebGLAccelerator.cs` readback | TF output buffer contains packed u16 values at the expected byte offsets |
+| **W2.4** | Flip capability: `Float16 = true` | `SpawnDev.ILGPU/WebGL/WebGLCapabilityContext.cs:16` | `Float16 = true` (emulation always available) |
+| **W2.5** | Verify the 5 non-algorithm Half tests on WebGL: `HalfBufferRoundTripTest`, `HalfArithmeticTest`, `HalfMinMaxTest`, `HalfEdgeCasesTest`, `HalfMixedTypeTest`. Algorithm Half tests remain **legitimately skipped** (WebGL has no shared memory / barriers — existing skip overrides stay) | `WebGLTests.cs` | 5/5 non-algorithm Half tests pass; algorithm overrides unchanged |
+| **W2.6** | Zero-regression sweep on WebGL | Full WebGL suite | No regressions on existing tests |
+| **W2.7** | Docs — update `WebGL/CLAUDE.md` and main `CLAUDE.md` Feature Matrix | Docs | Accurate emulation status |
+
+**Phase 2 acceptance:** `HalfBufferRoundTripTest`, `HalfArithmeticTest`, `HalfMinMaxTest`, `HalfEdgeCasesTest`, `HalfMixedTypeTest` all pass on WebGL with CPU-reference verification. Algorithm-family Half tests continue to skip with their existing "requires shared memory + barriers" reason. Zero regressions on the rest of the WebGL suite.
+
+### Phase 3 — OpenCL (`!cl_khr_fp16`)
+
+Lower priority; same pattern as WebGPU/WebGL via OpenCL C helpers. Deferred until a device without `cl_khr_fp16` actually shows up in testing.
+
+### Phase 4 — `ILGPUReduceHalfTest`
+
+| ID | Task | File(s) | Acceptance |
+|----|------|---------|------------|
+| **W4.1** | Write the missing test following the lock-free AllReduce pattern already used for Half | `BackendTestBase.Tests*.cs` | Test runs on every backend where Half + AllReduce are supported; CPU-reference verified |
+
+### Scheduling / Dependencies
+
+- **No dependency on Riker's RTC/WebTorrent chain.** This is pure ILGPU backend work. Can proceed in parallel.
+- **No dependency on Data's VoxelEngine work.** Data can continue Phase B/C carving independently.
+- **Does NOT gate main ILGPU 4.9.2-rc.7 nuget.org promotion.** Current rc.7 behaviour on `!shader-f16` browsers is capability=false, which is still accurate — it's just not as good as it could be.
+- **Will go in next rc** (likely 4.9.3-rc.1 or 4.9.2-rc.8 depending on what else converges) so Captain can pace the release.
 
 ---
 

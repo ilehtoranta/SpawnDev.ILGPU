@@ -949,15 +949,20 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             // This ensures the emulation library inclusion matches the body's emulation usage.
             bool needsI64Emulation = TypeGenerator.KernelUsesI64 == true;
             bool needsF64Emulation = TypeGenerator.KernelUsesF64 == true;
+            // Float16 emulation is needed whenever any parameter was registered as a
+            // sub-word Float16 param (populated only when !Backend.HasShaderF16). Load/store
+            // call-sites emit `_f16_to_f32` / `_f32_to_f16` from WGSLEmulationLibrary.F16Functions.
+            bool needsF16Emulation = _subWordFloat16Params.Count > 0;
 
             // Emit minimal emulation library: only functions actually used by the kernel body
-            if (needsF64Emulation || needsI64Emulation)
+            if (needsF64Emulation || needsI64Emulation || needsF16Emulation)
             {
-                builder.AppendLine("// ============ 64-bit Emulation Library ============");
+                builder.AppendLine("// ============ Emulation Library ============");
                 builder.AppendLine(WGSLEmulationLibrary.GetMinimalEmulationLibrary(
                     needsF64Emulation,
                     Backend.UseOzakiF64Emulation,
                     needsI64Emulation,
+                    needsF16Emulation,
                     Builder.ToString()));
             }
 
@@ -4012,18 +4017,14 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 }
                 else if (_subWordFloat16Params.Contains(subWordParamIdx))
                 {
-                    // Float16 extraction: 2 halfs per atomic<u32> word, convert f16 bits to f32
+                    // Float16 extraction: 2 halves per atomic<u32> word, call _f16_to_f32 helper.
+                    // Helper from WGSLEmulationLibrary.F16Functions handles all cases correctly:
+                    // signed zero, denormals (flushed), normal, Inf, NaN. Previous inline code
+                    // mishandled exp==0 denormals and exp==31 Inf/NaN (produced huge finites).
                     var wordIdx = $"(u32({idx}) / 2u)";
                     var shift = $"((u32({idx}) % 2u) * 16u)";
                     var rawExpr = $"((u32(atomicLoad(&param{subWordParamIdx}[{wordIdx}])) >> {shift}) & 0xFFFFu)";
-                    // IEEE 754 half-to-single: sign | exponent | mantissa
-                    var sign = $"(({rawExpr}) & 0x8000u) << 16u";
-                    var exp = $"((({rawExpr}) >> 10u) & 0x1Fu)";
-                    var mant = $"(({rawExpr}) & 0x3FFu)";
-                    // Normalized case: bias adjust (127-15=112) and shift mantissa
-                    // For zero/subnormal/inf/nan, this approximation handles most cases
-                    // Full subnormal support would need a loop, but those values are rare
-                    extractExpr = $"select(bitcast<f32>(({sign}) | ((({exp}) + 112u) << 23u) | (({mant}) << 13u)), bitcast<f32>(({sign})), ({exp}) == 0u && ({mant}) == 0u)";
+                    extractExpr = $"_f16_to_f32({rawExpr})";
                 }
                 else if (_subWordUnsignedParams.Contains(subWordParamIdx))
                 {
@@ -4199,24 +4200,15 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 }
                 else if (_subWordFloat16Params.Contains(storeParamIdx))
                 {
-                    // Float16 store: convert f32 to f16 bits, then pack into atomic<u32> word
+                    // Float16 store: call _f32_to_f16 helper for the conversion, then pack
+                    // into the atomic<u32> word via RMW. Helper from WGSLEmulationLibrary
+                    // handles underflow (flush to zero), overflow (clamp exp to 31 with
+                    // mantissa preserved so NaN stays NaN), and normal range. Previous
+                    // inline store zeroed the mantissa on overflow, losing NaN.
                     var wordIdx = $"(u32({idx}) / 2u)";
                     var shift = $"((u32({idx}) % 2u) * 16u)";
-                    // IEEE 754 single-to-half conversion using let statements for clarity and WGSL precedence safety
-                    AppendLine($"{{");
-                    AppendLine($"  let _f2h_bits = bitcast<u32>({val});");
-                    AppendLine($"  let _f2h_sign = (_f2h_bits >> 16u) & 0x8000u;");
-                    AppendLine($"  let _f2h_exp = (_f2h_bits >> 23u) & 0xFFu;");
-                    AppendLine($"  let _f2h_mant = _f2h_bits & 0x7FFFFFu;");
-                    AppendLine($"  let _f2h_unbiased = i32(_f2h_exp) - 127;");
-                    AppendLine($"  var _f16 = _f2h_sign;"); // default: zero (exp==0)
-                    AppendLine($"  if (_f2h_exp != 0u) {{");
-                    AppendLine($"    if (_f2h_unbiased > 15) {{ _f16 = _f2h_sign | 0x7C00u; }}"); // overflow -> inf
-                    AppendLine($"    else if (_f2h_unbiased >= -14) {{ _f16 = _f2h_sign | (u32(_f2h_unbiased + 15) << 10u) | (_f2h_mant >> 13u); }}"); // normal
-                    AppendLine($"  }}");
-                    AppendLine($"  atomicAnd(&param{storeParamIdx}[{wordIdx}], ~(0xFFFFu << {shift}));");
-                    AppendLine($"  atomicOr(&param{storeParamIdx}[{wordIdx}], ((_f16 & 0xFFFFu) << {shift}));");
-                    AppendLine($"}}");
+                    AppendLine($"atomicAnd(&param{storeParamIdx}[{wordIdx}], ~(0xFFFFu << {shift}));");
+                    AppendLine($"atomicOr(&param{storeParamIdx}[{wordIdx}], ((_f32_to_f16({val}) & 0xFFFFu) << {shift}));");
                 }
                 else // elemSize == 2, Int16/UInt16
                 {
