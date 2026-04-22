@@ -307,18 +307,23 @@ namespace SpawnDev.ILGPU.WebGL.Backend
 
             // 3. Post-dominators and loops already created in constructor
 
-            // 4. Emit emulation library only if the kernel actually uses f64/i64 types.
+            // 4. Emit emulation library only if the kernel actually uses f64/i64/f16 types.
             //    Including the library unconditionally produces a massive vertex shader
             //    that ANGLE's D3D11 backend cannot compile with Transform Feedback.
-            var (kernelNeedsF64, kernelNeedsI64) = KernelUsesEmulatedTypes();
+            var (kernelNeedsF64, kernelNeedsI64, kernelNeedsF16) = KernelUsesEmulatedTypes();
+            // Float16 emulation is always active on WebGL when the kernel uses Half
+            // types - GLSL ES 3.0 has no hardware f16 path. Detected via IR scan above,
+            // not just _subWordFloat16Params (which is populated AFTER library emission).
             if ((Backend.EnableF64Emulation && kernelNeedsF64) ||
-                (Backend.EnableI64Emulation && kernelNeedsI64))
+                (Backend.EnableI64Emulation && kernelNeedsI64) ||
+                kernelNeedsF16)
             {
-                Builder.AppendLine("// ============ 64-bit Emulation Library ============");
+                Builder.AppendLine("// ============ Emulation Library ============");
                 Builder.AppendLine(GLSLEmulationLibrary.GetEmulationLibrary(
                     Backend.EnableF64Emulation && kernelNeedsF64,
                     Backend.UseOzakiF64Emulation,
-                    Backend.EnableI64Emulation && kernelNeedsI64));
+                    Backend.EnableI64Emulation && kernelNeedsI64,
+                    kernelNeedsF16));
             }
 
             // 5. Insert a placeholder for struct type definitions.
@@ -389,15 +394,16 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         /// the entire emulation library for simple float32 kernels, which causes
         /// ANGLE D3D11 to fail compiling the large vertex shader.
         /// </summary>
-        private (bool needsF64, bool needsI64) KernelUsesEmulatedTypes()
+        private (bool needsF64, bool needsI64, bool needsF16) KernelUsesEmulatedTypes()
         {
             bool needsF64 = _emulatedF64Params.Count > 0;
             bool needsI64 = _emulatedI64Params.Count > 0;
+            bool needsF16 = _subWordFloat16Params.Count > 0;
 
-            // Early exit if both already detected from parameters
-            if (needsF64 && needsI64) return (needsF64, needsI64);
+            // Early exit if all three already detected from parameters
+            if (needsF64 && needsI64 && needsF16) return (needsF64, needsI64, needsF16);
 
-            // Scan all values in the kernel's IR blocks for f64/i64 usage
+            // Scan all values in the kernel's IR blocks for f64/i64/f16 usage
             foreach (var block in Method.Blocks)
             {
                 foreach (Value value in block)
@@ -407,12 +413,14 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                         needsF64 = true;
                     if (!needsI64 && bvt == BasicValueType.Int64)
                         needsI64 = true;
+                    if (!needsF16 && bvt == BasicValueType.Float16)
+                        needsF16 = true;
 
-                    if (needsF64 && needsI64) return (needsF64, needsI64);
+                    if (needsF64 && needsI64 && needsF16) return (needsF64, needsI64, needsF16);
                 }
             }
 
-            return (needsF64, needsI64);
+            return (needsF64, needsI64, needsF16);
         }
 
         private static TypeNode UnwrapType(TypeNode type)
@@ -2008,17 +2016,15 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 }
                 else if (_subWordFloat16Params.Contains(subWordParamIdx))
                 {
-                    // Float16 extraction: 2 halfs per texel, convert f16 bits to f32
+                    // Float16 extraction: 2 halves per texel, call _f16_to_f32 helper.
+                    // Helper from GLSLEmulationLibrary.F16Functions handles all cases:
+                    // signed zero, denormals (flushed), normal, Inf, NaN. Previous
+                    // inline code mishandled exp==0 denormals and exp==31 Inf/NaN.
                     var texelIdx = $"({idx} / 2 + u_param{subWordParamIdx}_offset)";
                     var shift = $"(({idx}) % 2) * 16";
                     var fetch = $"texelFetch(u_param{subWordParamIdx}, ivec2({texelIdx} % u_param{subWordParamIdx}_tileW, {texelIdx} / u_param{subWordParamIdx}_tileW), 0).r";
-                    var rawExpr = $"(({fetch}) >> ({shift})) & 0xFFFF";
-                    // IEEE 754 half-to-single conversion in GLSL
-                    var sign = $"(({rawExpr}) & 0x8000) << 16";
-                    var exp = $"(({rawExpr}) >> 10) & 0x1F";
-                    var mant = $"(({rawExpr}) & 0x3FF)";
-                    // Normalized: bias adjust (127-15=112) and shift mantissa
-                    extractExpr = $"(({exp}) == 0 && ({mant}) == 0) ? intBitsToFloat({sign}) : intBitsToFloat(({sign}) | ((({exp}) + 112) << 23) | (({mant}) << 13))";
+                    var rawExpr = $"uint((({fetch}) >> ({shift})) & 0xFFFF)";
+                    extractExpr = $"_f16_to_f32({rawExpr})";
                 }
                 else if (_subWordUnsignedParams.Contains(subWordParamIdx))
                 {
@@ -2201,23 +2207,13 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 _singleStoreIndex!.TryGetValue(leaParamIdx, out var output);
                 if (output != null)
                 {
-                    // Float16 sub-word Store: convert f32 to f16 bits before TF output
+                    // Float16 sub-word Store: call _f32_to_f16 helper, cast to int
+                    // for the Transform Feedback varying. Helper from
+                    // GLSLEmulationLibrary.F16Functions preserves mantissa on overflow
+                    // so NaN stays NaN (previous inline code zeroed mantissa, losing NaN).
                     if (_subWordFloat16Params.Contains(leaParamIdx))
                     {
-                        // IEEE 754 single-to-half conversion in GLSL
-                        AppendLine($"{{");
-                        AppendLine($"  uint _f2h_bits = floatBitsToUint({val});");
-                        AppendLine($"  uint _f2h_sign = (_f2h_bits >> 16u) & 0x8000u;");
-                        AppendLine($"  uint _f2h_exp = (_f2h_bits >> 23u) & 0xFFu;");
-                        AppendLine($"  uint _f2h_mant = _f2h_bits & 0x7FFFFFu;");
-                        AppendLine($"  int _f2h_unbiased = int(_f2h_exp) - 127;");
-                        AppendLine($"  uint _f16 = _f2h_sign;"); // default: zero
-                        AppendLine($"  if (_f2h_exp != 0u) {{");
-                        AppendLine($"    if (_f2h_unbiased > 15) {{ _f16 = _f2h_sign | 0x7C00u; }}");
-                        AppendLine($"    else if (_f2h_unbiased >= -14) {{ _f16 = _f2h_sign | (uint(_f2h_unbiased + 15) << 10u) | (_f2h_mant >> 13u); }}");
-                        AppendLine($"  }}");
-                        AppendLine($"  {output.VaryingName} = int(_f16);");
-                        AppendLine($"}}");
+                        AppendLine($"{output.VaryingName} = int(_f32_to_f16({val}));");
                         return;
                     }
 

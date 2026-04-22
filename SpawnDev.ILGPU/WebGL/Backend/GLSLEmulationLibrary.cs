@@ -831,12 +831,76 @@ vec4 f64_max(vec4 a, vec4 b) {
 
         #endregion
 
+        #region f16 Emulation (Bit Conversion Helpers)
+
+        /// <summary>
+        /// GLSL helper functions for emulated Float16. Arithmetic happens in native
+        /// <c>float</c>; the helpers convert between the 16-bit IEEE 754 bit pattern
+        /// (held in a <c>uint</c>) and <c>float</c> at buffer load/store boundaries.
+        /// Storage layout is packed: 2 halves per u32, same as WebGPU's emulation path.
+        ///
+        /// Behaviour matches the WGSL emulation in <see cref="WebGPU.Backend.WGSLEmulationLibrary.F16Functions"/>
+        /// which itself matches the Wasm reference (<c>WasmKernelFunctionGenerator.EmitF16ToF32</c> /
+        /// <c>EmitF32ToF16</c>). All three emulated backends produce identical results for
+        /// identical inputs.
+        /// </summary>
+        public const string F16Functions = @"
+// ============================================================================
+// Float16 Emulation Functions (16-bit IEEE 754 in uint, float arithmetic)
+// ============================================================================
+
+// Expand a 16-bit Float16 bit pattern (held in the low 16 bits of a uint)
+// into a native float value. Denormals flush to signed zero.
+float _f16_to_f32(uint h) {
+    uint sign = (h >> 15u) & 1u;
+    uint exp  = (h >> 10u) & 0x1Fu;
+    uint mant = h & 0x3FFu;
+    if (exp == 0u) {
+        return uintBitsToFloat(sign << 31u);
+    }
+    if (exp == 31u) {
+        return uintBitsToFloat((sign << 31u) | (0xFFu << 23u) | (mant << 13u));
+    }
+    return uintBitsToFloat((sign << 31u) | ((exp + 112u) << 23u) | (mant << 13u));
+}
+
+// Compress a native float into the 16-bit Float16 bit pattern (returned in low 16
+// bits of the uint). Underflow clamps to signed zero; overflow clamps to signed
+// Inf while preserving mantissa bits so NaNs stay NaN.
+uint _f32_to_f16(float f) {
+    uint bits = floatBitsToUint(f);
+    uint sign = (bits >> 31u) & 1u;
+    int exp_i = int((bits >> 23u) & 0xFFu) - 112;
+    uint mant = (bits >> 13u) & 0x3FFu;
+    if (exp_i < 0) {
+        exp_i = 0;
+        mant = 0u;
+    }
+    if (exp_i > 31) {
+        exp_i = 31;
+    }
+    return (sign << 15u) | (uint(exp_i) << 10u) | mant;
+}
+";
+
+        #endregion
+
         #region Combined Library
 
         /// <summary>
         /// Gets the full emulation library based on which features are enabled.
+        /// Overload that defaults <c>includeF16</c> to false for source compatibility.
         /// </summary>
         public static string GetEmulationLibrary(bool includeF64, bool useOzakiF64, bool includeI64)
+            => GetEmulationLibrary(includeF64, useOzakiF64, includeI64, includeF16: false);
+
+        /// <summary>
+        /// Gets the full emulation library based on which features are enabled.
+        /// </summary>
+        /// <param name="includeF16">When true, emits the Float16 bit-conversion helpers
+        /// (<c>_f16_to_f32</c>, <c>_f32_to_f16</c>). WebGL has no native f16, so this is
+        /// the only f16 path available on this backend.</param>
+        public static string GetEmulationLibrary(bool includeF64, bool useOzakiF64, bool includeI64, bool includeF16)
         {
             var sb = new System.Text.StringBuilder();
 
@@ -855,6 +919,11 @@ vec4 f64_max(vec4 a, vec4 b) {
             if (includeI64)
             {
                 sb.AppendLine(I64Functions);
+            }
+
+            if (includeF16)
+            {
+                sb.AppendLine(F16Functions);
             }
 
             return sb.ToString();

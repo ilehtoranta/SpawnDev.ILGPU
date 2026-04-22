@@ -14,6 +14,13 @@
 - Work scope is additive — no existing code path changes for the native-f16 WebGPU case or the Wasm emulation case. New code only fires when `!HasShaderF16` (WebGPU) or `backend == WebGL`.
 - Rule 1 applies. Every test that currently skips on `!Capabilities.Float16` must run and pass on the unlocked backend, with CPU-reference verification, before the emulation is declared done.
 
+## Shipping status (2026-04-22)
+
+- **Phase 1 (WebGPU `!shader-f16` emulation): SHIPPED** at commit `30eb12c`. 8/8 WebGPU Half tests green on native and emulated paths. WGSL dump of `HalfArithmeticKernel` confirms helpers emitted.
+- **Phase 2 (WebGL emulation): CODE COMPLETE** at HEAD (not yet committed). GLSL helpers in `GLSLEmulationLibrary.F16Functions`; load refactored to call `_f16_to_f32`; store refactored to call `_f32_to_f16`; capability flipped to true; `Float16Native` field added. Verification in progress.
+- **Phase 3 (OpenCL `!cl_khr_fp16`): deferred** — no device in testing needs it.
+- **Phase 4 (`ILGPUReduceHalfTest`): pending** — unblocked by Phase 1.
+
 ---
 
 ## Goal
