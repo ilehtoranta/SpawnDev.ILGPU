@@ -104,6 +104,10 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
         public new async Task ILGPUReduceULongTest() =>
             throw new UnsupportedTestException("WebGL: GroupExtensions.Reduce unsupported in vertex shaders");
 
+        [TestMethod]
+        public new async Task ILGPUReduceHalfTest() =>
+            throw new UnsupportedTestException("WebGL: accelerator.Reduce requires atomics in the cross-workgroup combine step; WebGL 2.0 vertex shaders have no atomic operations. See Docs/atomic-operations.md for the per-backend matrix.");
+
         // --- Atomics (WebGL vertex shader TF pipeline has no atomic operations) ---
         [TestMethod]
         public new async Task AtomicTest() =>

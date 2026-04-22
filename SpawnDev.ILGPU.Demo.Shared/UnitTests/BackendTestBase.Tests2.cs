@@ -638,15 +638,66 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                 throw new Exception($"Reduce<AddUInt64> expected {expectedSum}, got {sumResult[0]}");
         });
 
-        // ILGPUReduceHalfTest is NOT implemented yet - blocked by the library, not test-writing.
-        // accelerator.Reduce<T, TReduction>() uses AtomicApply internally for the cross-
-        // workgroup combine step. AddHalf / MaxHalf / MinHalf's AtomicApply explicitly
-        // throws NotSupportedException ("Half-precision atomics are not supported - use
-        // group-level scan/reduce operations instead"). To unlock the test we need to
-        // route Half through the lock-free pattern that ILGroupExtensions.AllReduce
-        // already uses internally (per-warp shared-memory slots), but at the multi-
-        // workgroup Accelerator.Reduce level. See Plans/f16-emulation-plan.md Phase 4
-        // for the full scope.
+        // ==================== Reduce<Half> ====================
+        // Unlocked by f16-emulation-plan Phase 4 (2026-04-22): AddHalf/MaxHalf/MinHalf
+        // AtomicApply now uses a CAS loop on the u32 containing the Half bits. Exercises
+        // multi-workgroup dispatch (count >> MaxNumThreadsPerGroup) to force the cross-
+        // workgroup atomic combine step that was previously throwing.
+        // WebGL is exempt - vertex shader TF pipeline has no atomic operations at all.
+        [TestMethod]
+        public async Task ILGPUReduceHalfTest() => await RunTest(async accelerator =>
+        {
+            if (!accelerator.Capabilities.Float16)
+                throw new UnsupportedTestException("Float16 not supported on this device");
+
+            // count chosen to guarantee multi-workgroup dispatch on every backend
+            // (max threads/group is 256 on WebGPU, 1024 elsewhere) and to stay within
+            // Half's exact integer range for Max (Half exactly represents integers up
+            // to 2048).
+            const int count = 2048;
+            var data = new global::ILGPU.Half[count];
+            for (int i = 0; i < count; i++) data[i] = (global::ILGPU.Half)(float)(i + 1); // 1..2048
+
+            using var inputBuf = accelerator.Allocate1D(data);
+
+            // Max: 1..2048 -> max=2048. Exact in Half (2^11 = 2048).
+            using var maxOut = accelerator.Allocate1D<global::ILGPU.Half>(1);
+            accelerator.Reduce<global::ILGPU.Half, global::ILGPU.Algorithms.ScanReduceOperations.MaxHalf>(
+                accelerator.DefaultStream, inputBuf.View, maxOut.View);
+            await accelerator.SynchronizeAsync();
+            var maxResult = await maxOut.CopyToHostAsync<global::ILGPU.Half>();
+            if ((float)maxResult[0] != (float)count)
+                throw new Exception($"Reduce<MaxHalf> expected {count}, got {(float)maxResult[0]}");
+
+            // Min: 1..2048 -> min=1. Exact in Half.
+            using var minOut = accelerator.Allocate1D<global::ILGPU.Half>(1);
+            accelerator.Reduce<global::ILGPU.Half, global::ILGPU.Algorithms.ScanReduceOperations.MinHalf>(
+                accelerator.DefaultStream, inputBuf.View, minOut.View);
+            await accelerator.SynchronizeAsync();
+            var minResult = await minOut.CopyToHostAsync<global::ILGPU.Half>();
+            if ((float)minResult[0] != 1f)
+                throw new Exception($"Reduce<MinHalf> expected 1, got {(float)minResult[0]}");
+
+            // Sum: Half precision limits the useful sum size. Use all-ones across
+            // count=2048 elements -> exact sum = 2048 (last power of 2 Half can hit).
+            // This exercises the AtomicApply AddHalf CAS loop with multi-workgroup
+            // contention without running into Half accumulation drift.
+            var onesData = new global::ILGPU.Half[count];
+            for (int i = 0; i < count; i++) onesData[i] = (global::ILGPU.Half)1f;
+            using var onesBuf = accelerator.Allocate1D(onesData);
+
+            using var sumOut = accelerator.Allocate1D<global::ILGPU.Half>(1);
+            accelerator.Reduce<global::ILGPU.Half, global::ILGPU.Algorithms.ScanReduceOperations.AddHalf>(
+                accelerator.DefaultStream, onesBuf.View, sumOut.View);
+            await accelerator.SynchronizeAsync();
+            var sumResult = await sumOut.CopyToHostAsync<global::ILGPU.Half>();
+            // Allow 0.5% tolerance for Half ULP accumulation near 2048 (ULP(2048)=2)
+            float expectedSum = count; // 2048
+            float actual = (float)sumResult[0];
+            float tolerance = expectedSum * 0.005f;
+            if (MathF.Abs(actual - expectedSum) > tolerance)
+                throw new Exception($"Reduce<AddHalf> expected ~{expectedSum} (tol {tolerance}), got {actual}");
+        });
 
         // ══════════════════════════════════════════════════════════════
         //  i64 Bitwise Atomic Tests
