@@ -4,7 +4,7 @@
 		<TargetFramework>net10.0</TargetFramework>
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>enable</Nullable>
-		<Version>4.9.2-rc.7</Version>
+		<Version>4.9.2-rc.8</Version>
 		<GeneratePackageOnBuild>True</GeneratePackageOnBuild>
 		<GenerateDocumentationFile>true</GenerateDocumentationFile>
 		<EmbedAllSources>true</EmbedAllSources>
@@ -28,7 +28,7 @@
 	<ItemGroup>
 		<ProjectReference Include="..\SpawnDev.ILGPU\SpawnDev.ILGPU.csproj" />
 		<ProjectReference Include="..\ILGPU\ILGPU.csproj" />
-		<PackageReference Include="SpawnDev.WebTorrent" Version="3.0.1-rc.1" />
+		<PackageReference Include="SpawnDev.WebTorrent" Version="3.1.1" />
 	</ItemGroup>
 
 </Project>
