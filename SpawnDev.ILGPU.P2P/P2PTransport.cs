@@ -360,18 +360,44 @@ public class P2PTransport : IAsyncDisposable
     }
 
     /// <summary>
-    /// Send buffer data to a peer in chunks.
+    /// Maximum number of outbound buffer chunks issued concurrently per
+    /// <see cref="SendBufferAsync"/> call. Larger values increase pipeline
+    /// parallelism (and therefore throughput) at the cost of peak memory
+    /// held in JSON-encoded chunk payloads and SCTP send buffers. 8 is
+    /// conservative - a 10 MB buffer at 256 KB chunks = 40 chunks = 5 batches
+    /// of 8, keeping peak in-flight payload under ~2 MB while still cutting
+    /// wall-clock time ~8x vs the fully-serialized `foreach await` pattern.
+    /// </summary>
+    public int OutboundChunkPipelineWindow { get; set; } = 8;
+
+    /// <summary>
+    /// Send buffer data to a peer in chunks. Chunks are issued in a pipelined
+    /// batch (see <see cref="OutboundChunkPipelineWindow"/>) rather than strictly
+    /// serialized per send, so multi-megabyte tensor transfer isn't bottlenecked
+    /// by the per-message latency of the underlying SCTP/WebRTC data channel.
+    /// The receiver's per-peer <see cref="PeerMessageQueue"/> still serializes
+    /// handler execution in arrival order; reassembly via <see cref="BufferChunk.ChunkIndex"/>
+    /// tolerates out-of-order arrival that the pipelining could produce at the
+    /// wire layer in principle (in practice SCTP ordered mode preserves order).
     /// </summary>
     public async Task SendBufferAsync(string peerId, string bufferId, byte[] data)
     {
         var chunks = _bufferTransfer.CreateChunks(bufferId, data);
-        foreach (var chunk in chunks)
+        var window = Math.Max(1, OutboundChunkPipelineWindow);
+        for (int batchStart = 0; batchStart < chunks.Length; batchStart += window)
         {
-            await SendMessageAsync(peerId, new P2PMessage
+            var batchEnd = Math.Min(batchStart + window, chunks.Length);
+            var sends = new Task[batchEnd - batchStart];
+            for (int i = batchStart; i < batchEnd; i++)
             {
-                Type = P2PMessageType.BufferSend,
-                Payload = JsonSerializer.SerializeToElement(chunk),
-            });
+                var chunk = chunks[i];
+                sends[i - batchStart] = SendMessageAsync(peerId, new P2PMessage
+                {
+                    Type = P2PMessageType.BufferSend,
+                    Payload = JsonSerializer.SerializeToElement(chunk),
+                });
+            }
+            await Task.WhenAll(sends);
         }
     }
 
