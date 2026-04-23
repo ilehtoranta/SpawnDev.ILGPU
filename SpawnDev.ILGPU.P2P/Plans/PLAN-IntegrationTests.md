@@ -1,8 +1,8 @@
 # Plan: P2P Integration Tests - Full Coverage
 
 **Author:** Geordi (Claude CLI #4)
-**Date:** 2026-04-14
-**Status:** IN PROGRESS - Phases 1-4 in-process tests PASSING (27/27). Phase 2 WebRTC tests blocked on WebTorrent (Riker).
+**Date:** 2026-04-14 (updated 2026-04-22 evening)
+**Status:** IN PROGRESS - Phases 1-4 in-process + Phase 2 real-WebRTC core PASSING (32/32). Phases 5, 6 still open.
 **Captain's Order:** Test everything. No guessing. No surprises. Rule #1.
 
 ---
@@ -24,13 +24,26 @@
 - [x] Add TestNode project to solution
 - [x] Verify foundation builds and 3 baseline tests pass (319ms)
 
-### Phase 2: Core Pipeline (Desktop-Desktop) [NOT STARTED]
-- [ ] `CorePipeline_VectorAdd_1024` - a[i]=i, b[i]=i*2, verify result[i]==i*3 for ALL 1024 elements over real WebRTC
-- [ ] `CorePipeline_LargeBuffer_256K` - 1MB float buffer, 16 chunks, full integrity
-- [ ] `CorePipeline_ScalarParams` - VectorScale with float scalar across WebRTC
-- [ ] `CorePipeline_IntegerKernel` - ArrayView<int> Identity kernel
-- [ ] `CorePipeline_DataIntegrity_SHA256` - random 64KB, Identity kernel, SHA256 before/after
-- [ ] `CorePipeline_InProcess_Baseline` - selftest pattern, no WebRTC, regression baseline
+### Phase 2: Core Pipeline (Desktop-Desktop) [CORE COMPLETE, SCALAR DEFERRED]
+Implemented in `RealWebRtcPipelineTests.cs`. Two P2PCompute instances live in the
+same test process, connected through real WebRTC via LocalTrackerFixture first +
+hub.spawndev.com/openwebtorrent.com as fallbacks. No mocks, no in-process shortcuts;
+kernel dispatch rides the same sd_compute extension + chunked buffer transfer path
+a production swarm uses. Every real-WebRTC test carries `[Retry(3)]` so public-
+tracker flakiness cannot hide real regressions.
+- [x] `VectorAdd_1024_DispatchedOverRealWebRtc_BitExact` - 1024 elements, all verified
+- [x] `LargeBuffer_1MB_DispatchedOverRealWebRtc_BitExact` - 1MB (256K floats), ~16 chunks each direction
+- [ ] `CorePipeline_ScalarParams` - **deferred pending library task #33** (P2PKernelSerializer.CreateDispatch does not yet serialize scalar kernel parameters, so VectorScale over P2P receives scalar=0)
+- [x] `DataIntegrity_SHA256_IdentityOverRealWebRtc` - 64KB random ints, Identity kernel, hash round-trip
+- [x] `TwoPeers_DiscoverEachOtherViaLocalTracker` / `…ViaPublicHubTracker` - tracker + sd_compute handshake
+- Existing `CorePipeline_InProcess_Baseline` (in-process) remains as regression baseline
+
+**Library fixes shipped while writing Phase 2 tests:**
+- P2PCompute race: `bridge.OnComputePeerCapabilities` subscriber was wired after `bridge.AttachToSwarm`, so fast-connecting peers lost their CapabilityResponse. Fixed by re-ordering in both CreateSwarmAsync and JoinSwarmAsync.
+- Output-only buffer size: `DispatchAsync`/`DispatchToSwarm` reported `Length=0` for buffers passed with `data=null`; worker then allocated a zero-byte buffer and kernels wrote past it. Now defaults to `gridDimX` with a documented exit (callers with non-grid-sized outputs pass a pre-allocated byte[] as data).
+- Result-buffer round-trip: `P2PWorker.HandleDispatchAsync` used to emit only KernelResult metadata. Now, when `KernelDispatchRequest.ReturnModifiedBuffers` is true (default), the worker pushes every modified buffer back via `transport.SendBufferAsync`. Pipelines suppress this flag for intermediate stages.
+- Worker buffer ingress: `P2PTransport` now forwards `BufferTransfer.OnBufferReceived` into `_worker?.ReceiveBuffer` so the in-flight chunks assembled from the coordinator actually land in the worker's buffer store.
+- `P2PCompute.CreateSwarmAsync` now accepts a `trackers` parameter (was hardcoded to hub.spawndev.com through the facade).
 
 ### Phase 3: Multi-Peer and Fault Tolerance [IN-PROCESS TESTS PASSING]
 - [x] `MultiPeer_TwoWorkers_BothReceive` - 2 workers, 4 dispatches, both get work (in-process)

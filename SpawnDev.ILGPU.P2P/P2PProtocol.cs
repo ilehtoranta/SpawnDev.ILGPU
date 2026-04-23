@@ -317,6 +317,13 @@ public class KernelDispatchRequest
 
     /// <summary>Scalar parameter values (serialized).</summary>
     public byte[]? ScalarParams { get; set; }
+
+    /// <summary>
+    /// When true (default), the worker pushes modified buffer data back to the
+    /// coordinator after successful kernel execution. Set to false for
+    /// pipeline intermediate stages whose output stays on the worker.
+    /// </summary>
+    public bool ReturnModifiedBuffers { get; set; } = true;
 }
 
 /// <summary>

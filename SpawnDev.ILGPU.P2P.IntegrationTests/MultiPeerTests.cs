@@ -7,10 +7,10 @@ using SpawnDev.ILGPU.P2P.IntegrationTests.Infrastructure;
 namespace SpawnDev.ILGPU.P2P.IntegrationTests;
 
 /// <summary>
-/// Phase 3: Multi-Peer and Fault Tolerance tests.
-/// Proves dispatch works with multiple workers, load balancing distributes
-/// based on TFLOPS, and fault tolerance handles disconnections correctly.
-/// All in-process until WebTorrent is verified stable by Riker.
+/// Multi-Peer and Fault Tolerance tests.
+/// Proves the dispatcher scoring, load balancing, retry, election, and transfer
+/// logic is correct. These use simulated peer connections (HandlePeerConnected);
+/// real-WebRTC end-to-end dispatch is covered by RealWebRtcPipelineTests.
 /// </summary>
 [TestFixture]
 public class MultiPeerTests

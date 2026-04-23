@@ -115,11 +115,13 @@ public class P2PCompute : IAsyncDisposable
     /// <param name="client">WebTorrent client for P2P transport.</param>
     /// <param name="name">Human-readable swarm name.</param>
     /// <param name="joinLinkBaseUrl">Base URL for HTTP join links (your web app URL).</param>
+    /// <param name="trackers">Tracker URLs for peer discovery. Defaults to hub.spawndev.com.</param>
     public static async Task<P2PCompute> CreateSwarmAsync(
         IPortableCrypto crypto,
         WebTorrentClient client,
         string name,
-        string? joinLinkBaseUrl = null)
+        string? joinLinkBaseUrl = null,
+        string[]? trackers = null)
     {
         var identity = await SwarmIdentity.CreateAsync(crypto, name + "-owner");
         var coordinator = new P2PSwarmCoordinator(client);
@@ -156,11 +158,7 @@ public class P2PCompute : IAsyncDisposable
             coordinator.JoinLinkBaseUrl = GetBrowserBaseUrl();
 
         // NOW create the swarm — peers that connect will get sd_compute in handshake
-        await coordinator.CreateSwarmAsync(name);
-
-        // Attach bridge to torrent for peer connection events
-        if (coordinator.Swarm != null)
-            bridge.AttachToSwarm(coordinator.Swarm);
+        await coordinator.CreateSwarmAsync(name, trackers);
 
         // Wire coordinator messages to transport — auto-sign authority messages
         coordinator.OnSendMessage += async (peerId, msg) =>
@@ -174,8 +172,8 @@ public class P2PCompute : IAsyncDisposable
             await transport.SendSignedMessageAsync(peerId, msg);
         };
 
-        // Wire bridge peer discovery to coordinator - when a compute peer connects
-        // via WebRTC + sd_compute handshake, register them with capabilities
+        // Wire bridge peer discovery to coordinator BEFORE AttachToSwarm so the
+        // subscriber is in place by the time torrent.OnWire fires.
         bridge.OnComputePeerCapabilities += (peerId, caps) =>
         {
             Console.WriteLine($"[P2PCompute] Bridge OnComputePeerCapabilities: peerId={peerId}, caps={caps != null}");
@@ -183,6 +181,10 @@ public class P2PCompute : IAsyncDisposable
             var result = coordinator.HandlePeerConnected(peerId, caps);
             Console.WriteLine($"[P2PCompute] HandlePeerConnected result: {result}, PeerCount: {coordinator.PeerCount}");
         };
+
+        // Attach bridge to torrent for peer connection events
+        if (coordinator.Swarm != null)
+            bridge.AttachToSwarm(coordinator.Swarm);
 
         var compute = new P2PCompute(client, identity, coordinator, accelerator, dispatcher, transport, bridge, context: context);
 
@@ -265,10 +267,11 @@ public class P2PCompute : IAsyncDisposable
 
         // Bridge WebRTC peer connections to sd_compute extension
         var bridge = new P2PWebRtcBridge(transport);
-        if (coordinator.Swarm != null)
-            bridge.AttachToSwarm(coordinator.Swarm);
 
-        // Wire bridge peer discovery to coordinator
+        // Wire bridge peer discovery to coordinator BEFORE AttachToSwarm so the
+        // subscriber is in place by the time torrent.OnWire fires. Otherwise a
+        // peer that connects fast enough will deliver its CapabilityResponse
+        // through bridge.OnComputePeerCapabilities with no listener attached yet.
         bridge.OnComputePeerCapabilities += (peerId, caps) =>
         {
             Console.WriteLine($"[P2PCompute Join] Bridge OnComputePeerCapabilities: peerId={peerId}, caps={caps != null}");
@@ -276,6 +279,9 @@ public class P2PCompute : IAsyncDisposable
             var result = coordinator.HandlePeerConnected(peerId, caps);
             Console.WriteLine($"[P2PCompute Join] HandlePeerConnected result: {result}, PeerCount: {coordinator.PeerCount}");
         };
+
+        if (coordinator.Swarm != null)
+            bridge.AttachToSwarm(coordinator.Swarm);
 
         var compute = new P2PCompute(client, identity, coordinator, p2pAccel, dispatcher, transport, bridge, worker);
 

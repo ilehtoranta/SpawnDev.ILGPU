@@ -2,7 +2,9 @@ using System.Diagnostics;
 using System.Net.Http;
 using NUnit.Framework;
 
-namespace SpawnDev.ILGPU.P2P.IntegrationTests.Infrastructure;
+// NUnit [SetUpFixture] scope follows the declaring namespace. Placed in the
+// root test namespace so it fires once per assembly for every test class.
+namespace SpawnDev.ILGPU.P2P.IntegrationTests;
 
 /// <summary>
 /// NUnit assembly-level fixture that starts a local SpawnDev.WebTorrent.ServerApp

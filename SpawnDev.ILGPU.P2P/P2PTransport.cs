@@ -35,6 +35,14 @@ public class P2PTransport : IAsyncDisposable
         _client = client;
         _coordinator = coordinator;
         _dispatcher = dispatcher;
+
+        // When a complete buffer lands on this side, forward it into the worker's
+        // buffer store so HandleDispatchAsync can find it. No-op on the coordinator
+        // side where _worker is null — the coordinator observes via BufferTransfer.OnBufferReceived.
+        _bufferTransfer.OnBufferReceived += (bufferId, data) =>
+        {
+            _worker?.ReceiveBuffer(bufferId, data);
+        };
     }
 
     /// <summary>

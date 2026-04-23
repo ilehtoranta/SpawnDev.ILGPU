@@ -131,19 +131,7 @@ public class P2PAccelerator : KernelAccelerator<P2PCompiledKernel, P2PKernel>
             throw new InvalidOperationException("Dispatcher not set. Use P2PCompute facade.");
 
         var request = P2PKernelSerializer.CreateDispatch(kernelMethod, gridDimX);
-        var bindings = new BufferBinding[buffers.Length];
-        for (int i = 0; i < buffers.Length; i++)
-        {
-            bindings[i] = new BufferBinding
-            {
-                ParameterIndex = i + 1, // +1 for Index parameter at position 0
-                BufferId = buffers[i].bufferId,
-                Length = buffers[i].data?.Length / buffers[i].elementSize ?? 0,
-                ElementSize = buffers[i].elementSize,
-            };
-        }
-        request.Buffers = bindings;
-
+        request.Buffers = BuildBufferBindings(buffers, gridDimX);
         return Dispatcher.Dispatch(request);
     }
 
@@ -157,20 +145,40 @@ public class P2PAccelerator : KernelAccelerator<P2PCompiledKernel, P2PKernel>
             throw new InvalidOperationException("Dispatcher not set. Use P2PCompute facade.");
 
         var request = P2PKernelSerializer.CreateDispatch(kernelMethod, gridDimX);
+        request.Buffers = BuildBufferBindings(buffers, gridDimX);
+        return await Dispatcher.DispatchAsync(request);
+    }
+
+    /// <summary>
+    /// Build buffer bindings from the caller's (bufferId, data, elementSize) tuples.
+    ///
+    /// When <paramref name="buffers"/>[i].data is non-null it is treated as an input
+    /// buffer and the element count is derived from the byte length. When data is
+    /// null the buffer is treated as output-only and the element count defaults to
+    /// <paramref name="gridDimX"/> — the natural size for a data-parallel kernel
+    /// that writes one output per work item. Callers whose output size differs
+    /// from the grid extent (e.g., reductions) should pass a pre-allocated buffer
+    /// with the correct byte length as the data argument.
+    /// </summary>
+    private static BufferBinding[] BuildBufferBindings(
+        (string bufferId, byte[]? data, int elementSize)[] buffers, long gridDimX)
+    {
         var bindings = new BufferBinding[buffers.Length];
         for (int i = 0; i < buffers.Length; i++)
         {
+            var buf = buffers[i];
+            long length = buf.data != null
+                ? buf.data.Length / buf.elementSize
+                : gridDimX;
             bindings[i] = new BufferBinding
             {
-                ParameterIndex = i + 1,
-                BufferId = buffers[i].bufferId,
-                Length = buffers[i].data?.Length / buffers[i].elementSize ?? 0,
-                ElementSize = buffers[i].elementSize,
+                ParameterIndex = i + 1, // +1 for Index parameter at position 0
+                BufferId = buf.bufferId,
+                Length = length,
+                ElementSize = buf.elementSize,
             };
         }
-        request.Buffers = bindings;
-
-        return await Dispatcher.DispatchAsync(request);
+        return bindings;
     }
 
     /// <summary>

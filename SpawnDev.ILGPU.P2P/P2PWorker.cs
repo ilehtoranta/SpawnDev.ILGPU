@@ -248,12 +248,33 @@ public class P2PWorker : IAsyncDisposable
 
         OnKernelCompleted?.Invoke(request.DispatchId, result.Success, result.DurationMs);
 
-        // Send result back to coordinator
+        // Send result metadata back to coordinator
         await _transport.SendMessageAsync(fromPeerId, new P2PMessage
         {
             Type = P2PMessageType.KernelResult,
             Payload = JsonSerializer.SerializeToElement(result),
         });
+
+        // Auto-push modified buffer data back to the coordinator so the
+        // caller that issued DispatchAsync can observe the computed output.
+        // Suppressed when the request is a pipeline intermediate.
+        if (result.Success && request.ReturnModifiedBuffers && result.ModifiedBuffers.Length > 0)
+        {
+            foreach (var bufferId in result.ModifiedBuffers)
+            {
+                if (!_bufferStore.TryGetValue(bufferId, out var data) || data == null)
+                    continue;
+                try
+                {
+                    await _transport.SendBufferAsync(fromPeerId, bufferId, data);
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine(
+                        $"[P2PWorker] Pushing modified buffer '{bufferId}' to {fromPeerId} failed: {ex.Message}");
+                }
+            }
+        }
     }
 
     /// <summary>

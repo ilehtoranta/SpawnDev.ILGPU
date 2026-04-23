@@ -29,7 +29,7 @@ var compute = await P2PCompute.JoinSwarmAsync(crypto, client, accelerator, magne
 
 ## Features
 
-- **173 unit tests** — real kernel execution, coordinator dispatch, crypto, policy, security, buffer transfer, RBAC enforcement, fault tolerance
+- **32 integration tests, no mocks** — 27 in-process (real kernel execution, coordinator dispatch, real Ed25519 crypto via DotNetCrypto, join policies, kick/block enforcement, load balancing, thermal-aware scoring, retry/election/transfer) plus 5 real-WebRTC end-to-end (peer discovery through live tracker, VectorAdd dispatched across SIPSorcery WebRTC with bit-exact verification, 1MB tensor round-trip through chunked buffer transfer, SHA-256 Identity kernel integrity). See `Plans/PLAN-IntegrationTests.md`.
 - **Real kernel execution** — P2PKernelLauncher: reflection-based typed dispatch via LoadAutoGroupedStreamKernel. Verified on CPU and CUDA.
 - **Coordinator dispatch API** — `DispatchToSwarm()` routes to best peer, worker executes, results returned
 - **Real Ed25519 crypto** — SwarmIdentity, KeyRegistry, RoleAssignment via SpawnDev.BlazorJS.Cryptography
