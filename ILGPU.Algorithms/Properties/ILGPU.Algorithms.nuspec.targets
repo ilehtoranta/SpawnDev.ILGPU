@@ -30,6 +30,15 @@
     <None Include="..\LICENSE.txt" Link="Properties\LICENSE.txt" Pack="true" PackagePath="$(PackageLicenseFile)" />
   </ItemGroup>
 
+  <!-- README — points to the main SpawnDev.ILGPU README.md so all forks describe the same ecosystem -->
+  <PropertyGroup>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="..\README.md" Pack="true" PackagePath="\" />
+  </ItemGroup>
+
   <!-- Source Link -->
   <PropertyGroup>
     <PublishRepositoryUrl>true</PublishRepositoryUrl>
