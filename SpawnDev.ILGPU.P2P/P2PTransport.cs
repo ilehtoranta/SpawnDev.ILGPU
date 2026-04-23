@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Text.Json;
+using System.Threading.Channels;
 using SpawnDev.BlazorJS.Cryptography;
 using SpawnDev.WebTorrent;
 
@@ -18,6 +19,7 @@ public class P2PTransport : IAsyncDisposable
     private readonly P2PSwarmCoordinator _coordinator;
     private readonly P2PDispatcher _dispatcher;
     private readonly ConcurrentDictionary<string, PeerChannel> _channels = new();
+    private readonly ConcurrentDictionary<string, PeerMessageQueue> _peerQueues = new();
     private readonly P2PBufferTransfer _bufferTransfer = new();
     private P2PWorker? _worker;
     private IPortableCrypto? _crypto;
@@ -87,15 +89,39 @@ public class P2PTransport : IAsyncDisposable
     public void UnregisterPeer(string peerId)
     {
         _channels.TryRemove(peerId, out _);
+        if (_peerQueues.TryRemove(peerId, out var queue))
+            _ = queue.ShutdownAsync();
         _coordinator.HandlePeerDisconnected(peerId);
         _dispatcher.HandlePeerLost(peerId);
     }
 
     /// <summary>
     /// Handle incoming data from a peer's compute channel.
-    /// Authority-sensitive messages require valid signatures.
+    ///
+    /// Messages from the same peer are processed strictly in arrival order via a
+    /// per-peer queue. This eliminates the race where buffer chunks from a chunked
+    /// BufferSend could still be reassembling when a following KernelDispatch
+    /// started executing — tests previously worked around it with
+    /// <c>WaitForWorkerBuffersAsync</c>. Messages from DIFFERENT peers still run
+    /// concurrently, so swarms with many peers parallelize naturally.
+    ///
+    /// Callers fire-and-forget the returned <see cref="Task"/>; the enqueue itself
+    /// is synchronous and thread-safe, so arrival order at the enqueue point is
+    /// the order in which the peer's consumer loop processes the messages.
     /// </summary>
-    public async Task HandleIncomingDataAsync(string peerId, byte[] data)
+    public Task HandleIncomingDataAsync(string peerId, byte[] data)
+    {
+        var queue = _peerQueues.GetOrAdd(peerId,
+            pid => new PeerMessageQueue(d => ProcessIncomingDataAsync(pid, d)));
+        return queue.EnqueueAsync(data);
+    }
+
+    /// <summary>
+    /// The actual message-handling pipeline, invoked serially by the per-peer
+    /// <see cref="PeerMessageQueue"/> consumer task. Authority-sensitive messages
+    /// require valid signatures.
+    /// </summary>
+    private async Task ProcessIncomingDataAsync(string peerId, byte[] data)
     {
         P2PMessage? message;
         try
@@ -572,13 +598,96 @@ public class P2PTransport : IAsyncDisposable
     }
 
     /// <inheritdoc/>
-    public ValueTask DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
         // Disable all channels before clearing to prevent sends on disposed transport
         foreach (var channel in _channels.Values)
             channel.SendAsync = _ => Task.CompletedTask;
         _channels.Clear();
-        return ValueTask.CompletedTask;
+
+        // Drain and stop every per-peer consumer loop so in-flight processors finish
+        // before the transport goes away.
+        var queues = _peerQueues.Values.ToArray();
+        _peerQueues.Clear();
+        foreach (var queue in queues)
+            await queue.ShutdownAsync();
+    }
+
+    /// <summary>
+    /// Serializes incoming messages for a single peer. The writer side is sync +
+    /// thread-safe (called from <see cref="SdComputeExtension.OnMessage"/>), while
+    /// a single background reader drains the channel and invokes the processor one
+    /// message at a time. The <see cref="Task"/> returned from <see cref="EnqueueAsync"/>
+    /// completes when that specific message has been fully processed, so callers
+    /// can fire-and-forget while still getting strictly ordered per-peer processing.
+    /// </summary>
+    private sealed class PeerMessageQueue
+    {
+        private readonly Channel<PendingMessage> _channel;
+        private readonly Task _consumer;
+        private readonly CancellationTokenSource _cts = new();
+
+        public PeerMessageQueue(Func<byte[], Task> processor)
+        {
+            _channel = Channel.CreateUnbounded<PendingMessage>(new UnboundedChannelOptions
+            {
+                SingleReader = true,
+                SingleWriter = false,
+            });
+            _consumer = Task.Run(() => ConsumeLoopAsync(processor, _cts.Token));
+        }
+
+        public Task EnqueueAsync(byte[] data)
+        {
+            var pending = new PendingMessage(data);
+            // Unbounded channel: TryWrite only fails when the writer is completed
+            // (i.e. after ShutdownAsync). Surface that as a cancelled task instead
+            // of silently dropping the message so callers can detect shutdown.
+            if (!_channel.Writer.TryWrite(pending))
+                pending.Done.TrySetCanceled();
+            return pending.Done.Task;
+        }
+
+        public async Task ShutdownAsync()
+        {
+            _channel.Writer.TryComplete();
+            _cts.Cancel();
+            try { await _consumer.ConfigureAwait(false); }
+            catch (OperationCanceledException) { /* expected on shutdown */ }
+            _cts.Dispose();
+        }
+
+        private async Task ConsumeLoopAsync(Func<byte[], Task> processor, CancellationToken ct)
+        {
+            try
+            {
+                await foreach (var item in _channel.Reader.ReadAllAsync(ct).ConfigureAwait(false))
+                {
+                    try
+                    {
+                        await processor(item.Data).ConfigureAwait(false);
+                        item.Done.TrySetResult();
+                    }
+                    catch (Exception ex)
+                    {
+                        item.Done.TrySetException(ex);
+                    }
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                // Shutdown path — any remaining in-flight pendings complete via TryComplete.
+            }
+        }
+
+        private sealed class PendingMessage
+        {
+            public byte[] Data { get; }
+            public TaskCompletionSource Done { get; } =
+                new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+            public PendingMessage(byte[] data) => Data = data;
+        }
     }
 }
 

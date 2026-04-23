@@ -185,8 +185,6 @@ public class RealWebRtcPipelineTests
         // dispatch message is processed. Chunks and dispatch travel on the same
         // reliable+ordered data channel, but the worker's P2PTransport fires
         // each handler task without serializing, so a race is possible.
-        await WaitForWorkerBuffersAsync(worker, "a", "b");
-
         // Dispatch VectorAdd. Worker auto-pushes modified "result" buffer back.
         var method = typeof(P2PTestKernels).GetMethod(nameof(P2PTestKernels.VectorAdd))!;
         var dispatchResult = await coordinator.Accelerator!.DispatchAsync(method, n,
@@ -262,8 +260,6 @@ public class RealWebRtcPipelineTests
         await coordinator.Transport!.SendBufferAsync(peerId, "large_a", aBytes);
         await coordinator.Transport!.SendBufferAsync(peerId, "large_b", bBytes);
 
-        await WaitForWorkerBuffersAsync(worker, "large_a", "large_b");
-
         var method = typeof(P2PTestKernels).GetMethod(nameof(P2PTestKernels.VectorAdd))!;
         var dispatchResult = await coordinator.Accelerator!.DispatchAsync(method, n,
             ("large_a", aBytes, 4), ("large_b", bBytes, 4), ("large_out", null, 4));
@@ -284,7 +280,7 @@ public class RealWebRtcPipelineTests
 
     }
 
-    /// <summary>
+/// <summary>
     /// Scalar kernel parameter transmission over real WebRTC. Dispatches VectorScale with
     /// scalar = 3.14f and verifies every result[i] == input[i] * 3.14f bit-exact. Proves
     /// the coordinator-sent scalar value reaches the worker's kernel invocation instead
@@ -326,7 +322,6 @@ public class RealWebRtcPipelineTests
         Buffer.BlockCopy(input, 0, inputBytes, 0, n * 4);
 
         await coordinator.Transport!.SendBufferAsync(peerId, "scale_in", inputBytes);
-        await WaitForWorkerBuffersAsync(worker, "scale_in");
 
         // VectorScale signature: (Index1D, ArrayView<float> input, ArrayView<float> result, float scalar)
         // Scalar at parameter index 3 — the param index after Index1D + 2 buffers.
@@ -392,8 +387,6 @@ public class RealWebRtcPipelineTests
         var hashBefore = DataIntegrityHelper.ComputeSha256(inputBytes);
 
         await coordinator.Transport!.SendBufferAsync(peerId, "integ_in", inputBytes);
-
-        await WaitForWorkerBuffersAsync(worker, "integ_in");
 
         var method = typeof(P2PTestKernels).GetMethod(nameof(P2PTestKernels.Identity))!;
         var dispatchResult = await coordinator.Accelerator!.DispatchAsync(method, n,
@@ -485,8 +478,6 @@ public class RealWebRtcPipelineTests
         var (aBytes, bBytes, expected) = DataIntegrityHelper.GenerateVectorAddData(n);
         await coordinator.Transport!.SendBufferAsync(peerId, "a", aBytes);
         await coordinator.Transport!.SendBufferAsync(peerId, "b", bBytes);
-        await WaitForWorkerBuffersAsync(worker, "a", "b");
-
         var method = typeof(P2PTestKernels).GetMethod(nameof(P2PTestKernels.VectorAdd))!;
         var dispatchResult = await coordinator.Accelerator!.DispatchAsync(method, n,
             ("a", aBytes, 4), ("b", bBytes, 4), ("result", null, 4));
@@ -559,28 +550,4 @@ public class RealWebRtcPipelineTests
             $"Modified buffer '{bufferId}' did not arrive from worker within {timeoutMs}ms.");
     }
 
-    /// <summary>
-    /// Block until every listed buffer has been fully reassembled in the worker's
-    /// buffer store. Guards against the dispatch message overtaking its own input
-    /// buffer chunks at the worker.
-    /// </summary>
-    private static async Task WaitForWorkerBuffersAsync(
-        P2PCompute worker, params string[] bufferIds)
-    {
-        var workerInstance = worker.Worker
-            ?? throw new InvalidOperationException("Worker P2PCompute has no Worker instance set.");
-
-        var deadline = DateTime.UtcNow.AddMilliseconds(BufferReturnTimeoutMs);
-        while (DateTime.UtcNow < deadline)
-        {
-            if (bufferIds.All(id => workerInstance.GetBuffer(id) != null))
-                return;
-            await Task.Delay(50);
-        }
-
-        var missing = bufferIds.Where(id => workerInstance.GetBuffer(id) == null).ToArray();
-        throw new TimeoutException(
-            $"Input buffers did not arrive at worker within {BufferReturnTimeoutMs}ms: " +
-            $"{string.Join(", ", missing)}.");
-    }
 }
