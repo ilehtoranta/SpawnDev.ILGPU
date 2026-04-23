@@ -8,6 +8,9 @@
     <VersionPrefix>$(LibraryVersionPrefix)</VersionPrefix>
     <AssemblyVersion>$(LibraryAssemblyVersion)</AssemblyVersion>
     <FileVersion>$(LibraryFileVersion)</FileVersion>
+    <Version>2.0.0-local.1</Version>
+    <IsPackable>true</IsPackable>
+    <GeneratePackageOnBuild>true</GeneratePackageOnBuild>
   </PropertyGroup>
 
   <!-- Enable Nullable Reference Types, but only check for warnings on the latest framework -->

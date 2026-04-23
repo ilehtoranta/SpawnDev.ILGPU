@@ -1,20 +1,23 @@
 <Project>
     <PropertyGroup>
-        <PackageId>ILGPU</PackageId>
+        <PackageId>SpawnDev.ILGPU.Fork</PackageId>
         <PackageVersion>$(Version)</PackageVersion>
 
-        <Title>ILGPU</Title>
-        <Copyright>Copyright (c) 2016-2025 ILGPU Project. All rights reserved.</Copyright>
+        <Title>SpawnDev.ILGPU.Fork</Title>
+        <Copyright>Copyright (c) 2016-2025 ILGPU Project + SpawnDev contributors. All rights reserved.</Copyright>
         <Company />
-        <Authors>Marcel Koester</Authors>
-        <Description>ILGPU Just-In-Time Compiler</Description>
+        <Authors>Marcel Koester, LostBeard, SpawnDev Contributors</Authors>
+        <Description>SpawnDev fork of ILGPU Just-In-Time Compiler. Forked from upstream ILGPU 2.0.0-beta1 branch. Adds WebGPU, WebGL, and Wasm backends plus related IR enhancements. AssemblyName (ILGPU) and namespaces (ILGPU.*) unchanged from upstream - drop-in source compatible. Consumed by SpawnDev.ILGPU.</Description>
         <PackageDescription>
-            ILGPU compiler and runtime library for convenient and high-performance GPU programming in .Net.
-            Samples can be found in the GitHub repository: https://github.com/m4rs-mt/ILGPU/tree/master/Samples
+            SpawnDev fork of ILGPU compiler and runtime library. Extends upstream ILGPU with WebGPU, WebGL, and Wasm backends for Blazor WebAssembly and browser-based GPU compute.
+            Upstream project: https://github.com/m4rs-mt/ILGPU
+            This fork: https://github.com/LostBeard/SpawnDev.ILGPU
         </PackageDescription>
-        <PackageProjectUrl>http://www.ilgpu.net</PackageProjectUrl>
-        <PackageReleaseNotes>http://www.ilgpu.net/releases</PackageReleaseNotes>
-        <PackageTags>ilgpu gpu msil il cil cpu ptx nvidia amd amp opencl cuda compiler jit</PackageTags>
+        <PackageProjectUrl>https://github.com/LostBeard/SpawnDev.ILGPU</PackageProjectUrl>
+        <PackageReleaseNotes>https://github.com/LostBeard/SpawnDev.ILGPU/releases</PackageReleaseNotes>
+        <PackageTags>ilgpu gpu msil il cil cpu ptx nvidia amd amp opencl cuda compiler jit spawndev webgpu webgl wasm blazor</PackageTags>
+        <RepositoryUrl>https://github.com/LostBeard/SpawnDev.ILGPU.git</RepositoryUrl>
+        <RepositoryType>git</RepositoryType>
     </PropertyGroup>
 
     <!-- License -->

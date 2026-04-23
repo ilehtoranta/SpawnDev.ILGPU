@@ -1,20 +1,23 @@
 <Project>
   <PropertyGroup>
-    <PackageId>ILGPU.Algorithms</PackageId>
+    <PackageId>SpawnDev.ILGPU.Algorithms.Fork</PackageId>
     <PackageVersion>$(Version)</PackageVersion>
 
-    <Title>ILGPU Algorithms Library</Title>
-    <Copyright>Copyright (c) 2016-2025 ILGPU Project. All rights reserved.</Copyright>
+    <Title>SpawnDev.ILGPU.Algorithms.Fork</Title>
+    <Copyright>Copyright (c) 2016-2025 ILGPU Project + SpawnDev contributors. All rights reserved.</Copyright>
     <Company />
-    <Authors>ILGPU Algorithms Project</Authors>
-    <Description>ILGPU Algorithms library for high-level GPU programming.</Description>
+    <Authors>ILGPU Algorithms Project, LostBeard, SpawnDev Contributors</Authors>
+    <Description>SpawnDev fork of ILGPU Algorithms library. Forked from upstream ILGPU 2.0.0-beta1 branch. High-level GPU programming algorithms (Scan, RadixSort, Reduce, Histogram, etc.) with browser backend compatibility. AssemblyName (ILGPU.Algorithms) and namespaces (ILGPU.Algorithms.*) unchanged from upstream - drop-in source compatible. Consumed by SpawnDev.ILGPU.</Description>
     <PackageDescription>
-      ILGPU Algorithms library for high-level GPU programming.
-      Samples can be found in the GitHub repository: https://github.com/m4rs-mt/ILGPU/tree/master/Samples
+      SpawnDev fork of ILGPU Algorithms library for high-level GPU programming.
+      Upstream project: https://github.com/m4rs-mt/ILGPU
+      This fork: https://github.com/LostBeard/SpawnDev.ILGPU
     </PackageDescription>
-    <PackageProjectUrl>http://www.ilgpu.net</PackageProjectUrl>
-    <PackageReleaseNotes>http://www.ilgpu.net/releases</PackageReleaseNotes>
-    <PackageTags>ilgpu gpu llvm nvidia amd amp opencl cuda scan prefix sum sort reduce parallel foreach</PackageTags>
+    <PackageProjectUrl>https://github.com/LostBeard/SpawnDev.ILGPU</PackageProjectUrl>
+    <PackageReleaseNotes>https://github.com/LostBeard/SpawnDev.ILGPU/releases</PackageReleaseNotes>
+    <PackageTags>ilgpu gpu llvm nvidia amd amp opencl cuda scan prefix sum sort reduce parallel foreach spawndev webgpu webgl wasm blazor</PackageTags>
+    <RepositoryUrl>https://github.com/LostBeard/SpawnDev.ILGPU.git</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
   </PropertyGroup>
 
   <!-- License -->
