@@ -129,10 +129,18 @@ public class SdComputeExtension : SpawnDev.WebTorrent.IWireExtension
     public void OnMessage(byte[] payload)
     {
         Console.WriteLine($"[sd_compute] OnMessage: peerId={_peerId}, {payload.Length} bytes, IsSupported={IsSupported}");
-        // Route to the P2P transport for handling (fire-and-forget since OnMessage is sync)
+        // Route to the P2P transport for handling (fire-and-forget since OnMessage is sync).
+        // The transport owns the single primary parse (binary fast-path or JSON).
         _ = _transport.HandleIncomingDataAsync(_peerId, payload);
 
-        // Also fire local event + buffer capabilities
+        // Binary buffer-chunk frames carry no P2PMessage envelope and no consumers
+        // of OnComputeMessage care about per-chunk events - skip the deserialize.
+        // This removes the redundant second JSON parse that previously ran on every
+        // tensor chunk in parallel with the transport's parse.
+        if (P2PBinaryFrame.IsBinaryFrame(payload))
+            return;
+
+        // Fire local event + cache capabilities for handshake completion detection.
         var message = P2PProtocol.Deserialize(payload);
         if (message != null)
         {

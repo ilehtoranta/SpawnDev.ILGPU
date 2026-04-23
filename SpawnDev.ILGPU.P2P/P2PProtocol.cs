@@ -14,7 +14,7 @@ namespace SpawnDev.ILGPU.P2P;
 /// </summary>
 public static class P2PProtocol
 {
-    public const string Version = "2.0";
+    public const string Version = "3.0";
 
     /// <summary>
     /// Serialize a message to JSON bytes for transmission over WebRTC.

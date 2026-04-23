@@ -14,16 +14,16 @@ namespace SpawnDev.ILGPU.P2P;
 public class P2PBufferTransfer
 {
     /// <summary>
-    /// Maximum chunk size in bytes. 64 KB is the empirically-safe default across
-    /// SIPSorcery SCTP and browser WebRTC data channels. Larger chunks (128-256 KB)
-    /// appear to silently drop in SIPSorcery's desktop stack during real-WebRTC
-    /// transfer (discovered during Gap 4 10 MB stress - 256 KB chunks left the
-    /// coordinator but never arrived at the worker, dispatch timed out waiting on
-    /// buffers that never reassembled). Outbound throughput on multi-MB buffers is
-    /// addressed by <see cref="P2PTransport.OutboundChunkPipelineWindow"/> pipelining
-    /// instead of raising the per-chunk ceiling.
+    /// Maximum chunk size in bytes. Now that BufferSend/BufferData go through the
+    /// binary wire frame (<see cref="P2PBinaryFrame"/>) instead of a JSON envelope
+    /// that would base64-expand the payload, we can push right up to SIPSorcery's
+    /// hard 256 KiB SCTP max-message cap minus a 512-byte safety margin for the
+    /// ~15-byte binary frame header plus bufferId utf-8 bytes. 4x fewer wire
+    /// messages per multi-megabyte buffer vs the prior 64 KiB ceiling. Callers
+    /// who need smaller chunks (unit tests with tiny payloads etc.) override
+    /// per-instance.
     /// </summary>
-    public int MaxChunkSize { get; set; } = 64 * 1024;
+    public int MaxChunkSize { get; set; } = 256 * 1024 - 512;
 
     private readonly System.Collections.Concurrent.ConcurrentDictionary<string, BufferTransferState> _inProgress = new();
 

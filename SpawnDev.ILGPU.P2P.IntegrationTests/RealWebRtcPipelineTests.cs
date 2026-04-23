@@ -280,7 +280,7 @@ public class RealWebRtcPipelineTests
 
     }
 
-/// <summary>
+    /// <summary>
     /// Scalar kernel parameter transmission over real WebRTC. Dispatches VectorScale with
     /// scalar = 3.14f and verifies every result[i] == input[i] * 3.14f bit-exact. Proves
     /// the coordinator-sent scalar value reaches the worker's kernel invocation instead
