@@ -281,6 +281,75 @@ public class RealWebRtcPipelineTests
     }
 
     /// <summary>
+    /// Gap 4 headline test: 10MB float buffers (a, b, result) over real WebRTC.
+    /// Three 10MB buffers = 30MB of SCTP traffic per direction. At the rc.14 default
+    /// 256KB chunk size that's 40 chunks per buffer (was 160 at 64KB). Unblocked by
+    /// Riker's SctpDataSender reset-race fix in SpawnDev.WebTorrent 3.1.3-rc.1
+    /// (60x loopback speedup on 504KB benchmark, same fix lifts the SCTP ceiling
+    /// that pinned rc.13 at a 240s timeout). All 2.6M elements verified bit-exact.
+    /// </summary>
+    [Test, CancelAfter(240000), Retry(3)]
+    public async Task LargeBuffer_10MB_DispatchedOverRealWebRtc_BitExact()
+    {
+        const int n = 10 * 256 * 1024; // exactly 10 MB of float32 = 2,621,440 elements
+        var trackers = DispatchTrackers;
+        var crypto = new DotNetCrypto();
+
+        await using var coordClient = new SpawnDev.WebTorrent.WebTorrentClient();
+        await using var workerClient = new SpawnDev.WebTorrent.WebTorrentClient();
+
+        await using var coordinator = await P2PCompute.CreateSwarmAsync(
+            crypto, coordClient, "largebuffer-10mb-test", trackers: trackers);
+
+        using var workerContext = Context.Create(b => b.CPU());
+        using var workerAccelerator = workerContext.CreateCPUAccelerator(0);
+
+        await using var worker = await P2PCompute.JoinSwarmAsync(
+            crypto, workerClient, workerAccelerator, coordinator.MagnetLink!);
+
+        await WaitForPeersAsync(coordinator, worker);
+
+        var peerId = coordinator.Accelerator!.Peers.First().PeerId;
+        var workerBuffers = CollectWorkerBuffers(coordinator);
+
+        var rng = new Random(unchecked((int)0xC0DEFACE));
+        var a = new float[n];
+        var b = new float[n];
+        var expected = new float[n];
+        for (int i = 0; i < n; i++)
+        {
+            a[i] = (float)(rng.NextDouble() * 1000.0 - 500.0);
+            b[i] = (float)(rng.NextDouble() * 1000.0 - 500.0);
+            expected[i] = a[i] + b[i];
+        }
+        var aBytes = new byte[n * 4];
+        var bBytes = new byte[n * 4];
+        Buffer.BlockCopy(a, 0, aBytes, 0, n * 4);
+        Buffer.BlockCopy(b, 0, bBytes, 0, n * 4);
+
+        await coordinator.Transport!.SendBufferAsync(peerId, "large10_a", aBytes);
+        await coordinator.Transport!.SendBufferAsync(peerId, "large10_b", bBytes);
+
+        var method = typeof(P2PTestKernels).GetMethod(nameof(P2PTestKernels.VectorAdd))!;
+        var dispatchResult = await coordinator.Accelerator!.DispatchAsync(method, n,
+            ("large10_a", aBytes, 4), ("large10_b", bBytes, 4), ("large10_out", null, 4));
+
+        Assert.That(dispatchResult.Success, Is.True,
+            $"Dispatch failed: {dispatchResult.Error}");
+
+        var resultBytes = await WaitForBufferAsync(workerBuffers, "large10_out", BufferReturnTimeoutMs);
+        Assert.That(resultBytes.Length, Is.EqualTo(n * 4), "10MB buffer wrong size");
+
+        var actual = DataIntegrityHelper.BytesToFloats(resultBytes);
+        var (violations, firstIdx, firstExp, firstAct) =
+            DataIntegrityHelper.VerifyFloats(actual, expected, tolerance: 0.001f);
+
+        Assert.That(violations, Is.EqualTo(0),
+            $"10MB VectorAdd over WebRTC: {violations}/{n} violations. " +
+            $"First at [{firstIdx}]: expected {firstExp}, got {firstAct}");
+    }
+
+    /// <summary>
     /// Scalar kernel parameter transmission over real WebRTC. Dispatches VectorScale with
     /// scalar = 3.14f and verifies every result[i] == input[i] * 3.14f bit-exact. Proves
     /// the coordinator-sent scalar value reaches the worker's kernel invocation instead

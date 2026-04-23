@@ -605,8 +605,16 @@
 
     // Activity log
     private readonly List<ActivityEntry> _activityLog = new();
-    private bool _dispatching;
+    private bool _dispatching => _benchmarkRunning || _mandelbrotRunning || _chaosRunning;
     private int _dispatchCount;
+
+    /// <summary>
+    /// Result buffers pushed back by worker peers after a dispatch completes.
+    /// Populated by subscribing to <c>_compute.Transport.BufferTransfer.OnBufferReceived</c>
+    /// in <see cref="WireSwarmEvents"/>. Dispatch call sites wait for the expected
+    /// buffer IDs to land here before reporting the dispatch "complete."
+    /// </summary>
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte[]> _resultBuffers = new();
 
     private record ActivityEntry(DateTime Time, string Icon, string Message, string Color);
 
@@ -676,23 +684,44 @@
                 var chunkSw = System.Diagnostics.Stopwatch.StartNew();
                 try
                 {
-                    // Generate test data for this chunk
+                    // Generate test data for this chunk: data[j] = (float)j. Kernel doubles
+                    // in place, so result[j] = 2*j on the worker's returned buffer.
+                    var bufferId = $"chunk_{idx}";
                     var data = new byte[task.Elements * 4]; // float32
                     for (int j = 0; j < task.Elements; j++)
                         BitConverter.TryWriteBytes(data.AsSpan(j * 4), (float)j);
 
-                    var dispatchId = _compute.DispatchToSwarm(
-                        typeof(P2PDemoKernels), nameof(P2PDemoKernels.MultiplyBy2),
-                        task.Elements,
-                        ($"chunk_{idx}", data, 4));
+                    // Real dispatch: P2PAccelerator.DispatchAsync now auto-ships the input
+                    // buffer to the selected peer before the KernelDispatch message fires.
+                    var method = typeof(P2PDemoKernels).GetMethod(nameof(P2PDemoKernels.MultiplyBy2))!;
+                    var dispatchResult = await _compute.Accelerator!.DispatchAsync(
+                        method, task.Elements, (bufferId, data, 4));
 
-                    task.DispatchId = dispatchId;
+                    task.DispatchId = dispatchResult.DispatchId;
                     task.PeerId = "dispatched";
-                    task.Progress = 50;
+                    task.Progress = 70;
                     await InvokeAsync(StateHasChanged);
 
-                    // Wait for result (simplified — in production use DispatchAsync)
-                    await Task.Delay(500 + (int)(task.Elements / 10000)); // Simulate processing time
+                    if (!dispatchResult.Success)
+                        throw new Exception(dispatchResult.Error ?? "Dispatch reported failure");
+
+                    // Wait for the worker's result-buffer push back. MultiplyBy2 is in-place,
+                    // so the modified buffer carries the same id as the input we sent.
+                    var resultBytes = await WaitForResultBufferAsync(bufferId, timeoutMs: 30_000);
+
+                    // Spot-check a couple of elements to confirm the peer ran the real kernel
+                    // rather than returning our input unchanged.
+                    if (resultBytes.Length >= 8)
+                    {
+                        float sampleFirst = BitConverter.ToSingle(resultBytes, 0);
+                        int midIdx = (int)Math.Min(task.Elements / 2, (long)(resultBytes.Length / 4) - 1);
+                        float sampleMid = BitConverter.ToSingle(resultBytes, midIdx * 4);
+                        float expectedMid = 2f * midIdx;
+                        if (Math.Abs(sampleFirst - 0f) > 0.001f || Math.Abs(sampleMid - expectedMid) > 0.001f)
+                            throw new Exception(
+                                $"Peer kernel output mismatch: [0]={sampleFirst} want 0, [{midIdx}]={sampleMid} want {expectedMid}");
+                    }
+
                     task.Progress = 100;
                     task.Status = "Complete";
                     task.DurationMs = chunkSw.ElapsedMilliseconds;
@@ -775,40 +804,32 @@
                             imagCoords[idx] = (y / (float)height) * 2.0f - 1.0f;
                         }
 
-                    // Dispatch to swarm
+                    // Pack coords for dispatch to the swarm
                     var realBytes = new byte[stripPixelCount * 4];
                     var imagBytes = new byte[stripPixelCount * 4];
                     Buffer.BlockCopy(realCoords, 0, realBytes, 0, realBytes.Length);
                     Buffer.BlockCopy(imagCoords, 0, imagBytes, 0, imagBytes.Length);
 
-                    _compute.DispatchToSwarm(
-                        typeof(P2PDemoKernels), nameof(P2PDemoKernels.MandelbrotChunk),
-                        stripPixelCount,
-                        ($"mand_out_{peerIdx}", null, 4),
-                        ($"mand_real_{peerIdx}", realBytes, 4),
-                        ($"mand_imag_{peerIdx}", imagBytes, 4));
+                    var outId = $"mand_out_{peerIdx}";
+                    var realId = $"mand_real_{peerIdx}";
+                    var imagId = $"mand_imag_{peerIdx}";
 
-                    // LOCAL COMPUTATION: The DispatchToSwarm above sends the kernel to
-                    // the peer, but result collection (BufferRequest → BufferData) is not
-                    // yet wired into this demo. The dispatch IS real — it executes on the
-                    // peer. But we render from local CPU here until result readback is
-                    // integrated. When WebTorrent peer connections are working end-to-end,
-                    // replace this with await DispatchAsync + buffer readback.
+                    // Real dispatch: library auto-ships real/imag coord buffers to the
+                    // selected peer, peer computes iteration counts into the output buffer,
+                    // worker pushes the modified output buffer back to the coordinator.
+                    var method = typeof(P2PDemoKernels).GetMethod(nameof(P2PDemoKernels.MandelbrotChunk))!;
+                    var dispatchResult = await _compute.Accelerator!.DispatchAsync(
+                        method, stripPixelCount,
+                        (outId, null, 4),     // output-only: worker allocates, fills, pushes back
+                        (realId, realBytes, 4),
+                        (imagId, imagBytes, 4));
+
+                    if (!dispatchResult.Success)
+                        throw new Exception(dispatchResult.Error ?? "Mandelbrot dispatch failed");
+
+                    var outBytes = await WaitForResultBufferAsync(outId, timeoutMs: 30_000);
                     var result = new int[stripPixelCount];
-                    for (int i = 0; i < stripPixelCount; i++)
-                    {
-                        float cr = realCoords[i], ci = imagCoords[i];
-                        float zr = 0, zi = 0;
-                        int iter = 0;
-                        while (zr * zr + zi * zi <= 4.0f && iter < maxIter)
-                        {
-                            float tmp = zr * zr - zi * zi + cr;
-                            zi = 2.0f * zr * zi + ci;
-                            zr = tmp;
-                            iter++;
-                        }
-                        result[i] = iter;
-                    }
+                    Buffer.BlockCopy(outBytes, 0, result, 0, Math.Min(outBytes.Length, stripPixelCount * 4));
                     stripPixels[peerIdx] = result;
                 }
                 catch (Exception ex)
@@ -1382,6 +1403,34 @@
                 LogActivity("\ud83d\udd04", $"Dispatch {id[..Math.Min(8, id.Length)]}... retried: {failedPeerId[..Math.Min(8, failedPeerId.Length)]}... → {newPeerId[..Math.Min(8, newPeerId.Length)]}...", "#f59e0b");
             };
         }
+
+        // Collect worker-pushed result buffers. Dispatch call sites wait on this dict
+        // for the expected bufferId before reporting a result. Required because the
+        // P2P library's result-buffer round-trip is separate from the dispatch ack.
+        if (_compute.Transport?.BufferTransfer != null)
+        {
+            _compute.Transport.BufferTransfer.OnBufferReceived += (bufferId, data) =>
+            {
+                _resultBuffers[bufferId] = data;
+            };
+        }
+    }
+
+    /// <summary>
+    /// Wait for a worker-pushed result buffer to arrive with the given id, up to the
+    /// specified timeout. Returns the buffer bytes on arrival; throws on timeout.
+    /// </summary>
+    private async Task<byte[]> WaitForResultBufferAsync(string bufferId, int timeoutMs = 30000)
+    {
+        var deadline = DateTime.UtcNow.AddMilliseconds(timeoutMs);
+        while (DateTime.UtcNow < deadline)
+        {
+            if (_resultBuffers.TryGetValue(bufferId, out var data))
+                return data;
+            await Task.Delay(50);
+        }
+        throw new TimeoutException(
+            $"Result buffer '{bufferId}' did not arrive from worker within {timeoutMs}ms.");
     }
 
     private async Task JoinAlways()

@@ -132,7 +132,7 @@ public class P2PAccelerator : KernelAccelerator<P2PCompiledKernel, P2PKernel>
 
         var request = P2PKernelSerializer.CreateDispatch(kernelMethod, gridDimX);
         request.Buffers = BuildBufferBindings(buffers, gridDimX);
-        return Dispatcher.Dispatch(request);
+        return Dispatcher.Dispatch(request, ExtractInputBuffers(buffers));
     }
 
     /// <summary>
@@ -160,7 +160,26 @@ public class P2PAccelerator : KernelAccelerator<P2PCompiledKernel, P2PKernel>
 
         var request = P2PKernelSerializer.CreateDispatch(kernelMethod, gridDimX, scalarValues: scalarValues);
         request.Buffers = BuildBufferBindings(buffers, gridDimX);
-        return await Dispatcher.DispatchAsync(request);
+        return await Dispatcher.DispatchAsync(request, ExtractInputBuffers(buffers));
+    }
+
+    /// <summary>
+    /// Collect caller-provided input buffers (tuples with data != null) into a
+    /// dispatch-level dictionary the dispatcher can ship to the selected peer
+    /// before the KernelDispatch message fires. Tuples with null data are
+    /// output-only buffers the worker allocates locally - not transmitted.
+    /// </summary>
+    private static IReadOnlyDictionary<string, byte[]>? ExtractInputBuffers(
+        (string bufferId, byte[]? data, int elementSize)[] buffers)
+    {
+        Dictionary<string, byte[]>? inputs = null;
+        foreach (var (bufferId, data, _) in buffers)
+        {
+            if (data == null) continue;
+            inputs ??= new Dictionary<string, byte[]>(buffers.Length);
+            inputs[bufferId] = data;
+        }
+        return inputs;
     }
 
     /// <summary>
@@ -246,6 +265,7 @@ public class P2PAccelerator : KernelAccelerator<P2PCompiledKernel, P2PKernel>
         var sw = System.Diagnostics.Stopwatch.StartNew();
         var tasks = chunks.Select((chunk, idx) =>
         {
+            var bufferId = $"dist_{idx}";
             var data = dataFactory(chunk.start, chunk.count);
             var request = P2PKernelSerializer.CreateDispatch(method, chunk.count);
             request.Buffers = new[]
@@ -253,12 +273,17 @@ public class P2PAccelerator : KernelAccelerator<P2PCompiledKernel, P2PKernel>
                 new BufferBinding
                 {
                     ParameterIndex = 1,
-                    BufferId = $"dist_{idx}",
+                    BufferId = bufferId,
                     Length = chunk.count,
                     ElementSize = elementSize,
                 }
             };
-            return Dispatcher.DispatchAsync(request);
+            // Ship the chunk's input data alongside the dispatch - dispatcher will send it
+            // to whichever peer it selects before firing the KernelDispatch message.
+            var inputs = data != null
+                ? (IReadOnlyDictionary<string, byte[]>)new Dictionary<string, byte[]> { [bufferId] = data }
+                : null;
+            return Dispatcher.DispatchAsync(request, inputs);
         }).ToList();
 
         var results = await Task.WhenAll(tasks);

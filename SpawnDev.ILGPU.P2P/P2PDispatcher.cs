@@ -83,7 +83,9 @@ public class P2PDispatcher : IDisposable
     /// Dispatch a kernel to the best available peer.
     /// Returns the dispatch ID for tracking.
     /// </summary>
-    public string Dispatch(KernelDispatchRequest request, string[]? preferredBufferIds = null)
+    public string Dispatch(KernelDispatchRequest request,
+        IReadOnlyDictionary<string, byte[]>? inputBuffers = null,
+        string[]? preferredBufferIds = null)
     {
         var peer = SelectHealthyPeer(preferredBufferIds);
         if (peer == null)
@@ -93,6 +95,7 @@ public class P2PDispatcher : IDisposable
         {
             DispatchId = request.DispatchId,
             Request = request,
+            InputBuffers = inputBuffers,
             AssignedPeer = peer,
             StartTime = DateTime.UtcNow,
             Attempts = 1,
@@ -104,6 +107,10 @@ public class P2PDispatcher : IDisposable
         }
 
         peer.IncrementPending();
+        // Fire-and-forget path can't await the buffer sends synchronously - start them
+        // now, let them overlap with caller's post-return work. The receive-side per-peer
+        // ordered queue (rc.12) guarantees chunks drain before the KernelDispatch message.
+        _ = SendInputBuffersAsync(peer, inputBuffers);
         SendDispatchToPeer(peer, request);
 
         return request.DispatchId;
@@ -113,9 +120,18 @@ public class P2PDispatcher : IDisposable
     /// Dispatch a kernel and await the result.
     /// Returns the dispatch result when the peer completes execution.
     /// Throws on timeout or permanent failure.
+    ///
+    /// When <paramref name="inputBuffers"/> is provided, each buffer is transmitted
+    /// to the selected peer BEFORE the KernelDispatch message fires. This closes
+    /// the long-standing library gap where <c>DispatchAsync</c> took
+    /// <c>(bufferId, data, elementSize)</c> tuples at the accelerator layer but
+    /// the raw <c>data</c> never reached the peer. Stored on the <see cref="PendingDispatch"/>
+    /// so a retry can re-ship the inputs to the replacement peer.
     /// </summary>
     public async Task<KernelDispatchResult> DispatchAsync(
-        KernelDispatchRequest request, string[]? preferredBufferIds = null)
+        KernelDispatchRequest request,
+        IReadOnlyDictionary<string, byte[]>? inputBuffers = null,
+        string[]? preferredBufferIds = null)
     {
         var peer = SelectHealthyPeer(preferredBufferIds);
         if (peer == null)
@@ -126,6 +142,7 @@ public class P2PDispatcher : IDisposable
         {
             DispatchId = request.DispatchId,
             Request = request,
+            InputBuffers = inputBuffers,
             AssignedPeer = peer,
             StartTime = DateTime.UtcNow,
             Attempts = 1,
@@ -138,6 +155,7 @@ public class P2PDispatcher : IDisposable
         }
 
         peer.IncrementPending();
+        await SendInputBuffersAsync(peer, inputBuffers).ConfigureAwait(false);
         SendDispatchToPeer(peer, request);
 
         // Await with timeout
@@ -151,6 +169,26 @@ public class P2PDispatcher : IDisposable
             throw new TimeoutException(
                 $"P2P dispatch {request.DispatchId} timed out after {DispatchTimeoutMs * MaxRetries}ms");
         }
+    }
+
+    /// <summary>
+    /// Ship every provided input buffer to the selected peer via <see cref="OnSendBuffer"/>
+    /// (wired to <c>P2PTransport.SendBufferAsync</c> by the facade). Awaits all sends
+    /// in parallel; the receive side's per-peer ordered queue guarantees they drain
+    /// before the following KernelDispatch message starts processing.
+    /// </summary>
+    private async Task SendInputBuffersAsync(RemotePeer peer, IReadOnlyDictionary<string, byte[]>? inputBuffers)
+    {
+        if (inputBuffers == null || inputBuffers.Count == 0) return;
+        var handler = OnSendBuffer;
+        if (handler == null) return;
+
+        var sends = inputBuffers
+            .Where(kv => kv.Value != null)
+            .Select(kv => handler(peer.PeerId, kv.Key, kv.Value))
+            .ToArray();
+        if (sends.Length > 0)
+            await Task.WhenAll(sends).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -252,6 +290,11 @@ public class P2PDispatcher : IDisposable
         newPeer.IncrementPending();
 
         OnDispatchRetried?.Invoke(dispatch.DispatchId, failedPeerId, newPeer.PeerId);
+        // Re-ship input buffers to the replacement peer before re-dispatching so the
+        // new worker has the data the original one was holding. Fire-and-forget on the
+        // buffer task is acceptable here; the per-peer ordered queue at the receiver
+        // guarantees the buffer chunks arrive ahead of the re-sent KernelDispatch.
+        _ = SendInputBuffersAsync(newPeer, dispatch.InputBuffers);
         SendDispatchToPeer(newPeer, dispatch.Request);
     }
 
@@ -471,6 +514,13 @@ public class P2PDispatcher : IDisposable
     /// </summary>
     public event Action<string, P2PMessage>? OnSendMessage;
 
+    /// <summary>
+    /// Fired when the dispatcher needs to ship an input buffer to a peer.
+    /// Wire this to P2PTransport.SendBufferAsync so DispatchAsync's
+    /// (bufferId, data, elementSize) tuples actually transmit the data.
+    /// </summary>
+    public event Func<string, string, byte[], Task>? OnSendBuffer;
+
     /// <inheritdoc/>
     public void Dispose()
     {
@@ -536,6 +586,14 @@ internal class PendingDispatch
 {
     public string DispatchId { get; set; } = "";
     public KernelDispatchRequest Request { get; set; } = new();
+
+    /// <summary>
+    /// Input buffer payloads captured at dispatch time so a retry to a different
+    /// peer can re-ship them. Key = bufferId, value = raw bytes. Null when the
+    /// caller used the fire-and-forget path without providing inputs.
+    /// </summary>
+    public IReadOnlyDictionary<string, byte[]>? InputBuffers { get; set; }
+
     public RemotePeer AssignedPeer { get; set; } = new();
     public DateTime StartTime { get; set; }
     public int Attempts { get; set; }

@@ -1,6 +1,8 @@
 using ILGPU;
 using ILGPU.Runtime;
 using SpawnDev.BlazorJS.Cryptography;
+using SpawnDev.RTC;
+using SpawnDev.RTC.Desktop;
 using SpawnDev.WebTorrent;
 
 namespace SpawnDev.ILGPU.P2P;
@@ -123,6 +125,7 @@ public class P2PCompute : IAsyncDisposable
         string? joinLinkBaseUrl = null,
         string[]? trackers = null)
     {
+        ConfigureHighThroughputSctp(client);
         var identity = await SwarmIdentity.CreateAsync(crypto, name + "-owner");
         var coordinator = new P2PSwarmCoordinator(client);
         coordinator.SetIdentity(identity);
@@ -170,6 +173,13 @@ public class P2PCompute : IAsyncDisposable
         dispatcher.OnSendMessage += async (peerId, msg) =>
         {
             await transport.SendSignedMessageAsync(peerId, msg);
+        };
+
+        // Wire dispatcher input-buffer sends to transport so DispatchAsync's (bufferId, data, _)
+        // tuples actually transmit their data to the selected peer before the dispatch fires.
+        dispatcher.OnSendBuffer += async (peerId, bufferId, data) =>
+        {
+            await transport.SendBufferAsync(peerId, bufferId, data);
         };
 
         // Wire bridge peer discovery to coordinator BEFORE AttachToSwarm so the
@@ -227,6 +237,7 @@ public class P2PCompute : IAsyncDisposable
         Accelerator accelerator,
         string magnetOrJoinLink)
     {
+        ConfigureHighThroughputSctp(client);
         var identity = await SwarmIdentity.CreateAsync(crypto, "worker");
         var coordinator = new P2PSwarmCoordinator(client);
         coordinator.SetIdentity(identity);
@@ -407,5 +418,54 @@ public class P2PCompute : IAsyncDisposable
         await Coordinator.DisposeAsync();
         await Identity.DisposeAsync();
         _context?.Dispose();
+    }
+
+    /// <summary>
+    /// Overrides the client's <see cref="WebTorrentClient.PeerFactory"/> so every peer
+    /// that gets created raises SCTP burst knobs on its SIPSorcery data channel as soon
+    /// as the channel opens. Default MAX_BURST=4 / BURST_PERIOD=50ms (RFC 4960 §7.2.2)
+    /// caps WebRTC-loopback throughput at MAX_BURST * MTU / RTT ≈ 180 KB/s, which isn't
+    /// enough for multi-MB tensor transfers. Tuning to MaxBurst=32 / BurstPeriod=10ms
+    /// lifts the ceiling to ≈ 1.5 MB/s at the same RTT — fine for LAN / localhost where
+    /// the spec's bursty-sender prevention isn't needed. Browser peers are a no-op:
+    /// libwebrtc doesn't expose per-association SCTP tunables and has better defaults.
+    /// </summary>
+    private static void ConfigureHighThroughputSctp(WebTorrentClient client)
+    {
+        var previousFactory = client.PeerFactory;
+        client.PeerFactory = (initiator) =>
+        {
+            var peer = previousFactory != null
+                ? previousFactory(initiator)
+                : new RtcPeer(initiator, client.IceServers, trickle: false);
+
+            if (peer is RtcPeer rtc)
+            {
+                peer.OnConnect += () =>
+                {
+                    // Desktop path: reach SIPSorcery's SctpAssociation and raise the burst knobs.
+                    // Browser path: PeerConnection is a BrowserRTCPeerConnection; no-op.
+                    if (rtc.PeerConnection is DesktopRTCPeerConnection dpc)
+                    {
+                        try
+                        {
+                            var sctp = dpc.NativeConnection?.sctp;
+                            if (sctp?.RTCSctpAssociation != null)
+                            {
+                                sctp.RTCSctpAssociation.MaxBurst = 32;
+                                sctp.RTCSctpAssociation.BurstPeriodMilliseconds = 10;
+                            }
+                        }
+                        catch
+                        {
+                            // If the SCTP association isn't reachable (channel closed mid-race,
+                            // future SIPSorcery API drift, etc.) leave RFC defaults in place.
+                        }
+                    }
+                };
+            }
+
+            return peer;
+        };
     }
 }

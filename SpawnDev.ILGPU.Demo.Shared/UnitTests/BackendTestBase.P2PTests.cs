@@ -1629,8 +1629,10 @@ public abstract partial class BackendTestBase
     [TestMethod]
     public async Task P2P_BufferTransfer_1MB_Tensor()
     {
-        // Simulate transferring a 1MB float tensor (256K floats)
-        var transfer = new P2PBufferTransfer(); // default 64KB chunks
+        // Simulate transferring a 1MB float tensor (256K floats). Pin MaxChunkSize to
+        // 64KB so the test proves chunked reassembly regardless of the library default
+        // (rc.14 raised the default to 256KB - 512 for fewer wire messages per buffer).
+        var transfer = new P2PBufferTransfer { MaxChunkSize = 64 * 1024 };
         var tensorData = new byte[1024 * 1024];
         Random.Shared.NextBytes(tensorData);
 
@@ -1664,6 +1666,10 @@ public abstract partial class BackendTestBase
         var dispatcher = new P2PDispatcher(accelerator);
         await using var transport = new P2PTransport(client, coordinator, dispatcher);
 
+        // Pin MaxChunkSize to 64KB so we can assert a deterministic chunk count
+        // independent of the library default (rc.14 raised default to 256KB - 512).
+        transport.BufferTransfer.MaxChunkSize = 64 * 1024;
+
         // Track messages sent to worker
         var sentMessages = new List<byte[]>();
         transport.RegisterPeer("worker-1", async (data) =>
@@ -1672,7 +1678,7 @@ public abstract partial class BackendTestBase
         });
 
         // Send a buffer that requires multiple chunks
-        var tensorData = new byte[200_000]; // ~3 chunks at 64KB
+        var tensorData = new byte[200_000]; // ~4 chunks at 64KB
         Random.Shared.NextBytes(tensorData);
         await transport.SendBufferAsync("worker-1", "tensor-a", tensorData);
 
@@ -1858,15 +1864,22 @@ public abstract partial class BackendTestBase
         P2PKernelSerializer.RegisterKernelType(typeof(BackendTestBase));
 
         // === Wire mock transport: bidirectional ===
+        // Fire-and-forget matches real WebRTC semantics: SendAsync returns once the
+        // message is handed to the wire, not once the peer has finished processing
+        // it. Awaiting HandleIncomingDataAsync here would deadlock under the rc.12
+        // per-peer queue because the consumer loop that's processing the current
+        // dispatch can't reach the KernelResult it's waiting on.
         // Coordinator → Worker
-        coordTransport.RegisterPeer("worker-node", async (data) =>
+        coordTransport.RegisterPeer("worker-node", (data) =>
         {
-            await workerTransport.HandleIncomingDataAsync("coord-node", data);
+            _ = workerTransport.HandleIncomingDataAsync("coord-node", data);
+            return Task.CompletedTask;
         });
         // Worker → Coordinator
-        workerTransport.RegisterPeer("coord-node", async (data) =>
+        workerTransport.RegisterPeer("coord-node", (data) =>
         {
-            await coordTransport.HandleIncomingDataAsync("worker-node", data);
+            _ = coordTransport.HandleIncomingDataAsync("worker-node", data);
+            return Task.CompletedTask;
         });
 
         // === Connect worker as peer ===
@@ -2814,9 +2827,13 @@ public abstract partial class BackendTestBase
         transport.SetWorker(worker);
 
         // Wire mock transport: coordinator ↔ worker
-        transport.RegisterPeer("worker-1", async (data) =>
+        // Fire-and-forget matches real WebRTC semantics and avoids rc.12 per-peer
+        // queue deadlock (awaiting would block the consumer loop waiting on its
+        // own KernelResult to process through the same queue).
+        transport.RegisterPeer("worker-1", (data) =>
         {
-            await transport.HandleIncomingDataAsync("worker-1", data);
+            _ = transport.HandleIncomingDataAsync("worker-1", data);
+            return Task.CompletedTask;
         });
 
         // Register peer
@@ -2938,14 +2955,17 @@ public abstract partial class BackendTestBase
         worker.Initialize(context, cpuAccel);
         workerTransport.SetWorker(worker);
 
-        // Bidirectional mock transport
-        coordTransport.RegisterPeer(workerId, async (data) =>
+        // Bidirectional mock transport — fire-and-forget to match real WebRTC
+        // semantics and avoid rc.12 per-peer queue deadlock.
+        coordTransport.RegisterPeer(workerId, (data) =>
         {
-            await workerTransport.HandleIncomingDataAsync("coordinator", data);
+            _ = workerTransport.HandleIncomingDataAsync("coordinator", data);
+            return Task.CompletedTask;
         });
-        workerTransport.RegisterPeer("coordinator", async (data) =>
+        workerTransport.RegisterPeer("coordinator", (data) =>
         {
-            await coordTransport.HandleIncomingDataAsync(workerId, data);
+            _ = coordTransport.HandleIncomingDataAsync(workerId, data);
+            return Task.CompletedTask;
         });
 
         // Register as peer
@@ -3070,13 +3090,17 @@ public abstract partial class BackendTestBase
         w2Transport.SetWorker(worker2);
         worker2.ReceiveBuffer("data", new byte[16]);
 
-        coordTransport.RegisterPeer("worker-2", async (data) =>
+        // Fire-and-forget to match real WebRTC semantics and avoid rc.12 per-peer
+        // queue deadlock.
+        coordTransport.RegisterPeer("worker-2", (data) =>
         {
-            await w2Transport.HandleIncomingDataAsync("coordinator", data);
+            _ = w2Transport.HandleIncomingDataAsync("coordinator", data);
+            return Task.CompletedTask;
         });
-        w2Transport.RegisterPeer("coordinator", async (data) =>
+        w2Transport.RegisterPeer("coordinator", (data) =>
         {
-            await coordTransport.HandleIncomingDataAsync("worker-2", data);
+            _ = coordTransport.HandleIncomingDataAsync("worker-2", data);
+            return Task.CompletedTask;
         });
         coordinator.HandlePeerConnected("worker-2", new PeerCapabilities
             { PeerId = "worker-2", EstimatedTflops = 5.0 });
