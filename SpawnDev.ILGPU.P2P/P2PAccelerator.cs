@@ -138,13 +138,27 @@ public class P2PAccelerator : KernelAccelerator<P2PCompiledKernel, P2PKernel>
     /// <summary>
     /// Dispatch a kernel and await the result from the remote peer.
     /// </summary>
+    public Task<KernelDispatchResult> DispatchAsync(MethodInfo kernelMethod, long gridDimX,
+        params (string bufferId, byte[]? data, int elementSize)[] buffers)
+        => DispatchAsync(kernelMethod, gridDimX, scalarValues: null, buffers);
+
+    /// <summary>
+    /// Dispatch a kernel with scalar parameter values and await the result from the remote peer.
+    /// </summary>
+    /// <param name="scalarValues">
+    /// Scalar kernel parameter values keyed by parameter index. For a kernel signature
+    /// <c>(Index1D, ArrayView&lt;float&gt; input, ArrayView&lt;float&gt; result, float scalar)</c>
+    /// pass <c>new Dictionary&lt;int, object&gt; { [3] = 7.5f }</c>. Buffers still flow through the
+    /// <paramref name="buffers"/> params array; only non-buffer scalar parameters belong here.
+    /// </param>
     public async Task<KernelDispatchResult> DispatchAsync(MethodInfo kernelMethod, long gridDimX,
+        IReadOnlyDictionary<int, object>? scalarValues,
         params (string bufferId, byte[]? data, int elementSize)[] buffers)
     {
         if (Dispatcher == null)
             throw new InvalidOperationException("Dispatcher not set. Use P2PCompute facade.");
 
-        var request = P2PKernelSerializer.CreateDispatch(kernelMethod, gridDimX);
+        var request = P2PKernelSerializer.CreateDispatch(kernelMethod, gridDimX, scalarValues: scalarValues);
         request.Buffers = BuildBufferBindings(buffers, gridDimX);
         return await Dispatcher.DispatchAsync(request);
     }

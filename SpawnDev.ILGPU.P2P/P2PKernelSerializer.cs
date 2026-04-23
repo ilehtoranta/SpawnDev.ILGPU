@@ -1,4 +1,5 @@
 using System.Reflection;
+using System.Text.Json;
 
 namespace SpawnDev.ILGPU.P2P;
 
@@ -57,12 +58,21 @@ public static class P2PKernelSerializer
     /// Serialize a kernel method reference to a dispatch request.
     /// The method's declaring type must be registered via RegisterKernelType.
     /// </summary>
+    /// <param name="scalarValues">
+    /// Optional scalar kernel parameter values keyed by parameter index.
+    /// For a kernel signature <c>(Index1D, ArrayView&lt;float&gt;, ArrayView&lt;float&gt;, float scalar)</c>
+    /// pass <c>new Dictionary&lt;int, object&gt; { [3] = 7.5f }</c>. Buffer parameters are NOT included here
+    /// (they use the <see cref="KernelDispatchRequest.Buffers"/> binding mechanism).
+    /// Supports all ILGPU primitive types: float, double, int, uint, long, ulong, short,
+    /// ushort, byte, sbyte, bool, System.Half, plus any JSON-serializable struct.
+    /// </param>
     public static KernelDispatchRequest CreateDispatch(
         MethodInfo kernelMethod,
         long gridDimX, long gridDimY = 1, long gridDimZ = 1,
-        int groupDimX = 256, int groupDimY = 1, int groupDimZ = 1)
+        int groupDimX = 256, int groupDimY = 1, int groupDimZ = 1,
+        IReadOnlyDictionary<int, object>? scalarValues = null)
     {
-        return new KernelDispatchRequest
+        var request = new KernelDispatchRequest
         {
             KernelType = kernelMethod.DeclaringType?.AssemblyQualifiedName ?? "",
             KernelMethod = kernelMethod.Name,
@@ -73,6 +83,21 @@ public static class P2PKernelSerializer
             GroupDimY = groupDimY,
             GroupDimZ = groupDimZ,
         };
+
+        if (scalarValues != null && scalarValues.Count > 0)
+        {
+            // Encode scalar parameters as a JSON object keyed by parameter index (stringified).
+            // System.Half is not natively supported by System.Text.Json; promote to float for transmission
+            // and the worker will narrow it back to Half per the kernel signature.
+            var encoded = new Dictionary<string, object?>(scalarValues.Count);
+            foreach (var kvp in scalarValues)
+            {
+                encoded[kvp.Key.ToString()] = kvp.Value is System.Half h ? (float)h : kvp.Value;
+            }
+            request.ScalarParams = JsonSerializer.SerializeToUtf8Bytes(encoded);
+        }
+
+        return request;
     }
 
     /// <summary>

@@ -214,9 +214,7 @@ public class RealWebRtcPipelineTests
     /// <summary>
     /// Tensor-transfer stress test: three 1MB float buffers (a, b, result) — 3MB of
     /// traffic across real WebRTC per direction. Each 1MB buffer is chunked into 16
-    /// x 64KB frames by P2PBufferTransfer. VectorAdd is used instead of VectorScale
-    /// because the P2P dispatch path does not yet serialize scalar kernel parameters
-    /// (see task #33). All 256K elements are verified bit-exact.
+    /// x 64KB frames by P2PBufferTransfer. All 256K elements verified bit-exact.
     /// </summary>
     [Test, CancelAfter(180000), Retry(3)]
     public async Task LargeBuffer_1MB_DispatchedOverRealWebRtc_BitExact()
@@ -287,6 +285,74 @@ public class RealWebRtcPipelineTests
     }
 
     /// <summary>
+    /// Scalar kernel parameter transmission over real WebRTC. Dispatches VectorScale with
+    /// scalar = 3.14f and verifies every result[i] == input[i] * 3.14f bit-exact. Proves
+    /// the coordinator-sent scalar value reaches the worker's kernel invocation instead
+    /// of silently defaulting to 0. Regression guard for the ScalarParams wire fix.
+    /// </summary>
+    [Test, CancelAfter(120000), Retry(3)]
+    public async Task VectorScale_ScalarOverRealWebRtc_BitExact()
+    {
+        const int n = 1024;
+        const float scalar = 3.14f;
+        var trackers = DispatchTrackers;
+        var crypto = new DotNetCrypto();
+
+        await using var coordClient = new SpawnDev.WebTorrent.WebTorrentClient();
+        await using var workerClient = new SpawnDev.WebTorrent.WebTorrentClient();
+
+        await using var coordinator = await P2PCompute.CreateSwarmAsync(
+            crypto, coordClient, "vectorscale-test", trackers: trackers);
+
+        using var workerContext = Context.Create(b => b.CPU());
+        using var workerAccelerator = workerContext.CreateCPUAccelerator(0);
+
+        await using var worker = await P2PCompute.JoinSwarmAsync(
+            crypto, workerClient, workerAccelerator, coordinator.MagnetLink!);
+
+        await WaitForPeersAsync(coordinator, worker);
+
+        var peerId = coordinator.Accelerator!.Peers.First().PeerId;
+        var workerBuffers = CollectWorkerBuffers(coordinator);
+
+        var input = new float[n];
+        var expected = new float[n];
+        for (int i = 0; i < n; i++)
+        {
+            input[i] = i;
+            expected[i] = i * scalar;
+        }
+        var inputBytes = new byte[n * 4];
+        Buffer.BlockCopy(input, 0, inputBytes, 0, n * 4);
+
+        await coordinator.Transport!.SendBufferAsync(peerId, "scale_in", inputBytes);
+        await WaitForWorkerBuffersAsync(worker, "scale_in");
+
+        // VectorScale signature: (Index1D, ArrayView<float> input, ArrayView<float> result, float scalar)
+        // Scalar at parameter index 3 — the param index after Index1D + 2 buffers.
+        var method = typeof(P2PTestKernels).GetMethod(nameof(P2PTestKernels.VectorScale))!;
+        var dispatchResult = await coordinator.Accelerator!.DispatchAsync(
+            method, n,
+            scalarValues: new Dictionary<int, object> { [3] = scalar },
+            ("scale_in", inputBytes, 4), ("scale_out", null, 4));
+
+        Assert.That(dispatchResult.Success, Is.True,
+            $"VectorScale dispatch failed: {dispatchResult.Error}");
+
+        var resultBytes = await WaitForBufferAsync(workerBuffers, "scale_out", BufferReturnTimeoutMs);
+        Assert.That(resultBytes.Length, Is.EqualTo(n * 4), "result buffer wrong size");
+
+        var actual = DataIntegrityHelper.BytesToFloats(resultBytes);
+        var (violations, firstIdx, firstExp, firstAct) =
+            DataIntegrityHelper.VerifyFloats(actual, expected);
+
+        Assert.That(violations, Is.EqualTo(0),
+            $"VectorScale scalar over WebRTC: {violations}/{n} violations. " +
+            $"First at [{firstIdx}]: expected {firstExp}, got {firstAct}. " +
+            $"If firstAct is 0, ScalarParams was not transmitted across the data channel.");
+    }
+
+    /// <summary>
     /// Integer Identity kernel across real WebRTC. Any single-bit flip during
     /// input transfer, kernel execution, or output transfer fails the SHA256 check.
     /// </summary>
@@ -343,6 +409,104 @@ public class RealWebRtcPipelineTests
             $"SHA256 mismatch over WebRTC round-trip. Before: {hashBefore[..16]}... " +
             $"After: {hashAfter[..16]}... ({resultBytes.Length} bytes, {n} ints)");
 
+    }
+
+    /// <summary>
+    /// Heterogeneous-backend dispatch over real WebRTC: CPU coordinator dispatches
+    /// a kernel to a CUDA worker. The coordinator's accelerator is CPU and the worker's
+    /// is CUDA (NVIDIA GPU) — two completely different ILGPU codegen paths sharing the
+    /// same source kernel. Proves the core "backend agnostic" P2P value prop: write a
+    /// kernel once, dispatch it to any peer's accelerator, results come back identical.
+    ///
+    /// Skips cleanly when CUDA isn't available on the host (non-NVIDIA machines, CI).
+    /// </summary>
+    [Test, CancelAfter(120000), Retry(3)]
+    public async Task VectorAdd_CpuCoordinator_CudaWorker_OverRealWebRtc_BitExact()
+        => await HeterogeneousVectorAddAsync(
+            swarmName: "heterogeneous-cpu-cuda",
+            pickWorkerDevice: ctx =>
+                ctx.Devices.OfType<global::ILGPU.Runtime.Cuda.CudaDevice>().FirstOrDefault(),
+            workerBackendLabel: "CUDA");
+
+    /// <summary>
+    /// Heterogeneous-backend dispatch over real WebRTC: CPU coordinator dispatches to an
+    /// OpenCL worker. Covers the second desktop-side code path for the backend-agnostic
+    /// claim. Skips cleanly when no OpenCL device is visible to ILGPU on the host.
+    /// </summary>
+    [Test, CancelAfter(120000), Retry(3)]
+    public async Task VectorAdd_CpuCoordinator_OpenClWorker_OverRealWebRtc_BitExact()
+        => await HeterogeneousVectorAddAsync(
+            swarmName: "heterogeneous-cpu-opencl",
+            pickWorkerDevice: ctx =>
+                ctx.Devices.OfType<global::ILGPU.Runtime.OpenCL.CLDevice>().FirstOrDefault(),
+            workerBackendLabel: "OpenCL");
+
+    /// <summary>
+    /// Shared setup for a CPU-coordinator + non-CPU-worker dispatch test.
+    /// The worker's device is selected from Context.CreateDefault's enumeration so every
+    /// desktop ILGPU backend (CUDA, OpenCL, and anything added later) can be reached with
+    /// the same scaffolding. The test skips cleanly when the target backend is absent
+    /// on the host machine (non-NVIDIA box for CUDA, no OpenCL driver, etc.).
+    /// </summary>
+    private async Task HeterogeneousVectorAddAsync(
+        string swarmName,
+        Func<global::ILGPU.Context, Device?> pickWorkerDevice,
+        string workerBackendLabel)
+    {
+        const int n = 1024;
+        var trackers = DispatchTrackers;
+        var crypto = new DotNetCrypto();
+
+        // Worker context is built first so we can bail out BEFORE touching the tracker
+        // if the target backend isn't available on this host.
+        using var workerContext = Context.CreateDefault();
+        var workerDevice = pickWorkerDevice(workerContext);
+        if (workerDevice == null)
+            Assert.Ignore($"{workerBackendLabel} not available on this host.");
+        using var workerAccelerator = workerDevice!.CreateAccelerator(workerContext);
+
+        await using var coordClient = new SpawnDev.WebTorrent.WebTorrentClient();
+        await using var workerClient = new SpawnDev.WebTorrent.WebTorrentClient();
+
+        // Coordinator runs on plain CPU - P2PCompute.CreateSwarmAsync's default context
+        // already enables every desktop backend via Context.CreateDefault, so the coordinator
+        // side of P2P doesn't need special setup.
+        await using var coordinator = await P2PCompute.CreateSwarmAsync(
+            crypto, coordClient, swarmName, trackers: trackers);
+
+        await using var worker = await P2PCompute.JoinSwarmAsync(
+            crypto, workerClient, workerAccelerator, coordinator.MagnetLink!);
+
+        await WaitForPeersAsync(coordinator, worker);
+
+        var peerId = coordinator.Accelerator!.Peers.First().PeerId;
+        var workerBuffers = CollectWorkerBuffers(coordinator);
+
+        var (aBytes, bBytes, expected) = DataIntegrityHelper.GenerateVectorAddData(n);
+        await coordinator.Transport!.SendBufferAsync(peerId, "a", aBytes);
+        await coordinator.Transport!.SendBufferAsync(peerId, "b", bBytes);
+        await WaitForWorkerBuffersAsync(worker, "a", "b");
+
+        var method = typeof(P2PTestKernels).GetMethod(nameof(P2PTestKernels.VectorAdd))!;
+        var dispatchResult = await coordinator.Accelerator!.DispatchAsync(method, n,
+            ("a", aBytes, 4), ("b", bBytes, 4), ("result", null, 4));
+
+        Assert.That(dispatchResult.Success, Is.True,
+            $"Heterogeneous dispatch (CPU -> {workerBackendLabel}) failed: {dispatchResult.Error}");
+        Assert.That(dispatchResult.ModifiedBuffers, Contains.Item("result"),
+            $"result buffer should be reported as modified by the {workerBackendLabel} worker");
+
+        var resultBytes = await WaitForBufferAsync(workerBuffers, "result", BufferReturnTimeoutMs);
+        Assert.That(resultBytes.Length, Is.EqualTo(n * 4),
+            $"Returned buffer wrong size: {resultBytes.Length}");
+
+        var actual = DataIntegrityHelper.BytesToFloats(resultBytes);
+        var (violations, firstIdx, firstExp, firstAct) =
+            DataIntegrityHelper.VerifyFloats(actual, expected);
+
+        Assert.That(violations, Is.EqualTo(0),
+            $"Heterogeneous CPU -> {workerBackendLabel} dispatch: {violations}/{n} violations. " +
+            $"First at [{firstIdx}]: expected {firstExp}, got {firstAct}");
     }
 
     /// <summary>

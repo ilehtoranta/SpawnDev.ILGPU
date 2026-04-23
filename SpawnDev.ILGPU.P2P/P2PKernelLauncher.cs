@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Linq.Expressions;
 using System.Reflection;
+using System.Text.Json;
 using ILGPU;
 using ILGPU.Runtime;
 using SpawnDev.ILGPU;
@@ -51,11 +52,17 @@ public class P2PKernelLauncher
     /// <param name="kernelMethod">The kernel method to execute.</param>
     /// <param name="gridDim">Total work items (Index1D extent).</param>
     /// <param name="bufferBindings">Buffer data keyed by parameter index.</param>
+    /// <param name="scalarParams">
+    /// Optional JSON-encoded scalar parameter values (from <see cref="KernelDispatchRequest.ScalarParams"/>).
+    /// Format: <c>{"paramIndex": jsonValue, ...}</c> where paramIndex matches the kernel signature.
+    /// When null or empty, scalar parameters fall back to <c>default(T)</c>.
+    /// </param>
     /// <returns>Modified buffer data keyed by parameter index.</returns>
     public async Task<Dictionary<int, byte[]>> ExecuteAsync(
         MethodInfo kernelMethod,
         long gridDim,
-        Dictionary<int, BufferData> bufferBindings)
+        Dictionary<int, BufferData> bufferBindings,
+        byte[]? scalarParams = null)
     {
         ArgumentNullException.ThrowIfNull(kernelMethod);
         ArgumentNullException.ThrowIfNull(bufferBindings);
@@ -63,6 +70,22 @@ public class P2PKernelLauncher
         var paramInfos = kernelMethod.GetParameters();
         var args = new object[paramInfos.Length];
         var allocatedBuffers = new List<(int paramIdx, MemoryBuffer buffer, Type elementType, long count)>();
+
+        // Decode scalar parameters once. JSON keys are parameter indices as strings.
+        Dictionary<int, JsonElement>? scalars = null;
+        if (scalarParams != null && scalarParams.Length > 0)
+        {
+            var raw = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(scalarParams);
+            if (raw != null && raw.Count > 0)
+            {
+                scalars = new Dictionary<int, JsonElement>(raw.Count);
+                foreach (var kvp in raw)
+                {
+                    if (int.TryParse(kvp.Key, out var idx))
+                        scalars[idx] = kvp.Value;
+                }
+            }
+        }
 
         try
         {
@@ -85,9 +108,16 @@ public class P2PKernelLauncher
                     args[i] = view;
                     allocatedBuffers.Add((i, buffer, elemType, bufData.ElementCount));
                 }
+                else if (scalars != null && scalars.TryGetValue(i, out var scalarJson))
+                {
+                    // Scalar parameter transmitted by the coordinator
+                    args[i] = DeserializeScalar(scalarJson, paramType);
+                }
                 else
                 {
-                    // Scalar parameter — use default value
+                    // No value transmitted — fall back to default(T). Kernel signatures with
+                    // meaningful scalar parameters should always set them via CreateDispatch's
+                    // scalarValues argument; this default is for optional/unused scalars only.
                     args[i] = paramType.IsValueType ? Activator.CreateInstance(paramType)! : null!;
                 }
             }
@@ -257,6 +287,32 @@ public class P2PKernelLauncher
         var bytes = new byte[count * elemSize];
         Buffer.BlockCopy(hostArray, 0, bytes, 0, Math.Min(bytes.Length, hostArray.Length * elemSize));
         return bytes;
+    }
+
+    /// <summary>
+    /// Deserialize a transmitted scalar JSON value to the kernel's expected parameter type.
+    /// Handles every ILGPU primitive explicitly; falls back to JSON-based deserialization
+    /// for structs and other complex types.
+    /// </summary>
+    private static object DeserializeScalar(JsonElement json, Type targetType)
+    {
+        if (targetType == typeof(float)) return json.GetSingle();
+        if (targetType == typeof(double)) return json.GetDouble();
+        if (targetType == typeof(int)) return json.GetInt32();
+        if (targetType == typeof(uint)) return json.GetUInt32();
+        if (targetType == typeof(long)) return json.GetInt64();
+        if (targetType == typeof(ulong)) return json.GetUInt64();
+        if (targetType == typeof(short)) return json.GetInt16();
+        if (targetType == typeof(ushort)) return json.GetUInt16();
+        if (targetType == typeof(byte)) return json.GetByte();
+        if (targetType == typeof(sbyte)) return json.GetSByte();
+        if (targetType == typeof(bool)) return json.GetBoolean();
+        // System.Half is transmitted as float (STJ has no native Half support).
+        if (targetType == typeof(System.Half)) return (System.Half)json.GetSingle();
+        // Struct or other: let STJ handle it.
+        var raw = json.GetRawText();
+        var value = JsonSerializer.Deserialize(raw, targetType);
+        return value ?? Activator.CreateInstance(targetType)!;
     }
 
     /// <summary>

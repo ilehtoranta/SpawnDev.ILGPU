@@ -219,8 +219,11 @@ public class P2PWorker : IAsyncDisposable
                 };
             }
 
-            // 3. Execute kernel on local GPU via reflection-based typed dispatch
-            var modifiedBuffers = await _launcher!.ExecuteAsync(kernelMethod, request.GridDimX, bufferBindings);
+            // 3. Execute kernel on local GPU via reflection-based typed dispatch.
+            //    Pass request.ScalarParams so scalar kernel arguments (e.g. VectorScale's scalar)
+            //    arrive with the coordinator's value instead of silently defaulting to 0.
+            var modifiedBuffers = await _launcher!.ExecuteAsync(
+                kernelMethod, request.GridDimX, bufferBindings, request.ScalarParams);
             if (isFirstCompile)
                 OnKernelCompiled?.Invoke(cacheKey);
 
