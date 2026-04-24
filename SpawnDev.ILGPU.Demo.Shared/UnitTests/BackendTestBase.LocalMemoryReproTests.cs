@@ -123,20 +123,18 @@ public abstract partial class BackendTestBase
                 "WebGL varying-count limit rejects 256 outputs-per-thread. " +
                 "Use AcceleratorRequirements { RequiresAtomics = true } to filter WebGL up-front.");
 
-        // rc.10 follow-up (see DevComms geordi-to-tuvok-n256-wall-2026-04-24): IR loop
-        // optimizer fully unrolls the constant-bound 256-iter loop in the kernel body.
-        // Produces ~132 KB WGSL (3867 lines / 1361 scalar var declarations) for WebGPU,
-        // which Chrome's WGSL validator takes > 30 s to validate. Same symptom on Wasm
-        // (the code-gen-per-iteration blows up the worker script too). CPU / CUDA /
-        // OpenCL unroll the same way but the downstream compilers digest it fine.
-        // Tracking as rc.11 unroll-threshold fix; skip cleanly for the browser backends
-        // that hit the ceiling until then so master stays green.
-        if (accelerator.AcceleratorType == AcceleratorType.WebGPU ||
-            accelerator.AcceleratorType == AcceleratorType.Wasm)
-            throw new UnsupportedTestException(
-                "Blocked on rc.11 IR loop-unroll threshold fix: full unroll of the 256-iter " +
-                "constant-bound body produces ~132 KB of WGSL / Wasm that WGSL validator + " +
-                "V8 compile in > 30 s. Skip pending fix — tests stay as the regression oracle.");
+        // No WebGPU/Wasm skip guard: per Captain 2026-04-24 - we do not skip anything
+        // that can be fixed. This test is the regression oracle for the rc.11 IR
+        // loop-unroll heuristic fix. Current state: red on WebGPU + Wasm (>30 s
+        // validator/compile timeout from the IR optimizer fully unrolling a
+        // constant-bound 256-iter loop into ~132 KB of WGSL / Wasm). Naive fix at
+        // LoopUnrolling.ComputeUnrollFactor that skipped partial-unroll for
+        // tripCount > maxUnrollFactor regressed AlgorithmRadixSortPairsHalfTest
+        // (wrong sort output on WebGPU) and Wasm RadixSort timeouts - partial
+        // unroll is load-bearing for Half-packed sort correctness + Wasm radix
+        // perf. Real fix requires a per-body-size heuristic (cap TOTAL unrolled
+        // code size, not trip count). Test stays red until that fix lands and
+        // stays regression-green thereafter.
 
         const int blocks = 4;
         const int elemsPerBlock = 256;
@@ -206,13 +204,9 @@ public abstract partial class BackendTestBase
                 "WebGL varying-count limit rejects 1024 outputs-per-thread. " +
                 "Use AcceleratorRequirements { RequiresAtomics = true } to filter WebGL up-front.");
 
-        // rc.10 follow-up — see LocalMemoryRepro_Int256_ShortByteViews for the root cause.
-        // N=1024 produces ~530 KB WGSL / Wasm, Chrome WGSL validator timeouts ~100x worse.
-        if (accelerator.AcceleratorType == AcceleratorType.WebGPU ||
-            accelerator.AcceleratorType == AcceleratorType.Wasm)
-            throw new UnsupportedTestException(
-                "Blocked on rc.11 IR loop-unroll threshold fix: 1024-iter full unroll is " +
-                "the worst-case scaling of the same pathology documented on the N=256 variant.");
+        // No WebGPU/Wasm skip guard - see LocalMemoryRepro_Int256_ShortByteViews for
+        // the rationale. Test stays red on WebGPU + Wasm as the N=1024 regression oracle
+        // for the upcoming body-size-aware unroll heuristic fix.
 
         const int blocks = 2; // 2 * 1024 = 2048 elements total - keeps runtime fast even on Wasm
         const int elemsPerBlock = 1024;
