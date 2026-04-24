@@ -1,24 +1,23 @@
 using ILGPU;
 using ILGPU.Runtime;
 using ILGPU.Runtime.CPU;
-using NUnit.Framework;
-using SpawnDev.ILGPU.P2P.IntegrationTests.Infrastructure;
+using SpawnDev.ILGPU.P2P;
+using SpawnDev.UnitTesting;
 
-namespace SpawnDev.ILGPU.P2P.IntegrationTests;
+namespace SpawnDev.ILGPU.DemoConsole.P2PTests;
 
 /// <summary>
 /// Core pipeline integration tests. Phase 2 of the test plan.
 /// Proves the fundamental dispatch pipeline works - first in-process,
 /// then over real WebRTC between separate processes.
 /// </summary>
-[TestFixture]
 public class CorePipelineTests
 {
     /// <summary>
     /// In-process baseline: VectorAdd with real CPU accelerator, no WebRTC.
     /// If this fails, nothing else can work.
     /// </summary>
-    [Test]
+    [TestMethod]
     public async Task CorePipeline_InProcess_Baseline()
     {
         // Register kernel type in allowlist
@@ -75,27 +74,28 @@ public class CorePipelineTests
 
         await worker.HandleDispatchAsync("coordinator", request);
 
-        Assert.That(completed, Is.True, "Dispatch did not complete");
-        Assert.That(success, Is.True, "Dispatch failed");
+        if (!completed) throw new Exception("Dispatch did not complete");
+        if (!success) throw new Exception("Dispatch failed");
 
         // Verify result
         var resultBytes = worker.GetBuffer("result");
-        Assert.That(resultBytes, Is.Not.Null, "Result buffer missing");
-        Assert.That(resultBytes!.Length, Is.EqualTo(n * 4), "Result buffer wrong size");
+        if (resultBytes == null) throw new Exception("Result buffer missing");
+        if (resultBytes.Length != n * 4) throw new Exception($"Result buffer wrong size: {resultBytes.Length}");
 
         var actual = DataIntegrityHelper.BytesToFloats(resultBytes);
         var (violations, firstIdx, firstExp, firstAct) =
             DataIntegrityHelper.VerifyFloats(actual, expected);
 
-        Assert.That(violations, Is.EqualTo(0),
-            $"VectorAdd failed: {violations}/{n} violations. " +
-            $"First at [{firstIdx}]: expected {firstExp}, got {firstAct}");
+        if (violations != 0)
+            throw new Exception(
+                $"VectorAdd failed: {violations}/{n} violations. " +
+                $"First at [{firstIdx}]: expected {firstExp}, got {firstAct}");
     }
 
     /// <summary>
     /// In-process baseline: integer Identity kernel - verifies non-float types.
     /// </summary>
-    [Test]
+    [TestMethod]
     public async Task CorePipeline_InProcess_IntegerKernel()
     {
         P2PKernelSerializer.RegisterKernelType(typeof(P2PTestKernels));
@@ -120,14 +120,13 @@ public class CorePipelineTests
             Capabilities = caps,
         });
 
-        // Prepare int data
         int n = 512;
         var input = new int[n];
         var expectedOutput = new int[n];
         for (int i = 0; i < n; i++)
         {
             input[i] = i * 7 + 13;
-            expectedOutput[i] = input[i] * 2; // IntDoubler: result = input * 2
+            expectedOutput[i] = input[i] * 2;
         }
         var inputBytes = new byte[n * 4];
         Buffer.BlockCopy(input, 0, inputBytes, 0, n * 4);
@@ -149,26 +148,27 @@ public class CorePipelineTests
 
         await worker.HandleDispatchAsync("coordinator", request);
 
-        Assert.That(completed, Is.True, "Dispatch did not complete");
-        Assert.That(success, Is.True, "Dispatch failed");
+        if (!completed) throw new Exception("Dispatch did not complete");
+        if (!success) throw new Exception("Dispatch failed");
 
         var resultBytes = worker.GetBuffer("result");
-        Assert.That(resultBytes, Is.Not.Null, "Result buffer missing");
+        if (resultBytes == null) throw new Exception("Result buffer missing");
 
-        var actual = DataIntegrityHelper.BytesToInts(resultBytes!);
+        var actual = DataIntegrityHelper.BytesToInts(resultBytes);
         var (violations, firstIdx, firstExp, firstAct) =
             DataIntegrityHelper.VerifyInts(actual, expectedOutput);
 
-        Assert.That(violations, Is.EqualTo(0),
-            $"IntDoubler failed: {violations}/{n} violations. " +
-            $"First at [{firstIdx}]: expected {firstExp}, got {firstAct}");
+        if (violations != 0)
+            throw new Exception(
+                $"IntDoubler failed: {violations}/{n} violations. " +
+                $"First at [{firstIdx}]: expected {firstExp}, got {firstAct}");
     }
 
     /// <summary>
     /// In-process baseline: SHA256 data integrity - random data, Identity kernel,
     /// hash comparison before/after. Any bit flip causes failure.
     /// </summary>
-    [Test]
+    [TestMethod]
     public async Task CorePipeline_InProcess_DataIntegrity_SHA256()
     {
         P2PKernelSerializer.RegisterKernelType(typeof(P2PTestKernels));
@@ -193,7 +193,6 @@ public class CorePipelineTests
             Capabilities = caps,
         });
 
-        // Generate random int data (16K ints = 64KB)
         int n = 16384;
         var rng = new Random(42);
         var input = new int[n];
@@ -221,14 +220,15 @@ public class CorePipelineTests
 
         await worker.HandleDispatchAsync("coordinator", request);
 
-        Assert.That(completed && success, Is.True, "Identity dispatch failed");
+        if (!(completed && success)) throw new Exception("Identity dispatch failed");
 
         var resultBytes = worker.GetBuffer("result");
         var hashAfter = DataIntegrityHelper.ComputeSha256(resultBytes!);
 
-        Assert.That(hashAfter, Is.EqualTo(hashBefore),
-            $"SHA256 mismatch: data corrupted during Identity kernel dispatch. " +
-            $"Before: {hashBefore[..16]}... After: {hashAfter[..16]}...");
+        if (hashAfter != hashBefore)
+            throw new Exception(
+                $"SHA256 mismatch: data corrupted during Identity kernel dispatch. " +
+                $"Before: {hashBefore[..16]}... After: {hashAfter[..16]}...");
     }
 
     /// <summary>
@@ -237,7 +237,7 @@ public class CorePipelineTests
     /// sent by the coordinator actually reaches the worker's kernel invocation, rather
     /// than silently defaulting to 0 as it did before the ScalarParams fix.
     /// </summary>
-    [Test]
+    [TestMethod]
     public async Task CorePipeline_InProcess_ScalarParams()
     {
         P2PKernelSerializer.RegisterKernelType(typeof(P2PTestKernels));
@@ -262,7 +262,6 @@ public class CorePipelineTests
             Capabilities = caps,
         });
 
-        // Input: input[i] = i. Scalar: 7.5f. Expected: result[i] = i * 7.5f.
         const int n = 1024;
         const float scalar = 7.5f;
         var input = new float[n];
@@ -278,8 +277,6 @@ public class CorePipelineTests
         worker.ReceiveBuffer("input", inputBytes);
         worker.ReceiveBuffer("result", new byte[n * 4]);
 
-        // VectorScale signature: (Index1D, ArrayView<float> input, ArrayView<float> result, float scalar)
-        // Buffers at param indices 1 and 2; scalar at param index 3.
         var method = typeof(P2PTestKernels).GetMethod(nameof(P2PTestKernels.VectorScale))!;
         var request = P2PKernelSerializer.CreateDispatch(
             method,
@@ -291,8 +288,8 @@ public class CorePipelineTests
             new BufferBinding { ParameterIndex = 2, BufferId = "result", Length = n, ElementSize = 4 },
         };
 
-        Assert.That(request.ScalarParams, Is.Not.Null,
-            "CreateDispatch should populate ScalarParams when scalarValues is provided.");
+        if (request.ScalarParams == null)
+            throw new Exception("CreateDispatch should populate ScalarParams when scalarValues is provided.");
 
         bool completed = false;
         bool success = false;
@@ -300,20 +297,21 @@ public class CorePipelineTests
 
         await worker.HandleDispatchAsync("coordinator", request);
 
-        Assert.That(completed && success, Is.True, "VectorScale dispatch failed");
+        if (!(completed && success)) throw new Exception("VectorScale dispatch failed");
 
         var resultBytes = worker.GetBuffer("result");
-        Assert.That(resultBytes, Is.Not.Null, "Result buffer missing");
+        if (resultBytes == null) throw new Exception("Result buffer missing");
 
-        var actual = DataIntegrityHelper.BytesToFloats(resultBytes!);
+        var actual = DataIntegrityHelper.BytesToFloats(resultBytes);
         var (violations, firstIdx, firstExp, firstAct) =
             DataIntegrityHelper.VerifyFloats(actual, expected);
 
         // Regression: if ScalarParams is silently defaulted to 0, every result[i] comes back as 0
         // and violations == n-1 (result[0] = 0 * 7.5 = 0 = expected[0], rest all mismatch).
-        Assert.That(violations, Is.EqualTo(0),
-            $"VectorScale scalar param not transmitted: {violations}/{n} violations. " +
-            $"First at [{firstIdx}]: expected {firstExp}, got {firstAct}. " +
-            $"If firstAct is 0, the worker silently defaulted scalar to 0.");
+        if (violations != 0)
+            throw new Exception(
+                $"VectorScale scalar param not transmitted: {violations}/{n} violations. " +
+                $"First at [{firstIdx}]: expected {firstExp}, got {firstAct}. " +
+                $"If firstAct is 0, the worker silently defaulted scalar to 0.");
     }
 }

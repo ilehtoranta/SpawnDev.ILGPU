@@ -13,8 +13,14 @@
 	</PropertyGroup>
 
 	<ItemGroup>
+		<PackageReference Include="SpawnDev.UnitTesting" Version="2.5.2" />
+		<PackageReference Include="SpawnDev.BlazorJS.Cryptography" Version="3.2.0" />
+	</ItemGroup>
+
+	<ItemGroup>
 		<ProjectReference Include="..\SpawnDev.ILGPU\SpawnDev.ILGPU.csproj" />
 		<ProjectReference Include="..\SpawnDev.ILGPU.Demo.Shared\SpawnDev.ILGPU.Demo.Shared.csproj" />
+		<ProjectReference Include="..\SpawnDev.ILGPU.P2P\SpawnDev.ILGPU.P2P.csproj" />
 		<ProjectReference Include="..\ILGPU\ILGPU.csproj" />
 		<ProjectReference Include="..\ILGPU.Algorithms\ILGPU.Algorithms.csproj" />
 	</ItemGroup>

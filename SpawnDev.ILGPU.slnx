@@ -8,6 +8,4 @@
   <Project Path="SpawnDev.ILGPU.WpfDemo/SpawnDev.ILGPU.WpfDemo.csproj" />
   <Project Path="SpawnDev.ILGPU/SpawnDev.ILGPU.csproj" Id="21af58b2-0004-41c4-bb4e-3265e99632e6" />
   <Project Path="SpawnDev.ILGPU.P2P/SpawnDev.ILGPU.P2P.csproj" />
-  <Project Path="SpawnDev.ILGPU.P2P.IntegrationTests/SpawnDev.ILGPU.P2P.IntegrationTests.csproj" />
-  <Project Path="SpawnDev.ILGPU.P2P.TestNode/SpawnDev.ILGPU.P2P.TestNode.csproj" />
 </Solution>

@@ -1,7 +1,7 @@
 using ILGPU;
 using ILGPU.Runtime;
 
-namespace SpawnDev.ILGPU.P2P.IntegrationTests;
+namespace SpawnDev.ILGPU.DemoConsole.P2PTests;
 
 /// <summary>
 /// Byte-identical mirror of <c>SpawnDev.ILGPU.Demo.Shared.P2PDemoKernels</c>

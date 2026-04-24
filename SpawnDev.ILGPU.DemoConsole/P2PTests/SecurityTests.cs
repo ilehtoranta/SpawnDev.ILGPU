@@ -1,45 +1,41 @@
 using ILGPU;
 using ILGPU.Runtime;
 using ILGPU.Runtime.CPU;
-using NUnit.Framework;
 using SpawnDev.BlazorJS.Cryptography;
-using SpawnDev.ILGPU.P2P.IntegrationTests.Infrastructure;
+using SpawnDev.ILGPU.P2P;
+using SpawnDev.UnitTesting;
 
-namespace SpawnDev.ILGPU.P2P.IntegrationTests;
+namespace SpawnDev.ILGPU.DemoConsole.P2PTests;
 
 /// <summary>
 /// Phase 4: Security, RBAC, Identity, and Policy tests.
 /// Proves Ed25519 signatures, coordinator authority verification,
 /// kick/block enforcement, key registry, and join policies all work correctly.
-/// Uses real crypto (DotNetCrypto) - no mocks.
+/// Uses real crypto (IPortableCrypto via DI) - no mocks.
 /// </summary>
-[TestFixture]
 public class SecurityTests
 {
-    private IPortableCrypto _crypto = null!;
+    private readonly IPortableCrypto _crypto;
 
-    [SetUp]
-    public void SetUp()
+    public SecurityTests(IPortableCrypto crypto)
     {
-        _crypto = new DotNetCrypto();
+        _crypto = crypto;
     }
 
     /// <summary>
     /// Worker verifies that a dispatch comes from an authorized coordinator
     /// via Ed25519 signature on the dispatch request.
     /// </summary>
-    [Test]
+    [TestMethod]
     public async Task Security_SignedDispatch_Verified()
     {
         P2PKernelSerializer.RegisterKernelType(typeof(P2PTestKernels));
 
-        // Create owner identity and registry
         var ownerIdentity = await SwarmIdentity.CreateAsync(_crypto, "owner");
         var registry = new KeyRegistry();
         registry.AddKey(ownerIdentity.PublicKeySpki, SwarmRole.Owner, "owner");
         await registry.SignAsync(ownerIdentity);
 
-        // Create worker with registry
         using var context = Context.Create(builder => builder.CPU());
         using var accelerator = context.CreateCPUAccelerator(0);
         var coordinator = new P2PSwarmCoordinator(new SpawnDev.WebTorrent.WebTorrentClient());
@@ -51,7 +47,6 @@ public class SecurityTests
         worker.Initialize(context, accelerator);
         worker.SetKeyRegistry(registry);
 
-        // Create dispatch with coordinator's public key
         var method = typeof(P2PTestKernels).GetMethod(nameof(P2PTestKernels.Identity))!;
         var request = P2PKernelSerializer.CreateDispatch(method, gridDimX: 64);
         request.CoordinatorPublicKey = Convert.ToBase64String(ownerIdentity.PublicKeySpki);
@@ -61,7 +56,6 @@ public class SecurityTests
             new BufferBinding { ParameterIndex = 2, BufferId = "out", Length = 64, ElementSize = 4 },
         };
 
-        // Provide input data
         var inputBytes = new byte[64 * 4];
         new Random(42).NextBytes(inputBytes);
         worker.ReceiveBuffer("in", inputBytes);
@@ -72,19 +66,18 @@ public class SecurityTests
 
         await worker.HandleDispatchAsync("coordinator", request);
 
-        Assert.That(completed, Is.True, "Dispatch should complete");
-        Assert.That(success, Is.True, "Dispatch from authorized coordinator should succeed");
+        if (!completed) throw new Exception("Dispatch should complete");
+        if (!success) throw new Exception("Dispatch from authorized coordinator should succeed");
     }
 
     /// <summary>
     /// Worker rejects a dispatch from an unauthorized peer (no public key provided).
     /// </summary>
-    [Test]
+    [TestMethod]
     public async Task Security_UnsignedDispatch_Rejected()
     {
         P2PKernelSerializer.RegisterKernelType(typeof(P2PTestKernels));
 
-        // Create owner identity and registry with entries
         var ownerIdentity = await SwarmIdentity.CreateAsync(_crypto, "owner");
         var registry = new KeyRegistry();
         registry.AddKey(ownerIdentity.PublicKeySpki, SwarmRole.Owner, "owner");
@@ -101,7 +94,6 @@ public class SecurityTests
         worker.Initialize(context, accelerator);
         worker.SetKeyRegistry(registry);
 
-        // Create dispatch WITHOUT coordinator public key - should be rejected
         var method = typeof(P2PTestKernels).GetMethod(nameof(P2PTestKernels.Identity))!;
         var request = P2PKernelSerializer.CreateDispatch(method, gridDimX: 64);
         // Intentionally NOT setting CoordinatorPublicKey
@@ -119,27 +111,25 @@ public class SecurityTests
 
         await worker.HandleDispatchAsync("attacker", request);
 
-        Assert.That(completed, Is.True, "Dispatch event should fire");
-        Assert.That(success, Is.False,
-            "Dispatch without coordinator public key should be REJECTED when registry has entries");
+        if (!completed) throw new Exception("Dispatch event should fire");
+        if (success)
+            throw new Exception("Dispatch without coordinator public key should be REJECTED when registry has entries");
     }
 
     /// <summary>
     /// A revoked key cannot dispatch work - the worker checks the revocation list.
     /// </summary>
-    [Test]
+    [TestMethod]
     public async Task Security_RevokedKey_Rejected()
     {
         P2PKernelSerializer.RegisterKernelType(typeof(P2PTestKernels));
 
-        // Create owner + coordinator identities
         var ownerIdentity = await SwarmIdentity.CreateAsync(_crypto, "owner");
         var coordIdentity = await SwarmIdentity.CreateAsync(_crypto, "coordinator");
 
         var registry = new KeyRegistry();
         registry.AddKey(ownerIdentity.PublicKeySpki, SwarmRole.Owner, "owner");
         registry.AddKey(coordIdentity.PublicKeySpki, SwarmRole.Coordinator, "coordinator");
-        // Now revoke the coordinator
         registry.RevokeKey(coordIdentity.PublicKeySpki, "compromised");
         await registry.SignAsync(ownerIdentity);
 
@@ -170,16 +160,14 @@ public class SecurityTests
 
         await worker.HandleDispatchAsync("revoked-coord", request);
 
-        Assert.That(completed, Is.True, "Dispatch event should fire");
-        Assert.That(success, Is.False,
-            "Dispatch from revoked key should be REJECTED");
+        if (!completed) throw new Exception("Dispatch event should fire");
+        if (success) throw new Exception("Dispatch from revoked key should be REJECTED");
     }
 
     /// <summary>
     /// Kick removes a connected peer from the swarm.
-    /// Requires Coordinator authority.
     /// </summary>
-    [Test]
+    [TestMethod]
     public async Task Security_Kick_RemovesPeer()
     {
         var coordinator = new P2PSwarmCoordinator(new SpawnDev.WebTorrent.WebTorrentClient());
@@ -192,28 +180,27 @@ public class SecurityTests
             IsCharging = true,
         });
 
-        Assert.That(coordinator.PeerCount, Is.EqualTo(1), "Should have 1 peer");
+        if (coordinator.PeerCount != 1) throw new Exception($"Should have 1 peer, got {coordinator.PeerCount}");
 
         string? kickedPeer = null;
         coordinator.OnPeerKicked += (peerId, reason) => { kickedPeer = peerId; };
 
         bool kicked = coordinator.KickPeer("peer-1", "test kick");
 
-        Assert.That(kicked, Is.True, "Kick should succeed for coordinator");
-        Assert.That(kickedPeer, Is.EqualTo("peer-1"), "Kicked event should fire");
-        Assert.That(coordinator.PeerCount, Is.EqualTo(0), "Peer should be removed");
+        if (!kicked) throw new Exception("Kick should succeed for coordinator");
+        if (kickedPeer != "peer-1") throw new Exception($"Kicked event should fire, got '{kickedPeer}'");
+        if (coordinator.PeerCount != 0) throw new Exception($"Peer should be removed, count={coordinator.PeerCount}");
     }
 
     /// <summary>
     /// Blocked peer cannot reconnect.
     /// </summary>
-    [Test]
+    [TestMethod]
     public async Task Security_Block_PreventsReconnect()
     {
         var coordinator = new P2PSwarmCoordinator(new SpawnDev.WebTorrent.WebTorrentClient());
         await coordinator.CreateSwarmAsync("block-test");
 
-        // Connect and then block
         coordinator.HandlePeerConnected("bad-peer", new PeerCapabilities
         {
             PeerId = "bad-peer",
@@ -222,11 +209,10 @@ public class SecurityTests
         });
 
         bool blocked = coordinator.BlockPeer("bad-peer", "misbehavior");
-        Assert.That(blocked, Is.True, "Block should succeed");
-        Assert.That(coordinator.PeerCount, Is.EqualTo(0), "Blocked peer should be disconnected");
-        Assert.That(coordinator.IsPeerBlocked("bad-peer"), Is.True, "Peer should be in block list");
+        if (!blocked) throw new Exception("Block should succeed");
+        if (coordinator.PeerCount != 0) throw new Exception("Blocked peer should be disconnected");
+        if (!coordinator.IsPeerBlocked("bad-peer")) throw new Exception("Peer should be in block list");
 
-        // Try to reconnect - should be rejected
         string? rejectedPeer = null;
         string? rejectedReason = null;
         coordinator.OnPeerRejected += (peerId, reason) =>
@@ -242,46 +228,38 @@ public class SecurityTests
             IsCharging = true,
         });
 
-        Assert.That(reconnected, Is.False, "Blocked peer should not be admitted");
-        Assert.That(rejectedPeer, Is.EqualTo("bad-peer"), "Rejection event should fire");
-        Assert.That(rejectedReason, Is.EqualTo("blocked"), "Rejection reason should be 'blocked'");
+        if (reconnected) throw new Exception("Blocked peer should not be admitted");
+        if (rejectedPeer != "bad-peer") throw new Exception($"Rejection event should fire, got '{rejectedPeer}'");
+        if (rejectedReason != "blocked") throw new Exception($"Rejection reason should be 'blocked', got '{rejectedReason}'");
     }
 
     /// <summary>
     /// Ed25519 identity: create, sign, and verify - proves real crypto works end-to-end.
     /// </summary>
-    [Test]
+    [TestMethod]
     public async Task Identity_CrossVerify_Ed25519()
     {
-        // Create two identities
         var identity1 = await SwarmIdentity.CreateAsync(_crypto, "peer-1");
         var identity2 = await SwarmIdentity.CreateAsync(_crypto, "peer-2");
 
-        // Identity 1 signs some data
         var data = System.Text.Encoding.UTF8.GetBytes("dispatch:vectoradd:1024");
         var signature = await identity1.SignAsync(data);
 
-        Assert.That(signature.Length, Is.EqualTo(64),
-            "Ed25519 signature should always be 64 bytes");
+        if (signature.Length != 64)
+            throw new Exception($"Ed25519 signature should always be 64 bytes, got {signature.Length}");
 
-        // Identity 2 verifies using identity 1's public key
         var verified = await SwarmIdentity.VerifyAsync(
             _crypto, identity1.PublicKeySpki, data, signature);
-        Assert.That(verified, Is.True,
-            "Verification of valid signature should succeed");
+        if (!verified) throw new Exception("Verification of valid signature should succeed");
 
-        // Tampered data should fail verification
         var tampered = System.Text.Encoding.UTF8.GetBytes("dispatch:vectoradd:9999");
         var tamperedVerified = await SwarmIdentity.VerifyAsync(
             _crypto, identity1.PublicKeySpki, tampered, signature);
-        Assert.That(tamperedVerified, Is.False,
-            "Verification of tampered data should fail");
+        if (tamperedVerified) throw new Exception("Verification of tampered data should fail");
 
-        // Wrong key should fail verification
         var wrongKeyVerified = await SwarmIdentity.VerifyAsync(
             _crypto, identity2.PublicKeySpki, data, signature);
-        Assert.That(wrongKeyVerified, Is.False,
-            "Verification with wrong key should fail");
+        if (wrongKeyVerified) throw new Exception("Verification with wrong key should fail");
 
         await identity1.DisposeAsync();
         await identity2.DisposeAsync();
@@ -290,7 +268,7 @@ public class SecurityTests
     /// <summary>
     /// Signed role assignment: granter creates assignment, recipient verifies.
     /// </summary>
-    [Test]
+    [TestMethod]
     public async Task Identity_RoleAssignment_Signed()
     {
         var owner = await SwarmIdentity.CreateAsync(_crypto, "owner");
@@ -299,14 +277,12 @@ public class SecurityTests
         var assignment = await RoleAssignment.CreateAsync(
             owner, "peer-1", worker.PublicKeySpki, SwarmRole.Coordinator);
 
-        Assert.That(assignment.Role, Is.EqualTo(SwarmRole.Coordinator));
-        Assert.That(assignment.PeerId, Is.EqualTo("peer-1"));
-        Assert.That(assignment.Signature, Is.Not.Empty);
+        if (assignment.Role != SwarmRole.Coordinator) throw new Exception($"Role: {assignment.Role}");
+        if (assignment.PeerId != "peer-1") throw new Exception($"PeerId: {assignment.PeerId}");
+        if (string.IsNullOrEmpty(assignment.Signature)) throw new Exception("Signature should not be empty");
 
-        // Verify the signature
         var verified = await assignment.VerifyAsync(_crypto);
-        Assert.That(verified, Is.True,
-            "Role assignment signature should verify correctly");
+        if (!verified) throw new Exception("Role assignment signature should verify correctly");
 
         await owner.DisposeAsync();
         await worker.DisposeAsync();
@@ -315,7 +291,7 @@ public class SecurityTests
     /// <summary>
     /// Election respects registry: Admin wins over higher-TFLOPS Worker.
     /// </summary>
-    [Test]
+    [TestMethod]
     public async Task Identity_Election_RespectsRegistry()
     {
         var owner = await SwarmIdentity.CreateAsync(_crypto, "owner");
@@ -331,7 +307,6 @@ public class SecurityTests
         var coordinator = new P2PSwarmCoordinator(new SpawnDev.WebTorrent.WebTorrentClient());
         coordinator.UpdateRegistry(registry);
 
-        // Admin with low TFLOPS
         coordinator.HandlePeerConnected("admin-peer", new PeerCapabilities
         {
             PeerId = "admin-peer",
@@ -340,7 +315,6 @@ public class SecurityTests
             IsCharging = true,
         });
 
-        // Worker with high TFLOPS
         coordinator.HandlePeerConnected("worker-peer", new PeerCapabilities
         {
             PeerId = "worker-peer",
@@ -351,10 +325,8 @@ public class SecurityTests
 
         var winner = coordinator.ElectCoordinator();
 
-        // Admin should win because registry-based election prefers higher roles,
-        // even if the worker has more TFLOPS
-        Assert.That(winner, Is.EqualTo("admin-peer"),
-            $"Admin should win election over higher-TFLOPS Worker, got '{winner}'");
+        if (winner != "admin-peer")
+            throw new Exception($"Admin should win election over higher-TFLOPS Worker, got '{winner}'");
 
         await owner.DisposeAsync();
         await adminIdentity.DisposeAsync();
@@ -364,8 +336,8 @@ public class SecurityTests
     /// <summary>
     /// Open policy: any peer joins without credentials.
     /// </summary>
-    [Test]
-    public void Policy_Open_AnyPeerJoins()
+    [TestMethod]
+    public Task Policy_Open_AnyPeerJoins()
     {
         var coordinator = new P2PSwarmCoordinator(new SpawnDev.WebTorrent.WebTorrentClient());
         coordinator.Policy = new SwarmPolicy { JoinPermission = JoinMode.Open };
@@ -377,15 +349,16 @@ public class SecurityTests
             IsCharging = true,
         });
 
-        Assert.That(result, Is.True, "Open policy should admit any peer");
-        Assert.That(coordinator.PeerCount, Is.EqualTo(1));
+        if (!result) throw new Exception("Open policy should admit any peer");
+        if (coordinator.PeerCount != 1) throw new Exception($"PeerCount: {coordinator.PeerCount}");
+        return Task.CompletedTask;
     }
 
     /// <summary>
     /// KnownOnly policy: unknown peer is rejected.
     /// </summary>
-    [Test]
-    public void Policy_KnownOnly_NewRejected()
+    [TestMethod]
+    public Task Policy_KnownOnly_NewRejected()
     {
         var coordinator = new P2PSwarmCoordinator(new SpawnDev.WebTorrent.WebTorrentClient());
         coordinator.Policy = new SwarmPolicy { JoinPermission = JoinMode.KnownOnly };
@@ -400,30 +373,29 @@ public class SecurityTests
             IsCharging = true,
         });
 
-        Assert.That(result, Is.False, "KnownOnly should reject unknown peers");
-        Assert.That(rejectedPeer, Is.EqualTo("stranger"));
-        Assert.That(coordinator.PeerCount, Is.EqualTo(0));
+        if (result) throw new Exception("KnownOnly should reject unknown peers");
+        if (rejectedPeer != "stranger") throw new Exception($"rejectedPeer: {rejectedPeer}");
+        if (coordinator.PeerCount != 0) throw new Exception($"PeerCount: {coordinator.PeerCount}");
+        return Task.CompletedTask;
     }
 
     /// <summary>
     /// MaxPeers policy: excess peers are rejected.
     /// </summary>
-    [Test]
-    public void Policy_MaxPeers_ExcessRejected()
+    [TestMethod]
+    public Task Policy_MaxPeers_ExcessRejected()
     {
         var coordinator = new P2PSwarmCoordinator(new SpawnDev.WebTorrent.WebTorrentClient());
         coordinator.Policy = new SwarmPolicy { MaxPeers = 1 };
 
-        // First peer admitted
         var result1 = coordinator.HandlePeerConnected("first", new PeerCapabilities
         {
             PeerId = "first",
             EstimatedTflops = 1.0,
             IsCharging = true,
         });
-        Assert.That(result1, Is.True, "First peer should be admitted");
+        if (!result1) throw new Exception("First peer should be admitted");
 
-        // Second peer rejected (max 1)
         string? rejectedReason = null;
         coordinator.OnPeerRejected += (peerId, reason) => { rejectedReason = reason; };
 
@@ -433,15 +405,16 @@ public class SecurityTests
             EstimatedTflops = 1.0,
             IsCharging = true,
         });
-        Assert.That(result2, Is.False, "Second peer should be rejected (MaxPeers=1)");
-        Assert.That(rejectedReason, Does.Contain("full"),
-            $"Rejection reason should mention 'full', got: {rejectedReason}");
+        if (result2) throw new Exception("Second peer should be rejected (MaxPeers=1)");
+        if (rejectedReason == null || !rejectedReason.Contains("full"))
+            throw new Exception($"Rejection reason should mention 'full', got: {rejectedReason}");
+        return Task.CompletedTask;
     }
 
     /// <summary>
     /// InviteOnly policy: peer without registry entry is rejected.
     /// </summary>
-    [Test]
+    [TestMethod]
     public async Task Policy_InviteOnly_RequiresRegistry()
     {
         var owner = await SwarmIdentity.CreateAsync(_crypto, "owner");
@@ -454,7 +427,6 @@ public class SecurityTests
         coordinator.Policy = new SwarmPolicy { JoinPermission = JoinMode.InviteOnly };
         coordinator.UpdateRegistry(registry);
 
-        // Random peer with a key but not in registry
         var randomIdentity = await SwarmIdentity.CreateAsync(_crypto, "random");
         string? rejectedReason = null;
         coordinator.OnPeerRejected += (peerId, reason) => { rejectedReason = reason; };
@@ -467,8 +439,8 @@ public class SecurityTests
             IsCharging = true,
         });
 
-        Assert.That(result, Is.False, "InviteOnly should reject peer not in registry");
-        Assert.That(rejectedReason, Is.EqualTo("invite only"));
+        if (result) throw new Exception("InviteOnly should reject peer not in registry");
+        if (rejectedReason != "invite only") throw new Exception($"rejectedReason: {rejectedReason}");
 
         await owner.DisposeAsync();
         await randomIdentity.DisposeAsync();
@@ -477,7 +449,7 @@ public class SecurityTests
     /// <summary>
     /// Key registry: last owner cannot be revoked (prevents lockout).
     /// </summary>
-    [Test]
+    [TestMethod]
     public async Task Security_LastOwner_CannotBeRevoked()
     {
         var owner = await SwarmIdentity.CreateAsync(_crypto, "owner");
@@ -486,10 +458,9 @@ public class SecurityTests
 
         bool revoked = registry.RevokeKey(owner.PublicKeySpki, "test");
 
-        Assert.That(revoked, Is.False,
-            "Revoking the last owner should fail (prevents lockout)");
-        Assert.That(registry.Revocations.Count, Is.EqualTo(0),
-            "No revocation should be recorded");
+        if (revoked) throw new Exception("Revoking the last owner should fail (prevents lockout)");
+        if (registry.Revocations.Count != 0)
+            throw new Exception($"No revocation should be recorded, count={registry.Revocations.Count}");
 
         await owner.DisposeAsync();
     }
@@ -497,7 +468,7 @@ public class SecurityTests
     /// <summary>
     /// Key registry: sequence number increases on modifications (replay protection).
     /// </summary>
-    [Test]
+    [TestMethod]
     public async Task Security_RegistrySequence_Monotonic()
     {
         var owner = await SwarmIdentity.CreateAsync(_crypto, "owner");
@@ -514,9 +485,9 @@ public class SecurityTests
         registry.RevokeKey(worker.PublicKeySpki, "test");
         long seq3 = registry.Sequence;
 
-        Assert.That(seq1, Is.GreaterThan(seq0), "AddKey should increment sequence");
-        Assert.That(seq2, Is.GreaterThan(seq1), "Second AddKey should increment");
-        Assert.That(seq3, Is.GreaterThan(seq2), "RevokeKey should increment");
+        if (!(seq1 > seq0)) throw new Exception("AddKey should increment sequence");
+        if (!(seq2 > seq1)) throw new Exception("Second AddKey should increment");
+        if (!(seq3 > seq2)) throw new Exception("RevokeKey should increment");
 
         await owner.DisposeAsync();
         await worker.DisposeAsync();
@@ -525,7 +496,7 @@ public class SecurityTests
     /// <summary>
     /// P2PProtocol message signing and verification round-trip.
     /// </summary>
-    [Test]
+    [TestMethod]
     public async Task Security_MessageSignVerify_RoundTrip()
     {
         var identity = await SwarmIdentity.CreateAsync(_crypto, "signer");
@@ -538,17 +509,17 @@ public class SecurityTests
 
         await P2PProtocol.SignMessageAsync(message, identity);
 
-        Assert.That(message.SenderPublicKey, Is.Not.Null.And.Not.Empty);
-        Assert.That(message.Signature, Is.Not.Null.And.Not.Empty);
+        if (string.IsNullOrEmpty(message.SenderPublicKey))
+            throw new Exception("SenderPublicKey should be set");
+        if (string.IsNullOrEmpty(message.Signature))
+            throw new Exception("Signature should be set");
 
         var verified = await P2PProtocol.VerifyMessageAsync(message, _crypto);
-        Assert.That(verified, Is.True, "Signed message should verify successfully");
+        if (!verified) throw new Exception("Signed message should verify successfully");
 
-        // Tamper with the message
         message.Type = P2PMessageType.Kick;
         var tamperedResult = await P2PProtocol.VerifyMessageAsync(message, _crypto);
-        Assert.That(tamperedResult, Is.False,
-            "Tampered message should fail verification");
+        if (tamperedResult) throw new Exception("Tampered message should fail verification");
 
         await identity.DisposeAsync();
     }
@@ -556,30 +527,28 @@ public class SecurityTests
     /// <summary>
     /// Kernel allowlist: unregistered types cannot be resolved.
     /// </summary>
-    [Test]
-    public void Security_KernelAllowlist_EnforcedOnResolve()
+    [TestMethod]
+    public Task Security_KernelAllowlist_EnforcedOnResolve()
     {
-        // Clear and register only P2PTestKernels
         P2PKernelSerializer.ClearAllowlist();
         P2PKernelSerializer.RegisterKernelType(typeof(P2PTestKernels));
 
-        // Test kernels should resolve
         var method = typeof(P2PTestKernels).GetMethod(nameof(P2PTestKernels.VectorAdd))!;
         var request = P2PKernelSerializer.CreateDispatch(method, gridDimX: 256);
         var resolved = P2PKernelSerializer.ResolveKernel(request);
-        Assert.That(resolved, Is.Not.Null, "Registered kernel type should resolve");
+        if (resolved == null) throw new Exception("Registered kernel type should resolve");
 
-        // Unregistered type should NOT resolve
         var evilRequest = new KernelDispatchRequest
         {
             KernelType = typeof(Environment).AssemblyQualifiedName!,
             KernelMethod = "Exit",
         };
         var evilResolved = P2PKernelSerializer.ResolveKernel(evilRequest);
-        Assert.That(evilResolved, Is.Null,
-            "Unregistered kernel type should NOT resolve - security violation");
+        if (evilResolved != null)
+            throw new Exception("Unregistered kernel type should NOT resolve - security violation");
 
         // Re-register for other tests
         P2PKernelSerializer.RegisterKernelType(typeof(P2PTestKernels));
+        return Task.CompletedTask;
     }
 }

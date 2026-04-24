@@ -1,21 +1,20 @@
 using System.Diagnostics;
 using System.Net.Http;
-using NUnit.Framework;
 
-// NUnit [SetUpFixture] scope follows the declaring namespace. Placed in the
-// root test namespace so it fires once per assembly for every test class.
-namespace SpawnDev.ILGPU.P2P.IntegrationTests;
+namespace SpawnDev.ILGPU.DemoConsole.P2PTests;
 
 /// <summary>
-/// NUnit assembly-level fixture that starts a local SpawnDev.WebTorrent.ServerApp
-/// instance for P2P tracker signaling. Eliminates dependency on hub.spawndev.com
-/// and gives tests full control of their signaling infrastructure.
+/// Starts a local SpawnDev.WebTorrent.ServerApp for P2P tracker signaling so tests
+/// don't depend on hub.spawndev.com. The ServerApp runs on
+/// ws://localhost:5561/announce (HTTP) and wss://localhost:5560/announce (HTTPS).
 ///
-/// The ServerApp runs on ws://localhost:5561/announce (HTTP) and
-/// wss://localhost:5560/announce (HTTPS).
+/// Lifecycle: call <see cref="InitAsync"/> once before running any tests that need
+/// the tracker (in DemoConsole's <c>Program.cs</c>, before <c>ConsoleRunner.Run</c>).
+/// The tracker process dies when the test runner process exits, so no explicit
+/// teardown is required. Static <see cref="IsAvailable"/> and
+/// <see cref="GetTrackerUrl"/> expose the run state to test methods.
 /// </summary>
-[SetUpFixture]
-public class LocalTrackerFixture
+public static class LocalTrackerFixture
 {
     private static Process? _trackerProcess;
 
@@ -26,29 +25,52 @@ public class LocalTrackerFixture
     public const string TrackerHttpUrl = "http://localhost:5561";
 
     /// <summary>
-    /// Path to the ServerApp project.
+    /// Path to the ServerApp project. Walks up from the DemoConsole publish
+    /// directory to find the sibling SpawnDev.WebTorrent repo.
     /// </summary>
-    public static string ServerAppPath =>
-        Path.GetFullPath(Path.Combine(
-            AppContext.BaseDirectory, "..", "..", "..", "..", "..", "..",
-            "SpawnDev.WebTorrent", "SpawnDev.WebTorrent", "SpawnDev.WebTorrent.ServerApp"));
+    public static string ServerAppPath
+    {
+        get
+        {
+            // Walk up from AppContext.BaseDirectory looking for a directory that
+            // contains both SpawnDev.ILGPU/ and SpawnDev.WebTorrent/. This is
+            // resilient to whether we're in `bin/Release/net10.0/` (build output)
+            // or `bin/Release/net10.0/publish/` (PlaywrightMultiTest publish output).
+            var dir = new DirectoryInfo(AppContext.BaseDirectory);
+            while (dir != null)
+            {
+                var wtDir = Path.Combine(dir.FullName, "SpawnDev.WebTorrent");
+                if (Directory.Exists(wtDir))
+                {
+                    var appPath = Path.Combine(wtDir, "SpawnDev.WebTorrent", "SpawnDev.WebTorrent.ServerApp");
+                    if (Directory.Exists(appPath)) return appPath;
+                }
+                dir = dir.Parent;
+            }
+            return "";
+        }
+    }
 
-    /// <summary>Whether the local tracker is running.</summary>
+    /// <summary>Whether the local tracker is running (or confirmed already running elsewhere).</summary>
     public static bool IsAvailable { get; private set; }
 
-    [OneTimeSetUp]
-    public async Task StartTracker()
+    /// <summary>
+    /// Start the local tracker. Safe to call multiple times; only the first call
+    /// launches the child process. If another tracker is already listening on port
+    /// 5561 (another test session or manual start), reuses it without spawning a
+    /// duplicate.
+    /// </summary>
+    public static async Task InitAsync()
     {
-        // Check if ServerApp project exists
-        if (!Directory.Exists(ServerAppPath))
+        var appPath = ServerAppPath;
+        if (string.IsNullOrEmpty(appPath) || !Directory.Exists(appPath))
         {
-            Console.WriteLine($"[LocalTracker] ServerApp not found at {ServerAppPath}. " +
+            Console.WriteLine($"[LocalTracker] ServerApp not found via directory walk from {AppContext.BaseDirectory}. " +
                 "Tests will use hub.spawndev.com:44365 as fallback.");
             IsAvailable = false;
             return;
         }
 
-        // Check if already running (another test session or manual start)
         if (await IsTrackerRunning())
         {
             Console.WriteLine("[LocalTracker] Local tracker already running on port 5561.");
@@ -60,7 +82,7 @@ public class LocalTrackerFixture
         var psi = new ProcessStartInfo
         {
             FileName = "dotnet",
-            Arguments = $"run --project \"{ServerAppPath}\"",
+            Arguments = $"run --project \"{appPath}\"",
             UseShellExecute = false,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
@@ -72,7 +94,6 @@ public class LocalTrackerFixture
         _trackerProcess.BeginOutputReadLine();
         _trackerProcess.BeginErrorReadLine();
 
-        // Wait for tracker to be responsive
         var deadline = DateTime.UtcNow.AddSeconds(30);
         while (DateTime.UtcNow < deadline)
         {
@@ -88,21 +109,6 @@ public class LocalTrackerFixture
         Console.WriteLine("[LocalTracker] Failed to start local tracker within 30s. " +
             "Tests will use hub.spawndev.com:44365 as fallback.");
         IsAvailable = false;
-    }
-
-    [OneTimeTearDown]
-    public void StopTracker()
-    {
-        if (_trackerProcess != null && !_trackerProcess.HasExited)
-        {
-            try
-            {
-                _trackerProcess.Kill(entireProcessTree: true);
-                Console.WriteLine("[LocalTracker] Local tracker stopped.");
-            }
-            catch { }
-        }
-        _trackerProcess?.Dispose();
     }
 
     /// <summary>

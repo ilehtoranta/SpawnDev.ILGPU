@@ -1,6 +1,6 @@
 using System.Security.Cryptography;
 
-namespace SpawnDev.ILGPU.P2P.IntegrationTests.Infrastructure;
+namespace SpawnDev.ILGPU.DemoConsole.P2PTests;
 
 /// <summary>
 /// Verification utilities for P2P integration tests.

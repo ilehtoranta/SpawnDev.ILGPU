@@ -1,7 +1,7 @@
 using ILGPU;
 using ILGPU.Runtime;
 
-namespace SpawnDev.ILGPU.P2P.IntegrationTests;
+namespace SpawnDev.ILGPU.DemoConsole.P2PTests;
 
 /// <summary>
 /// GPU kernels used by all P2P integration tests.

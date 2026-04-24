@@ -1,10 +1,10 @@
 using ILGPU;
 using ILGPU.Runtime;
 using ILGPU.Runtime.CPU;
-using NUnit.Framework;
-using SpawnDev.ILGPU.P2P.IntegrationTests.Infrastructure;
+using SpawnDev.ILGPU.P2P;
+using SpawnDev.UnitTesting;
 
-namespace SpawnDev.ILGPU.P2P.IntegrationTests;
+namespace SpawnDev.ILGPU.DemoConsole.P2PTests;
 
 /// <summary>
 /// Multi-Peer and Fault Tolerance tests.
@@ -12,14 +12,13 @@ namespace SpawnDev.ILGPU.P2P.IntegrationTests;
 /// logic is correct. These use simulated peer connections (HandlePeerConnected);
 /// real-WebRTC end-to-end dispatch is covered by RealWebRtcPipelineTests.
 /// </summary>
-[TestFixture]
 public class MultiPeerTests
 {
     /// <summary>
     /// Two workers connected, 4 dispatches sent. Both workers should receive work.
     /// Verifies the dispatcher doesn't always pick the same peer.
     /// </summary>
-    [Test]
+    [TestMethod]
     public async Task MultiPeer_TwoWorkers_BothReceive()
     {
         P2PKernelSerializer.RegisterKernelType(typeof(P2PTestKernels));
@@ -34,7 +33,6 @@ public class MultiPeerTests
         var transport = new P2PTransport(
             new SpawnDev.WebTorrent.WebTorrentClient(), coordinator, dispatcher);
 
-        // Worker A - 2 TFLOPS
         var workerA = new P2PWorker(transport);
         workerA.Initialize(context, accel1);
         var capsA = workerA.BuildCapabilities("worker-A");
@@ -47,7 +45,6 @@ public class MultiPeerTests
             Capabilities = capsA,
         });
 
-        // Worker B - 2 TFLOPS (same as A)
         var workerB = new P2PWorker(transport);
         workerB.Initialize(context, accel2);
         var capsB = workerB.BuildCapabilities("worker-B");
@@ -60,16 +57,12 @@ public class MultiPeerTests
             Capabilities = capsB,
         });
 
-        // Track which peer gets each dispatch
         var dispatchedTo = new List<string>();
         dispatcher.OnSendMessage += (peerId, msg) =>
         {
             dispatchedTo.Add(peerId);
         };
 
-        // Dispatch 4 times WITHOUT completing between dispatches.
-        // This builds up pending count on the first-chosen worker,
-        // causing the load score to decrease and the dispatcher to pick the other.
         int n = 256;
         var dispatchIds = new List<string>();
         for (int d = 0; d < 4; d++)
@@ -87,7 +80,6 @@ public class MultiPeerTests
             dispatchIds.Add(request.DispatchId);
         }
 
-        // Now complete them all
         foreach (var id in dispatchIds)
         {
             dispatcher.HandleResult(id, new KernelDispatchResult
@@ -98,18 +90,21 @@ public class MultiPeerTests
             });
         }
 
-        Assert.That(dispatchedTo.Count, Is.EqualTo(4), "Expected 4 dispatches");
-        Assert.That(dispatchedTo.Distinct().Count(), Is.GreaterThanOrEqualTo(2),
-            "Expected work distributed to at least 2 workers, " +
-            $"but only dispatched to: {string.Join(", ", dispatchedTo.Distinct())}");
+        if (dispatchedTo.Count != 4)
+            throw new Exception($"Expected 4 dispatches, got {dispatchedTo.Count}");
+        if (dispatchedTo.Distinct().Count() < 2)
+            throw new Exception(
+                "Expected work distributed to at least 2 workers, " +
+                $"but only dispatched to: {string.Join(", ", dispatchedTo.Distinct())}");
+        await Task.CompletedTask;
     }
 
     /// <summary>
     /// Three workers with different TFLOPS. The highest-TFLOPS worker
     /// should receive the first dispatch (it scores highest).
     /// </summary>
-    [Test]
-    public void MultiPeer_ThreeWorkers_LoadBalance()
+    [TestMethod]
+    public Task MultiPeer_ThreeWorkers_LoadBalance()
     {
         P2PKernelSerializer.RegisterKernelType(typeof(P2PTestKernels));
 
@@ -118,7 +113,6 @@ public class MultiPeerTests
         var p2pAccel = coordinator.CreateAccelerator(context);
         var dispatcher = new P2PDispatcher(p2pAccel);
 
-        // Add 3 peers with different TFLOPS
         var tflopsValues = new[] { 1.0, 5.0, 10.0 };
         var peerIds = new[] { "peer-low", "peer-mid", "peer-high" };
         for (int i = 0; i < 3; i++)
@@ -140,7 +134,6 @@ public class MultiPeerTests
             });
         }
 
-        // Track first dispatch target
         string? firstTarget = null;
         dispatcher.OnSendMessage += (peerId, msg) =>
         {
@@ -157,15 +150,16 @@ public class MultiPeerTests
         };
         dispatcher.Dispatch(request);
 
-        Assert.That(firstTarget, Is.EqualTo("peer-high"),
-            $"Expected highest-TFLOPS peer to get first dispatch, got '{firstTarget}'");
+        if (firstTarget != "peer-high")
+            throw new Exception($"Expected highest-TFLOPS peer to get first dispatch, got '{firstTarget}'");
+        return Task.CompletedTask;
     }
 
     /// <summary>
     /// When a worker disconnects mid-dispatch, the dispatcher retries on another peer.
     /// </summary>
-    [Test]
-    public void Fault_WorkerDies_RetrySucceeds()
+    [TestMethod]
+    public Task Fault_WorkerDies_RetrySucceeds()
     {
         P2PKernelSerializer.RegisterKernelType(typeof(P2PTestKernels));
 
@@ -174,7 +168,6 @@ public class MultiPeerTests
         var p2pAccel = coordinator.CreateAccelerator(context);
         var dispatcher = new P2PDispatcher(p2pAccel);
 
-        // Add two peers
         for (int i = 0; i < 2; i++)
         {
             var id = $"peer-{i}";
@@ -194,7 +187,6 @@ public class MultiPeerTests
             });
         }
 
-        // Track retries
         string? retriedTo = null;
         string? failedPeer = null;
         dispatcher.OnDispatchRetried += (id, failed, newPeer) =>
@@ -213,21 +205,20 @@ public class MultiPeerTests
         };
         var dispatchId = dispatcher.Dispatch(request);
 
-        // Simulate the assigned peer dying
         var assignedPeerId = p2pAccel.Peers.First().PeerId;
         dispatcher.HandlePeerLost(assignedPeerId);
 
-        Assert.That(failedPeer, Is.Not.Null, "Expected retry event to fire");
-        Assert.That(retriedTo, Is.Not.Null, "Expected dispatch to be retried on another peer");
-        Assert.That(retriedTo, Is.Not.EqualTo(failedPeer),
-            "Retried dispatch should go to a DIFFERENT peer");
+        if (failedPeer == null) throw new Exception("Expected retry event to fire");
+        if (retriedTo == null) throw new Exception("Expected dispatch to be retried on another peer");
+        if (retriedTo == failedPeer) throw new Exception("Retried dispatch should go to a DIFFERENT peer");
+        return Task.CompletedTask;
     }
 
     /// <summary>
     /// When all workers disconnect, dispatch fails with a clear error.
     /// </summary>
-    [Test]
-    public void Fault_AllWorkersDie_DispatchFails()
+    [TestMethod]
+    public Task Fault_AllWorkersDie_DispatchFails()
     {
         P2PKernelSerializer.RegisterKernelType(typeof(P2PTestKernels));
 
@@ -236,7 +227,6 @@ public class MultiPeerTests
         var p2pAccel = coordinator.CreateAccelerator(context);
         var dispatcher = new P2PDispatcher(p2pAccel);
 
-        // Add a single peer
         var caps = new PeerCapabilities
         {
             PeerId = "lone-peer",
@@ -270,24 +260,23 @@ public class MultiPeerTests
         };
         var dispatchId = dispatcher.Dispatch(request);
 
-        // Kill the only peer
         dispatcher.HandlePeerLost("lone-peer");
 
-        Assert.That(failedId, Is.EqualTo(dispatchId), "Expected dispatch failure event");
-        Assert.That(failError, Does.Contain("No healthy peers"),
-            $"Expected 'No healthy peers' error, got: {failError}");
+        if (failedId != dispatchId) throw new Exception($"Expected dispatch failure event, got failedId={failedId}");
+        if (failError == null || !failError.Contains("No healthy peers"))
+            throw new Exception($"Expected 'No healthy peers' error, got: {failError}");
+        return Task.CompletedTask;
     }
 
     /// <summary>
     /// Coordinator election: when coordinator drops, highest-TFLOPS worker wins.
     /// </summary>
-    [Test]
-    public void Fault_CoordinatorDies_ElectionHappens()
+    [TestMethod]
+    public Task Fault_CoordinatorDies_ElectionHappens()
     {
         using var context = Context.Create(builder => builder.CPU());
         var coordinator = new P2PSwarmCoordinator(new SpawnDev.WebTorrent.WebTorrentClient());
 
-        // Add peers with different TFLOPS
         coordinator.HandlePeerConnected("peer-weak", new PeerCapabilities
         {
             PeerId = "peer-weak",
@@ -301,17 +290,17 @@ public class MultiPeerTests
             IsCharging = true,
         });
 
-        // Elect new coordinator
         var winner = coordinator.ElectCoordinator();
 
-        Assert.That(winner, Is.EqualTo("peer-strong"),
-            $"Expected strongest peer to win election, got '{winner}'");
+        if (winner != "peer-strong")
+            throw new Exception($"Expected strongest peer to win election, got '{winner}'");
+        return Task.CompletedTask;
     }
 
     /// <summary>
     /// Graceful coordinator transfer preserves pending dispatch state.
     /// </summary>
-    [Test]
+    [TestMethod]
     public async Task Fault_GracefulTransfer_PendingPreserved()
     {
         P2PKernelSerializer.RegisterKernelType(typeof(P2PTestKernels));
@@ -324,7 +313,6 @@ public class MultiPeerTests
         var dispatcher = new P2PDispatcher(p2pAccel);
         p2pAccel.Dispatcher = dispatcher;
 
-        // Add two peers
         for (int i = 0; i < 2; i++)
         {
             var id = $"peer-{i}";
@@ -344,7 +332,6 @@ public class MultiPeerTests
             });
         }
 
-        // Dispatch a kernel (creates pending state)
         var method = typeof(P2PTestKernels).GetMethod(nameof(P2PTestKernels.VectorAdd))!;
         var request = P2PKernelSerializer.CreateDispatch(method, gridDimX: 256);
         request.Buffers = new[]
@@ -354,9 +341,8 @@ public class MultiPeerTests
             new BufferBinding { ParameterIndex = 3, BufferId = "result", Length = 256, ElementSize = 4 },
         };
         dispatcher.Dispatch(request);
-        Assert.That(dispatcher.PendingCount, Is.EqualTo(1), "Should have 1 pending dispatch");
+        if (dispatcher.PendingCount != 1) throw new Exception($"Should have 1 pending dispatch, got {dispatcher.PendingCount}");
 
-        // Capture transfer message
         P2PMessage? transferMsg = null;
         coordinator.OnSendMessage += (peerId, msg) =>
         {
@@ -364,21 +350,19 @@ public class MultiPeerTests
                 transferMsg = msg;
         };
 
-        // Transfer coordinator role
         var transferTarget = coordinator.TransferCoordinator();
 
-        Assert.That(transferTarget, Is.Not.Null, "Transfer should succeed");
-        Assert.That(coordinator.Role, Is.EqualTo(P2PRole.Worker),
-            "Transferring coordinator should become Worker");
-        Assert.That(transferMsg, Is.Not.Null,
-            "Transfer message should be sent to target");
+        if (transferTarget == null) throw new Exception("Transfer should succeed");
+        if (coordinator.Role != P2PRole.Worker)
+            throw new Exception($"Transferring coordinator should become Worker, got {coordinator.Role}");
+        if (transferMsg == null) throw new Exception("Transfer message should be sent to target");
     }
 
     /// <summary>
     /// Always-fail worker exhausts max retries, dispatch fails permanently.
     /// </summary>
-    [Test]
-    public void Fault_MaxRetries_Exhausted()
+    [TestMethod]
+    public Task Fault_MaxRetries_Exhausted()
     {
         P2PKernelSerializer.RegisterKernelType(typeof(P2PTestKernels));
 
@@ -388,7 +372,6 @@ public class MultiPeerTests
         var dispatcher = new P2PDispatcher(p2pAccel);
         dispatcher.MaxRetries = 2;
 
-        // Add one peer
         var caps = new PeerCapabilities
         {
             PeerId = "fail-peer",
@@ -417,7 +400,6 @@ public class MultiPeerTests
         };
         var dispatchId = dispatcher.Dispatch(request);
 
-        // Simulate failure results until max retries exhausted
         for (int i = 0; i < 3; i++)
         {
             dispatcher.HandleResult(request.DispatchId, new KernelDispatchResult
@@ -428,16 +410,17 @@ public class MultiPeerTests
             });
         }
 
-        Assert.That(failedId, Is.EqualTo(dispatchId),
-            "Dispatch should fail permanently after max retries");
+        if (failedId != dispatchId)
+            throw new Exception($"Dispatch should fail permanently after max retries, failedId={failedId}");
+        return Task.CompletedTask;
     }
 
     /// <summary>
     /// Thermal eviction: a peer at thermal state 3 (critical) gets score 0
     /// and should not receive new dispatches.
     /// </summary>
-    [Test]
-    public void Fault_ThermalCritical_NoDispatch()
+    [TestMethod]
+    public Task Fault_ThermalCritical_NoDispatch()
     {
         P2PKernelSerializer.RegisterKernelType(typeof(P2PTestKernels));
 
@@ -446,7 +429,6 @@ public class MultiPeerTests
         var p2pAccel = coordinator.CreateAccelerator(context);
         var dispatcher = new P2PDispatcher(p2pAccel);
 
-        // Add healthy peer
         var healthyCaps = new PeerCapabilities
         {
             PeerId = "healthy",
@@ -462,13 +444,12 @@ public class MultiPeerTests
             Capabilities = healthyCaps,
         });
 
-        // Add thermally critical peer (10x TFLOPS but critical thermal)
         var hotCaps = new PeerCapabilities
         {
             PeerId = "overheating",
             EstimatedTflops = 10.0,
             IsCharging = true,
-            ThermalState = 3, // critical
+            ThermalState = 3,
         };
         coordinator.HandlePeerConnected("overheating", hotCaps);
         p2pAccel.AddPeer(new RemotePeer
@@ -478,18 +459,16 @@ public class MultiPeerTests
             Capabilities = hotCaps,
         });
 
-        // Verify scoring: thermal critical should score 0
         var hotPeer = p2pAccel.Peers.First(p => p.PeerId == "overheating");
         var healthyPeer = p2pAccel.Peers.First(p => p.PeerId == "healthy");
         var hotScore = dispatcher.ScorePeer(hotPeer);
         var healthyScore = dispatcher.ScorePeer(healthyPeer);
 
-        Assert.That(hotScore, Is.EqualTo(0.0),
-            $"Thermally critical peer should score 0, got {hotScore}");
-        Assert.That(healthyScore, Is.GreaterThan(0.0),
-            "Healthy peer should score > 0");
+        if (hotScore != 0.0)
+            throw new Exception($"Thermally critical peer should score 0, got {hotScore}");
+        if (!(healthyScore > 0.0))
+            throw new Exception("Healthy peer should score > 0");
 
-        // Dispatch should go to healthy peer
         string? target = null;
         dispatcher.OnSendMessage += (peerId, msg) => { target ??= peerId; };
 
@@ -503,7 +482,8 @@ public class MultiPeerTests
         };
         dispatcher.Dispatch(request);
 
-        Assert.That(target, Is.EqualTo("healthy"),
-            $"Dispatch should go to healthy peer, not overheating. Got '{target}'");
+        if (target != "healthy")
+            throw new Exception($"Dispatch should go to healthy peer, not overheating. Got '{target}'");
+        return Task.CompletedTask;
     }
 }

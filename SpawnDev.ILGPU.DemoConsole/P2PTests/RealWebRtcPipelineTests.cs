@@ -2,17 +2,17 @@ using System.Collections.Concurrent;
 using ILGPU;
 using ILGPU.Runtime;
 using ILGPU.Runtime.CPU;
-using NUnit.Framework;
 using SpawnDev.BlazorJS.Cryptography;
-using SpawnDev.ILGPU.P2P.IntegrationTests.Infrastructure;
+using SpawnDev.ILGPU.P2P;
+using SpawnDev.UnitTesting;
 
-namespace SpawnDev.ILGPU.P2P.IntegrationTests;
+namespace SpawnDev.ILGPU.DemoConsole.P2PTests;
 
 /// <summary>
 /// Phase 2: Real-WebRTC end-to-end pipeline tests (Rule #1 primary-purpose coverage).
 ///
-/// Two P2PCompute instances live in the same test process — one coordinator, one worker
-/// — connected through the LocalTrackerFixture WebSocket tracker at ws://localhost:5561
+/// Two P2PCompute instances live in the same test process - one coordinator, one worker
+/// - connected through the LocalTrackerFixture WebSocket tracker at ws://localhost:5561
 /// (with hub.spawndev.com + openwebtorrent.com as fallbacks). The WebRTC data channel
 /// between them is provided by SpawnDev.RTC's SIPSorcery fork exactly as it would be
 /// between two separate machines. No loopback shortcuts.
@@ -22,17 +22,19 @@ namespace SpawnDev.ILGPU.P2P.IntegrationTests;
 /// KernelResult metadata, and the modified-buffer auto-push back to the coordinator.
 /// Every result is verified bit-for-bit against a CPU reference.
 ///
-/// **Flakiness note:** tracker signaling through public infrastructure is not 100%
-/// reliable. Every test in this fixture carries `[Retry(3)]` so one bad announce
-/// cycle on hub.spawndev.com does not fail the build. When a test fails all three
-/// attempts with peer-discovery timeouts and no `[sd_compute] OnExtendedHandshake`
-/// lines, that is a tracker/WebRTC-layer issue, not a P2P library regression.
-/// Task #35 tracks making the local tracker signaling deterministic so these tests
-/// can stop depending on public infrastructure.
+/// Flakiness note: tracker signaling through public infrastructure is not 100% reliable.
+/// Every test in this class carries <c>RetryCount = 2</c> so one bad announce cycle
+/// does not fail the build.
 /// </summary>
-[TestFixture]
 public class RealWebRtcPipelineTests
 {
+    private readonly IPortableCrypto _crypto;
+
+    public RealWebRtcPipelineTests(IPortableCrypto crypto)
+    {
+        _crypto = crypto;
+    }
+
     /// <summary>
     /// Peer-discovery timeout. Public trackers (hub.spawndev.com) are sometimes
     /// slow to relay offers/answers when under load, so we allow a minute before
@@ -40,20 +42,16 @@ public class RealWebRtcPipelineTests
     /// </summary>
     private const int DiscoveryTimeoutMs = 60000;
 
-    private const int DispatchTimeoutMs = 15000;
-
     /// <summary>
     /// Timeout for buffer-transfer waits. Relayed WebRTC through a public tracker
-    /// delivers ~10–30 KB/s in the worst case; 1MB + round trip needs breathing room.
+    /// delivers ~10-30 KB/s in the worst case; 1MB + round trip needs breathing room.
     /// </summary>
     private const int BufferReturnTimeoutMs = 120000;
 
     /// <summary>
-    /// Trackers used by the kernel-dispatch tests. LocalTrackerFixture's
-    /// loopback tracker is listed first so tests do not depend on any public
-    /// service; hub.spawndev.com + openwebtorrent.com are kept as fallbacks
-    /// for the case where LocalTrackerFixture fails to launch ServerApp
-    /// (e.g., port 5561 already in use by another process).
+    /// Trackers used by the kernel-dispatch tests. LocalTrackerFixture's loopback tracker
+    /// is listed first so tests do not depend on any public service; hub.spawndev.com +
+    /// openwebtorrent.com are kept as fallbacks.
     /// </summary>
     private static string[] DispatchTrackers => LocalTrackerFixture.IsAvailable
         ? new[]
@@ -68,61 +66,54 @@ public class RealWebRtcPipelineTests
             "wss://tracker.openwebtorrent.com",
         };
 
-    [SetUp]
-    public void PerTestSetUp()
+    /// <summary>
+    /// Re-register the kernel allowlist for each test. Process-wide static state -
+    /// SecurityTests.Security_KernelAllowlist_EnforcedOnResolve clears it, so run
+    /// order cannot be trusted. Idempotent.
+    /// </summary>
+    private static void EnsureAllowlist()
     {
-        // The kernel allowlist is process-wide static state and
-        // SecurityTests.Security_KernelAllowlist_EnforcedOnResolve clears it.
-        // Register before every test so run order cannot affect us.
         P2PKernelSerializer.RegisterKernelType(typeof(P2PTestKernels));
         P2PKernelSerializer.RegisterKernelType(typeof(P2PDemoKernelsMirror));
     }
 
     /// <summary>
     /// Foundation test: two P2PCompute instances discover each other through the
-    /// local tracker via real WebRTC. Proves the tracker + SIPSorcery + sd_compute
-    /// handshake path is wired correctly before layering kernel work on top.
+    /// local tracker via real WebRTC.
     /// </summary>
-    [Test, CancelAfter(90000), Retry(3)]
+    [TestMethod(Timeout = 90000, RetryCount = 2)]
     public async Task TwoPeers_DiscoverEachOtherViaLocalTracker()
     {
+        EnsureAllowlist();
         await RunDiscoveryAsync(new[] { LocalTrackerFixture.GetTrackerUrl() },
             "discovery-local-tracker");
     }
 
     /// <summary>
     /// Same as the local-tracker discovery test but signaled through the public
-    /// hub.spawndev.com tracker. Proves the P2PCompute wiring works end-to-end
-    /// in the known-good signaling path (matches
-    /// SpawnDev.WebTorrent.Desktop_TwoClients_DiscoverViaTracker). Helpful for
-    /// isolating regressions: if this passes while the local-tracker test fails,
-    /// the issue is in the local tracker setup.
+    /// hub.spawndev.com tracker.
     /// </summary>
-    [Test, CancelAfter(90000), Retry(3)]
+    [TestMethod(Timeout = 90000, RetryCount = 2)]
     public async Task TwoPeers_DiscoverEachOtherViaPublicHubTracker()
     {
+        EnsureAllowlist();
         await RunDiscoveryAsync(new[] { "wss://hub.spawndev.com:44365/announce" },
             "discovery-public-tracker");
     }
 
     private async Task RunDiscoveryAsync(string[] trackers, string swarmName)
     {
-        var crypto = new DotNetCrypto();
-
-        // Declare clients with `await using` before the P2PCompute wrappers so
-        // dispose order is P2PCompute first, WebTorrentClient last. Prevents
-        // dangling transport/bridge state from racing with client shutdown.
         await using var coordClient = new SpawnDev.WebTorrent.WebTorrentClient();
         await using var workerClient = new SpawnDev.WebTorrent.WebTorrentClient();
 
         await using var coordinator = await P2PCompute.CreateSwarmAsync(
-            crypto, coordClient, swarmName, trackers: trackers);
+            _crypto, coordClient, swarmName, trackers: trackers);
 
         using var workerContext = Context.Create(b => b.CPU());
         using var workerAccelerator = workerContext.CreateCPUAccelerator(0);
 
         await using var worker = await P2PCompute.JoinSwarmAsync(
-            crypto, workerClient, workerAccelerator, coordinator.MagnetLink!);
+            _crypto, workerClient, workerAccelerator, coordinator.MagnetLink!);
 
         var start = DateTime.UtcNow;
         var deadline = start.AddMilliseconds(DiscoveryTimeoutMs);
@@ -131,118 +122,95 @@ public class RealWebRtcPipelineTests
         {
             await Task.Delay(1000);
             var elapsed = (DateTime.UtcNow - start).TotalSeconds;
-            TestContext.Progress.WriteLine(
+            Console.WriteLine(
                 $"[{elapsed:F0}s] coord.PeerCount={coordinator.PeerCount}, " +
                 $"worker.PeerCount={worker.PeerCount}");
         }
 
-        Assert.That(coordinator.PeerCount, Is.GreaterThan(0),
-            "Coordinator should see the worker as a peer");
-        Assert.That(worker.PeerCount, Is.GreaterThan(0),
-            "Worker should see the coordinator as a peer");
-
+        if (!(coordinator.PeerCount > 0)) throw new Exception("Coordinator should see the worker as a peer");
+        if (!(worker.PeerCount > 0)) throw new Exception("Worker should see the coordinator as a peer");
     }
 
     /// <summary>
     /// Rule #1 primary-purpose test: real kernel dispatch across real WebRTC.
-    /// Coordinator sends VectorAdd inputs to a worker over the data channel,
-    /// worker compiles + executes on its CPU accelerator, coordinator receives
-    /// the result buffer back and verifies all 1024 elements bit-exact.
     /// </summary>
-    [Test, CancelAfter(120000), Retry(3)]
+    [TestMethod(Timeout = 120000, RetryCount = 2)]
     public async Task VectorAdd_1024_DispatchedOverRealWebRtc_BitExact()
     {
+        EnsureAllowlist();
         const int n = 1024;
         var trackers = DispatchTrackers;
-        var crypto = new DotNetCrypto();
 
-        // Declare clients with `await using` before the P2PCompute wrappers so
-        // dispose order is P2PCompute first, WebTorrentClient last. Prevents
-        // dangling transport/bridge state from racing with client shutdown.
         await using var coordClient = new SpawnDev.WebTorrent.WebTorrentClient();
         await using var workerClient = new SpawnDev.WebTorrent.WebTorrentClient();
 
         await using var coordinator = await P2PCompute.CreateSwarmAsync(
-            crypto, coordClient, "vectoradd-test", trackers: trackers);
+            _crypto, coordClient, "vectoradd-test", trackers: trackers);
 
         using var workerContext = Context.Create(b => b.CPU());
         using var workerAccelerator = workerContext.CreateCPUAccelerator(0);
 
         await using var worker = await P2PCompute.JoinSwarmAsync(
-            crypto, workerClient, workerAccelerator, coordinator.MagnetLink!);
+            _crypto, workerClient, workerAccelerator, coordinator.MagnetLink!);
 
-        // Wait for peer discovery.
         await WaitForPeersAsync(coordinator, worker);
 
         var peerId = coordinator.Accelerator!.Peers.First().PeerId;
         var workerBuffers = CollectWorkerBuffers(coordinator);
 
-        // Send inputs to the worker. result buffer is output-only, worker allocates.
         var (aBytes, bBytes, expected) = DataIntegrityHelper.GenerateVectorAddData(n);
         await coordinator.Transport!.SendBufferAsync(peerId, "a", aBytes);
         await coordinator.Transport!.SendBufferAsync(peerId, "b", bBytes);
 
-        // Ensure both inputs are fully reassembled on the worker before the
-        // dispatch message is processed. Chunks and dispatch travel on the same
-        // reliable+ordered data channel, but the worker's P2PTransport fires
-        // each handler task without serializing, so a race is possible.
-        // Dispatch VectorAdd. Worker auto-pushes modified "result" buffer back.
         var method = typeof(P2PTestKernels).GetMethod(nameof(P2PTestKernels.VectorAdd))!;
         var dispatchResult = await coordinator.Accelerator!.DispatchAsync(method, n,
             ("a", aBytes, 4), ("b", bBytes, 4), ("result", null, 4));
 
-        Assert.That(dispatchResult.Success, Is.True,
-            $"Dispatch failed: {dispatchResult.Error}");
-        Assert.That(dispatchResult.ModifiedBuffers, Contains.Item("result"),
-            "result buffer should be reported as modified");
+        if (!dispatchResult.Success) throw new Exception($"Dispatch failed: {dispatchResult.Error}");
+        if (!dispatchResult.ModifiedBuffers.Contains("result"))
+            throw new Exception("result buffer should be reported as modified");
 
         var resultBytes = await WaitForBufferAsync(workerBuffers, "result", BufferReturnTimeoutMs);
-        Assert.That(resultBytes.Length, Is.EqualTo(n * 4),
-            $"Returned buffer wrong size: {resultBytes.Length}");
+        if (resultBytes.Length != n * 4)
+            throw new Exception($"Returned buffer wrong size: {resultBytes.Length}");
 
         var actual = DataIntegrityHelper.BytesToFloats(resultBytes);
         var (violations, firstIdx, firstExp, firstAct) =
             DataIntegrityHelper.VerifyFloats(actual, expected);
 
-        Assert.That(violations, Is.EqualTo(0),
-            $"VectorAdd over WebRTC: {violations}/{n} violations. " +
-            $"First at [{firstIdx}]: expected {firstExp}, got {firstAct}");
-
+        if (violations != 0)
+            throw new Exception(
+                $"VectorAdd over WebRTC: {violations}/{n} violations. " +
+                $"First at [{firstIdx}]: expected {firstExp}, got {firstAct}");
     }
 
     /// <summary>
-    /// Tensor-transfer stress test: three 1MB float buffers (a, b, result) — 3MB of
-    /// traffic across real WebRTC per direction. Each 1MB buffer is chunked into 16
-    /// x 64KB frames by P2PBufferTransfer. All 256K elements verified bit-exact.
+    /// Tensor-transfer stress test: three 1MB float buffers over real WebRTC.
     /// </summary>
-    [Test, CancelAfter(180000), Retry(3)]
+    [TestMethod(Timeout = 180000, RetryCount = 2)]
     public async Task LargeBuffer_1MB_DispatchedOverRealWebRtc_BitExact()
     {
-        const int n = 256 * 1024; // 1MB of float32
+        EnsureAllowlist();
+        const int n = 256 * 1024;
         var trackers = DispatchTrackers;
-        var crypto = new DotNetCrypto();
 
-        // Declare clients with `await using` before the P2PCompute wrappers so
-        // dispose order is P2PCompute first, WebTorrentClient last. Prevents
-        // dangling transport/bridge state from racing with client shutdown.
         await using var coordClient = new SpawnDev.WebTorrent.WebTorrentClient();
         await using var workerClient = new SpawnDev.WebTorrent.WebTorrentClient();
 
         await using var coordinator = await P2PCompute.CreateSwarmAsync(
-            crypto, coordClient, "largebuffer-test", trackers: trackers);
+            _crypto, coordClient, "largebuffer-test", trackers: trackers);
 
         using var workerContext = Context.Create(b => b.CPU());
         using var workerAccelerator = workerContext.CreateCPUAccelerator(0);
 
         await using var worker = await P2PCompute.JoinSwarmAsync(
-            crypto, workerClient, workerAccelerator, coordinator.MagnetLink!);
+            _crypto, workerClient, workerAccelerator, coordinator.MagnetLink!);
 
         await WaitForPeersAsync(coordinator, worker);
 
         var peerId = coordinator.Accelerator!.Peers.First().PeerId;
         var workerBuffers = CollectWorkerBuffers(coordinator);
 
-        // Deterministic pseudo-random inputs so any single-bit corruption is detectable.
         var rng = new Random(unchecked((int)0xC0DEFACE));
         var a = new float[n];
         var b = new float[n];
@@ -265,48 +233,42 @@ public class RealWebRtcPipelineTests
         var dispatchResult = await coordinator.Accelerator!.DispatchAsync(method, n,
             ("large_a", aBytes, 4), ("large_b", bBytes, 4), ("large_out", null, 4));
 
-        Assert.That(dispatchResult.Success, Is.True,
-            $"Dispatch failed: {dispatchResult.Error}");
+        if (!dispatchResult.Success) throw new Exception($"Dispatch failed: {dispatchResult.Error}");
 
         var resultBytes = await WaitForBufferAsync(workerBuffers, "large_out", BufferReturnTimeoutMs);
-        Assert.That(resultBytes.Length, Is.EqualTo(n * 4), "1MB buffer wrong size");
+        if (resultBytes.Length != n * 4) throw new Exception($"1MB buffer wrong size: {resultBytes.Length}");
 
         var actual = DataIntegrityHelper.BytesToFloats(resultBytes);
         var (violations, firstIdx, firstExp, firstAct) =
             DataIntegrityHelper.VerifyFloats(actual, expected, tolerance: 0.001f);
 
-        Assert.That(violations, Is.EqualTo(0),
-            $"1MB VectorAdd over WebRTC: {violations}/{n} violations. " +
-            $"First at [{firstIdx}]: expected {firstExp}, got {firstAct}");
-
+        if (violations != 0)
+            throw new Exception(
+                $"1MB VectorAdd over WebRTC: {violations}/{n} violations. " +
+                $"First at [{firstIdx}]: expected {firstExp}, got {firstAct}");
     }
 
     /// <summary>
-    /// Gap 4 headline test: 10MB float buffers (a, b, result) over real WebRTC.
-    /// Three 10MB buffers = 30MB of SCTP traffic per direction. At the rc.14 default
-    /// 256KB chunk size that's 40 chunks per buffer (was 160 at 64KB). Unblocked by
-    /// Riker's SctpDataSender reset-race fix in SpawnDev.WebTorrent 3.1.3-rc.1
-    /// (60x loopback speedup on 504KB benchmark, same fix lifts the SCTP ceiling
-    /// that pinned rc.13 at a 240s timeout). All 2.6M elements verified bit-exact.
+    /// Gap 4 headline test: 10MB float buffers over real WebRTC.
     /// </summary>
-    [Test, CancelAfter(240000), Retry(3)]
+    [TestMethod(Timeout = 240000, RetryCount = 2)]
     public async Task LargeBuffer_10MB_DispatchedOverRealWebRtc_BitExact()
     {
-        const int n = 10 * 256 * 1024; // exactly 10 MB of float32 = 2,621,440 elements
+        EnsureAllowlist();
+        const int n = 10 * 256 * 1024;
         var trackers = DispatchTrackers;
-        var crypto = new DotNetCrypto();
 
         await using var coordClient = new SpawnDev.WebTorrent.WebTorrentClient();
         await using var workerClient = new SpawnDev.WebTorrent.WebTorrentClient();
 
         await using var coordinator = await P2PCompute.CreateSwarmAsync(
-            crypto, coordClient, "largebuffer-10mb-test", trackers: trackers);
+            _crypto, coordClient, "largebuffer-10mb-test", trackers: trackers);
 
         using var workerContext = Context.Create(b => b.CPU());
         using var workerAccelerator = workerContext.CreateCPUAccelerator(0);
 
         await using var worker = await P2PCompute.JoinSwarmAsync(
-            crypto, workerClient, workerAccelerator, coordinator.MagnetLink!);
+            _crypto, workerClient, workerAccelerator, coordinator.MagnetLink!);
 
         await WaitForPeersAsync(coordinator, worker);
 
@@ -335,48 +297,43 @@ public class RealWebRtcPipelineTests
         var dispatchResult = await coordinator.Accelerator!.DispatchAsync(method, n,
             ("large10_a", aBytes, 4), ("large10_b", bBytes, 4), ("large10_out", null, 4));
 
-        Assert.That(dispatchResult.Success, Is.True,
-            $"Dispatch failed: {dispatchResult.Error}");
+        if (!dispatchResult.Success) throw new Exception($"Dispatch failed: {dispatchResult.Error}");
 
         var resultBytes = await WaitForBufferAsync(workerBuffers, "large10_out", BufferReturnTimeoutMs);
-        Assert.That(resultBytes.Length, Is.EqualTo(n * 4), "10MB buffer wrong size");
+        if (resultBytes.Length != n * 4) throw new Exception($"10MB buffer wrong size: {resultBytes.Length}");
 
         var actual = DataIntegrityHelper.BytesToFloats(resultBytes);
         var (violations, firstIdx, firstExp, firstAct) =
             DataIntegrityHelper.VerifyFloats(actual, expected, tolerance: 0.001f);
 
-        Assert.That(violations, Is.EqualTo(0),
-            $"10MB VectorAdd over WebRTC: {violations}/{n} violations. " +
-            $"First at [{firstIdx}]: expected {firstExp}, got {firstAct}");
+        if (violations != 0)
+            throw new Exception(
+                $"10MB VectorAdd over WebRTC: {violations}/{n} violations. " +
+                $"First at [{firstIdx}]: expected {firstExp}, got {firstAct}");
     }
 
     /// <summary>
-    /// Aspirational next-ceiling stress: 100MB float buffers (a, b, result) over real
-    /// WebRTC. 300MB of SCTP traffic per direction. At rc.14's 256KB chunk size that's
-    /// 400 chunks per buffer - roughly 10x the 10MB test's volume. Opt-in via
-    /// <c>[Category("Stress")]</c> so it doesn't run in the default regression sweep;
-    /// filter with <c>--filter "Category=Stress"</c> to exercise. Designed to catch the
-    /// next throughput / memory / SCTP ceiling BEFORE shipping a rc that claims
-    /// unbounded buffer support. Bit-exact on all 26M elements.
+    /// Aspirational next-ceiling stress: 100MB float buffers over real WebRTC.
+    /// Opt-in via <c>Category = "Stress"</c> so it doesn't run in the default sweep.
     /// </summary>
-    [Test, CancelAfter(600000), Retry(2), Category("Stress")]
+    [TestMethod(Timeout = 600000, RetryCount = 1, Category = "Stress")]
     public async Task LargeBuffer_100MB_DispatchedOverRealWebRtc_BitExact()
     {
-        const int n = 100 * 256 * 1024; // exactly 100 MB of float32 = 26,214,400 elements
+        EnsureAllowlist();
+        const int n = 100 * 256 * 1024;
         var trackers = DispatchTrackers;
-        var crypto = new DotNetCrypto();
 
         await using var coordClient = new SpawnDev.WebTorrent.WebTorrentClient();
         await using var workerClient = new SpawnDev.WebTorrent.WebTorrentClient();
 
         await using var coordinator = await P2PCompute.CreateSwarmAsync(
-            crypto, coordClient, "largebuffer-100mb-test", trackers: trackers);
+            _crypto, coordClient, "largebuffer-100mb-test", trackers: trackers);
 
         using var workerContext = Context.Create(b => b.CPU());
         using var workerAccelerator = workerContext.CreateCPUAccelerator(0);
 
         await using var worker = await P2PCompute.JoinSwarmAsync(
-            crypto, workerClient, workerAccelerator, coordinator.MagnetLink!);
+            _crypto, workerClient, workerAccelerator, coordinator.MagnetLink!);
 
         await WaitForPeersAsync(coordinator, worker);
 
@@ -405,74 +362,65 @@ public class RealWebRtcPipelineTests
         var dispatchResult = await coordinator.Accelerator!.DispatchAsync(method, n,
             ("large100_a", aBytes, 4), ("large100_b", bBytes, 4), ("large100_out", null, 4));
 
-        Assert.That(dispatchResult.Success, Is.True,
-            $"Dispatch failed: {dispatchResult.Error}");
+        if (!dispatchResult.Success) throw new Exception($"Dispatch failed: {dispatchResult.Error}");
 
         var resultBytes = await WaitForBufferAsync(workerBuffers, "large100_out", BufferReturnTimeoutMs);
-        Assert.That(resultBytes.Length, Is.EqualTo(n * 4), "100MB buffer wrong size");
+        if (resultBytes.Length != n * 4) throw new Exception($"100MB buffer wrong size: {resultBytes.Length}");
 
         var actual = DataIntegrityHelper.BytesToFloats(resultBytes);
         var (violations, firstIdx, firstExp, firstAct) =
             DataIntegrityHelper.VerifyFloats(actual, expected, tolerance: 0.001f);
 
-        Assert.That(violations, Is.EqualTo(0),
-            $"100MB VectorAdd over WebRTC: {violations}/{n} violations. " +
-            $"First at [{firstIdx}]: expected {firstExp}, got {firstAct}");
+        if (violations != 0)
+            throw new Exception(
+                $"100MB VectorAdd over WebRTC: {violations}/{n} violations. " +
+                $"First at [{firstIdx}]: expected {firstExp}, got {firstAct}");
     }
 
     /// <summary>
-    /// Demo /compute benchmark path: byte-for-byte mirrors <c>ComputeSwarm.razor</c>'s
-    /// <c>RunDistributedBenchmark</c>. Input <c>data[j] = (float)j</c>, in-place
-    /// <c>MultiplyBy2</c> dispatch, worker returns the SAME bufferId back to the
-    /// coordinator, expect <c>result[j] == 2*j</c>. The demo only spot-checks two
-    /// elements (<c>[0]</c> and <c>[mid]</c>); this test verifies every element
-    /// bit-exact so any breakage in the ArrayView1D&lt;float, Stride1D.Dense&gt;
-    /// dispatch-serializer path or the in-place buffer-return path fails loudly
-    /// instead of sliding past a sparse sample.
+    /// Demo /compute benchmark path: byte-for-byte mirrors ComputeSwarm.razor's
+    /// RunDistributedBenchmark. MultiplyBy2 in-place dispatch.
     /// </summary>
-    [Test, CancelAfter(120000), Retry(3)]
+    [TestMethod(Timeout = 120000, RetryCount = 2)]
     public async Task DemoPath_MultiplyBy2_InPlace_OverRealWebRtc_BitExact()
     {
+        EnsureAllowlist();
         const int n = 4096;
         var trackers = DispatchTrackers;
-        var crypto = new DotNetCrypto();
 
         await using var coordClient = new SpawnDev.WebTorrent.WebTorrentClient();
         await using var workerClient = new SpawnDev.WebTorrent.WebTorrentClient();
 
         await using var coordinator = await P2PCompute.CreateSwarmAsync(
-            crypto, coordClient, "demo-multiplyby2-test", trackers: trackers);
+            _crypto, coordClient, "demo-multiplyby2-test", trackers: trackers);
 
         using var workerContext = Context.Create(b => b.CPU());
         using var workerAccelerator = workerContext.CreateCPUAccelerator(0);
 
         await using var worker = await P2PCompute.JoinSwarmAsync(
-            crypto, workerClient, workerAccelerator, coordinator.MagnetLink!);
+            _crypto, workerClient, workerAccelerator, coordinator.MagnetLink!);
 
         await WaitForPeersAsync(coordinator, worker);
 
         var peerId = coordinator.Accelerator!.Peers.First().PeerId;
         var workerBuffers = CollectWorkerBuffers(coordinator);
 
-        // Exactly the demo's input generation: data[j] = (float)j.
         const string bufferId = "chunk_demo_mul2";
         var data = new byte[n * 4];
         for (int j = 0; j < n; j++)
             BitConverter.TryWriteBytes(data.AsSpan(j * 4), (float)j);
 
-        // Exactly the demo's dispatch — single in-place tuple.
         var method = typeof(P2PDemoKernelsMirror).GetMethod(nameof(P2PDemoKernelsMirror.MultiplyBy2))!;
         var dispatchResult = await coordinator.Accelerator!.DispatchAsync(
             method, n, (bufferId, data, 4));
 
-        Assert.That(dispatchResult.Success, Is.True,
-            $"Demo MultiplyBy2 dispatch failed: {dispatchResult.Error}");
+        if (!dispatchResult.Success)
+            throw new Exception($"Demo MultiplyBy2 dispatch failed: {dispatchResult.Error}");
 
-        // In-place: worker returns modified buffer under the same bufferId.
         var resultBytes = await WaitForBufferAsync(workerBuffers, bufferId, BufferReturnTimeoutMs);
-        Assert.That(resultBytes.Length, Is.EqualTo(n * 4), "MultiplyBy2 in-place result wrong size");
+        if (resultBytes.Length != n * 4)
+            throw new Exception($"MultiplyBy2 in-place result wrong size: {resultBytes.Length}");
 
-        // Full bit-exact verification — not just the demo's spot-check.
         var actual = DataIntegrityHelper.BytesToFloats(resultBytes);
         int badCount = 0;
         int firstBadIdx = -1;
@@ -486,49 +434,42 @@ public class RealWebRtcPipelineTests
                 badCount++;
             }
         }
-        Assert.That(badCount, Is.EqualTo(0),
-            $"Demo MultiplyBy2 bit-exact: {badCount}/{n} wrong. " +
-            $"First at [{firstBadIdx}]: expected {firstBadExp}, got {firstBadAct}");
+        if (badCount != 0)
+            throw new Exception(
+                $"Demo MultiplyBy2 bit-exact: {badCount}/{n} wrong. " +
+                $"First at [{firstBadIdx}]: expected {firstBadExp}, got {firstBadAct}");
     }
 
     /// <summary>
-    /// Demo /compute Mandelbrot path: byte-for-byte mirrors <c>ComputeSwarm.razor</c>'s
-    /// <c>RunDistributedMandelbrot</c>. Generates real/imag coordinate arrays for a
-    /// Mandelbrot region, dispatches <c>MandelbrotChunk</c> with the demo's exact
-    /// tuple shape <c>(outId, null, 4), (realId, realBytes, 4), (imagId, imagBytes, 4)</c>
-    /// — the first tuple carries <c>null</c> data so the worker allocates the output,
-    /// fills it with iteration counts, and pushes it back. Every iteration count is
-    /// verified against a CPU-side run of the identical kernel body. Proves the
-    /// output-only buffer pattern the demo depends on works end-to-end.
+    /// Demo /compute Mandelbrot path: byte-for-byte mirrors ComputeSwarm.razor's
+    /// RunDistributedMandelbrot. Output-only buffer pattern.
     /// </summary>
-    [Test, CancelAfter(120000), Retry(3)]
+    [TestMethod(Timeout = 120000, RetryCount = 2)]
     public async Task DemoPath_MandelbrotChunk_OutputOnlyBuffer_OverRealWebRtc_BitExact()
     {
-        // 64x64 pixel Mandelbrot strip (same geometry the demo uses per-peer at peerCount=8).
+        EnsureAllowlist();
         const int width = 64;
         const int height = 64;
         const int n = width * height;
         var trackers = DispatchTrackers;
-        var crypto = new DotNetCrypto();
 
         await using var coordClient = new SpawnDev.WebTorrent.WebTorrentClient();
         await using var workerClient = new SpawnDev.WebTorrent.WebTorrentClient();
 
         await using var coordinator = await P2PCompute.CreateSwarmAsync(
-            crypto, coordClient, "demo-mandelbrot-test", trackers: trackers);
+            _crypto, coordClient, "demo-mandelbrot-test", trackers: trackers);
 
         using var workerContext = Context.Create(b => b.CPU());
         using var workerAccelerator = workerContext.CreateCPUAccelerator(0);
 
         await using var worker = await P2PCompute.JoinSwarmAsync(
-            crypto, workerClient, workerAccelerator, coordinator.MagnetLink!);
+            _crypto, workerClient, workerAccelerator, coordinator.MagnetLink!);
 
         await WaitForPeersAsync(coordinator, worker);
 
         var peerId = coordinator.Accelerator!.Peers.First().PeerId;
         var workerBuffers = CollectWorkerBuffers(coordinator);
 
-        // Exactly the demo's coordinate generation.
         var realCoords = new float[n];
         var imagCoords = new float[n];
         for (int y = 0; y < height; y++)
@@ -547,7 +488,6 @@ public class RealWebRtcPipelineTests
         const string realId = "mand_real_demo";
         const string imagId = "mand_imag_demo";
 
-        // Demo's exact dispatch tuple shape: output-only first, then 2 inputs.
         var method = typeof(P2PDemoKernelsMirror).GetMethod(nameof(P2PDemoKernelsMirror.MandelbrotChunk))!;
         var dispatchResult = await coordinator.Accelerator!.DispatchAsync(
             method, n,
@@ -555,18 +495,15 @@ public class RealWebRtcPipelineTests
             (realId, realBytes, 4),
             (imagId, imagBytes, 4));
 
-        Assert.That(dispatchResult.Success, Is.True,
-            $"Demo Mandelbrot dispatch failed: {dispatchResult.Error}");
+        if (!dispatchResult.Success)
+            throw new Exception($"Demo Mandelbrot dispatch failed: {dispatchResult.Error}");
 
         var outBytes = await WaitForBufferAsync(workerBuffers, outId, BufferReturnTimeoutMs);
-        Assert.That(outBytes.Length, Is.EqualTo(n * 4), "Mandelbrot output wrong size");
+        if (outBytes.Length != n * 4) throw new Exception($"Mandelbrot output wrong size: {outBytes.Length}");
 
-        // Decode iteration counts the way the demo does.
         var actual = new int[n];
         Buffer.BlockCopy(outBytes, 0, actual, 0, Math.Min(outBytes.Length, n * 4));
 
-        // CPU reference using the same kernel body. If ANY pixel disagrees with CPU,
-        // the worker-side path is broken - bit-exact required.
         int badCount = 0;
         int firstBadIdx = -1;
         int firstBadExp = 0, firstBadAct = 0;
@@ -579,15 +516,15 @@ public class RealWebRtcPipelineTests
                 badCount++;
             }
         }
-        Assert.That(badCount, Is.EqualTo(0),
-            $"Demo Mandelbrot bit-exact: {badCount}/{n} pixels wrong. " +
-            $"First at [{firstBadIdx}]: expected iter={firstBadExp}, got {firstBadAct}");
+        if (badCount != 0)
+            throw new Exception(
+                $"Demo Mandelbrot bit-exact: {badCount}/{n} pixels wrong. " +
+                $"First at [{firstBadIdx}]: expected iter={firstBadExp}, got {firstBadAct}");
 
-        // Also prove we're not just getting zeros back — the worker actually computed something.
         int nonZero = 0;
         for (int i = 0; i < n; i++) if (actual[i] > 0) nonZero++;
-        Assert.That(nonZero, Is.GreaterThan(n / 4),
-            $"Only {nonZero}/{n} pixels have non-zero iteration count - worker likely returned zeros.");
+        if (!(nonZero > n / 4))
+            throw new Exception($"Only {nonZero}/{n} pixels have non-zero iteration count - worker likely returned zeros.");
     }
 
     private static int CpuReferenceMandelbrot(float cr, float ci)
@@ -606,30 +543,27 @@ public class RealWebRtcPipelineTests
     }
 
     /// <summary>
-    /// Scalar kernel parameter transmission over real WebRTC. Dispatches VectorScale with
-    /// scalar = 3.14f and verifies every result[i] == input[i] * 3.14f bit-exact. Proves
-    /// the coordinator-sent scalar value reaches the worker's kernel invocation instead
-    /// of silently defaulting to 0. Regression guard for the ScalarParams wire fix.
+    /// Scalar kernel parameter transmission over real WebRTC.
     /// </summary>
-    [Test, CancelAfter(120000), Retry(3)]
+    [TestMethod(Timeout = 120000, RetryCount = 2)]
     public async Task VectorScale_ScalarOverRealWebRtc_BitExact()
     {
+        EnsureAllowlist();
         const int n = 1024;
         const float scalar = 3.14f;
         var trackers = DispatchTrackers;
-        var crypto = new DotNetCrypto();
 
         await using var coordClient = new SpawnDev.WebTorrent.WebTorrentClient();
         await using var workerClient = new SpawnDev.WebTorrent.WebTorrentClient();
 
         await using var coordinator = await P2PCompute.CreateSwarmAsync(
-            crypto, coordClient, "vectorscale-test", trackers: trackers);
+            _crypto, coordClient, "vectorscale-test", trackers: trackers);
 
         using var workerContext = Context.Create(b => b.CPU());
         using var workerAccelerator = workerContext.CreateCPUAccelerator(0);
 
         await using var worker = await P2PCompute.JoinSwarmAsync(
-            crypto, workerClient, workerAccelerator, coordinator.MagnetLink!);
+            _crypto, workerClient, workerAccelerator, coordinator.MagnetLink!);
 
         await WaitForPeersAsync(coordinator, worker);
 
@@ -648,55 +582,49 @@ public class RealWebRtcPipelineTests
 
         await coordinator.Transport!.SendBufferAsync(peerId, "scale_in", inputBytes);
 
-        // VectorScale signature: (Index1D, ArrayView<float> input, ArrayView<float> result, float scalar)
-        // Scalar at parameter index 3 — the param index after Index1D + 2 buffers.
         var method = typeof(P2PTestKernels).GetMethod(nameof(P2PTestKernels.VectorScale))!;
         var dispatchResult = await coordinator.Accelerator!.DispatchAsync(
             method, n,
             scalarValues: new Dictionary<int, object> { [3] = scalar },
             ("scale_in", inputBytes, 4), ("scale_out", null, 4));
 
-        Assert.That(dispatchResult.Success, Is.True,
-            $"VectorScale dispatch failed: {dispatchResult.Error}");
+        if (!dispatchResult.Success) throw new Exception($"VectorScale dispatch failed: {dispatchResult.Error}");
 
         var resultBytes = await WaitForBufferAsync(workerBuffers, "scale_out", BufferReturnTimeoutMs);
-        Assert.That(resultBytes.Length, Is.EqualTo(n * 4), "result buffer wrong size");
+        if (resultBytes.Length != n * 4) throw new Exception($"result buffer wrong size: {resultBytes.Length}");
 
         var actual = DataIntegrityHelper.BytesToFloats(resultBytes);
         var (violations, firstIdx, firstExp, firstAct) =
             DataIntegrityHelper.VerifyFloats(actual, expected);
 
-        Assert.That(violations, Is.EqualTo(0),
-            $"VectorScale scalar over WebRTC: {violations}/{n} violations. " +
-            $"First at [{firstIdx}]: expected {firstExp}, got {firstAct}. " +
-            $"If firstAct is 0, ScalarParams was not transmitted across the data channel.");
+        if (violations != 0)
+            throw new Exception(
+                $"VectorScale scalar over WebRTC: {violations}/{n} violations. " +
+                $"First at [{firstIdx}]: expected {firstExp}, got {firstAct}. " +
+                $"If firstAct is 0, ScalarParams was not transmitted across the data channel.");
     }
 
     /// <summary>
-    /// Integer Identity kernel across real WebRTC. Any single-bit flip during
-    /// input transfer, kernel execution, or output transfer fails the SHA256 check.
+    /// Integer Identity kernel across real WebRTC with SHA256 integrity check.
     /// </summary>
-    [Test, CancelAfter(120000), Retry(3)]
+    [TestMethod(Timeout = 120000, RetryCount = 2)]
     public async Task DataIntegrity_SHA256_IdentityOverRealWebRtc()
     {
-        const int n = 16384; // 64KB
+        EnsureAllowlist();
+        const int n = 16384;
         var trackers = DispatchTrackers;
-        var crypto = new DotNetCrypto();
 
-        // Declare clients with `await using` before the P2PCompute wrappers so
-        // dispose order is P2PCompute first, WebTorrentClient last. Prevents
-        // dangling transport/bridge state from racing with client shutdown.
         await using var coordClient = new SpawnDev.WebTorrent.WebTorrentClient();
         await using var workerClient = new SpawnDev.WebTorrent.WebTorrentClient();
 
         await using var coordinator = await P2PCompute.CreateSwarmAsync(
-            crypto, coordClient, "integrity-test", trackers: trackers);
+            _crypto, coordClient, "integrity-test", trackers: trackers);
 
         using var workerContext = Context.Create(b => b.CPU());
         using var workerAccelerator = workerContext.CreateCPUAccelerator(0);
 
         await using var worker = await P2PCompute.JoinSwarmAsync(
-            crypto, workerClient, workerAccelerator, coordinator.MagnetLink!);
+            _crypto, workerClient, workerAccelerator, coordinator.MagnetLink!);
 
         await WaitForPeersAsync(coordinator, worker);
 
@@ -717,54 +645,48 @@ public class RealWebRtcPipelineTests
         var dispatchResult = await coordinator.Accelerator!.DispatchAsync(method, n,
             ("integ_in", inputBytes, 4), ("integ_out", null, 4));
 
-        Assert.That(dispatchResult.Success, Is.True,
-            $"Dispatch failed: {dispatchResult.Error}");
+        if (!dispatchResult.Success) throw new Exception($"Dispatch failed: {dispatchResult.Error}");
 
         var resultBytes = await WaitForBufferAsync(workerBuffers, "integ_out", BufferReturnTimeoutMs);
         var hashAfter = DataIntegrityHelper.ComputeSha256(resultBytes);
 
-        Assert.That(hashAfter, Is.EqualTo(hashBefore),
-            $"SHA256 mismatch over WebRTC round-trip. Before: {hashBefore[..16]}... " +
-            $"After: {hashAfter[..16]}... ({resultBytes.Length} bytes, {n} ints)");
-
+        if (hashAfter != hashBefore)
+            throw new Exception(
+                $"SHA256 mismatch over WebRTC round-trip. Before: {hashBefore[..16]}... " +
+                $"After: {hashAfter[..16]}... ({resultBytes.Length} bytes, {n} ints)");
     }
 
     /// <summary>
-    /// Heterogeneous-backend dispatch over real WebRTC: CPU coordinator dispatches
-    /// a kernel to a CUDA worker. The coordinator's accelerator is CPU and the worker's
-    /// is CUDA (NVIDIA GPU) — two completely different ILGPU codegen paths sharing the
-    /// same source kernel. Proves the core "backend agnostic" P2P value prop: write a
-    /// kernel once, dispatch it to any peer's accelerator, results come back identical.
-    ///
-    /// Skips cleanly when CUDA isn't available on the host (non-NVIDIA machines, CI).
+    /// Heterogeneous-backend dispatch over real WebRTC: CPU coordinator -> CUDA worker.
+    /// Skips cleanly when CUDA isn't available.
     /// </summary>
-    [Test, CancelAfter(120000), Retry(3)]
+    [TestMethod(Timeout = 120000, RetryCount = 2)]
     public async Task VectorAdd_CpuCoordinator_CudaWorker_OverRealWebRtc_BitExact()
-        => await HeterogeneousVectorAddAsync(
+    {
+        EnsureAllowlist();
+        await HeterogeneousVectorAddAsync(
             swarmName: "heterogeneous-cpu-cuda",
             pickWorkerDevice: ctx =>
                 ctx.Devices.OfType<global::ILGPU.Runtime.Cuda.CudaDevice>().FirstOrDefault(),
             workerBackendLabel: "CUDA");
+    }
 
     /// <summary>
-    /// Heterogeneous-backend dispatch over real WebRTC: CPU coordinator dispatches to an
-    /// OpenCL worker. Covers the second desktop-side code path for the backend-agnostic
-    /// claim. Skips cleanly when no OpenCL device is visible to ILGPU on the host.
+    /// Heterogeneous-backend dispatch over real WebRTC: CPU coordinator -> OpenCL worker.
     /// </summary>
-    [Test, CancelAfter(120000), Retry(3)]
+    [TestMethod(Timeout = 120000, RetryCount = 2)]
     public async Task VectorAdd_CpuCoordinator_OpenClWorker_OverRealWebRtc_BitExact()
-        => await HeterogeneousVectorAddAsync(
+    {
+        EnsureAllowlist();
+        await HeterogeneousVectorAddAsync(
             swarmName: "heterogeneous-cpu-opencl",
             pickWorkerDevice: ctx =>
                 ctx.Devices.OfType<global::ILGPU.Runtime.OpenCL.CLDevice>().FirstOrDefault(),
             workerBackendLabel: "OpenCL");
+    }
 
     /// <summary>
     /// Shared setup for a CPU-coordinator + non-CPU-worker dispatch test.
-    /// The worker's device is selected from Context.CreateDefault's enumeration so every
-    /// desktop ILGPU backend (CUDA, OpenCL, and anything added later) can be reached with
-    /// the same scaffolding. The test skips cleanly when the target backend is absent
-    /// on the host machine (non-NVIDIA box for CUDA, no OpenCL driver, etc.).
     /// </summary>
     private async Task HeterogeneousVectorAddAsync(
         string swarmName,
@@ -773,27 +695,21 @@ public class RealWebRtcPipelineTests
     {
         const int n = 1024;
         var trackers = DispatchTrackers;
-        var crypto = new DotNetCrypto();
 
-        // Worker context is built first so we can bail out BEFORE touching the tracker
-        // if the target backend isn't available on this host.
         using var workerContext = Context.CreateDefault();
         var workerDevice = pickWorkerDevice(workerContext);
         if (workerDevice == null)
-            Assert.Ignore($"{workerBackendLabel} not available on this host.");
-        using var workerAccelerator = workerDevice!.CreateAccelerator(workerContext);
+            throw new UnsupportedTestException($"{workerBackendLabel} not available on this host.");
+        using var workerAccelerator = workerDevice.CreateAccelerator(workerContext);
 
         await using var coordClient = new SpawnDev.WebTorrent.WebTorrentClient();
         await using var workerClient = new SpawnDev.WebTorrent.WebTorrentClient();
 
-        // Coordinator runs on plain CPU - P2PCompute.CreateSwarmAsync's default context
-        // already enables every desktop backend via Context.CreateDefault, so the coordinator
-        // side of P2P doesn't need special setup.
         await using var coordinator = await P2PCompute.CreateSwarmAsync(
-            crypto, coordClient, swarmName, trackers: trackers);
+            _crypto, coordClient, swarmName, trackers: trackers);
 
         await using var worker = await P2PCompute.JoinSwarmAsync(
-            crypto, workerClient, workerAccelerator, coordinator.MagnetLink!);
+            _crypto, workerClient, workerAccelerator, coordinator.MagnetLink!);
 
         await WaitForPeersAsync(coordinator, worker);
 
@@ -807,27 +723,25 @@ public class RealWebRtcPipelineTests
         var dispatchResult = await coordinator.Accelerator!.DispatchAsync(method, n,
             ("a", aBytes, 4), ("b", bBytes, 4), ("result", null, 4));
 
-        Assert.That(dispatchResult.Success, Is.True,
-            $"Heterogeneous dispatch (CPU -> {workerBackendLabel}) failed: {dispatchResult.Error}");
-        Assert.That(dispatchResult.ModifiedBuffers, Contains.Item("result"),
-            $"result buffer should be reported as modified by the {workerBackendLabel} worker");
+        if (!dispatchResult.Success)
+            throw new Exception($"Heterogeneous dispatch (CPU -> {workerBackendLabel}) failed: {dispatchResult.Error}");
+        if (!dispatchResult.ModifiedBuffers.Contains("result"))
+            throw new Exception($"result buffer should be reported as modified by the {workerBackendLabel} worker");
 
         var resultBytes = await WaitForBufferAsync(workerBuffers, "result", BufferReturnTimeoutMs);
-        Assert.That(resultBytes.Length, Is.EqualTo(n * 4),
-            $"Returned buffer wrong size: {resultBytes.Length}");
+        if (resultBytes.Length != n * 4)
+            throw new Exception($"Returned buffer wrong size: {resultBytes.Length}");
 
         var actual = DataIntegrityHelper.BytesToFloats(resultBytes);
         var (violations, firstIdx, firstExp, firstAct) =
             DataIntegrityHelper.VerifyFloats(actual, expected);
 
-        Assert.That(violations, Is.EqualTo(0),
-            $"Heterogeneous CPU -> {workerBackendLabel} dispatch: {violations}/{n} violations. " +
-            $"First at [{firstIdx}]: expected {firstExp}, got {firstAct}");
+        if (violations != 0)
+            throw new Exception(
+                $"Heterogeneous CPU -> {workerBackendLabel} dispatch: {violations}/{n} violations. " +
+                $"First at [{firstIdx}]: expected {firstExp}, got {firstAct}");
     }
 
-    /// <summary>
-    /// Wait for the coordinator and worker to see each other through WebRTC.
-    /// </summary>
     private static async Task WaitForPeersAsync(P2PCompute coordinator, P2PCompute worker)
     {
         var deadline = DateTime.UtcNow.AddMilliseconds(DiscoveryTimeoutMs);
@@ -839,15 +753,11 @@ public class RealWebRtcPipelineTests
 
         if (coordinator.PeerCount == 0 || worker.PeerCount == 0)
         {
-            Assert.Fail($"Peer discovery timed out after {DiscoveryTimeoutMs}ms. " +
+            throw new Exception($"Peer discovery timed out after {DiscoveryTimeoutMs}ms. " +
                 $"Coordinator peers: {coordinator.PeerCount}, Worker peers: {worker.PeerCount}.");
         }
     }
 
-    /// <summary>
-    /// Subscribe to the coordinator's buffer-transfer completion event. Returns
-    /// a thread-safe map of bufferId → data populated as buffers arrive from the worker.
-    /// </summary>
     private static ConcurrentDictionary<string, byte[]> CollectWorkerBuffers(P2PCompute coordinator)
     {
         var received = new ConcurrentDictionary<string, byte[]>();
@@ -858,9 +768,6 @@ public class RealWebRtcPipelineTests
         return received;
     }
 
-    /// <summary>
-    /// Wait for a specific buffer to appear in the map (worker auto-push path).
-    /// </summary>
     private static async Task<byte[]> WaitForBufferAsync(
         ConcurrentDictionary<string, byte[]> received, string bufferId, int timeoutMs)
     {
@@ -874,5 +781,4 @@ public class RealWebRtcPipelineTests
         throw new TimeoutException(
             $"Modified buffer '{bufferId}' did not arrive from worker within {timeoutMs}ms.");
     }
-
 }
