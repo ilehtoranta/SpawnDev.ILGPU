@@ -9,6 +9,55 @@ Write parallel compute code in C# and let the library pick the best available ba
 
 ## What's New in 4.9.2
 
+### AcceleratorRequirements - Capability-Gated Backend Selection (rc.10)
+
+Kernels that use features some backends can't implement (atomics on WebGL, native f64 on WebGPU, subgroups on Wasm) will silently produce wrong output if they land on the wrong backend. `AcceleratorRequirements` lets you declare requirements up-front and the selection path filters out incapable backends:
+
+```csharp
+using SpawnDev.ILGPU;
+
+using var acc = context.CreatePreferredAccelerator(
+    new AcceleratorRequirements
+    {
+        RequiresAtomics = true,        // rules out WebGL
+        RequiresFloat64Native = true,  // rules out WebGPU + WebGL
+    });
+// -> on desktop: CUDA > OpenCL > CPU
+// -> on browser with this combo: only Wasm survives
+// -> throws NotSupportedException naming the unmet requirements when nothing matches
+```
+
+All flags mirror the 6-backend feature matrix: `RequiresAtomics`, `RequiresSharedMemory`, `RequiresBarriers`, `RequiresFloat16`, `RequiresFloat16Native`, `RequiresFloat64`, `RequiresFloat64Native`, `RequiresInt64`, `RequiresInt64Native`, `RequiresInt64Atomics`, `RequiresSubGroups`. Use `AcceleratorRequirements.None` for no filtering.
+
+Other entry points: `context.EnumerateCompatibleDevices(requirements)` for ranking your own pick, `device.Satisfies(requirements)` for per-device checks. Put the capability knowledge in one place so consuming projects stop hand-rolling `if (backend == WebGL) skip;` branches.
+
+### UnsupportedKernelFeatureException - Typed Codegen Errors (rc.10)
+
+New `SpawnDev.ILGPU.UnsupportedKernelFeatureException` replaces the prior anonymous `NotSupportedException` at WebGL atomic codegen sites with a typed exception carrying `Feature`, `Backend`, and `Remediation` properties:
+
+```csharp
+try { kernel = accelerator.LoadAutoGroupedStreamKernel<...>(...); }
+catch (UnsupportedKernelFeatureException ex)
+{
+    Console.WriteLine($"Feature {ex.Feature} not supported on {ex.Backend}");
+    Console.WriteLine($"Remediation: {ex.Remediation}");
+}
+```
+
+Thrown at kernel compile time (not dispatch time) so the failure mode is loud and self-documenting. Still inherits from `NotSupportedException` so existing catch-by-base code keeps working. Currently wired at the WebGL `GenericAtomic` and `AtomicCAS` sites; the plan is to expand coverage to every backend intrinsic that used to silently emit `target = 0` or similar garbage.
+
+### LocalMemory<T>(N >= 32) WGSL Codegen Fix (rc.10)
+
+Kernels declaring `LocalMemory.Allocate<int>(N)` with `N >= 32` produced incorrect WGSL on WebGPU (SSA-expanded the entire array into N scalar fields, then downstream DCE dropped some of them, producing garbage output). 5-layer fix:
+
+1. `SSAStructureConstruction.CanConvert` honors a 32-element SSA threshold and leaves larger allocas as memory.
+2. `WGSLCodeGenerator.SetupAllocations` tracks the full array type in `valueVariables` for LEA-through-alloca patterns.
+3. `WGSLKernelFunctionGenerator.HoistCrossBlockVariables` has an RHS-lookup fallback for missing declarations.
+4. WebGL `GLSLCodeGenerator` alloca emission also declares the `int` pointer variable for parity.
+5. WebGL `GLSLKernelFunctionGenerator` aliases local alloca backing and LEA offsets for sub-word read/write paths.
+
+Regression test `LocalMemoryRepro_Int64_ShortByteViews` locks down the happy path (5 backends) and the WebGL architectural varying-count ceiling (1 expected skip - WebGL's 1-thread-per-output-element topology caps per-kernel varying count, orthogonal to this fix).
+
 ### Float16 (Half) Everywhere - Native or Emulated
 
 `Capabilities.Float16 = true` on every backend. Half kernels compile and run correctly across CPU, CUDA, OpenCL, WebGPU, WebGL, and Wasm - native when the hardware exposes it (CUDA SM_53+, OpenCL `cl_khr_fp16`, WebGPU `shader-f16`), emulated otherwise via `_f16_to_f32` / `_f32_to_f16` helpers with f32 arithmetic. `Capabilities.Float16Native` on WebGPU and OpenCL exposes whether native hardware f16 is active so downstream code can branch without a backend-type check. Emulation is lossless - f16 is a strict subset of f32's encoding, so values round-trip bit-for-bit. `WebGPUBackend.ForceEmulatedF16` test flag lets you force the emulation path on shader-f16-capable hardware for verification.
