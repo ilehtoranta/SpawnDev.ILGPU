@@ -1037,10 +1037,18 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 if (IsStateMachineActive)
                 {
                     VariableBuilder.AppendLine($"    {elementType} {arrayName}[{arraySize}];");
+                    // Declare the alloca's pointer variable as offset=0 so downstream
+                    // "generic LEA" codegen that emits `v_target = v_alloca + offset`
+                    // compiles cleanly. Without this, LocalMemory<int>(>=32) kernels
+                    // that survive SSAStructureConstruction (per its length threshold)
+                    // hit "undeclared identifier" on the alloca's pointer variable.
+                    // Tuvok 2026-04-24 VP9 iDCT 8x8 WebGL path.
+                    VariableBuilder.AppendLine($"    int {target.Name} = 0;");
                 }
                 else
                 {
                     AppendLine($"{elementType} {arrayName}[{arraySize}];");
+                    AppendLine($"int {target.Name} = 0;");
                 }
             }
         }
@@ -1913,6 +1921,22 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 return;
             }
 
+            // Local-alloca LEA: when source is an array alloca we declared as
+            // `local_arr_N[size]` with accompanying `int v_source = 0;`, register
+            // `_leaArrayExprs[target] = "local_arr_N[offset]"` so downstream Store/Load
+            // emit `local_arr_N[offset] = val;` / `val = local_arr_N[offset];` instead
+            // of the generic-LEA integer-sum pattern that gets overwritten by Store's
+            // fallback branch. Without this hand-off, stores go to the LEA scalar
+            // itself (`v_target = val`) and disappear, producing silent-wrong-output.
+            // Tuvok 2026-04-24 VP9 iDCT 8x8 WebGL, final data-correctness layer.
+            if (_allocaArrayNames.TryGetValue(sourceVal.Name, out var localArrName))
+            {
+                Declare(target);
+                AppendLine($"{target} = {sourceVal} + {offset}; // LEA into {localArrName}");
+                _leaArrayExprs[target.Name] = $"{localArrName}[{offset}]";
+                return;
+            }
+
             Declare(target);
             AppendLine($"{target} = {sourceVal} + {offset}; // generic LEA");
         }
@@ -2257,6 +2281,23 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             // Propagate the param mapping if source is a param alias
             if (_leaParamMap.TryGetValue(source.ToString(), out var paramIdx))
                 _leaParamMap[target.Name] = paramIdx;
+
+            // When source is a local-memory array alloca (tracked via
+            // _allocaArrayNames), forward the NewView target to the same backing array.
+            // GLSL ES 3.0 doesn't allow array-value assignment (`int tmp2[N] = tmp1;` is
+            // invalid), so we can't emit a true copy. Instead, subsequent `target[i]`
+            // accesses must resolve to the source's backing array. Without this, the
+            // NewView target was declared-without-declaration (just a comment) and later
+            // references produced "undeclared identifier v_X" at GLSL compile time
+            // - the symptom Tuvok's 2026-04-24 VP9 iDCT 8x8 report surfaced on WebGL.
+            if (_allocaArrayNames.TryGetValue(source.Name, out var backingArray))
+            {
+                valueVariables[value] = source;
+                _allocaArrayNames[target.Name] = backingArray;
+                AppendLine($"// NewView: aliased to local alloca backing {backingArray} (no emit)");
+                return;
+            }
+
             AppendLine($"// NewView: {target} aliases {source}");
         }
 

@@ -1245,6 +1245,13 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 _allocaArrayNames[target.Name] = arrayName;
                 declaredVariables.Add(target.Name);
                 AppendLine($"{elementType} {arrayName}[{arraySize}];");
+                // Declare the alloca's pointer variable as an integer offset=0 so that
+                // downstream "generic LEA" codegen emitting `v_target = v_alloca + offset`
+                // compiles - the result is an absolute index into local_arr_N. Without
+                // this, WebGL shader compile fails with "undeclared identifier" on
+                // v_alloca whenever loop-unrolled LEAs survive SSAStructureConstruction
+                // (Tuvok 2026-04-24 VP9 iDCT 8x8 path, LocalMemory<int>(64)).
+                AppendLine($"int {target.Name} = 0;");
             }
         }
 

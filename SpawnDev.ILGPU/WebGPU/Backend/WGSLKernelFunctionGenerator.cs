@@ -2376,6 +2376,29 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                             }
                         }
 
+                        // RHS-lookup fallback: when `expr` is a bare identifier naming
+                        // another tracked variable, inherit THAT variable's type instead
+                        // of guessing from expression shape. This fixes the case where
+                        // `let v_X = v_alloca;` aliases a LocalMemory `array<T, N>` alloca
+                        // through a ViewType IR value. TypeGenerator maps ViewType to its
+                        // element type (i32), which is wrong for `var` declarations that
+                        // will then be indexed via `&v_X[i]`. Propagating the underlying
+                        // alloca's array type preserves indexability. Without this, the
+                        // subsequent `*&v_X[i] = ...;` stores write into a scalar and get
+                        // silently discarded (Tuvok's 2026-04-24 VP9 iDCT 8x8 report).
+                        var exprTrimmed = expr.Trim();
+                        if (IsSimpleIdentifier(exprTrimmed))
+                        {
+                            foreach (var kvp in valueVariables)
+                            {
+                                if (kvp.Value.Name == exprTrimmed)
+                                {
+                                    inferredType = kvp.Value.Type;
+                                    break;
+                                }
+                            }
+                        }
+
                         // WGSL: pointer types are not constructible and can't be declared
                         // as 'var'. They will be bound as 'let' at their point of use.
                         if (!inferredType.StartsWith("ptr<"))
@@ -2630,6 +2653,26 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         /// <summary>
         /// Infers the WGSL type from an expression string for post-processing var declarations.
         /// </summary>
+        /// <summary>
+        /// True when <paramref name="s"/> looks like a bare WGSL identifier (ASCII
+        /// letters, digits, underscore; must start with letter or underscore). Used by
+        /// the post-codegen missing-declaration pass to decide when to look up the
+        /// RHS of `let v_X = expr;` in valueVariables to inherit its type (instead of
+        /// heuristically inferring from expression shape).
+        /// </summary>
+        private static bool IsSimpleIdentifier(string s)
+        {
+            if (string.IsNullOrEmpty(s)) return false;
+            char first = s[0];
+            if (!char.IsLetter(first) && first != '_') return false;
+            for (int i = 1; i < s.Length; i++)
+            {
+                char c = s[i];
+                if (!char.IsLetterOrDigit(c) && c != '_') return false;
+            }
+            return true;
+        }
+
         private static string InferWgslType(string expr)
         {
             // Comparison operators and emulated comparison functions produce bool

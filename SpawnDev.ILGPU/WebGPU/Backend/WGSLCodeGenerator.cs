@@ -746,7 +746,19 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
                 if (allocaInfo.IsArray)
                 {
-                    AppendLine($"var {variable.Name} : array<{elementType}, {allocaInfo.ArraySize}>;");
+                    // The WGSL declaration carries the full array type; keep the tracked
+                    // variable type in sync so downstream passes that look up variable
+                    // types by name (e.g. the missing-declaration RHS-lookup in
+                    // WGSLKernelFunctionGenerator) retrieve `array<T, N>` rather than
+                    // the default `TypeGenerator[PointerType]` which maps to the element
+                    // scalar. Without this, alias values `let v_X = v_alloca;` get
+                    // declared as scalar vars and subsequent `&v_X[i]` indexing silently
+                    // produces wrong output or undeclared identifiers on WebGL.
+                    // Fixes the core 2026-04-24 LocalMemory<int>(64) bug reported by
+                    // Tuvok for VP9 iDCT 8x8.
+                    var arrayWgslType = $"array<{elementType}, {allocaInfo.ArraySize}>";
+                    valueVariables[allocaInfo.Alloca] = new Variable(variable.Name, arrayWgslType);
+                    AppendLine($"var {variable.Name} : {arrayWgslType};");
                 }
                 else
                 {

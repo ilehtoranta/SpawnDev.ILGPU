@@ -952,6 +952,19 @@ namespace ILGPU.IR.Transformations
                 data => new ArrayConstructionData(data));
 
         /// <summary>
+        /// Array length at and above which we skip SSA structure construction and keep
+        /// the allocation as real memory. Below this, each element becomes an SSA field
+        /// (good for small scratch arrays that live in registers). At or above this,
+        /// the SSA form has a downstream DCE bug that drops fields (observed: v_61 of a
+        /// 64-element array declared but never assigned on WebGPU, GLSL undeclared
+        /// identifier on WebGL, Tuvok 2026-04-24). Keeping as memory lets the WGSL/GLSL
+        /// backends emit `var tmp : array&lt;T, N&gt;` - but that path has its own
+        /// type-propagation bug (pointer-to-array-element typed as scalar) which this
+        /// change accompanies a fix for in WGSLKernelFunctionGenerator.
+        /// </summary>
+        private const int SSAConversionLengthThreshold = 32;
+
+        /// <summary>
         /// Returns true if the given allocation is a simple allocation and does not
         /// require explicit addresses.
         /// </summary>
@@ -960,6 +973,7 @@ namespace ILGPU.IR.Transformations
             // Check whether we require an address or there are array accesses
             // that cannot be converted to statically known field index values.
             alloca.IsArrayAllocation(out var length) &&
+            length.Int32Value < SSAConversionLengthThreshold &&
             !RequiresAddress(alloca, length.Int32Value);
 
         #endregion
