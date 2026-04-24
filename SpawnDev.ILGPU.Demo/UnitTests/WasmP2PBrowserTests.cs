@@ -74,6 +74,10 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
                 var separator = joinLink.Contains('?') ? "&" : "?";
                 // Worker popup: auto-join the coordinator's swarm + emit state keyed to workerId.
                 // `autojoin=1` skips the Join Consent dialog (existing URL-param contract).
+                // Same origin as coord - each WebTorrent client generates a distinct 20-byte
+                // PeerId per session, so the tracker sees two separate peers and relays them
+                // normally. Same-origin also means the worker's PublishToHarness -> opener.X
+                // writes land in the test page's window so we can observe worker state too.
                 var workerUrl = joinLink + separator
                     + $"autojoin=1&testId={Uri.EscapeDataString(workerId)}";
 

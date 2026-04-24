@@ -189,50 +189,65 @@ namespace PlaywrightMultiTest
                         // Grant all available permissions to avoid prompts
                         await testableProject.BrowserContext.GrantPermissionsAsync(
                             new[] { "clipboard-read", "clipboard-write" }).ConfigureAwait(false);
-                        // new page
-                        testableProject.Page = await testableProject.BrowserContext.NewPageAsync().ConfigureAwait(false);
-
                         // Temporary: capture browser console output containing WGSL dumps to a log file
                         var wgslDumpDir = Path.Combine(project.Directory, "..", "PlaywrightMultiTest", "WGSLDumps");
                         Directory.CreateDirectory(wgslDumpDir);
                         var consoleLogPath = Path.Combine(wgslDumpDir, "browser_console.log");
                         File.WriteAllText(consoleLogPath, ""); // clear previous log
                         var wasmDumpChunks = new System.Collections.Generic.List<string>();
-                        testableProject.Page.Console += (_, msg) =>
+
+                        void HookPageConsole(Microsoft.Playwright.IPage page, string label)
                         {
-                            var text = msg.Text;
-                            // Capture Wasm binary dumps: collect base64 chunks and write to disk
-                            if (text.StartsWith("[Wasm_DUMP]"))
+                            page.Console += (_, msg) =>
                             {
-                                wasmDumpChunks.Add(text.Substring("[Wasm_DUMP]".Length));
-                            }
-                            else if (text.StartsWith("[Wasm_DUMP_END]") && wasmDumpChunks.Count > 0)
-                            {
-                                try
+                                var text = msg.Text;
+                                // Capture Wasm binary dumps: collect base64 chunks and write to disk
+                                if (text.StartsWith("[Wasm_DUMP]"))
                                 {
-                                    var b64 = string.Join("", wasmDumpChunks);
-                                    var bytes = Convert.FromBase64String(b64);
-                                    var wasmPath = Path.Combine(wgslDumpDir, $"wasm_dump_{DateTime.Now:HHmmss}.wasm");
-                                    File.WriteAllBytes(wasmPath, bytes);
-                                    LogStatus($"Wasm binary dumped: {wasmPath} ({bytes.Length} bytes)");
+                                    wasmDumpChunks.Add(text.Substring("[Wasm_DUMP]".Length));
                                 }
-                                catch (Exception ex) { LogStatus($"Wasm dump failed: {ex.Message}"); }
-                                wasmDumpChunks.Clear();
-                            }
-                            else if (text.StartsWith("[Wasm_DUMP_START]"))
-                            {
-                                wasmDumpChunks.Clear();
-                            }
-                            // Only log messages related to WGSL dumps, Wasm worker traces, or errors
-                            if (text.Contains("WGSL") || text.Contains("@compute") || text.Contains("@workgroup_size") || text.Contains("WGSL_DUMP") || text.Contains("GLSL_DUMP") || text.Contains("[WasmWorker]") || text.Contains("[Wasm") || text.Contains("CONV2D_TRACE") || text.Contains("TEX_UNIT") || text.Contains("PREPROCESS_TRACE") || text.Contains("LAYER_TRACE") || text.Contains("LOGITS_TRACE") || text.Contains("CPU_LOGITS") || text.Contains("DISP_TRACE") || text.Contains("TF_OFFSET") || msg.Type == "error")
-                            {
-                                try
+                                else if (text.StartsWith("[Wasm_DUMP_END]") && wasmDumpChunks.Count > 0)
                                 {
-                                    File.AppendAllText(consoleLogPath, $"[{msg.Type}] {text}\n---END_MSG---\n");
+                                    try
+                                    {
+                                        var b64 = string.Join("", wasmDumpChunks);
+                                        var bytes = Convert.FromBase64String(b64);
+                                        var wasmPath = Path.Combine(wgslDumpDir, $"wasm_dump_{DateTime.Now:HHmmss}.wasm");
+                                        File.WriteAllBytes(wasmPath, bytes);
+                                        LogStatus($"Wasm binary dumped: {wasmPath} ({bytes.Length} bytes)");
+                                    }
+                                    catch (Exception ex) { LogStatus($"Wasm dump failed: {ex.Message}"); }
+                                    wasmDumpChunks.Clear();
                                 }
-                                catch { }
-                            }
+                                else if (text.StartsWith("[Wasm_DUMP_START]"))
+                                {
+                                    wasmDumpChunks.Clear();
+                                }
+                                // Log WGSL/Wasm traces, errors, and P2P-layer diagnostic lines so
+                                // multi-popup WebRTC flows (P2P two-tab test) leave a trail for
+                                // offline diagnosis.
+                                if (text.Contains("WGSL") || text.Contains("@compute") || text.Contains("@workgroup_size") || text.Contains("WGSL_DUMP") || text.Contains("GLSL_DUMP") || text.Contains("[WasmWorker]") || text.Contains("[Wasm") || text.Contains("CONV2D_TRACE") || text.Contains("TEX_UNIT") || text.Contains("PREPROCESS_TRACE") || text.Contains("LAYER_TRACE") || text.Contains("LOGITS_TRACE") || text.Contains("CPU_LOGITS") || text.Contains("DISP_TRACE") || text.Contains("TF_OFFSET") || text.Contains("[Peer]") || text.Contains("[RtcPeer]") || text.Contains("[sd_compute]") || text.Contains("[P2PCompute") || text.Contains("[P2P ") || text.Contains("[Torrent") || msg.Type == "error")
+                                {
+                                    try
+                                    {
+                                        File.AppendAllText(consoleLogPath, $"[{label}][{msg.Type}] {text}\n---END_MSG---\n");
+                                    }
+                                    catch { }
+                                }
+                            };
+                        }
+
+                        // Hook console on any popup/new page created by window.open so tests that
+                        // drive multi-window flows (P2P two-popup test) capture diagnostics from
+                        // every popup, not just the test-driver page.
+                        testableProject.BrowserContext.Page += (_, newPage) =>
+                        {
+                            try { HookPageConsole(newPage, newPage.Url); } catch { }
                         };
+
+                        // new page
+                        testableProject.Page = await testableProject.BrowserContext.NewPageAsync().ConfigureAwait(false);
+                        HookPageConsole(testableProject.Page, "main");
 
                         // go to the app's unit tests page.
                         var testPageUrl = new Uri(new Uri(baseUrl), testableProject.TestPage).ToString();
