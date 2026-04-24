@@ -44,6 +44,32 @@ public class SdComputeExtension : SpawnDev.WebTorrent.IWireExtension
     /// </summary>
     public P2PMessage? LastCapabilityResponse { get; private set; }
 
+    /// <summary>
+    /// Local BEP 44/46 DHT public key (raw 32-byte Ed25519). Advertised to the remote peer
+    /// in the BEP 10 extended handshake under key <c>sd_compute_dht_pubkey</c>, hex-encoded.
+    /// On the coordinator side this is <c>P2PStateManager.PublicKey</c> so workers can find
+    /// our DHT mutable-item channel. Set BEFORE <see cref="SetWire"/> runs or the handshake
+    /// will go out without the key. Workers generally leave this null - only coordinators
+    /// publish DHT state.
+    /// </summary>
+    public byte[]? DhtPublicKey { get; set; }
+
+    /// <summary>
+    /// Remote peer's advertised DHT public key (raw 32-byte Ed25519), if any. Populated from
+    /// the remote's <c>sd_compute_dht_pubkey</c> handshake entry. Null when the remote did
+    /// not advertise one (typical for workers). Subscribers call
+    /// <c>P2PStateManager.SubscribeAsync(RemoteDhtPublicKey)</c> on the value to receive
+    /// BEP 46 state updates from that peer.
+    /// </summary>
+    public byte[]? RemoteDhtPublicKey { get; private set; }
+
+    /// <summary>
+    /// Fired once the remote peer's DHT public key arrives in the extended handshake. The
+    /// byte[] is the raw 32-byte Ed25519 key. Used by <c>P2PCompute.JoinSwarmAsync</c> to
+    /// drive <c>StateManager.SubscribeAsync</c> after the sd_compute handshake settles.
+    /// </summary>
+    public event Action<byte[]>? OnRemoteDhtPublicKeyReceived;
+
     public SdComputeExtension(P2PTransport transport)
     {
         _transport = transport;
@@ -58,6 +84,16 @@ public class SdComputeExtension : SpawnDev.WebTorrent.IWireExtension
         _wire = wire;
         // Add our version to the extended handshake
         wire.ExtendedHandshake["sd_compute_version"] = P2PProtocol.Version;
+
+        // If we have a DHT identity to publish under, advertise it hex-encoded so the
+        // remote peer can subscribe to our BEP 46 mutable-item channel. Hex instead of
+        // raw bytes because bencoded extended-handshake values round-trip as strings
+        // cleanly; an ASCII-safe 64-char hex string avoids any binary-in-dict quirks.
+        if (DhtPublicKey != null && DhtPublicKey.Length == 32)
+        {
+            wire.ExtendedHandshake["sd_compute_dht_pubkey"] =
+                Convert.ToHexString(DhtPublicKey).ToLowerInvariant();
+        }
     }
 
     /// <summary>
@@ -94,6 +130,42 @@ public class SdComputeExtension : SpawnDev.WebTorrent.IWireExtension
         if (handshake.TryGetValue("sd_compute_version", out var version))
         {
             Console.WriteLine($"[sd_compute] Peer {_peerId} supports sd_compute version {version}");
+        }
+
+        // Extract remote DHT pubkey if advertised. Values come through as either string
+        // or byte[] depending on the wire's bencode decoder - handle both. Only raw 32-byte
+        // Ed25519 keys are honored; anything else is ignored and RemoteDhtPublicKey stays
+        // null so subscribers don't call SubscribeAsync with garbage.
+        if (handshake.TryGetValue("sd_compute_dht_pubkey", out var pubKeyObj))
+        {
+            byte[]? decoded = null;
+            try
+            {
+                decoded = pubKeyObj switch
+                {
+                    string s when s.Length == 64 => Convert.FromHexString(s),
+                    byte[] b when b.Length == 64 =>
+                        Convert.FromHexString(System.Text.Encoding.ASCII.GetString(b)),
+                    byte[] b when b.Length == 32 => b,
+                    _ => null,
+                };
+            }
+            catch (FormatException)
+            {
+                decoded = null;
+            }
+            if (decoded != null && decoded.Length == 32)
+            {
+                RemoteDhtPublicKey = decoded;
+                Console.WriteLine(
+                    $"[sd_compute] Peer {_peerId} advertised DHT pubkey " +
+                    $"{Convert.ToHexString(decoded)[..16].ToLowerInvariant()}...");
+                try { OnRemoteDhtPublicKeyReceived?.Invoke(decoded); }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[sd_compute] OnRemoteDhtPublicKeyReceived handler threw: {ex.Message}");
+                }
+            }
         }
 
         // Register peer in transport with a send function that uses the wire

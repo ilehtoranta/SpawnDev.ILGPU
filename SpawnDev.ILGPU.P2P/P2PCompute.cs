@@ -143,6 +143,24 @@ public class P2PCompute : IAsyncDisposable
         // Bridge for wiring sd_compute to peer connections
         var bridge = new P2PWebRtcBridge(transport);
 
+        // Build the BEP 46 state channel BEFORE the sd_compute factory runs so every
+        // new wire's extended handshake carries our DHT pubkey. Workers need this key
+        // to call StateManager.SubscribeAsync - without it the wire fix Riker shipped
+        // in rc.26 can't actually propagate state from coordinator to workers.
+        P2PStateManager? stateManager = null;
+        AgentChannel? agentChannel = null;
+        byte[]? coordDhtPubKey = null;
+        if (client.Dht != null)
+        {
+            var dhtSigner = new Ed25519Signer(crypto);
+            await dhtSigner.ImportKeyAsync(
+                await crypto.ExportPublicKeySpki(identity.Key),
+                await crypto.ExportPrivateKeyPkcs8(identity.Key));
+            agentChannel = new AgentChannel(client.Dht, dhtSigner);
+            coordDhtPubKey = agentChannel.PublicKey; // raw 32-byte Ed25519
+            stateManager = new P2PStateManager(agentChannel, coordinator);
+        }
+
         // Register sd_compute extension factory BEFORE creating swarm
         // This ensures the extension is in the BEP 10 handshake for every peer.
         // ProcessHandshakeData fires naturally, registering the peer in transport
@@ -150,6 +168,9 @@ public class P2PCompute : IAsyncDisposable
         client.UseExtension((wire) =>
         {
             var ext = new SdComputeExtension(transport);
+            // Advertise our DHT identity so workers can subscribe to our state channel.
+            // Must be set BEFORE SetWire, which is where the handshake dict is populated.
+            if (coordDhtPubKey != null) ext.DhtPublicKey = coordDhtPubKey;
             ext.SetWire(wire);
             return ext;
         });
@@ -198,17 +219,12 @@ public class P2PCompute : IAsyncDisposable
 
         var compute = new P2PCompute(client, identity, coordinator, accelerator, dispatcher, transport, bridge, context: context);
 
-        // Wire BEP 46 DHT state persistence if DHT is available
-        if (client.Dht != null)
+        // Attach the pre-built StateManager (created before the extension factory so its
+        // public key could ride the first extended handshake) and wire auto-publish.
+        if (stateManager != null)
         {
-            var signer = new Ed25519Signer(crypto);
-            await signer.ImportKeyAsync(
-                await crypto.ExportPublicKeySpki(identity.Key),
-                await crypto.ExportPrivateKeyPkcs8(identity.Key));
-            var channel = new AgentChannel(client.Dht, signer);
-            compute.StateManager = new P2PStateManager(channel, coordinator);
+            compute.StateManager = stateManager;
 
-            // Auto-publish state when peers join or leave
             coordinator.OnPeerJoined += async (_) =>
             {
                 if (compute.StateManager != null)
@@ -251,10 +267,35 @@ public class P2PCompute : IAsyncDisposable
         worker.Initialize(accelerator.Context, accelerator);
         transport.SetWorker(worker);
 
+        // Build the worker's BEP 46 state channel BEFORE the sd_compute factory runs so
+        // the per-wire handshake handler can subscribe the instant a coordinator
+        // advertises its DHT pubkey. Worker uses a fresh Ed25519 key - it's a subscriber,
+        // not a publisher, so its own channel is never read. Callers that also want the
+        // worker to publish state would override DhtPublicKey on the extension.
+        P2PStateManager? workerStateManager = null;
+        if (client.Dht != null)
+        {
+            var workerDhtSigner = new Ed25519Signer(crypto);
+            await workerDhtSigner.GenerateKeyAsync();
+            var workerChannel = new AgentChannel(client.Dht, workerDhtSigner);
+            workerStateManager = new P2PStateManager(workerChannel, coordinator);
+        }
+
         // Register sd_compute extension factory BEFORE joining
         client.UseExtension((wire) =>
         {
             var ext = new SdComputeExtension(transport);
+            // Subscribe to the coordinator's DHT channel the moment the extended
+            // handshake arrives with its pubkey. SubscribeAsync is fire-and-forget
+            // here because the DHT subscription is a polling loop under the hood -
+            // we don't need to await it inline.
+            if (workerStateManager != null)
+            {
+                ext.OnRemoteDhtPublicKeyReceived += (remotePubKey) =>
+                {
+                    _ = SubscribeToRemoteDhtAsync(workerStateManager, remotePubKey);
+                };
+            }
             ext.SetWire(wire);
             return ext;
         });
@@ -296,16 +337,13 @@ public class P2PCompute : IAsyncDisposable
 
         var compute = new P2PCompute(client, identity, coordinator, p2pAccel, dispatcher, transport, bridge, worker);
 
-        // Wire BEP 46 DHT state subscription if DHT is available
-        if (client.Dht != null)
+        // Attach the pre-built worker StateManager (constructed before the extension
+        // factory so the per-wire handshake handler could close over it) and wire
+        // the diagnostic loggers that used to be gated on an unreachable code path.
+        if (workerStateManager != null)
         {
-            var signer = new Ed25519Signer(crypto);
-            await signer.GenerateKeyAsync();
-            var channel = new AgentChannel(client.Dht, signer);
-            compute.StateManager = new P2PStateManager(channel, coordinator);
+            compute.StateManager = workerStateManager;
 
-            // Subscribe to coordinator's state updates via DHT
-            // The coordinator's public key is obtained from the magnet link or handshake
             compute.StateManager.OnStateUpdated += (state) =>
             {
                 Console.WriteLine($"[P2PCompute Join] DHT state update: coordinator={state.CoordinatorPeerId}, " +
@@ -430,6 +468,27 @@ public class P2PCompute : IAsyncDisposable
     /// the spec's bursty-sender prevention isn't needed. Browser peers are a no-op:
     /// libwebrtc doesn't expose per-association SCTP tunables and has better defaults.
     /// </summary>
+    /// <summary>
+    /// Subscribe the worker's state channel to a coordinator-advertised DHT pubkey.
+    /// Fire-and-forget from the sd_compute handshake handler - AgentChannel.SubscribeAsync
+    /// runs a background poll loop so the Task it returns never completes under normal
+    /// operation. Exceptions are logged and swallowed so a single bad pubkey doesn't
+    /// crash the handshake path.
+    /// </summary>
+    private static async Task SubscribeToRemoteDhtAsync(P2PStateManager stateManager, byte[] remotePubKey)
+    {
+        try
+        {
+            Console.WriteLine($"[P2PCompute] Subscribing worker state channel to coord DHT pubkey " +
+                $"{Convert.ToHexString(remotePubKey)[..16].ToLowerInvariant()}...");
+            await stateManager.SubscribeAsync(remotePubKey);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[P2PCompute] SubscribeAsync failed: {ex.Message}");
+        }
+    }
+
     private static void ConfigureHighThroughputSctp(WebTorrentClient client)
     {
         var previousFactory = client.PeerFactory;

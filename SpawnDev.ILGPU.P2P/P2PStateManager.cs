@@ -66,11 +66,14 @@ public class P2PStateManager
 
     /// <summary>
     /// Subscribe to state updates for this swarm (workers call this).
-    /// Recovers state from DHT after coordinator loss.
+    /// Recovers state from DHT after coordinator loss. <paramref name="pollIntervalMs"/>
+    /// controls how often the underlying BEP 46 subscription re-queries the DHT for
+    /// updated values; defaults to 30s which matches BEP 46 expected behaviour but is
+    /// overridable for tests or for latency-sensitive paths.
     /// </summary>
-    public async Task SubscribeAsync(byte[] swarmPublicKey)
+    public async Task SubscribeAsync(byte[] swarmPublicKey, int pollIntervalMs = 30000)
     {
-        await _channel.SubscribeAsync(swarmPublicKey);
+        await _channel.SubscribeAsync(swarmPublicKey, pollIntervalMs: pollIntervalMs);
     }
 
     /// <summary>
