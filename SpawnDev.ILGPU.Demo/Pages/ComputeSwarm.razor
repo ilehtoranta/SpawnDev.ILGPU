@@ -586,6 +586,16 @@
 </div>
 
 @code {
+    // Query-param test hooks — let a harness drive this page without human clicks so a
+    // two-popup automated test can prove the full browser-WebRTC + Blazor-dispatcher +
+    // real-kernel round-trip works end-to-end. Mirrors SpawnDev.RTC.Demo's ChatRoom
+    // pattern (WasmRTCTests.ChatDemo_TextChat_RoundTrips_BetweenTwoIframes).
+    [SupplyParameterFromQuery(Name = "testId")] public string? TestId { get; set; }
+    [SupplyParameterFromQuery(Name = "autoCreate")] public bool AutoCreate { get; set; }
+    [SupplyParameterFromQuery(Name = "autoBenchmark")] public bool AutoBenchmark { get; set; }
+
+    private bool _autoBenchmarkFired;
+
     private enum SwarmPageState { Loading, JoinConsent, Dashboard }
     private SwarmPageState _state = SwarmPageState.Loading;
     private P2PCompute? _compute;
@@ -1224,8 +1234,55 @@
         return "#ef4444";
     }
 
+    /// <summary>
+    /// Writes a value onto the test-harness window. Popups write to window.opener;
+    /// same-window navigations write to window.parent (which is the window itself,
+    /// harmless no-op). Try/catch because the target window may have been closed.
+    /// Mirrors SpawnDev.RTC.Demo ChatRoom.PublishToHarness.
+    /// </summary>
+    private void PublishToHarness(string key, object? value)
+    {
+        if (string.IsNullOrEmpty(TestId)) return;
+        try { JS.Set($"opener.{key}", value!); } catch { }
+        try { JS.Set($"parent.{key}", value!); } catch { }
+    }
+
+    /// <summary>
+    /// Publishes a snapshot of this page's compute state to the harness window so
+    /// the two-popup test can observe peer discovery + benchmark completion without
+    /// needing to drive the DOM directly.
+    /// </summary>
+    private void PublishTestState()
+    {
+        if (string.IsNullOrEmpty(TestId)) return;
+        try
+        {
+            var state = new
+            {
+                testId = TestId,
+                role = _compute?.Role.ToString() ?? "None",
+                peerCount = _compute?.PeerCount ?? 0,
+                joinLink = _compute?.JoinLink,
+                benchmarkRunning = _benchmarkRunning,
+                benchmarkComplete = _benchmarkComplete,
+                benchmarkSuccessCount = _benchmarkSuccessCount,
+                benchmarkTotalElements = _benchmarkTotalElements,
+                benchmarkTotalTime = _benchmarkTotalTime,
+                dispatchCount = _dispatchCount,
+            };
+            PublishToHarness($"computeSwarmState_{TestId}", state);
+        }
+        catch { /* harness window may have closed */ }
+    }
+
     protected override async Task OnInitializedAsync()
     {
+        if (!string.IsNullOrEmpty(TestId))
+        {
+            // Liveness ping — proves the page loaded AND the query parameter round-trip works.
+            PublishToHarness($"computeSwarmAlive_{TestId}", DateTime.UtcNow.Ticks);
+        }
+
         // Check if this is a join link (URL takes priority over saved state)
         var (hash, name) = P2PCompute.ParseJoinLink(Nav.Uri);
 
@@ -1291,12 +1348,33 @@
         else
         {
             _state = SwarmPageState.Dashboard;
+
+            // Test hook: auto-create a swarm if the harness asked for it (no hash in URL, not a joiner).
+            if (AutoCreate && _compute == null)
+            {
+                await CreateSwarm();
+            }
         }
 
         // Start refresh timer for live updates (all paths need this)
         _refreshTimer = new System.Timers.Timer(2000);
-        _refreshTimer.Elapsed += (s, e) => InvokeAsync(StateHasChanged);
+        _refreshTimer.Elapsed += async (s, e) =>
+        {
+            await InvokeAsync(StateHasChanged);
+            // Test hooks: publish state every tick, and fire auto-benchmark once peers connect.
+            PublishTestState();
+            if (AutoBenchmark && !_autoBenchmarkFired && !_benchmarkRunning
+                && _compute != null && _compute.Role == P2PRole.Coordinator && _compute.PeerCount > 0)
+            {
+                _autoBenchmarkFired = true;
+                await InvokeAsync(async () => await RunDistributedBenchmark());
+                PublishTestState();
+            }
+        };
         _refreshTimer.Start();
+
+        // Initial publish so the harness sees role/joinLink immediately after create/join completes.
+        PublishTestState();
     }
 
     /// <summary>

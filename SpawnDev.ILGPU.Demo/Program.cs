@@ -40,6 +40,7 @@ builder.Services.AddSingleton<WebGPUNoSubgroupsTests>();
 builder.Services.AddSingleton<WasmTests>();
 builder.Services.AddSingleton<WebGLTests>();
 builder.Services.AddSingleton<DefaultTests>();
+builder.Services.AddSingleton<WasmP2PBrowserTests>();
 
 
 builder.Services.AddScoped(sp => new HttpClient { BaseAddress = new Uri(builder.HostEnvironment.BaseAddress) });
