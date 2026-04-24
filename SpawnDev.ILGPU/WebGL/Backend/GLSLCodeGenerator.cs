@@ -1700,18 +1700,20 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         // that users trust as correct. No silent garbage.
         public virtual void GenerateCode(GenericAtomic value)
         {
-            throw new NotSupportedException(
-                $"Atomic operations ({value.Kind}) are not supported on the WebGL backend. " +
-                $"WebGL2 vertex shaders do not support atomic operations. " +
-                $"Use WebGPU, Wasm, or a desktop backend for kernels that require atomics.");
+            throw new SpawnDev.ILGPU.UnsupportedKernelFeatureException(
+                feature: $"Atomic.{value.Kind}",
+                backend: global::ILGPU.Runtime.AcceleratorType.WebGL,
+                remediation: "WebGL2 vertex shaders have no atomic operations. Use WebGPU, Wasm, or a desktop backend. " +
+                    "Consumers can declare RequiresAtomics = true on AcceleratorRequirements to filter WebGL at selection time.");
         }
 
         public virtual void GenerateCode(AtomicCAS value)
         {
-            throw new NotSupportedException(
-                $"AtomicCAS operations are not supported on the WebGL backend. " +
-                $"WebGL2 vertex shaders do not support atomic operations. " +
-                $"Use WebGPU, Wasm, or a desktop backend for kernels that require atomics.");
+            throw new SpawnDev.ILGPU.UnsupportedKernelFeatureException(
+                feature: "Atomic.CompareExchange",
+                backend: global::ILGPU.Runtime.AcceleratorType.WebGL,
+                remediation: "WebGL2 vertex shaders have no atomic operations. Use WebGPU, Wasm, or a desktop backend. " +
+                    "Consumers can declare RequiresAtomics = true on AcceleratorRequirements to filter WebGL at selection time.");
         }
 
         public virtual void GenerateCode(MemoryBarrier value)
