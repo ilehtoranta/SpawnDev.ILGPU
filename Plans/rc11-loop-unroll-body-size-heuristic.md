@@ -36,14 +36,23 @@ At `TryUnroll` (line 494) after `tripCount` resolves, measure body size before c
 
 ```csharp
 // Measure the IR-node count of one loop iteration.
+// BasicBlock.Count (BasicBlock.cs:354) gives per-block instruction count -
+// O(nBlocks) traversal, not O(nValues). Fast at IR-optimization time.
 var bodyBlocks = loopInfo.ComputeOrderedBodyBlocks();
-int bodyCost = bodyBlocks.Values.Count(); // or a weighted cost if simple counts mislead
+int bodyCost = 0;
+foreach (var block in bodyBlocks)
+    bodyCost += block.Count;
 
 var (unrolls, iterations) = ComputeUnrollFactor(
     tripCount.Value,
     maxUnrollFactor,
     bodyCost);
 ```
+
+Confirmed API surface:
+- `LoopInfo.ComputeOrderedBodyBlocks()` at `ILGPU/IR/Analyses/LoopInfo.cs:575` returns a `BasicBlockCollection<TOrder, TDirection>`.
+- `BasicBlock.Count` at `ILGPU/IR/BasicBlock.cs:354` returns the int count of values in the block.
+- `LoopSpecializer` already calls `ComputeOrderedBodyBlocks()` at `LoopUnrolling.cs:165`, so I am not adding a new traversal pass - just measuring during the already-existing body iteration.
 
 And extend `ComputeUnrollFactor` with a `bodyCost` parameter plus a total-code-size cap:
 
