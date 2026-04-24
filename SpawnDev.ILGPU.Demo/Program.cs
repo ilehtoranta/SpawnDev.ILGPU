@@ -4,11 +4,21 @@ using Microsoft.AspNetCore.Components.WebAssembly.Hosting;
 using SpawnDev.BlazorJS;
 using SpawnDev.BlazorJS.Cryptography;
 using SpawnDev.ILGPU.Demo;
+using SpawnDev.ILGPU.Demo.Shared;
 using SpawnDev.ILGPU.Demo.UnitTests;
+using SpawnDev.ILGPU.P2P;
 using SpawnDev.ILGPU.WebGPU.Backend;
 
 // Print build timestamp so we can verify we're running the right build via browser console
 Console.WriteLine($"[SpawnDev.ILGPU.Demo] Build: {BuildTimestamp.Value}");
+
+// Register the demo's P2P kernels with the P2PKernelSerializer allowlist at boot,
+// so any peer acting as coordinator OR worker can dispatch / resolve them without
+// each page having to remember to call RegisterKernelType first. Without this, the
+// worker's ResolveKernel fails, the dispatcher reports "execution failed on peer"
+// and retries into exhaustion — visible in the demo as a fast-fail on the first
+// distributed benchmark dispatch.
+P2PKernelSerializer.RegisterKernelType(typeof(P2PDemoKernels));
 
 var builder = WebAssemblyHostBuilder.CreateDefault(args);
 

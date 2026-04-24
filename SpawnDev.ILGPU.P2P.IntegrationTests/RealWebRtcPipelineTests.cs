@@ -75,6 +75,7 @@ public class RealWebRtcPipelineTests
         // SecurityTests.Security_KernelAllowlist_EnforcedOnResolve clears it.
         // Register before every test so run order cannot affect us.
         P2PKernelSerializer.RegisterKernelType(typeof(P2PTestKernels));
+        P2PKernelSerializer.RegisterKernelType(typeof(P2PDemoKernelsMirror));
     }
 
     /// <summary>
@@ -347,6 +348,191 @@ public class RealWebRtcPipelineTests
         Assert.That(violations, Is.EqualTo(0),
             $"10MB VectorAdd over WebRTC: {violations}/{n} violations. " +
             $"First at [{firstIdx}]: expected {firstExp}, got {firstAct}");
+    }
+
+    /// <summary>
+    /// Demo /compute benchmark path: byte-for-byte mirrors <c>ComputeSwarm.razor</c>'s
+    /// <c>RunDistributedBenchmark</c>. Input <c>data[j] = (float)j</c>, in-place
+    /// <c>MultiplyBy2</c> dispatch, worker returns the SAME bufferId back to the
+    /// coordinator, expect <c>result[j] == 2*j</c>. The demo only spot-checks two
+    /// elements (<c>[0]</c> and <c>[mid]</c>); this test verifies every element
+    /// bit-exact so any breakage in the ArrayView1D&lt;float, Stride1D.Dense&gt;
+    /// dispatch-serializer path or the in-place buffer-return path fails loudly
+    /// instead of sliding past a sparse sample.
+    /// </summary>
+    [Test, CancelAfter(120000), Retry(3)]
+    public async Task DemoPath_MultiplyBy2_InPlace_OverRealWebRtc_BitExact()
+    {
+        const int n = 4096;
+        var trackers = DispatchTrackers;
+        var crypto = new DotNetCrypto();
+
+        await using var coordClient = new SpawnDev.WebTorrent.WebTorrentClient();
+        await using var workerClient = new SpawnDev.WebTorrent.WebTorrentClient();
+
+        await using var coordinator = await P2PCompute.CreateSwarmAsync(
+            crypto, coordClient, "demo-multiplyby2-test", trackers: trackers);
+
+        using var workerContext = Context.Create(b => b.CPU());
+        using var workerAccelerator = workerContext.CreateCPUAccelerator(0);
+
+        await using var worker = await P2PCompute.JoinSwarmAsync(
+            crypto, workerClient, workerAccelerator, coordinator.MagnetLink!);
+
+        await WaitForPeersAsync(coordinator, worker);
+
+        var peerId = coordinator.Accelerator!.Peers.First().PeerId;
+        var workerBuffers = CollectWorkerBuffers(coordinator);
+
+        // Exactly the demo's input generation: data[j] = (float)j.
+        const string bufferId = "chunk_demo_mul2";
+        var data = new byte[n * 4];
+        for (int j = 0; j < n; j++)
+            BitConverter.TryWriteBytes(data.AsSpan(j * 4), (float)j);
+
+        // Exactly the demo's dispatch — single in-place tuple.
+        var method = typeof(P2PDemoKernelsMirror).GetMethod(nameof(P2PDemoKernelsMirror.MultiplyBy2))!;
+        var dispatchResult = await coordinator.Accelerator!.DispatchAsync(
+            method, n, (bufferId, data, 4));
+
+        Assert.That(dispatchResult.Success, Is.True,
+            $"Demo MultiplyBy2 dispatch failed: {dispatchResult.Error}");
+
+        // In-place: worker returns modified buffer under the same bufferId.
+        var resultBytes = await WaitForBufferAsync(workerBuffers, bufferId, BufferReturnTimeoutMs);
+        Assert.That(resultBytes.Length, Is.EqualTo(n * 4), "MultiplyBy2 in-place result wrong size");
+
+        // Full bit-exact verification — not just the demo's spot-check.
+        var actual = DataIntegrityHelper.BytesToFloats(resultBytes);
+        int badCount = 0;
+        int firstBadIdx = -1;
+        float firstBadExp = 0f, firstBadAct = 0f;
+        for (int j = 0; j < n; j++)
+        {
+            float want = 2f * j;
+            if (Math.Abs(actual[j] - want) > 0.001f)
+            {
+                if (firstBadIdx == -1) { firstBadIdx = j; firstBadExp = want; firstBadAct = actual[j]; }
+                badCount++;
+            }
+        }
+        Assert.That(badCount, Is.EqualTo(0),
+            $"Demo MultiplyBy2 bit-exact: {badCount}/{n} wrong. " +
+            $"First at [{firstBadIdx}]: expected {firstBadExp}, got {firstBadAct}");
+    }
+
+    /// <summary>
+    /// Demo /compute Mandelbrot path: byte-for-byte mirrors <c>ComputeSwarm.razor</c>'s
+    /// <c>RunDistributedMandelbrot</c>. Generates real/imag coordinate arrays for a
+    /// Mandelbrot region, dispatches <c>MandelbrotChunk</c> with the demo's exact
+    /// tuple shape <c>(outId, null, 4), (realId, realBytes, 4), (imagId, imagBytes, 4)</c>
+    /// — the first tuple carries <c>null</c> data so the worker allocates the output,
+    /// fills it with iteration counts, and pushes it back. Every iteration count is
+    /// verified against a CPU-side run of the identical kernel body. Proves the
+    /// output-only buffer pattern the demo depends on works end-to-end.
+    /// </summary>
+    [Test, CancelAfter(120000), Retry(3)]
+    public async Task DemoPath_MandelbrotChunk_OutputOnlyBuffer_OverRealWebRtc_BitExact()
+    {
+        // 64x64 pixel Mandelbrot strip (same geometry the demo uses per-peer at peerCount=8).
+        const int width = 64;
+        const int height = 64;
+        const int n = width * height;
+        var trackers = DispatchTrackers;
+        var crypto = new DotNetCrypto();
+
+        await using var coordClient = new SpawnDev.WebTorrent.WebTorrentClient();
+        await using var workerClient = new SpawnDev.WebTorrent.WebTorrentClient();
+
+        await using var coordinator = await P2PCompute.CreateSwarmAsync(
+            crypto, coordClient, "demo-mandelbrot-test", trackers: trackers);
+
+        using var workerContext = Context.Create(b => b.CPU());
+        using var workerAccelerator = workerContext.CreateCPUAccelerator(0);
+
+        await using var worker = await P2PCompute.JoinSwarmAsync(
+            crypto, workerClient, workerAccelerator, coordinator.MagnetLink!);
+
+        await WaitForPeersAsync(coordinator, worker);
+
+        var peerId = coordinator.Accelerator!.Peers.First().PeerId;
+        var workerBuffers = CollectWorkerBuffers(coordinator);
+
+        // Exactly the demo's coordinate generation.
+        var realCoords = new float[n];
+        var imagCoords = new float[n];
+        for (int y = 0; y < height; y++)
+            for (int x = 0; x < width; x++)
+            {
+                int idx = y * width + x;
+                realCoords[idx] = (x / (float)width) * 3.5f - 2.5f;
+                imagCoords[idx] = (y / (float)height) * 2.0f - 1.0f;
+            }
+        var realBytes = new byte[n * 4];
+        var imagBytes = new byte[n * 4];
+        Buffer.BlockCopy(realCoords, 0, realBytes, 0, realBytes.Length);
+        Buffer.BlockCopy(imagCoords, 0, imagBytes, 0, imagBytes.Length);
+
+        const string outId = "mand_out_demo";
+        const string realId = "mand_real_demo";
+        const string imagId = "mand_imag_demo";
+
+        // Demo's exact dispatch tuple shape: output-only first, then 2 inputs.
+        var method = typeof(P2PDemoKernelsMirror).GetMethod(nameof(P2PDemoKernelsMirror.MandelbrotChunk))!;
+        var dispatchResult = await coordinator.Accelerator!.DispatchAsync(
+            method, n,
+            (outId, null, 4),
+            (realId, realBytes, 4),
+            (imagId, imagBytes, 4));
+
+        Assert.That(dispatchResult.Success, Is.True,
+            $"Demo Mandelbrot dispatch failed: {dispatchResult.Error}");
+
+        var outBytes = await WaitForBufferAsync(workerBuffers, outId, BufferReturnTimeoutMs);
+        Assert.That(outBytes.Length, Is.EqualTo(n * 4), "Mandelbrot output wrong size");
+
+        // Decode iteration counts the way the demo does.
+        var actual = new int[n];
+        Buffer.BlockCopy(outBytes, 0, actual, 0, Math.Min(outBytes.Length, n * 4));
+
+        // CPU reference using the same kernel body. If ANY pixel disagrees with CPU,
+        // the worker-side path is broken - bit-exact required.
+        int badCount = 0;
+        int firstBadIdx = -1;
+        int firstBadExp = 0, firstBadAct = 0;
+        for (int i = 0; i < n; i++)
+        {
+            int expected = CpuReferenceMandelbrot(realCoords[i], imagCoords[i]);
+            if (actual[i] != expected)
+            {
+                if (firstBadIdx == -1) { firstBadIdx = i; firstBadExp = expected; firstBadAct = actual[i]; }
+                badCount++;
+            }
+        }
+        Assert.That(badCount, Is.EqualTo(0),
+            $"Demo Mandelbrot bit-exact: {badCount}/{n} pixels wrong. " +
+            $"First at [{firstBadIdx}]: expected iter={firstBadExp}, got {firstBadAct}");
+
+        // Also prove we're not just getting zeros back — the worker actually computed something.
+        int nonZero = 0;
+        for (int i = 0; i < n; i++) if (actual[i] > 0) nonZero++;
+        Assert.That(nonZero, Is.GreaterThan(n / 4),
+            $"Only {nonZero}/{n} pixels have non-zero iteration count - worker likely returned zeros.");
+    }
+
+    private static int CpuReferenceMandelbrot(float cr, float ci)
+    {
+        float zr = 0f, zi = 0f;
+        int iter = 0;
+        const int maxIter = 255;
+        while (zr * zr + zi * zi <= 4.0f && iter < maxIter)
+        {
+            float tmp = zr * zr - zi * zi + cr;
+            zi = 2.0f * zr * zi + ci;
+            zr = tmp;
+            iter++;
+        }
+        return iter;
     }
 
     /// <summary>
