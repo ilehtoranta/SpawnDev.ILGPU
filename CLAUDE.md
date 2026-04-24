@@ -104,6 +104,32 @@ These apply everywhere, not just one directory:
 - **T4 Templates in `ILGPU/`** — check for `.tt` before editing `.cs`. Generated files are silently overwritten.
 - **Device loss detection** — WebGPU: `device.lost` promise. WebGL: `webglcontextlost` event. Guards on dispatch/synchronize. Intentional disposal filtered out.
 
+## Capability Gating — `AcceleratorRequirements` (v4.9.2-rc.10+)
+
+Kernels that use features some backends can't implement (atomics on WebGL, native f64 on WebGPU) will silently produce wrong output if they land on the wrong backend. Declare requirements up-front and the selection path filters out incapable backends:
+
+```csharp
+using SpawnDev.ILGPU;
+
+using var acc = context.CreatePreferredAccelerator(
+    new AcceleratorRequirements
+    {
+        RequiresAtomics = true,        // rules out WebGL
+        RequiresFloat64Native = true,  // rules out WebGPU + WebGL
+    });
+// -> on desktop: CUDA > OpenCL > CPU
+// -> on browser with the above combo: only Wasm survives
+// -> throws NotSupportedException naming the requirements when nothing matches
+```
+
+Other entry points: `context.EnumerateCompatibleDevices(requirements)` for ranking your own pick, `device.Satisfies(requirements)` for per-device checks.
+
+**All flags** (mirror the 6-backend feature matrix below): `RequiresAtomics`, `RequiresSharedMemory`, `RequiresBarriers`, `RequiresFloat16`, `RequiresFloat16Native`, `RequiresFloat64`, `RequiresFloat64Native`, `RequiresInt64`, `RequiresInt64Native`, `RequiresInt64Atomics`, `RequiresSubGroups`. `AcceleratorRequirements.None` = no filter (accepts every backend).
+
+**Use this INSTEAD of hand-rolling `if (backend == WebGL) skip;` in consuming projects.** The logic belongs in one place; consumers declare intent, not backend knowledge.
+
+A follow-up pass will add `UnsupportedKernelFeatureException` thrown at kernel compile time (not just selection time) for the "consumer pinned to WebGL anyway" case. Not shipped yet.
+
 ## WebGPU Binding Limits (v4.9.1+)
 
 **maxStorageBuffersPerShaderStage = 10 (Chrome).** WebGPU spec minimum is 8. Every `ArrayView` kernel parameter uses one storage buffer binding. Scalar parameters (int, float, etc.) are packed into a single `_scalar_params` buffer.

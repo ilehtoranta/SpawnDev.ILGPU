@@ -102,10 +102,22 @@ public class P2PStateManager
             IsConnected = p.IsConnected,
         }).ToList();
 
+        // Resolve a stable identifier for "who is the coordinator" in the published state.
+        // Internally CoordinatorPeerId is null when self-is-coordinator (by design - the
+        // field names a REMOTE peer), but a published state consumed by workers needs SOME
+        // identifier. Use the coord's SwarmIdentity fingerprint (SHA-256 of its Ed25519
+        // public key) - stable across reconnects, same identity every time this node is
+        // the coordinator, survives WebTorrent peer-id rotation.
+        var coordId = !string.IsNullOrEmpty(_coordinator.CoordinatorPeerId)
+            ? _coordinator.CoordinatorPeerId
+            : _coordinator.Role == P2PRole.Coordinator
+                ? _coordinator.Identity?.Fingerprint ?? ""
+                : "";
+
         return new SwarmState
         {
             SwarmName = "compute-swarm",
-            CoordinatorPeerId = _coordinator.CoordinatorPeerId,
+            CoordinatorPeerId = coordId,
             Timestamp = DateTimeOffset.UtcNow,
             PeerCount = _coordinator.PeerCount,
             TotalTflops = _coordinator.TotalTflops,

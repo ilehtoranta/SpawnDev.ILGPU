@@ -327,15 +327,22 @@ public class Bep46PropagationTests
                 $"coord.StateManager.Sequence={coordinator.StateManager.Sequence} (<1). " +
                 "PublishStateAsync should have incremented it.");
 
-        // NOTE: SwarmState.CoordinatorPeerId currently comes through empty because
-        // P2PSwarmCoordinator never populates its own local peer id - the coord's PeerId
-        // is set only for REMOTE peers in _peers, not for "me". That's a separate library
-        // gap ("coord identifies self in published state"), not a regression introduced
-        // by the BEP 46 handshake plumbing. Tracked as a follow-up.
+        // CoordinatorPeerId should now be populated (fix landed in P2PStateManager after
+        // BEP 46 e2e shipped): when self-is-coordinator, BuildCurrentState substitutes
+        // the SwarmIdentity fingerprint for the previously-null value.
+        if (string.IsNullOrEmpty(state.CoordinatorPeerId))
+            throw new Exception(
+                "Received SwarmState.CoordinatorPeerId empty - coord's BuildCurrentState " +
+                "should substitute Identity.Fingerprint when self-is-coordinator.");
+        var expectedFingerprint = coordinator.Identity?.Fingerprint;
+        if (!string.IsNullOrEmpty(expectedFingerprint) && state.CoordinatorPeerId != expectedFingerprint)
+            throw new Exception(
+                $"CoordinatorPeerId mismatch. Expected fingerprint '{expectedFingerprint}', " +
+                $"got '{state.CoordinatorPeerId}'.");
 
         Console.WriteLine(
             $"[BEP46 e2e] PASS - received SwarmState via real DHT: " +
-            $"coord='{state.CoordinatorPeerId}' (empty = known follow-up), " +
+            $"coord='{state.CoordinatorPeerId[..Math.Min(16, state.CoordinatorPeerId.Length)]}...', " +
             $"peers={state.PeerCount}, updates={allUpdates.Count}, " +
             $"coord.Sequence={coordinator.StateManager.Sequence}");
     }
