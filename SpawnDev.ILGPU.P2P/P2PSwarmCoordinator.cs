@@ -110,8 +110,29 @@ public class P2PSwarmCoordinator : IAsyncDisposable
 
     /// <summary>
     /// Total available memory across all connected peers (bytes).
+    /// Saturates at <see cref="long.MaxValue"/> instead of throwing on overflow -
+    /// .NET 10's <c>IEnumerable&lt;long&gt;.Sum</c> uses checked arithmetic and will
+    /// throw <see cref="OverflowException"/> when a peer reports an extreme value
+    /// (e.g. a sentinel representing "unknown/unlimited"). Saturation keeps the
+    /// state-publish path alive and gives downstream aggregators a sensible ceiling.
     /// </summary>
-    public long TotalMemory => _peers.Values.Sum(p => p.Capabilities?.AvailableMemory ?? 0);
+    public long TotalMemory
+    {
+        get
+        {
+            long total = 0;
+            foreach (var peer in _peers.Values)
+            {
+                var mem = peer.Capabilities?.AvailableMemory ?? 0;
+                if (mem <= 0) continue;
+                // Saturate at long.MaxValue - defensive, since no realistic sum of peer
+                // memory should overflow Int64 (would require ~9 exabytes combined).
+                if (mem > long.MaxValue - total) return long.MaxValue;
+                total += mem;
+            }
+            return total;
+        }
+    }
 
     /// <summary>
     /// Get a snapshot of all connected peers (for state persistence).

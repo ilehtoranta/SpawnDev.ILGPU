@@ -1,4 +1,5 @@
 using System.Reflection;
+using ILGPU;
 using ILGPU.Runtime.CPU;
 using SpawnDev.ILGPU.P2P;
 using SpawnDev.UnitTesting;
@@ -21,15 +22,38 @@ namespace SpawnDev.ILGPU.DemoConsole.P2PTests;
 ///     the hook P2PCompute.JoinSwarmAsync uses to drive
 ///     <see cref="P2PStateManager.SubscribeAsync"/>.
 ///
-/// Pure in-process validation - no WebRTC, no tracker, no DHT. The full
-/// coord-to-worker state propagation over two real <see cref="DhtDiscovery"/>
-/// instances is blocked until WebTorrentClient exposes an EnsureDhtAsync that
-/// accepts <see cref="DhtOptions"/> (current lazy init pins both clients to
-/// port 6881, causing a bind collision on a second loopback client). Tracked in
-/// <c>_DevComms/global/geordi-to-riker-ensuredht-request-2026-04-24.md</c>.
+/// Pure in-process validation for the wire-format cases. The full coord-to-worker
+/// state propagation test (<see cref="BEP46_CoordinatorStateReachesWorkerViaRealDht"/>)
+/// uses two loopback <see cref="DhtDiscovery"/> instances bound to distinct ports
+/// via <c>WebTorrentClient.EnsureDhtAsync</c> (shipped in SpawnDev.WebTorrent
+/// 3.1.3-rc.28 on Geordi's request) and exercises the full BEP 44 put + get
+/// wire round-trip plus Ed25519 verify.
 /// </summary>
 public class Bep46PropagationTests
 {
+    private readonly SpawnDev.BlazorJS.Cryptography.IPortableCrypto _crypto;
+
+    public Bep46PropagationTests(SpawnDev.BlazorJS.Cryptography.IPortableCrypto crypto) => _crypto = crypto;
+
+    private const int DiscoveryTimeoutMs = 60000;
+
+    /// <summary>
+    /// Tracker list - mirrors RealWebRtcPipelineTests.DispatchTrackers: prefer local,
+    /// fall back to public. Kept local to this class so changes don't cross-contaminate.
+    /// </summary>
+    private static string[] Trackers => LocalTrackerFixture.IsAvailable
+        ? new[]
+        {
+            LocalTrackerFixture.GetTrackerUrl(),
+            "wss://hub.spawndev.com:44365/announce",
+            "wss://tracker.openwebtorrent.com",
+        }
+        : new[]
+        {
+            "wss://hub.spawndev.com:44365/announce",
+            "wss://tracker.openwebtorrent.com",
+        };
+
     [TestMethod]
     public Task SdCompute_Handshake_AdvertisesDhtPubkey_WhenSet()
     {
@@ -190,6 +214,146 @@ public class Bep46PropagationTests
         if (ext.RemoteDhtPublicKey != null)
             throw new Exception("RemoteDhtPublicKey populated despite handshake having no entry.");
         return Task.CompletedTask;
+    }
+
+    /// <summary>
+    /// End-to-end: real coord + real worker + real tracker + real WebRTC + real DHT.
+    /// Coord publishes <see cref="SwarmState"/> when a peer joins. Worker's subscription
+    /// (wired automatically when the sd_compute handshake arrives) polls the DHT for
+    /// that key. BEP 44 put -> BEP 44 get -> Ed25519 verify (the exact path Riker's
+    /// rc.26 fix unblocked) delivers the signed value. Worker's OnStateUpdated fires
+    /// with a deserialized SwarmState carrying the coord's peer id + non-zero peer count.
+    /// </summary>
+    [TestMethod(Timeout = 300000, RetryCount = 2)]
+    public async Task BEP46_CoordinatorStateReachesWorkerViaRealDht()
+    {
+        if (OperatingSystem.IsBrowser())
+            throw new UnsupportedTestException("DHT requires UDP - desktop only.");
+
+        P2PKernelSerializer.RegisterKernelType(typeof(P2PTestKernels));
+
+        await using var coordClient = new SpawnDev.WebTorrent.WebTorrentClient();
+        await using var workerClient = new SpawnDev.WebTorrent.WebTorrentClient();
+
+        // Distinct loopback ports via rc.28's EnsureDhtAsync. Picked high + adjacent so
+        // a second concurrent test-run on the same box can offset trivially if needed.
+        await coordClient.EnsureDhtAsync(new DhtOptions { Port = 56830 });
+        await workerClient.EnsureDhtAsync(new DhtOptions { Port = 56831 });
+        if (coordClient.Dht == null || workerClient.Dht == null)
+            throw new Exception(
+                "EnsureDhtAsync returned without initializing Dht - library regression or browser fallback.");
+
+        // Cross-bootstrap the two loopback DHTs so they see each other for BEP 44 put/get.
+        // Mirrors Riker's Bep46LoopbackTests pattern - FindNodeAsync teaches each side
+        // about the other via BEP 5 add-sender logic on the response.
+        var coordEp = new System.Net.IPEndPoint(System.Net.IPAddress.Loopback, 56830);
+        var workerEp = new System.Net.IPEndPoint(System.Net.IPAddress.Loopback, 56831);
+        await coordClient.Dht.FindNodeAsync(workerEp);
+        await workerClient.Dht.FindNodeAsync(coordEp);
+        await Task.Delay(500);
+
+        var bootDeadline = DateTime.UtcNow.AddSeconds(10);
+        while ((coordClient.Dht.NodeCount == 0 || workerClient.Dht.NodeCount == 0)
+               && DateTime.UtcNow < bootDeadline)
+            await Task.Delay(200);
+        if (coordClient.Dht.NodeCount == 0 || workerClient.Dht.NodeCount == 0)
+            throw new Exception(
+                $"DHT loopback bootstrap failed after 10s: coord.NodeCount={coordClient.Dht.NodeCount}, " +
+                $"worker.NodeCount={workerClient.Dht.NodeCount}.");
+
+        // Stand up the compute swarm. CreateSwarmAsync sees client.Dht != null and wires
+        // P2PStateManager; factory will advertise its DHT pubkey on every sd_compute handshake.
+        await using var coordinator = await P2PCompute.CreateSwarmAsync(
+            _crypto, coordClient, "bep46-propagation-test", trackers: Trackers);
+        if (coordinator.StateManager == null)
+            throw new Exception("Coordinator StateManager null - DHT wiring never fired.");
+
+        using var workerContext = Context.Create(b => b.CPU());
+        using var workerAccelerator = workerContext.CreateCPUAccelerator(0);
+
+        await using var worker = await P2PCompute.JoinSwarmAsync(
+            _crypto, workerClient, workerAccelerator, coordinator.MagnetLink!);
+        if (worker.StateManager == null)
+            throw new Exception("Worker StateManager null - DHT wiring never fired.");
+
+        // Hook state-update capture BEFORE peer discovery completes - the first published
+        // state is triggered by coord's OnPeerJoined event the moment the WebRTC peer
+        // connects, and we don't want to race that.
+        var stateReceived = new TaskCompletionSource<SwarmState>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var allUpdates = new System.Collections.Generic.List<SwarmState>();
+        worker.StateManager.OnStateUpdated += (state) =>
+        {
+            lock (allUpdates) allUpdates.Add(state);
+            stateReceived.TrySetResult(state);
+        };
+
+        // The per-wire auto-subscribe from sd_compute handshake uses the 30s default poll
+        // interval - too slow for a test. Fire a parallel subscription with a 1s poll on
+        // the same coord pubkey; whichever GET lands first delivers the update. Safe to
+        // have two subscriptions on the same key.
+        var coordDhtPubKey = coordinator.StateManager.PublicKey;
+        _ = Task.Run(() => worker.StateManager.SubscribeAsync(coordDhtPubKey, pollIntervalMs: 1000));
+
+        await WaitForPeersAsync(coordinator, worker);
+
+        // Coord's OnPeerJoined already fired by this point, which called PublishStateAsync.
+        // Give the subscription loop up to 45s to observe it - with a 1s poll the first
+        // GET should hit within ~2s, but we allow for DHT bootstrap + tracker signaling.
+        var completedTask = await Task.WhenAny(stateReceived.Task, Task.Delay(45000));
+        if (completedTask != stateReceived.Task)
+        {
+            throw new Exception(
+                $"Worker did not receive any BEP 46 state update within 45s. " +
+                $"coord.PeerCount={coordinator.PeerCount}, worker.PeerCount={worker.PeerCount}, " +
+                $"coord.StateManager.Sequence={coordinator.StateManager.Sequence}, " +
+                $"coord.Dht.NodeCount={coordClient.Dht.NodeCount}, " +
+                $"worker.Dht.NodeCount={workerClient.Dht.NodeCount}, " +
+                $"updates captured={allUpdates.Count}.");
+        }
+
+        var state = await stateReceived.Task;
+
+        // The receipt itself is the strongest assertion: OnStateUpdated only fires after
+        // BEP 46 GET -> Ed25519 verify -> JSON deserialize all succeed end-to-end. That
+        // path was silently broken in the library before SpawnDev.WebTorrent rc.26.
+        if (state.PeerCount < 1)
+            throw new Exception(
+                $"Received SwarmState.PeerCount={state.PeerCount} (<1). " +
+                "The update that triggered publication was a peer-joined event, so the " +
+                "state should show the joining peer.");
+        if (coordinator.StateManager.Sequence < 1)
+            throw new Exception(
+                $"coord.StateManager.Sequence={coordinator.StateManager.Sequence} (<1). " +
+                "PublishStateAsync should have incremented it.");
+
+        // NOTE: SwarmState.CoordinatorPeerId currently comes through empty because
+        // P2PSwarmCoordinator never populates its own local peer id - the coord's PeerId
+        // is set only for REMOTE peers in _peers, not for "me". That's a separate library
+        // gap ("coord identifies self in published state"), not a regression introduced
+        // by the BEP 46 handshake plumbing. Tracked as a follow-up.
+
+        Console.WriteLine(
+            $"[BEP46 e2e] PASS - received SwarmState via real DHT: " +
+            $"coord='{state.CoordinatorPeerId}' (empty = known follow-up), " +
+            $"peers={state.PeerCount}, updates={allUpdates.Count}, " +
+            $"coord.Sequence={coordinator.StateManager.Sequence}");
+    }
+
+    private static async Task WaitForPeersAsync(P2PCompute coordinator, P2PCompute worker)
+    {
+        var deadline = DateTime.UtcNow.AddMilliseconds(DiscoveryTimeoutMs);
+        while (DateTime.UtcNow < deadline &&
+               (coordinator.PeerCount == 0 || worker.PeerCount == 0))
+        {
+            await Task.Delay(250);
+        }
+        if (coordinator.PeerCount == 0 || worker.PeerCount == 0)
+        {
+            throw new Exception(
+                $"Peer discovery timed out after {DiscoveryTimeoutMs}ms. " +
+                $"coord.PeerCount={coordinator.PeerCount}, worker.PeerCount={worker.PeerCount}");
+        }
     }
 
     // ──────────────────────────────────────────────────────────────────────────
