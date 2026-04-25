@@ -90,6 +90,43 @@ namespace ILGPU.Backends.OpenCL
                 extensionBuilder.Append(extensionName);
                 extensionBuilder.AppendLine(" : enable");
             }
+
+            // Emit Float16 emulation helpers when cl_khr_fp16 is unavailable. CLTypeGenerator
+            // promotes Half values to float for compute, so Interop.FloatAsInt(Half) needs to
+            // convert the f32 VALUE back to the 16-bit Half BIT PATTERN (not the f32 bits),
+            // which AscendingHalf / DescendingHalf radix-sort encodings depend on. The
+            // hardware path uses `as_short(half)` directly when shader-fp16 is on; the
+            // emulated path calls these helpers instead. They are tiny, no-op when unused,
+            // and let the OpenCL compiler optimize out the call when inlined. Mirrors WGSL's
+            // _f32_to_f16 / _f16_to_f32 byte-for-byte (denormals flush to signed zero,
+            // overflow clamps exp to 31 with mantissa preserved so NaN stays NaN).
+            if (!Capabilities.Float16Native)
+            {
+                extensionBuilder.AppendLine();
+                extensionBuilder.AppendLine("// Float16 bit-conversion helpers (cl_khr_fp16 unavailable - Half emulated as float).");
+                extensionBuilder.AppendLine("static inline short _f32_to_half_bits(float f) {");
+                extensionBuilder.AppendLine("    int bits = as_int(f);");
+                extensionBuilder.AppendLine("    int sign = (bits >> 31) & 1;");
+                extensionBuilder.AppendLine("    int exp_raw = (bits >> 23) & 0xFF;");
+                extensionBuilder.AppendLine("    int exp_adj = exp_raw - 112;");
+                extensionBuilder.AppendLine("    int mant = (bits >> 13) & 0x3FF;");
+                extensionBuilder.AppendLine("    if (exp_adj < 0) { exp_adj = 0; mant = 0; }");
+                extensionBuilder.AppendLine("    if (exp_adj > 31) { exp_adj = 31; }");
+                extensionBuilder.AppendLine("    return (short)((sign << 15) | (exp_adj << 10) | mant);");
+                extensionBuilder.AppendLine("}");
+                extensionBuilder.AppendLine("static inline float _half_bits_to_f32(short h) {");
+                extensionBuilder.AppendLine("    int sign = (h >> 15) & 1;");
+                extensionBuilder.AppendLine("    int exp_raw = (h >> 10) & 0x1F;");
+                extensionBuilder.AppendLine("    int mant = h & 0x3FF;");
+                extensionBuilder.AppendLine("    int out_bits;");
+                extensionBuilder.AppendLine("    if (exp_raw == 0) { out_bits = sign << 31; }");
+                extensionBuilder.AppendLine("    else if (exp_raw == 0x1F) { out_bits = (sign << 31) | (0xFF << 23) | (mant << 13); }");
+                extensionBuilder.AppendLine("    else { out_bits = (sign << 31) | ((exp_raw + 112) << 23) | (mant << 13); }");
+                extensionBuilder.AppendLine("    return as_float(out_bits);");
+                extensionBuilder.AppendLine("}");
+                extensionBuilder.AppendLine();
+            }
+
             extensions = extensionBuilder.ToString();
         }
 

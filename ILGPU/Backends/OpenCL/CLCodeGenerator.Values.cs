@@ -225,16 +225,36 @@ namespace ILGPU.Backends.OpenCL
             var source = Load(value.Value);
             var target = Allocate(value);
 
-            using var statement = BeginStatement(target);
-            statement.AppendCommand(
+            // EMULATED HALF: when cl_khr_fp16 is unavailable, CLTypeGenerator promotes
+            // Half values to `float` for compute. The naive emit `as_short(float_value)`
+            // is invalid OpenCL (size mismatch: 4 vs 2 bytes) and even if accepted gives
+            // f32 IEEE-754 bits, not the 16-bit Half pattern. AscendingHalf radix-sort
+            // depends on the Half bit pattern (NumBits=16, sign at bit 15), so without
+            // this fix every Half radix sort silently produced wrong output.
+            // Use the _f32_to_half_bits helper emitted in the kernel prologue.
+            bool isEmulatedHalfSource =
+                value.Value.BasicValueType == BasicValueType.Float16
+                && !TypeGenerator.Capabilities.Float16Native;
+            if (isEmulatedHalfSource)
+            {
+                using var statement = BeginStatement(target);
+                statement.AppendCommand("_f32_to_half_bits");
+                statement.BeginArguments();
+                statement.AppendArgument(source);
+                statement.EndArguments();
+                return;
+            }
+
+            using var statement2 = BeginStatement(target);
+            statement2.AppendCommand(
                 value.BasicValueType == BasicValueType.Int64 ?
                 CLInstructions.DoubleAsLong :
                 value.BasicValueType == BasicValueType.Int32 ?
                 CLInstructions.FloatAsInt :
                 CLInstructions.HalfAsShort);
-            statement.BeginArguments();
-            statement.AppendArgument(source);
-            statement.EndArguments();
+            statement2.BeginArguments();
+            statement2.AppendArgument(source);
+            statement2.EndArguments();
         }
 
         /// <summary cref="IBackendCodeGenerator.GenerateCode(IntAsFloatCast)"/>
@@ -243,16 +263,30 @@ namespace ILGPU.Backends.OpenCL
             var source = Load(value.Value);
             var target = Allocate(value);
 
-            using var statement = BeginStatement(target);
-            statement.AppendCommand(
+            // Symmetric inverse of FloatAsIntCast for emulated Half.
+            bool isEmulatedHalfTarget =
+                value.BasicValueType == BasicValueType.Float16
+                && !TypeGenerator.Capabilities.Float16Native;
+            if (isEmulatedHalfTarget)
+            {
+                using var statement = BeginStatement(target);
+                statement.AppendCommand("_half_bits_to_f32");
+                statement.BeginArguments();
+                statement.AppendArgument(source);
+                statement.EndArguments();
+                return;
+            }
+
+            using var statement2 = BeginStatement(target);
+            statement2.AppendCommand(
                 value.BasicValueType == BasicValueType.Float64 ?
                 CLInstructions.LongAsDouble :
                 value.BasicValueType == BasicValueType.Float32 ?
                 CLInstructions.IntAsFloat :
                 CLInstructions.ShortAsHalf);
-            statement.BeginArguments();
-            statement.AppendArgument(source);
-            statement.EndArguments();
+            statement2.BeginArguments();
+            statement2.AppendArgument(source);
+            statement2.EndArguments();
         }
 
         /// <summary cref="IBackendCodeGenerator.GenerateCode(Predicate)"/>
