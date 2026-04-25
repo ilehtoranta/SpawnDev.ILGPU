@@ -618,10 +618,19 @@ namespace ILGPU.IR.Transformations
             bool FitsCap(int unrolls) =>
                 bodyCost <= 0 || (long)bodyCost * unrolls <= MaxTotalUnrolledBodyCost;
 
-            // Fully unroll small loops unconditionally — the loop-wrapper
-            // overhead elimination is unambiguously the fastest emit on every
-            // backend even when the inlined body is large.
-            if (tripCount <= maxUnrollFactor)
+            // Fully unroll small loops when the body fits the cost cap. The
+            // loop-wrapper-overhead elimination IS the fastest emit on every
+            // backend - but only when the inlined body doesn't blow up shader
+            // size. With WGSL/GLSL `[MethodImpl(NoInlining)]` helper-call
+            // emission (rc.18+), each call site produces ~16+ lines of
+            // alloca/arg setup. A 16-iteration loop with such a call body
+            // unrolls to 16 × ~33 = ~528 lines per loop - this pushes the
+            // Chrome WGSL validator (Tint) past the 30s test-runner timeout
+            // for kernels like Tuvok's Vp9Idct16x16 (~25-31s compile, flaky
+            // around the line). Apply the body-cost cap uniformly so
+            // small-loop full-unroll only fires when the resulting code
+            // fits the budget.
+            if (tripCount <= maxUnrollFactor && FitsCap(tripCount))
                 return (tripCount, 1);
 
             // Probe divisors largest-to-smallest. Accept the first divisor
