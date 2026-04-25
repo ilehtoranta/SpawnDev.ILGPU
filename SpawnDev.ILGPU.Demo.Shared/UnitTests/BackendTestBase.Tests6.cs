@@ -1484,6 +1484,285 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
         }
 
         /// <summary>
+        /// Mirrors Tuvok's `Vp9Idct16x16Kernel.Idct16Row` exact param shape: 16
+        /// `short` inputs + 16 `out int` outputs. Catches WGSL fn-def emission
+        /// bugs that only surface at production-scale signature size and the
+        /// short-input lowering path (Int16 IR → packed sub-word storage in
+        /// WGSL → distinct codegen vs simple int params).
+        /// </summary>
+        [TestMethod]
+        public async Task NoInliningIdct16RowShapeHelperBitExactTest() => await RunTest(async accelerator =>
+        {
+            using var inputBuf = accelerator.Allocate1D<short>(16);
+            using var outputBuf = accelerator.Allocate1D<int>(16);
+            short[] inputs = { 100, 200, 300, 400, 500, 600, 700, 800, 900, 1000, 1100, 1200, 1300, 1400, 1500, 1600 };
+            inputBuf.CopyFromCPU(inputs);
+
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<short>, ArrayView<int>>(
+                Idct16RowShapeHelperKernel);
+            try
+            {
+                kernel(1, inputBuf.View, outputBuf.View);
+                await accelerator.SynchronizeAsync();
+            }
+            catch (Exception ex)
+            {
+                var diag = accelerator.AcceleratorType == AcceleratorType.WebGPU
+                    ? $"\n--- WGSL START ---\n{SpawnDev.ILGPU.WebGPU.Backend.WebGPUBackend.LastGeneratedWGSL ?? "<null>"}\n--- WGSL END ---"
+                    : "";
+                throw new Exception($"Idct16RowShape compile/dispatch failed: {ex.Message}{diag}");
+            }
+
+            var result = await outputBuf.CopyToHostAsync<int>();
+            for (int i = 0; i < 16; i++)
+            {
+                int expected = inputs[i] * 2 + (i + 1);
+                if (result[i] != expected)
+                {
+                    var diag = accelerator.AcceleratorType == AcceleratorType.WebGPU
+                        ? $"\n--- WGSL START ---\n{SpawnDev.ILGPU.WebGPU.Backend.WebGPUBackend.LastGeneratedWGSL ?? "<null>"}\n--- WGSL END ---"
+                        : "";
+                    throw new Exception($"Idct16RowShape[{i}] expected {expected} got {result[i]} (input {inputs[i]}){diag}");
+                }
+            }
+        });
+
+        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+        private static void Idct16RowShapeHelper(
+            short i0,  short i1,  short i2,  short i3,
+            short i4,  short i5,  short i6,  short i7,
+            short i8,  short i9,  short i10, short i11,
+            short i12, short i13, short i14, short i15,
+            out int o0,  out int o1,  out int o2,  out int o3,
+            out int o4,  out int o5,  out int o6,  out int o7,
+            out int o8,  out int o9,  out int o10, out int o11,
+            out int o12, out int o13, out int o14, out int o15)
+        {
+            // Each output uses its short input via a (short)-narrowing arithmetic
+            // sequence so the IR shape (Int16 input ops + ConvertValue narrowing
+            // + ref-int Store via Pointer<int>) matches Idct16Row's actual
+            // mid-stage butterfly. Output value: i*2 + (idx+1).
+            o0  = i0  * 2 + 1;
+            o1  = i1  * 2 + 2;
+            o2  = i2  * 2 + 3;
+            o3  = i3  * 2 + 4;
+            o4  = i4  * 2 + 5;
+            o5  = i5  * 2 + 6;
+            o6  = i6  * 2 + 7;
+            o7  = i7  * 2 + 8;
+            o8  = i8  * 2 + 9;
+            o9  = i9  * 2 + 10;
+            o10 = i10 * 2 + 11;
+            o11 = i11 * 2 + 12;
+            o12 = i12 * 2 + 13;
+            o13 = i13 * 2 + 14;
+            o14 = i14 * 2 + 15;
+            o15 = i15 * 2 + 16;
+        }
+
+        static void Idct16RowShapeHelperKernel(
+            Index1D index, ArrayView<short> input, ArrayView<int> output)
+        {
+            Idct16RowShapeHelper(
+                input[0],  input[1],  input[2],  input[3],
+                input[4],  input[5],  input[6],  input[7],
+                input[8],  input[9],  input[10], input[11],
+                input[12], input[13], input[14], input[15],
+                out int o0,  out int o1,  out int o2,  out int o3,
+                out int o4,  out int o5,  out int o6,  out int o7,
+                out int o8,  out int o9,  out int o10, out int o11,
+                out int o12, out int o13, out int o14, out int o15);
+            output[0]  = o0;  output[1]  = o1;  output[2]  = o2;  output[3]  = o3;
+            output[4]  = o4;  output[5]  = o5;  output[6]  = o6;  output[7]  = o7;
+            output[8]  = o8;  output[9]  = o9;  output[10] = o10; output[11] = o11;
+            output[12] = o12; output[13] = o13; output[14] = o14; output[15] = o15;
+        }
+
+        /// <summary>
+        /// Stricter version of <see cref="NoInliningIdct16RowShapeHelperBitExactTest"/>:
+        /// the helper body now does Tuvok's exact `Idct16Row` arithmetic shape -
+        /// `(short)((x * cos1 - y * cos2 + (1 &lt;&lt; 13)) >> 14)` butterfly
+        /// pattern. Q14 narrowing dominates Tuvok's kernel and was the
+        /// inner-loop trigger of the WGSL `i32 << i32` codegen bug. Expects
+        /// bit-exact match against a CPU reference computed in C#.
+        /// </summary>
+        [TestMethod]
+        public async Task NoInliningIdct16RowQ14NarrowHelperBitExactTest() => await RunTest(async accelerator =>
+        {
+            using var inputBuf = accelerator.Allocate1D<short>(16);
+            using var outputBuf = accelerator.Allocate1D<int>(16);
+            short[] inputs = { 100, -200, 300, -400, 500, -600, 700, -800, 900, -1000, 1100, -1200, 1300, -1400, 1500, -1600 };
+            inputBuf.CopyFromCPU(inputs);
+
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<short>, ArrayView<int>>(
+                Idct16RowQ14NarrowKernel);
+            try
+            {
+                kernel(1, inputBuf.View, outputBuf.View);
+                await accelerator.SynchronizeAsync();
+            }
+            catch (Exception ex)
+            {
+                var diag = accelerator.AcceleratorType == AcceleratorType.WebGPU
+                    ? $"\n--- WGSL START ---\n{SpawnDev.ILGPU.WebGPU.Backend.WebGPUBackend.LastGeneratedWGSL ?? "<null>"}\n--- WGSL END ---"
+                    : "";
+                throw new Exception($"Idct16RowQ14Narrow compile/dispatch failed: {ex.Message}{diag}");
+            }
+
+            var result = await outputBuf.CopyToHostAsync<int>();
+            // CPU reference uses identical arithmetic to the helper.
+            short[] expected = new short[16];
+            ComputeQ14NarrowReference(inputs, expected);
+            for (int i = 0; i < 16; i++)
+            {
+                if (result[i] != expected[i])
+                {
+                    var diag = accelerator.AcceleratorType == AcceleratorType.WebGPU
+                        ? $"\n--- WGSL START ---\n{SpawnDev.ILGPU.WebGPU.Backend.WebGPUBackend.LastGeneratedWGSL ?? "<null>"}\n--- WGSL END ---"
+                        : "";
+                    throw new Exception($"Idct16RowQ14Narrow[{i}] expected {expected[i]} got {result[i]} (input {inputs[i]}){diag}");
+                }
+            }
+        });
+
+        static void ComputeQ14NarrowReference(short[] inputs, short[] outputs)
+        {
+            const int CosA = 11585, CosB = 15137, CosC = 6270, CosD = 16069;
+            for (int i = 0; i < 16; i++)
+            {
+                short a = inputs[i];
+                short b = inputs[(i + 1) % 16];
+                int t = a * CosA - b * CosB + a * CosC + b * CosD;
+                outputs[i] = (short)((t + (1 << 13)) >> 14);
+            }
+        }
+
+        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+        private static void Idct16RowQ14NarrowHelper(
+            short i0,  short i1,  short i2,  short i3,
+            short i4,  short i5,  short i6,  short i7,
+            short i8,  short i9,  short i10, short i11,
+            short i12, short i13, short i14, short i15,
+            out short o0,  out short o1,  out short o2,  out short o3,
+            out short o4,  out short o5,  out short o6,  out short o7,
+            out short o8,  out short o9,  out short o10, out short o11,
+            out short o12, out short o13, out short o14, out short o15)
+        {
+            const int CosA = 11585, CosB = 15137, CosC = 6270, CosD = 16069;
+            o0  = (short)(((i0  * CosA - i1  * CosB + i0  * CosC + i1  * CosD) + (1 << 13)) >> 14);
+            o1  = (short)(((i1  * CosA - i2  * CosB + i1  * CosC + i2  * CosD) + (1 << 13)) >> 14);
+            o2  = (short)(((i2  * CosA - i3  * CosB + i2  * CosC + i3  * CosD) + (1 << 13)) >> 14);
+            o3  = (short)(((i3  * CosA - i4  * CosB + i3  * CosC + i4  * CosD) + (1 << 13)) >> 14);
+            o4  = (short)(((i4  * CosA - i5  * CosB + i4  * CosC + i5  * CosD) + (1 << 13)) >> 14);
+            o5  = (short)(((i5  * CosA - i6  * CosB + i5  * CosC + i6  * CosD) + (1 << 13)) >> 14);
+            o6  = (short)(((i6  * CosA - i7  * CosB + i6  * CosC + i7  * CosD) + (1 << 13)) >> 14);
+            o7  = (short)(((i7  * CosA - i8  * CosB + i7  * CosC + i8  * CosD) + (1 << 13)) >> 14);
+            o8  = (short)(((i8  * CosA - i9  * CosB + i8  * CosC + i9  * CosD) + (1 << 13)) >> 14);
+            o9  = (short)(((i9  * CosA - i10 * CosB + i9  * CosC + i10 * CosD) + (1 << 13)) >> 14);
+            o10 = (short)(((i10 * CosA - i11 * CosB + i10 * CosC + i11 * CosD) + (1 << 13)) >> 14);
+            o11 = (short)(((i11 * CosA - i12 * CosB + i11 * CosC + i12 * CosD) + (1 << 13)) >> 14);
+            o12 = (short)(((i12 * CosA - i13 * CosB + i12 * CosC + i13 * CosD) + (1 << 13)) >> 14);
+            o13 = (short)(((i13 * CosA - i14 * CosB + i13 * CosC + i14 * CosD) + (1 << 13)) >> 14);
+            o14 = (short)(((i14 * CosA - i15 * CosB + i14 * CosC + i15 * CosD) + (1 << 13)) >> 14);
+            o15 = (short)(((i15 * CosA - i0  * CosB + i15 * CosC + i0  * CosD) + (1 << 13)) >> 14);
+        }
+
+        static void Idct16RowQ14NarrowKernel(
+            Index1D index, ArrayView<short> input, ArrayView<int> output)
+        {
+            Idct16RowQ14NarrowHelper(
+                input[0],  input[1],  input[2],  input[3],
+                input[4],  input[5],  input[6],  input[7],
+                input[8],  input[9],  input[10], input[11],
+                input[12], input[13], input[14], input[15],
+                out short o0,  out short o1,  out short o2,  out short o3,
+                out short o4,  out short o5,  out short o6,  out short o7,
+                out short o8,  out short o9,  out short o10, out short o11,
+                out short o12, out short o13, out short o14, out short o15);
+            output[0]  = o0;  output[1]  = o1;  output[2]  = o2;  output[3]  = o3;
+            output[4]  = o4;  output[5]  = o5;  output[6]  = o6;  output[7]  = o7;
+            output[8]  = o8;  output[9]  = o9;  output[10] = o10; output[11] = o11;
+            output[12] = o12; output[13] = o13; output[14] = o14; output[15] = o15;
+        }
+
+        /// <summary>
+        /// Closer-to-production test: kernel calls the same `Idct16Row`-shape
+        /// helper TWICE (mirroring `Vp9Idct16x16Kernel`'s row-pass + column-
+        /// pass pattern that hits the helper at 32 call sites total). Catches
+        /// any bug that only surfaces under repeated calls (per-call state
+        /// reset, scratch overlap, repeated function name mangling).
+        /// </summary>
+        [TestMethod]
+        public async Task NoInliningIdct16RowQ14MultiCallHelperBitExactTest() => await RunTest(async accelerator =>
+        {
+            using var inputBuf = accelerator.Allocate1D<short>(16);
+            using var outputBuf = accelerator.Allocate1D<int>(32);
+            short[] inputs = { 100, -200, 300, -400, 500, -600, 700, -800, 900, -1000, 1100, -1200, 1300, -1400, 1500, -1600 };
+            inputBuf.CopyFromCPU(inputs);
+
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<short>, ArrayView<int>>(
+                Idct16RowQ14MultiCallKernel);
+            try
+            {
+                kernel(1, inputBuf.View, outputBuf.View);
+                await accelerator.SynchronizeAsync();
+            }
+            catch (Exception ex)
+            {
+                var diag = accelerator.AcceleratorType == AcceleratorType.WebGPU
+                    ? $"\n--- WGSL START ---\n{SpawnDev.ILGPU.WebGPU.Backend.WebGPUBackend.LastGeneratedWGSL ?? "<null>"}\n--- WGSL END ---"
+                    : "";
+                throw new Exception($"Idct16RowQ14MultiCall compile/dispatch failed: {ex.Message}{diag}");
+            }
+
+            var result = await outputBuf.CopyToHostAsync<int>();
+            short[] expected = new short[16];
+            ComputeQ14NarrowReference(inputs, expected);
+            // Both call sites use the same input slice and should produce identical results.
+            for (int i = 0; i < 16; i++)
+            {
+                if (result[i] != expected[i])
+                    throw new Exception($"MultiCall pass1 [{i}] expected {expected[i]} got {result[i]}");
+                if (result[i + 16] != expected[i])
+                    throw new Exception($"MultiCall pass2 [{i}] expected {expected[i]} got {result[i + 16]}");
+            }
+        });
+
+        static void Idct16RowQ14MultiCallKernel(
+            Index1D index, ArrayView<short> input, ArrayView<int> output)
+        {
+            // Pass 1
+            Idct16RowQ14NarrowHelper(
+                input[0],  input[1],  input[2],  input[3],
+                input[4],  input[5],  input[6],  input[7],
+                input[8],  input[9],  input[10], input[11],
+                input[12], input[13], input[14], input[15],
+                out short a0,  out short a1,  out short a2,  out short a3,
+                out short a4,  out short a5,  out short a6,  out short a7,
+                out short a8,  out short a9,  out short a10, out short a11,
+                out short a12, out short a13, out short a14, out short a15);
+            output[0]  = a0;  output[1]  = a1;  output[2]  = a2;  output[3]  = a3;
+            output[4]  = a4;  output[5]  = a5;  output[6]  = a6;  output[7]  = a7;
+            output[8]  = a8;  output[9]  = a9;  output[10] = a10; output[11] = a11;
+            output[12] = a12; output[13] = a13; output[14] = a14; output[15] = a15;
+
+            // Pass 2 - same inputs, expect identical results
+            Idct16RowQ14NarrowHelper(
+                input[0],  input[1],  input[2],  input[3],
+                input[4],  input[5],  input[6],  input[7],
+                input[8],  input[9],  input[10], input[11],
+                input[12], input[13], input[14], input[15],
+                out short b0,  out short b1,  out short b2,  out short b3,
+                out short b4,  out short b5,  out short b6,  out short b7,
+                out short b8,  out short b9,  out short b10, out short b11,
+                out short b12, out short b13, out short b14, out short b15);
+            output[16] = b0;  output[17] = b1;  output[18] = b2;  output[19] = b3;
+            output[20] = b4;  output[21] = b5;  output[22] = b6;  output[23] = b7;
+            output[24] = b8;  output[25] = b9;  output[26] = b10; output[27] = b11;
+            output[28] = b12; output[29] = b13; output[30] = b14; output[31] = b15;
+        }
+
+        /// <summary>
         /// Verifies that `(short)intValue` truncates the high bits and sign-extends
         /// from bit 15 — the C# / IL semantic for `conv.i2`. The Wasm backend
         /// previously omitted this conversion (both source and dst lower to i32 in

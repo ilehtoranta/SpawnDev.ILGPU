@@ -1173,6 +1173,17 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 // WGSL has no copysign builtin; emulate: sign(right) * abs(left)
                 AppendLine($"{target} = sign({right}) * abs({left});");
             }
+            else if (value.Kind == BinaryArithmeticKind.Shl || value.Kind == BinaryArithmeticKind.Shr)
+            {
+                // WGSL shift operators require the right operand to be u32 -
+                // `i32 << i32` fails to compile with "no matching overload".
+                // Wrap in u32(...). Mirrors the kernel-side handler at
+                // WGSLKernelFunctionGenerator line 4778-4779; needed here for
+                // the helper fn-def emission path (which uses this base
+                // handler unmodified). Triggered by `i * 2` (Tuvok's iDCT
+                // 16x16 helper has dozens of shifts in the butterfly).
+                AppendLine($"{target} = {left} {op} u32({right});");
+            }
             else
             {
                 AppendLine($"{target} = {left} {op} {right};");
