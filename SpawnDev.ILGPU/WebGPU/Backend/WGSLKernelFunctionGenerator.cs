@@ -5249,6 +5249,28 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 AppendLine($"{prefix}{target} = {left} {op} {right};");
             }
         }
+        public override void GenerateCode(AddressSpaceCast value)
+        {
+            var target = Load(value);
+            var source = Load(value.Value);
+            // When the source is a kernel-side local alloca, the kernel emits
+            // it as `var v_X : i32;` (a function-scope value, not a pointer).
+            // To produce a real WGSL pointer for the cast target — needed when
+            // the cast feeds a fn-def call expecting `ptr<function, T>` — we
+            // must take the address with `&v_X`. Without this, the call sees
+            // the alloca's *value* (typically zero-initialized) and the
+            // helper's `*ptr = ...` writes through a non-pointer in WGSL,
+            // producing a type error or silent wrong output.
+            if (target.Type.StartsWith("ptr<") && _localAllocaVarNames.Contains(source.Name))
+            {
+                if (declaredVariables.Add(target.Name))
+                    AppendLine($"let {target} = &{source}; // addrSpaceCast (alloca address)");
+                return;
+            }
+            // Fall through to base for non-alloca / non-ptr cases.
+            base.GenerateCode(value);
+        }
+
         public override void GenerateCode(ConvertValue value)
         {
             var target = Load(value);

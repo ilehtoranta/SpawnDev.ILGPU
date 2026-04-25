@@ -1441,24 +1441,10 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
         {
             using var outputBuf = accelerator.Allocate1D<int>(2);
 
-            try
-            {
-                var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<int>>(
-                    NoInliningVoidHelperKernel);
-                kernel(1, outputBuf.View);
-                await accelerator.SynchronizeAsync();
-            }
-            catch (Exception)
-            {
-                // Capture WGSL on WebGPU failure for diagnosis. Re-throw with the
-                // WGSL appended to the message so PMT failure output shows it.
-                if (accelerator.AcceleratorType == AcceleratorType.WebGPU)
-                {
-                    var wgsl = SpawnDev.ILGPU.WebGPU.Backend.WebGPUBackend.LastGeneratedWGSL ?? "<null>";
-                    throw new Exception($"WebGPU compile failed. Last WGSL:\n--- WGSL START ---\n{wgsl}\n--- WGSL END ---");
-                }
-                throw;
-            }
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<int>>(
+                NoInliningVoidHelperKernel);
+            kernel(1, outputBuf.View);
+            await accelerator.SynchronizeAsync();
 
             var result = await outputBuf.CopyToHostAsync<int>();
             // VoidPairWriter assigns 42 + 99 + 7 = 148 (sum) and 99 - 42 = 57 (diff).

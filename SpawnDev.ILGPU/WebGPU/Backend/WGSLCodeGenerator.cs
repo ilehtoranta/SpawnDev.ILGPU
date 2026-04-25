@@ -801,13 +801,19 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         /// </summary>
         protected void GenerateCodeFor(Value value)
         {
-            // Skip void values and already-handled values
+            // Skip void values that have no observable side effects. The
+            // exclusions list contains every void-typed IR node whose handler
+            // emits code: terminators, side-effecting memory ops, and any
+            // method call (void-returning helpers can still write through
+            // ref/out pointer params and must be visited so the call site is
+            // emitted; this was the rc.16 fn-def-emission gap).
             if (value.Type.IsVoidType &&
                 !(value is TerminatorValue) &&
                 !(value is Store) &&
                 !(value is MemoryBarrier) &&
                 !(value is global::ILGPU.IR.Values.Barrier) &&
-                !(value is PredicateBarrier))
+                !(value is PredicateBarrier) &&
+                !(value is MethodCall))
                 return;
 
             // Debug logging to trace instruction generation
