@@ -1,4 +1,27 @@
-# rc.11 — IR LoopUnrolling body-size heuristic
+# rc.11 — IR LoopUnrolling body-size heuristic — SHIPPED IN rc.12
+
+**Status: COMPLETE.** Shipped 2026-04-25 in commit `767f826` as `SpawnDev.ILGPU 4.9.2-rc.12`
+(prerelease, on nuget.org).
+
+The implementation matched the design captured below. `MaxTotalUnrolledBodyCost = 320`,
+applied only for `tripCount > maxUnrollFactor`; small loops always full-unroll. Verified
+on quiet-machine PMT (Tuvok paused his concurrent Codecs sweep for the window):
+`LocalMemoryRepro` 18 / 1 / 2 in 18 s (1 fail = pre-existing WebGL arch ceiling),
+`WasmTests.RadixSort*` 18 / 0 / 0 in 7 m 33 s, `AlgorithmRadixSort + Reduce + Scan`
+78 / 0 / 0 in 2 m 33 s. Zero regressions across 114 tests.
+
+The "2026-04-24 late-evening tuning attempt (reverted)" section below documents the
+naive cap=256 attempt that turned out to be contaminated by concurrent CPU load (per
+`feedback_wasm_radix_spinwait_flaky_under_cpu_load.md`). The cap=320 that actually
+shipped is conceptually the same heuristic with the small-loop full-unroll branch
+left unconditional — the bug in the earlier attempt was applying the cap to small
+loops too, which forced (32, 2) instead of (64, 1) and made Chrome run those kernels
+slower (3 s → 31 s on the same hardware). Lesson preserved in the comment header on
+`LoopUnrolling.MaxTotalUnrolledBodyCost`.
+
+Original design notes preserved below for archaeology.
+
+---
 
 ## Problem
 
