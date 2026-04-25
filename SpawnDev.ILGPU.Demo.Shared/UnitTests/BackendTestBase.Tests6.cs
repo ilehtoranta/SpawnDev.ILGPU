@@ -1392,6 +1392,43 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                 throw new Exception($"GroupReduceHalf failed. Expected {expectedSum}, got {(float)result[0]}");
         });
 
+        /// <summary>
+        /// Verifies that a method marked [MethodImpl(MethodImplOptions.NoInlining)] is
+        /// actually NOT inlined by the IR Inliner — the kernel IR should retain a
+        /// MethodCall, and each backend should emit a real fn definition + call site
+        /// rather than 2 inlined bodies. This exercises the WGSL fn-definition path
+        /// that fixes the Vp9Idct16x16Kernel compile cliff (rc.14, Bug 1 from
+        /// tuvok-to-geordi-idct16x16-two-bugs-2026-04-25.md). Same code path also
+        /// covers CUDA / OpenCL / CPU / Wasm / WebGL via their normal MethodCall
+        /// codegen.
+        /// </summary>
+        [TestMethod]
+        public async Task NoInliningHelperEmitsFunctionCallTest() => await RunTest(async accelerator =>
+        {
+            using var outputBuf = accelerator.Allocate1D<int>(1);
+
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<int>>(
+                NoInliningHelperKernel);
+            kernel(1, outputBuf.View);
+            await accelerator.SynchronizeAsync();
+
+            var result = await outputBuf.CopyToHostAsync<int>();
+            // SquareSum(3, 4) + SquareSum(5, 6) = (9 + 16) + (25 + 36) = 25 + 61 = 86
+            const int expected = 86;
+            if (result[0] != expected)
+                throw new Exception($"NoInliningHelper failed. Expected {expected}, got {result[0]}");
+        });
+
+        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+        private static int NoInliningSquareSumHelper(int a, int b) => a * a + b * b;
+
+        static void NoInliningHelperKernel(Index1D index, ArrayView<int> output)
+        {
+            int x = NoInliningSquareSumHelper(3, 4);
+            int y = NoInliningSquareSumHelper(5, 6);
+            output[0] = x + y;
+        }
+
         #region Algorithm Kernel Methods
 
 

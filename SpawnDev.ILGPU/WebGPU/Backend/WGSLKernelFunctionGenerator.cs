@@ -1813,8 +1813,58 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 return;
             }
 
+            // Method has an implementation but isn't a registered inlinable helper —
+            // emit a real WGSL function call to the fn definition that
+            // WGSLFunctionGenerator emits at module scope. This is the path for
+            // methods that the IR Inliner skipped (NoInlining / auto-skipped by
+            // body-size heuristic) and so retain a MethodCall in the kernel IR.
+            // Without this branch, large methods would either hit the helper-
+            // inline path above (defeating the point of skipping inlining) or
+            // fall through to the base class which would treat them as
+            // intrinsics and emit the "Unmapped fallback = 0" bug.
+            if (targetMethod.HasImplementation
+                && !targetMethod.HasFlags(MethodFlags.External)
+                && !targetMethod.HasFlags(MethodFlags.Intrinsic))
+            {
+                EmitNonInlinedMethodCall(methodCall);
+                return;
+            }
+
             // Fall through to base class for non-helper calls (intrinsics, math, etc.)
             base.GenerateCode(methodCall);
+        }
+
+        /// <summary>
+        /// Emits a real WGSL function call for a method whose body lives in a
+        /// module-scope `fn` definition (not inlined into the kernel).
+        ///
+        /// The fn name is derived via <see cref="WGSLFunctionGenerator.GetMethodName"/>
+        /// so call sites match the definition emitted by the function generator.
+        /// Arguments are passed positionally by their already-computed Variable
+        /// names; void-return calls emit a bare statement, value-return calls
+        /// emit `let target = fn_name(args...);`.
+        /// </summary>
+        private void EmitNonInlinedMethodCall(MethodCall methodCall)
+        {
+            var fnName = WGSLFunctionGenerator.GetMethodName(methodCall.Target);
+
+            var argStrs = new List<string>(methodCall.Count);
+            for (int i = 0; i < methodCall.Count; i++)
+            {
+                var argVar = Load(methodCall[i]);
+                argStrs.Add(argVar.ToString());
+            }
+            string argList = string.Join(", ", argStrs);
+
+            if (methodCall.Type.IsVoidType)
+            {
+                AppendLine($"{fnName}({argList});");
+                return;
+            }
+
+            var target = Load(methodCall);
+            Declare(target);
+            AppendLine($"{target} = {fnName}({argList});");
         }
 
         /// <summary>

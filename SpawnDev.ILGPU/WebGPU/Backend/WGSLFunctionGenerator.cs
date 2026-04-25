@@ -78,8 +78,10 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
         /// <summary>
         /// Gets the WGSL function name for the given method.
+        /// Used by both the function generator (to emit the fn definition) and the
+        /// kernel generator (to emit the call site) so the names match.
         /// </summary>
-        private static string GetMethodName(Method method)
+        internal static string GetMethodName(Method method)
         {
             var handleName = method.Handle.Name;
             if (method.HasFlags(MethodFlags.External))

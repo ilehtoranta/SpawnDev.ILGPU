@@ -821,8 +821,20 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             Allocas allocas,
             WGSLCodeGenerator.GeneratorArgs data)
         {
-            // Store helper methods so the kernel generator can inline them
-            data.HelperMethods[method] = allocas;
+            // Methods that the IR Inliner has flagged for inlining stay on the
+            // codegen-time inline path (HelperMethods). This keeps WGSL barrier-
+            // uniformity guarantees: helpers that touch workgroupBarrier() can
+            // only safely run when fully inlined into the kernel.
+            //
+            // Methods without the Inline flag (e.g. [MethodImpl(MethodImplOptions.NoInlining)]
+            // or methods auto-skipped by the Inliner's body-size heuristic) are
+            // emitted as real WGSL `fn` definitions at module scope and called
+            // from the kernel via a normal function call. This avoids the WGSL
+            // shader compile cliff that hits when a large method is inlined at
+            // many call sites (e.g. Vp9Idct16x16's 32x inline expansion of
+            // Idct16Row → ~3800-line straight-line WGSL → >30s validator time).
+            if (method.HasFlags(MethodFlags.Inline))
+                data.HelperMethods[method] = allocas;
             return new WGSLFunctionGenerator(data, method, allocas);
         }
 
