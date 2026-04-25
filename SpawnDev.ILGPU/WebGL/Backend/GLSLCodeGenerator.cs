@@ -1665,9 +1665,14 @@ namespace SpawnDev.ILGPU.WebGL.Backend
 
             // Method has an implementation but isn't a recognized intrinsic - emit a
             // real function call. GLSLFunctionGenerator emits a corresponding fn
-            // definition at module scope. Without this branch, non-inlined user
-            // methods (e.g. those marked [MethodImpl(MethodImplOptions.NoInlining)])
-            // would silently return 0 via the unmapped fallback below.
+            // definition at module scope. WebGL's CreateFunctionCodeGenerator does
+            // not register methods in a kernel-side HelperMethods inline map (unlike
+            // WebGPU rc.13 / rc.15 which inline at codegen time), so without this
+            // branch every non-intrinsic call silent-zeros via the unmapped
+            // fallback below. The branch handles simple int helpers correctly;
+            // complex bodies (multi-arg ref outputs, type mismatches at
+            // intermediate values) remain a known-incomplete feature flagged for a
+            // follow-up fn-def codegen pass.
             var glslMethod = methodCall.Target;
             if (glslMethod.HasImplementation
                 && !glslMethod.HasFlags(MethodFlags.External)

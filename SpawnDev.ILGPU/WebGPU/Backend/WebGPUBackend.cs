@@ -821,20 +821,21 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             Allocas allocas,
             WGSLCodeGenerator.GeneratorArgs data)
         {
-            // Methods that the IR Inliner has flagged for inlining stay on the
-            // codegen-time inline path (HelperMethods). This keeps WGSL barrier-
-            // uniformity guarantees: helpers that touch workgroupBarrier() can
-            // only safely run when fully inlined into the kernel.
+            // Register every non-intrinsic / non-external method as a helper so
+            // the kernel generator inlines it at codegen time (rc.13 behavior).
             //
-            // Methods without the Inline flag (e.g. [MethodImpl(MethodImplOptions.NoInlining)]
-            // or methods auto-skipped by the Inliner's body-size heuristic) are
-            // emitted as real WGSL `fn` definitions at module scope and called
-            // from the kernel via a normal function call. This avoids the WGSL
-            // shader compile cliff that hits when a large method is inlined at
-            // many call sites (e.g. Vp9Idct16x16's 32x inline expansion of
-            // Idct16Row → ~3800-line straight-line WGSL → >30s validator time).
-            if (method.HasFlags(MethodFlags.Inline))
-                data.HelperMethods[method] = allocas;
+            // rc.14 attempted to split this so [MethodImpl(NoInlining)] methods
+            // would be emitted as standalone WGSL `fn` definitions called from
+            // the kernel, in order to fix the Vp9Idct16x16 compile cliff
+            // (32x inline expansion of Idct16Row → ~3800-line straight-line
+            // WGSL → >30s validator time). The fn-definition body codegen has
+            // unresolved identifier issues for non-trivial helpers (kernel-
+            // scope variables referenced inside the fn body that aren't
+            // declared in fn scope), so rc.15 reverts to unconditional
+            // inlining until the fn-definition path is hardened. Tuvok's
+            // compile cliff returns at rc.13 levels; the fix is reactivated
+            // when the body codegen is correct.
+            data.HelperMethods[method] = allocas;
             return new WGSLFunctionGenerator(data, method, allocas);
         }
 

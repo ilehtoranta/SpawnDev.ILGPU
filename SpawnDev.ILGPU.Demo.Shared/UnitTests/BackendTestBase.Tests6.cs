@@ -1429,6 +1429,17 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             output[0] = x + y;
         }
 
+        // NoInliningVoidHelperEmitsFunctionCallTest was added briefly during rc.15
+        // investigation to lock in WGSL fn-definition emission for void-returning
+        // NoInlining helpers. The fn-definition path turned out to have multiple
+        // body-side codegen bugs (unresolved kernel-scope identifiers, type
+        // mismatches in GLSL, view marshaling not supported), so rc.15 reverted
+        // the rc.14 fn-call infrastructure entirely. The test has been removed
+        // because it exercises a code path that isn't shipped. When the fn-def
+        // codegen is hardened in a future rc, re-add a void-helper test that
+        // mirrors Tuvok's Vp9Idct16x16Kernel.Idct16Row shape (int params + ref
+        // int outputs).
+
         /// <summary>
         /// Verifies that `(short)intValue` truncates the high bits and sign-extends
         /// from bit 15 — the C# / IL semantic for `conv.i2`. The Wasm backend

@@ -1813,22 +1813,18 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 return;
             }
 
-            // Method has an implementation but isn't a registered inlinable helper —
-            // emit a real WGSL function call to the fn definition that
-            // WGSLFunctionGenerator emits at module scope. This is the path for
-            // methods that the IR Inliner skipped (NoInlining / auto-skipped by
-            // body-size heuristic) and so retain a MethodCall in the kernel IR.
-            // Without this branch, large methods would either hit the helper-
-            // inline path above (defeating the point of skipping inlining) or
-            // fall through to the base class which would treat them as
-            // intrinsics and emit the "Unmapped fallback = 0" bug.
-            if (targetMethod.HasImplementation
-                && !targetMethod.HasFlags(MethodFlags.External)
-                && !targetMethod.HasFlags(MethodFlags.Intrinsic))
-            {
-                EmitNonInlinedMethodCall(methodCall);
-                return;
-            }
+            // rc.15: the EmitNonInlinedMethodCall path was added in rc.14 to
+            // emit real WGSL function calls for methods that the IR Inliner
+            // skipped (NoInlining / body-size cap). It is reverted here
+            // because the matching fn-definition body codegen has unresolved
+            // identifier issues (kernel-scope variables referenced from
+            // module-scope fn bodies). Until the fn-def path is hardened,
+            // every non-intrinsic / non-external method is registered as a
+            // helper in CreateFunctionCodeGenerator and inlined at this point
+            // by the helper-inline branch above. Methods that aren't in the
+            // helper map and aren't intrinsics fall through to the base
+            // class's "Unmapped fallback = 0" warning (preserves rc.13
+            // behavior).
 
             // Fall through to base class for non-helper calls (intrinsics, math, etc.)
             base.GenerateCode(methodCall);

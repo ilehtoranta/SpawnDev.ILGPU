@@ -72,8 +72,16 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 builder.Append($"p_{param.Id} : {paramType}");
             }
 
-            builder.Append(") -> ");
-            builder.Append(TypeGenerator[Method.ReturnType]);
+            builder.Append(")");
+
+            // WGSL grammar: void-returning fns omit the return-type clause entirely.
+            // `fn name(...) -> void { ... }` is rejected by the validator with
+            // "unresolved type 'void'"; correct form is `fn name(...) { ... }`.
+            if (!Method.ReturnType.IsVoidType)
+            {
+                builder.Append(" -> ");
+                builder.Append(TypeGenerator[Method.ReturnType]);
+            }
         }
 
         /// <summary>
