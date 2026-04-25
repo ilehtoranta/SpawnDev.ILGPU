@@ -259,33 +259,28 @@ namespace PlaywrightMultiTest
                         await testableProject.Page.WaitForSelectorAsync("table.unit-test-ready", new() { Timeout = 30000 }).ConfigureAwait(false);
                         LogStatus("Test table ready");
 
-                        // get the table
-                        var table = testableProject.Page.Locator("table.unit-test-view");
+                        // Enumerate test rows via a single browser-side JS evaluation
+                        // instead of one-IPC-per-row. With ~5000+ rows on the multi-
+                        // backend ILGPU matrix the per-row round-trip pattern was
+                        // burning multiple minutes of dead time after the page rendered
+                        // but before the first test ran. Cribbed from Tuvok's
+                        // tuvok-to-team-pmt-enumeration-speedup-2026-04-25.md (Codecs
+                        // commit f16b27b). Same semantics, ~7000x fewer IPC calls.
+                        var rowsJson = await testableProject.Page.EvaluateAsync<System.Text.Json.JsonElement>(@"() => {
+                            const rows = document.querySelectorAll('table.unit-test-view tbody tr');
+                            return Array.from(rows).map(r => ({
+                                typeName: r.querySelector('.test-type-name')?.textContent ?? '',
+                                methodName: r.querySelector('.test-method-name')?.textContent ?? ''
+                            }));
+                        }").ConfigureAwait(false);
 
-                        // get table body
-                        var tbody = table.Locator("tbody");
-
-                        // get all rows in the target table body
-                        var rows = tbody.Locator("tr");
-
-                        // iterate the rows
-                        int rowCount = await rows.CountAsync().ConfigureAwait(false);
-
-                        // wait for the tests to load. This assumes that your Blazor WASM app will render an element with the id "test-list" that contains the list of tests. You would need to implement this in your Blazor WASM app to return the tests you want to run.
-                        // get a list of tests
-
-                        for (int i = 0; i < rowCount; i++)
+                        int totalRows = rowsJson.GetArrayLength();
+                        for (int i = 0; i < totalRows; i++)
                         {
-                            // get the specific row by index
-                            var currentRow = rows.Nth(i);
-
-                            // get test type name
-                            var typeName = await currentRow.Locator(".test-type-name").TextContentAsync().ConfigureAwait(false);
-
-                            // get test method name
-                            var methodName = await currentRow.Locator(".test-method-name").TextContentAsync().ConfigureAwait(false);
-
-                            var rowTest = new ProjectTest(testableProject, typeName!, methodName!, testPageUrl);
+                            var row = rowsJson[i];
+                            var typeName = row.GetProperty("typeName").GetString() ?? "";
+                            var methodName = row.GetProperty("methodName").GetString() ?? "";
+                            var rowTest = new ProjectTest(testableProject, typeName, methodName, testPageUrl);
 
                             if (filter != null)
                             {
