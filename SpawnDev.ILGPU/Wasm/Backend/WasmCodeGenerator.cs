@@ -977,6 +977,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
 
             // Detect unsigned source conversion
             bool isSourceUnsigned = (value.Flags & ConvertFlags.SourceUnsigned) == ConvertFlags.SourceUnsigned;
+            bool isTargetUnsigned = (value.Flags & ConvertFlags.TargetUnsigned) == ConvertFlags.TargetUnsigned;
 
             EmitGetLocal(src);
 
@@ -1002,6 +1003,48 @@ namespace SpawnDev.ILGPU.Wasm.Backend
 
             if (opcode.HasValue)
                 Code.Add(opcode.Value);
+
+            // Sub-word narrowing: ILGPU IR types Int8 / Int16 / UInt8 / UInt16 all
+            // lower to Wasm i32 (no native sub-word integer types in Wasm), so the
+            // (srcWasm, dstWasm) switch above sees no narrowing case for them.
+            // Apply truncation explicitly here so e.g. `(short)0x18000` doesn't
+            // leave a 32-bit value on the stack with the high bits intact and
+            // pollute downstream stages of the iDCT 16x16 butterfly (Bug 2 from
+            // tuvok-to-geordi-idct16x16-two-bugs-2026-04-25.md). Same fix covers
+            // (sbyte) / (byte) / (ushort).
+            //
+            // i32.extend16_s / i32.extend8_s sign-extend from bit 15 / bit 7.
+            // For unsigned target, mask with 0xFFFF / 0xFF to zero-extend.
+            // F32 / F64 / I64 destinations skip this (their wasm dst type isn't
+            // I32 here, so the narrowing branch doesn't apply).
+            if (dstType == WasmOpCodes.I32)
+            {
+                var dstBasicType = value.Type.BasicValueType;
+                if (dstBasicType == BasicValueType.Int16)
+                {
+                    if (isTargetUnsigned)
+                    {
+                        WasmModuleBuilder.EmitI32Const(Code, 0xFFFF);
+                        Code.Add(WasmOpCodes.I32And);
+                    }
+                    else
+                    {
+                        Code.Add(WasmOpCodes.I32Extend16S);
+                    }
+                }
+                else if (dstBasicType == BasicValueType.Int8)
+                {
+                    if (isTargetUnsigned)
+                    {
+                        WasmModuleBuilder.EmitI32Const(Code, 0xFF);
+                        Code.Add(WasmOpCodes.I32And);
+                    }
+                    else
+                    {
+                        Code.Add(WasmOpCodes.I32Extend8S);
+                    }
+                }
+            }
 
             WasmModuleBuilder.EmitLocalSet(Code, target);
         }

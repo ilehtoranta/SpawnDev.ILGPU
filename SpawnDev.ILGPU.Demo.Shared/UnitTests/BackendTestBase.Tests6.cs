@@ -1429,6 +1429,47 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             output[0] = x + y;
         }
 
+        /// <summary>
+        /// Verifies that `(short)intValue` truncates the high bits and sign-extends
+        /// from bit 15 — the C# / IL semantic for `conv.i2`. The Wasm backend
+        /// previously omitted this conversion (both source and dst lower to i32 in
+        /// Wasm-type space, so the ConvertValue switch had no entry), which made
+        /// `(short)` a silent no-op and broke Tuvok's Vp9Idct16x16Kernel on Wasm.
+        /// CPU / CUDA / OpenCL / WebGPU all agree because their backends emit the
+        /// proper narrowing.
+        /// </summary>
+        [TestMethod]
+        public async Task ShortNarrowingTest() => await RunTest(async accelerator =>
+        {
+            using var inputBuf = accelerator.Allocate1D<int>(4);
+            using var outputBuf = accelerator.Allocate1D<short>(4);
+
+            // 0x11170 = 70000: low 16 bits = 0x1170 = 4464, bit 15 = 0 → sign-extends to 4464.
+            // 0x18000 = 98304: low 16 bits = 0x8000 = -32768 (signed), bit 15 = 1 → sign-extends to -32768.
+            // 0xFFFF1234 = -61388: low 16 bits = 0x1234 = 4660, bit 15 = 0 → sign-extends to 4660.
+            // 0x80008000 = -2147450880: low 16 bits = 0x8000 → sign-extends to -32768.
+            inputBuf.CopyFromCPU(new int[] { 70000, 98304, unchecked((int)0xFFFF1234), unchecked((int)0x80008000) });
+
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<int>, ArrayView<short>>(
+                ShortNarrowingKernel);
+            kernel(4, inputBuf.View, outputBuf.View);
+            await accelerator.SynchronizeAsync();
+
+            var result = await outputBuf.CopyToHostAsync<short>();
+            short[] expected = { 4464, -32768, 4660, -32768 };
+            for (int i = 0; i < 4; i++)
+                if (result[i] != expected[i])
+                    throw new Exception(
+                        $"ShortNarrowing[{i}] failed. Expected {expected[i]}, got {result[i]}");
+        });
+
+        static void ShortNarrowingKernel(Index1D index, ArrayView<int> input, ArrayView<short> output)
+        {
+            int gid = index;
+            int v = input[gid];
+            output[gid] = (short)v;
+        }
+
         #region Algorithm Kernel Methods
 
 
