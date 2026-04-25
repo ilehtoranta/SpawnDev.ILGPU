@@ -1813,18 +1813,18 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 return;
             }
 
-            // rc.15: the EmitNonInlinedMethodCall path was added in rc.14 to
-            // emit real WGSL function calls for methods that the IR Inliner
-            // skipped (NoInlining / body-size cap). It is reverted here
-            // because the matching fn-definition body codegen has unresolved
-            // identifier issues (kernel-scope variables referenced from
-            // module-scope fn bodies). Until the fn-def path is hardened,
-            // every non-intrinsic / non-external method is registered as a
-            // helper in CreateFunctionCodeGenerator and inlined at this point
-            // by the helper-inline branch above. Methods that aren't in the
-            // helper map and aren't intrinsics fall through to the base
-            // class's "Unmapped fallback = 0" warning (preserves rc.13
-            // behavior).
+            // rc.16 work-in-progress: re-activating the rc.14 fn-call branch.
+            // For methods that the IR Inliner skipped (NoInlining / body-size
+            // cap) and that aren't intrinsics/external, emit a real WGSL fn
+            // call to the standalone fn definition produced by
+            // WGSLFunctionGenerator. Tracks `Plans/rc16-fn-def-codegen-harden.md`.
+            if (targetMethod.HasImplementation
+                && !targetMethod.HasFlags(MethodFlags.External)
+                && !targetMethod.HasFlags(MethodFlags.Intrinsic))
+            {
+                EmitNonInlinedMethodCall(methodCall);
+                return;
+            }
 
             // Fall through to base class for non-helper calls (intrinsics, math, etc.)
             base.GenerateCode(methodCall);

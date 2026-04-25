@@ -1429,16 +1429,59 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             output[0] = x + y;
         }
 
-        // NoInliningVoidHelperEmitsFunctionCallTest was added briefly during rc.15
-        // investigation to lock in WGSL fn-definition emission for void-returning
-        // NoInlining helpers. The fn-definition path turned out to have multiple
-        // body-side codegen bugs (unresolved kernel-scope identifiers, type
-        // mismatches in GLSL, view marshaling not supported), so rc.15 reverted
-        // the rc.14 fn-call infrastructure entirely. The test has been removed
-        // because it exercises a code path that isn't shipped. When the fn-def
-        // codegen is hardened in a future rc, re-add a void-helper test that
-        // mirrors Tuvok's Vp9Idct16x16Kernel.Idct16Row shape (int params + ref
-        // int outputs).
+        /// <summary>
+        /// rc.16 fn-def codegen smoke test, mirroring Tuvok's Vp9Idct16x16Kernel.Idct16Row
+        /// helper shape: NoInlining void fn taking int values + ref int output params
+        /// (which lower to `ptr&lt;function, i32&gt;` in WGSL). Captures
+        /// `WebGPUBackend.LastGeneratedWGSL` in the failure message so we can see what
+        /// the fn-def emission actually produced when validation fails.
+        /// </summary>
+        [TestMethod]
+        public async Task NoInliningVoidHelperEmitsFunctionCallTest() => await RunTest(async accelerator =>
+        {
+            using var outputBuf = accelerator.Allocate1D<int>(2);
+
+            try
+            {
+                var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<int>>(
+                    NoInliningVoidHelperKernel);
+                kernel(1, outputBuf.View);
+                await accelerator.SynchronizeAsync();
+            }
+            catch (Exception)
+            {
+                // Capture WGSL on WebGPU failure for diagnosis. Re-throw with the
+                // WGSL appended to the message so PMT failure output shows it.
+                if (accelerator.AcceleratorType == AcceleratorType.WebGPU)
+                {
+                    var wgsl = SpawnDev.ILGPU.WebGPU.Backend.WebGPUBackend.LastGeneratedWGSL ?? "<null>";
+                    throw new Exception($"WebGPU compile failed. Last WGSL:\n--- WGSL START ---\n{wgsl}\n--- WGSL END ---");
+                }
+                throw;
+            }
+
+            var result = await outputBuf.CopyToHostAsync<int>();
+            // VoidPairWriter assigns 42 + 99 + 7 = 148 (sum) and 99 - 42 = 57 (diff).
+            if (result[0] != 148 || result[1] != 57)
+                throw new Exception(
+                    $"NoInliningVoidHelper failed. Expected (148, 57), got ({result[0]}, {result[1]})");
+        });
+
+        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+        private static void NoInliningVoidPairWriterHelper(int a, int b, int c, ref int sumOut, ref int diffOut)
+        {
+            sumOut = a + b + c;
+            diffOut = b - a;
+        }
+
+        static void NoInliningVoidHelperKernel(Index1D index, ArrayView<int> output)
+        {
+            int sum = 0;
+            int diff = 0;
+            NoInliningVoidPairWriterHelper(42, 99, 7, ref sum, ref diff);
+            output[0] = sum;
+            output[1] = diff;
+        }
 
         /// <summary>
         /// Verifies that `(short)intValue` truncates the high bits and sign-extends
@@ -1479,6 +1522,182 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             int gid = index;
             int v = input[gid];
             output[gid] = (short)v;
+        }
+
+        /// <summary>
+        /// Mirrors the IR shape of Tuvok's Vp9Idct16x16Kernel.Idct16Row helper:
+        /// the kernel calls a helper with `short` inputs + `out int` outputs,
+        /// the helper computes butterfly-style arithmetic with the narrowing
+        /// pattern `(short)((x + (1 &lt;&lt; 13)) >> 14)`, the kernel then writes
+        /// per-element output. Runs across all 6 backends and compares against
+        /// a CPU reference computed in C# with the same operations.
+        ///
+        /// If this test passes on Wasm but Tuvok's iDCT 16x16 fails on Wasm, the
+        /// bug is in deeper IR shape (more out params, deeper butterfly) and we
+        /// expand the repro. If this test FAILS on Wasm, we have the minimal
+        /// bit-exact divergence and can fix the codegen at this scale.
+        /// </summary>
+        [TestMethod]
+        public async Task ButterflyNarrowingHelperBitExactTest() => await RunTest(async accelerator =>
+        {
+            // 8 elements per dispatch. Each element exercises the butterfly +
+            // narrowing pattern on a different magnitude of input value.
+            // Inputs are picked to span the int range used by VP9 iDCT
+            // intermediate values (Q14, ~1e6 magnitude before shift).
+            const int N = 8;
+            int[] aIn = { 1234567, -1234567, 0, 100, -100, 1 << 20, -(1 << 20), 8191 };
+            int[] bIn = { 7654321,  7654321, 1,  50,  -50, 1 << 19,  (1 << 19), 8192 };
+
+            using var aBuf = accelerator.Allocate1D<int>(N);
+            using var bBuf = accelerator.Allocate1D<int>(N);
+            using var rSumBuf = accelerator.Allocate1D<int>(N);
+            using var rDiffBuf = accelerator.Allocate1D<int>(N);
+            aBuf.CopyFromCPU(aIn);
+            bBuf.CopyFromCPU(bIn);
+
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<
+                Index1D, ArrayView<int>, ArrayView<int>, ArrayView<int>, ArrayView<int>>(
+                ButterflyNarrowingKernel);
+            kernel(N, aBuf.View, bBuf.View, rSumBuf.View, rDiffBuf.View);
+            await accelerator.SynchronizeAsync();
+
+            var rSum = await rSumBuf.CopyToHostAsync<int>();
+            var rDiff = await rDiffBuf.CopyToHostAsync<int>();
+
+            for (int i = 0; i < N; i++)
+            {
+                short eSum = (short)((aIn[i] + bIn[i] + (1 << 13)) >> 14);
+                short eDiff = (short)((bIn[i] - aIn[i] + (1 << 13)) >> 14);
+                if (rSum[i] != eSum)
+                    throw new Exception($"ButterflyNarrowing sum[{i}] expected {eSum}, got {rSum[i]} (a={aIn[i]}, b={bIn[i]})");
+                if (rDiff[i] != eDiff)
+                    throw new Exception($"ButterflyNarrowing diff[{i}] expected {eDiff}, got {rDiff[i]} (a={aIn[i]}, b={bIn[i]})");
+            }
+        });
+
+        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+        private static void ButterflyNarrowingHelper(int a, int b, out int sumOut, out int diffOut)
+        {
+            sumOut = (short)((a + b + (1 << 13)) >> 14);
+            diffOut = (short)((b - a + (1 << 13)) >> 14);
+        }
+
+        /// <summary>
+        /// Companion to <see cref="ButterflyNarrowingHelperBitExactTest"/>:
+        /// SAME helper signature (int + int + out int + out int) but NO narrowing
+        /// in the body - just plain int arithmetic. Isolates whether the Wasm
+        /// bit-exact bug is in `(short)int` narrowing-through-helper-call or
+        /// in the more fundamental out-param routing.
+        /// </summary>
+        [TestMethod]
+        public async Task NoInliningOutParamHelperBitExactTest() => await RunTest(async accelerator =>
+        {
+            const int N = 4;
+            int[] aIn = { 100, 200, 300, 400 };
+            int[] bIn = { 1, 2, 3, 4 };
+
+            using var aBuf = accelerator.Allocate1D<int>(N);
+            using var bBuf = accelerator.Allocate1D<int>(N);
+            using var rSumBuf = accelerator.Allocate1D<int>(N);
+            using var rDiffBuf = accelerator.Allocate1D<int>(N);
+            aBuf.CopyFromCPU(aIn);
+            bBuf.CopyFromCPU(bIn);
+
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<
+                Index1D, ArrayView<int>, ArrayView<int>, ArrayView<int>, ArrayView<int>>(
+                NoInliningOutParamKernel);
+            kernel(N, aBuf.View, bBuf.View, rSumBuf.View, rDiffBuf.View);
+            await accelerator.SynchronizeAsync();
+
+            var rSum = await rSumBuf.CopyToHostAsync<int>();
+            var rDiff = await rDiffBuf.CopyToHostAsync<int>();
+
+            for (int i = 0; i < N; i++)
+            {
+                int eSum = aIn[i] + bIn[i];
+                int eDiff = bIn[i] - aIn[i];
+                if (rSum[i] != eSum)
+                    throw new Exception($"NoInliningOutParam sum[{i}] expected {eSum}, got {rSum[i]} (a={aIn[i]}, b={bIn[i]})");
+                if (rDiff[i] != eDiff)
+                    throw new Exception($"NoInliningOutParam diff[{i}] expected {eDiff}, got {rDiff[i]} (a={aIn[i]}, b={bIn[i]})");
+            }
+        });
+
+        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+        private static void NoInliningOutParamHelper(int a, int b, out int sumOut, out int diffOut)
+        {
+            sumOut = a + b;
+            diffOut = b - a;
+        }
+
+        /// <summary>
+        /// Bisect Bug E: kernel does its own Alloca + Store + Load (no helper call)
+        /// to verify the alloca round-trip works on Wasm. If this passes, the bug is
+        /// specifically in the helper-inline-with-out-param path.
+        /// </summary>
+        [TestMethod]
+        public async Task NoHelperOutLikeAllocaTest() => await RunTest(async accelerator =>
+        {
+            const int N = 4;
+            int[] aIn = { 100, 200, 300, 400 };
+            int[] bIn = { 1, 2, 3, 4 };
+
+            using var aBuf = accelerator.Allocate1D<int>(N);
+            using var bBuf = accelerator.Allocate1D<int>(N);
+            using var rSumBuf = accelerator.Allocate1D<int>(N);
+            aBuf.CopyFromCPU(aIn);
+            bBuf.CopyFromCPU(bIn);
+
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<
+                Index1D, ArrayView<int>, ArrayView<int>, ArrayView<int>>(
+                NoHelperOutLikeAllocaKernel);
+            kernel(N, aBuf.View, bBuf.View, rSumBuf.View);
+            await accelerator.SynchronizeAsync();
+
+            var rSum = await rSumBuf.CopyToHostAsync<int>();
+            for (int i = 0; i < N; i++)
+            {
+                int eSum = aIn[i] + bIn[i];
+                if (rSum[i] != eSum)
+                    throw new Exception($"NoHelperOutLikeAlloca[{i}] expected {eSum}, got {rSum[i]}");
+            }
+        });
+
+        static void NoHelperOutLikeAllocaKernel(
+            Index1D index, ArrayView<int> aIn, ArrayView<int> bIn, ArrayView<int> rSumOut)
+        {
+            int gid = index;
+            // LocalMemory is the only ILGPU primitive for getting address-of a local
+            // from inside a kernel body. Mirrors what `out int sum` lowers to.
+            var sumStore = LocalMemory.Allocate<int>(1);
+            sumStore[0] = aIn[gid] + bIn[gid];
+            rSumOut[gid] = sumStore[0];
+        }
+
+        static void NoInliningOutParamKernel(
+            Index1D index,
+            ArrayView<int> aIn,
+            ArrayView<int> bIn,
+            ArrayView<int> rSumOut,
+            ArrayView<int> rDiffOut)
+        {
+            int gid = index;
+            NoInliningOutParamHelper(aIn[gid], bIn[gid], out int sum, out int diff);
+            rSumOut[gid] = sum;
+            rDiffOut[gid] = diff;
+        }
+
+        static void ButterflyNarrowingKernel(
+            Index1D index,
+            ArrayView<int> aIn,
+            ArrayView<int> bIn,
+            ArrayView<int> rSumOut,
+            ArrayView<int> rDiffOut)
+        {
+            int gid = index;
+            ButterflyNarrowingHelper(aIn[gid], bIn[gid], out int sum, out int diff);
+            rSumOut[gid] = sum;
+            rDiffOut[gid] = diff;
         }
 
         #region Algorithm Kernel Methods

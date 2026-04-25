@@ -821,21 +821,14 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             Allocas allocas,
             WGSLCodeGenerator.GeneratorArgs data)
         {
-            // Register every non-intrinsic / non-external method as a helper so
-            // the kernel generator inlines it at codegen time (rc.13 behavior).
-            //
-            // rc.14 attempted to split this so [MethodImpl(NoInlining)] methods
-            // would be emitted as standalone WGSL `fn` definitions called from
-            // the kernel, in order to fix the Vp9Idct16x16 compile cliff
-            // (32x inline expansion of Idct16Row → ~3800-line straight-line
-            // WGSL → >30s validator time). The fn-definition body codegen has
-            // unresolved identifier issues for non-trivial helpers (kernel-
-            // scope variables referenced inside the fn body that aren't
-            // declared in fn scope), so rc.15 reverts to unconditional
-            // inlining until the fn-definition path is hardened. Tuvok's
-            // compile cliff returns at rc.13 levels; the fix is reactivated
-            // when the body codegen is correct.
-            data.HelperMethods[method] = allocas;
+            // rc.16 work-in-progress: re-activating the rc.14 fn-definition
+            // emission path with body-codegen fixes for cross-scope identifier
+            // resolution. Methods marked [MethodImpl(NoInlining)] (no IR Inline
+            // flag) get emitted as standalone WGSL `fn` definitions; methods
+            // with the Inline flag stay on the codegen-time inline path.
+            // Tracks `Plans/rc16-fn-def-codegen-harden.md`.
+            if (method.HasFlags(MethodFlags.Inline))
+                data.HelperMethods[method] = allocas;
             return new WGSLFunctionGenerator(data, method, allocas);
         }
 

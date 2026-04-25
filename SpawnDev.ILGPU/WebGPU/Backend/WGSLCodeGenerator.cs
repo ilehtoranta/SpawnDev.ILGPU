@@ -2301,6 +2301,16 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         {
             var target = Load(value);
             var source = Load(value.Value);
+            if (target.Type.StartsWith("ptr<"))
+            {
+                // WGSL pointers cannot be declared with `var` (Declare() skips ptr types
+                // for that reason). Emit a combined declare + initialize via `let` so
+                // the variable is defined and bound in one statement. Track the name
+                // in declaredVariables so subsequent Load() / Declare() don't re-emit.
+                if (declaredVariables.Add(target.Name))
+                    AppendLine($"let {target} = {source}; // addrSpaceCast");
+                return;
+            }
             Declare(target);
             AppendLine($"{target} = {source}; // addrSpaceCast");
         }
