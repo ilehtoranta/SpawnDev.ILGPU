@@ -823,12 +823,16 @@ namespace SpawnDev.ILGPU.WebGL.Backend
 
         protected void GenerateCodeFor(Value value)
         {
+            // Same exclusion list as WGSL: void-typed Values without observable
+            // side effects are skipped, but void-returning MethodCalls must be
+            // visited (helpers may write through ref/out pointer params).
             if (value.Type.IsVoidType &&
                 !(value is TerminatorValue) &&
                 !(value is Store) &&
                 !(value is MemoryBarrier) &&
                 !(value is global::ILGPU.IR.Values.Barrier) &&
-                !(value is PredicateBarrier))
+                !(value is PredicateBarrier) &&
+                !(value is MethodCall))
                 return;
 
             if (WebGLBackend.VerboseLogging) WebGLBackend.Log($"[GLSL] Generating code for: {value.GetType().FullName} - {value}");
@@ -1603,8 +1607,16 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         // Method Calls
         public virtual void GenerateCode(MethodCall methodCall)
         {
-            var target = Load(methodCall);
-            Declare(target);
+            // Void-returning calls have no result variable - skip Load + Declare
+            // for them (Declare("void") would emit `void v_X;` which GLSL
+            // rejects with "illegal use of type 'void'"). The fn-call branch
+            // below handles void / non-void emission separately.
+            Variable? target = null;
+            if (!methodCall.Type.IsVoidType)
+            {
+                target = Load(methodCall);
+                Declare(target);
+            }
 
             string name = methodCall.Target.Name;
             string? glslFunc = name switch

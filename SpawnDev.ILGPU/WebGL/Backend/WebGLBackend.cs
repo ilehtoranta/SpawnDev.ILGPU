@@ -49,6 +49,11 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         public static bool EnableShaderCaching { get; set; } = true;
 
         /// <summary>
+        /// Stores the last generated GLSL source for debugging.
+        /// </summary>
+        public static string? LastGeneratedGLSL { get; set; }
+
+        /// <summary>
         /// Writes a message to the console.
         /// Caller MUST check <see cref="VerboseLogging"/> BEFORE constructing the message string
         /// to avoid allocating interpolated strings when logging is disabled.
@@ -412,6 +417,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 Log(glslSource);
                 Log("-----------------------");
             }
+            LastGeneratedGLSL = glslSource;
             return new WebGLCompiledKernel(
                 Context,
                 entryPoint,

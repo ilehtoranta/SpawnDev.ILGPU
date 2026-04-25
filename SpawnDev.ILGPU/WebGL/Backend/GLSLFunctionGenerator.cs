@@ -64,7 +64,18 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 if (!first) builder.Append(", ");
                 first = false;
 
+                // GLSL has no pointer types: ILGPU IR `Pointer<T>` and
+                // `AddressSpaceType` (the lowered shape of `ref T` / `out T`
+                // params) both map to the element type via TypeGenerator.
+                // For pass-by-value this means the helper would receive a
+                // copy and writes wouldn't propagate back. Mark these params
+                // with `inout` so the GLSL compiler treats them as
+                // bidirectional reference semantics, matching C# `ref`/`out`.
+                bool isRefParam = param.ParameterType is global::ILGPU.IR.Types.AddressSpaceType
+                               || param.ParameterType is global::ILGPU.IR.Types.PointerType;
+
                 var paramType = TypeGenerator[param.ParameterType];
+                if (isRefParam) builder.Append("inout ");
                 builder.Append(paramType);
                 builder.Append(" ");
                 builder.Append($"p_{param.Index}");

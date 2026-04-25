@@ -1050,6 +1050,28 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                     AppendLine($"{elementType} {arrayName}[{arraySize}];");
                     AppendLine($"int {target.Name} = 0;");
                 }
+                return;
+            }
+
+            // Scalar alloca (e.g. `out int sum` lowering to a single int slot).
+            // Without this declaration, downstream code that writes through the
+            // alloca's variable name (e.g. `v_2 = v_1;` for the implicit zero
+            // init, or `v_15 = v_2;` for a load-back after a fn-def helper
+            // wrote through its inout param) hits "undeclared identifier".
+            // The base WGSL backend pre-declares scalar allocas via
+            // SetupAllocations + GenerateCodeInternal, but the GLSL kernel
+            // path uses GenerateKernelBody which skips that setup; we declare
+            // the slot here on first visit instead.
+            {
+                string elementType = TypeGenerator[value.AllocaType];
+                var target = Load(value);
+                if (declaredVariables.Add(target.Name))
+                {
+                    if (IsStateMachineActive)
+                        VariableBuilder.AppendLine($"    {elementType} {target.Name};");
+                    else
+                        AppendLine($"{elementType} {target.Name};");
+                }
             }
         }
 
@@ -1800,6 +1822,22 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         #region Overrides for Kernel-Specific Code Gen
 
         public override void GenerateCode(global::ILGPU.IR.Values.Parameter parameter) { }
+
+        public override void GenerateCode(global::ILGPU.IR.Values.AddressSpaceCast value)
+        {
+            // GLSL has no pointer types - both ref/out params and direct
+            // memory accesses lower through the same int variable. Cross-
+            // address-space casts (e.g. local alloca -> function param) are
+            // therefore a no-op at the GLSL level: alias the cast result to
+            // the source variable so downstream code (notably fn-def calls
+            // with `inout int` ref params) sees the original alloca and the
+            // helper's writes propagate back via inout semantics. Without
+            // this aliasing the cast emitted `int v_X; v_X = v_Y;` which
+            // copied the value at the call site - the helper then wrote to
+            // a temporary and the caller never observed the result.
+            var source = Load(value.Value);
+            valueVariables[value] = source;
+        }
 
         public override void GenerateCode(ReturnTerminator value)
         {

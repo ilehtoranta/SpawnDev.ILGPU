@@ -1441,16 +1441,30 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
         {
             using var outputBuf = accelerator.Allocate1D<int>(2);
 
-            var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<int>>(
-                NoInliningVoidHelperKernel);
-            kernel(1, outputBuf.View);
-            await accelerator.SynchronizeAsync();
+            try
+            {
+                var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<int>>(
+                    NoInliningVoidHelperKernel);
+                kernel(1, outputBuf.View);
+                await accelerator.SynchronizeAsync();
+            }
+            catch (Exception ex)
+            {
+                var shaderDiag = accelerator.AcceleratorType == AcceleratorType.WebGL
+                    ? $"\n--- GLSL START ---\n{SpawnDev.ILGPU.WebGL.Backend.WebGLBackend.LastGeneratedGLSL ?? "<null>"}\n--- GLSL END ---"
+                    : "";
+                throw new Exception($"NoInliningVoidHelper compile/dispatch failed: {ex.Message}{shaderDiag}");
+            }
 
             var result = await outputBuf.CopyToHostAsync<int>();
-            // VoidPairWriter assigns 42 + 99 + 7 = 148 (sum) and 99 - 42 = 57 (diff).
             if (result[0] != 148 || result[1] != 57)
+            {
+                var shaderDiag = accelerator.AcceleratorType == AcceleratorType.WebGL
+                    ? $"\n--- GLSL START ---\n{SpawnDev.ILGPU.WebGL.Backend.WebGLBackend.LastGeneratedGLSL ?? "<null>"}\n--- GLSL END ---"
+                    : "";
                 throw new Exception(
-                    $"NoInliningVoidHelper failed. Expected (148, 57), got ({result[0]}, {result[1]})");
+                    $"NoInliningVoidHelper failed. Expected (148, 57), got ({result[0]}, {result[1]}){shaderDiag}");
+            }
         });
 
         [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
