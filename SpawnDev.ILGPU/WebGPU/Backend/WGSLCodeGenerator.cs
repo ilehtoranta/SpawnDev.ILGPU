@@ -541,10 +541,22 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             if (blocks.Count == 1)
             {
                 IsStateMachineActive = false;
-                foreach (var valueEntry in blocks.First())
+                var theBlock = blocks.First();
+                foreach (var valueEntry in theBlock)
                 {
                     GenerateCodeFor(valueEntry.Value);
                 }
+                // Emit the block's terminator (e.g. ReturnTerminator). The
+                // BasicBlock enumerator yields only the value list and does
+                // NOT include the terminator (BasicBlock.cs:241 iterates
+                // basicBlock.values; Terminator is stored separately). For
+                // single-block methods we must emit it explicitly here, or
+                // WGSL falls off the end of the function and a non-void
+                // function silently returns 0 (the default). The multi-
+                // block path below is safe because it has its own
+                // `return _ilgpu_return_val;` safety net at function end.
+                if (theBlock.Terminator != null)
+                    GenerateCodeFor(theBlock.Terminator);
                 return;
             }
 

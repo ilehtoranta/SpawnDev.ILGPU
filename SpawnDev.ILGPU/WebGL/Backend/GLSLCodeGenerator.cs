@@ -316,8 +316,16 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             if (blocks.Count == 1)
             {
                 IsStateMachineActive = false;
-                foreach (var valueEntry in blocks.First())
+                var theBlock = blocks.First();
+                foreach (var valueEntry in theBlock)
                     GenerateCodeFor(valueEntry.Value);
+                // BasicBlock iteration yields only values, not the terminator
+                // (BasicBlock.cs:241 iterates basicBlock.values; Terminator is
+                // stored separately). For single-block methods we must emit
+                // the terminator explicitly here, or non-void GLSL functions
+                // fall off the end and return undefined values.
+                if (theBlock.Terminator != null)
+                    GenerateCodeFor(theBlock.Terminator);
                 return;
             }
 
@@ -1652,6 +1660,33 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                     args.Append(Load(methodCall[i]));
                 }
                 AppendLine($"{target} = {glslFunc}({args});");
+                return;
+            }
+
+            // Method has an implementation but isn't a recognized intrinsic - emit a
+            // real function call. GLSLFunctionGenerator emits a corresponding fn
+            // definition at module scope. Without this branch, non-inlined user
+            // methods (e.g. those marked [MethodImpl(MethodImplOptions.NoInlining)])
+            // would silently return 0 via the unmapped fallback below.
+            var glslMethod = methodCall.Target;
+            if (glslMethod.HasImplementation
+                && !glslMethod.HasFlags(MethodFlags.External)
+                && !glslMethod.HasFlags(MethodFlags.Intrinsic))
+            {
+                var args2 = new StringBuilder();
+                for (int i = 0; i < methodCall.Count; i++)
+                {
+                    if (i > 0) args2.Append(", ");
+                    args2.Append(Load(methodCall[i]));
+                }
+                if (methodCall.Type.IsVoidType)
+                {
+                    AppendLine($"{GLSLFunctionGenerator.GetMethodName(glslMethod)}({args2});");
+                }
+                else
+                {
+                    AppendLine($"{target} = {GLSLFunctionGenerator.GetMethodName(glslMethod)}({args2});");
+                }
                 return;
             }
 
