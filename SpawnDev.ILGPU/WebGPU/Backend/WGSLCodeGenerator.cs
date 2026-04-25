@@ -2285,11 +2285,29 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             var target = Load(value);
             var source = Load(value.Value);
             Declare(target);
+            // IR-level Float16 source on emulated path: WGSL type is "f32" (Half value
+            // promoted to f32 for compute), but the f32 BIT PATTERN is NOT the Half BIT
+            // PATTERN. AscendingHalf / DescendingHalf radix-sort encodings depend on
+            // operating on the 16-bit Half bits (NumBits=16, sign at bit 15). A naive
+            // bitcast<i32>(f32_holding_half_value) gives the f32 IEEE-754 bits instead,
+            // which makes radix sort silently produce wrong output (every Half value in
+            // the test range f32-encodes to the same low 16 bits = 0x0000 since the
+            // mantissa lives in f32 bits 0..22). Round-trip through _f32_to_f16 to recover
+            // the Half raw 16-bit pattern in the low 16 bits of a u32, then cast to i32.
+            // Native f16 path (source.Type == "f16") keeps its existing packed-vec2 emit.
+            bool isEmulatedHalfSource =
+                value.Value.Type is global::ILGPU.IR.Types.PrimitiveType pt &&
+                pt.BasicValueType == global::ILGPU.BasicValueType.Float16 &&
+                source.Type == "f32";
             if (source.Type == "f16")
             {
                 // f16 is 2 bytes, target is i32 (4 bytes) -- size-mismatched bitcast is invalid in WGSL.
                 // Pack f16 into the low 16 bits of a u32 via vec2<f16>, then cast to i32.
                 AppendLine($"{target} = i32(bitcast<u32>(vec2<f16>({source}, f16(0.0))));");
+            }
+            else if (isEmulatedHalfSource)
+            {
+                AppendLine($"{target} = i32(_f32_to_f16({source}));");
             }
             else if (source.Type == "emu_f64")
             {
@@ -2309,11 +2327,22 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             var target = Load(value);
             var source = Load(value.Value);
             Declare(target);
+            // Symmetric inverse of FloatAsIntCast for emulated Half: IR-level Float16
+            // target on emulated path is WGSL "f32", and the i32 source carries Half raw
+            // bits in the low 16 bits. Decode via _f16_to_f32 to recover the value.
+            bool isEmulatedHalfTarget =
+                value.Type is global::ILGPU.IR.Types.PrimitiveType pt &&
+                pt.BasicValueType == global::ILGPU.BasicValueType.Float16 &&
+                target.Type == "f32";
             if (target.Type == "f16")
             {
                 // i32 is 4 bytes, target f16 is 2 bytes -- size-mismatched bitcast is invalid in WGSL.
                 // Reinterpret u32 as vec2<f16> and extract the low half.
                 AppendLine($"{target} = bitcast<vec2<f16>>(u32({source})).x;");
+            }
+            else if (isEmulatedHalfTarget)
+            {
+                AppendLine($"{target} = _f16_to_f32(u32({source}) & 0xFFFFu);");
             }
             else if (target.Type == "emu_f64")
             {
