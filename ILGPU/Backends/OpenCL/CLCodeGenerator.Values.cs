@@ -423,6 +423,19 @@ namespace ILGPU.Backends.OpenCL
                 return;
             }
 
+            // Float16 emulation fallback: address is a direct base pointer to half[]
+            // (no LEA computed - e.g. output[0] optimized to direct base ptr). Use
+            // vload_half(0, basePtr) since dereferencing as float* would read 4 bytes
+            // from a 2-byte half slot at wrong stride.
+            if (IsFloat16PointerEmulated(load.Source.Type))
+            {
+                using var statement = BeginStatement(target);
+                statement.AppendCommand("vload_half(0, ");
+                statement.AppendArgument(address);
+                statement.AppendCommand(")");
+                return;
+            }
+
             using var statement2 = BeginStatement(target);
             statement2.AppendCommand(CLInstructions.DereferenceOperation);
             statement2.AppendArgument(address);
@@ -447,11 +460,31 @@ namespace ILGPU.Backends.OpenCL
                 return;
             }
 
+            // Float16 emulation fallback: target is a direct base pointer to half[]
+            // (no LEA computed - e.g. output[0] optimized to direct base ptr). Use
+            // vstore_half(value, 0, basePtr) since `*ptr = float_val` would write
+            // 4 bytes into a 2-byte half slot, leaving the half value as 0.
+            if (IsFloat16PointerEmulated(store.Target.Type))
+            {
+                using var statement = BeginStatement("vstore_half(");
+                statement.AppendArgument(value);
+                statement.AppendCommand(", 0, ");
+                statement.AppendArgument(address);
+                statement.AppendCommand(")");
+                return;
+            }
+
             using var statement2 = BeginStatement(CLInstructions.DereferenceOperation);
             statement2.AppendArgument(address);
             statement2.AppendCommand(CLInstructions.AssignmentOperation);
             statement2.AppendArgument(value);
         }
+
+        private bool IsFloat16PointerEmulated(TypeNode type) =>
+            type is PointerType ptr
+            && ptr.ElementType is PrimitiveType pe
+            && pe.BasicValueType == BasicValueType.Float16
+            && !TypeGenerator.Capabilities.Float16Native;
 
         /// <summary cref="IBackendCodeGenerator.GenerateCode(LoadFieldAddress)"/>
         public void GenerateCode(LoadFieldAddress value)
