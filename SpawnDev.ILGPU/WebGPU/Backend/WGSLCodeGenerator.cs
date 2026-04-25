@@ -218,6 +218,19 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         // Flag to tracking if we are generating code within the state machine loop
         protected bool IsStateMachineActive { get; set; } = false;
 
+        /// <summary>
+        /// Set by <see cref="GenerateCode(FloatAsIntCast)"/> or
+        /// <see cref="GenerateCode(IntAsFloatCast)"/> when the emulated-Half
+        /// round-trip path emits <c>_f32_to_f16</c> or <c>_f16_to_f32</c>.
+        /// Read by <c>WGSLKernelFunctionGenerator.GenerateHeader</c> to include
+        /// the F16 helpers in the emulation library even when no kernel parameter
+        /// was registered as a sub-word Float16 (e.g. kernels that operate on
+        /// <c>RadixSortPair&lt;Half, int&gt;</c> see Half values as struct
+        /// fields, not direct Half buffer params - but still need the helpers
+        /// for correct bit extraction).
+        /// </summary>
+        protected bool _kernelReferencesF16Helpers { get; set; } = false;
+
         private StringBuilder prefixBuilder = new StringBuilder();
         private StringBuilder suffixBuilder = new StringBuilder();
 
@@ -2307,6 +2320,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             }
             else if (isEmulatedHalfSource)
             {
+                _kernelReferencesF16Helpers = true;
                 AppendLine($"{target} = i32(_f32_to_f16({source}));");
             }
             else if (source.Type == "emu_f64")
@@ -2342,6 +2356,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             }
             else if (isEmulatedHalfTarget)
             {
+                _kernelReferencesF16Helpers = true;
                 AppendLine($"{target} = _f16_to_f32(u32({source}) & 0xFFFFu);");
             }
             else if (target.Type == "emu_f64")

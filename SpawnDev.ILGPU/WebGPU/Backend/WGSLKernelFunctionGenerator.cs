@@ -958,7 +958,12 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             // Float16 emulation is needed whenever any parameter was registered as a
             // sub-word Float16 param (populated only when !Backend.HasShaderF16). Load/store
             // call-sites emit `_f16_to_f32` / `_f32_to_f16` from WGSLEmulationLibrary.F16Functions.
-            bool needsF16Emulation = _subWordFloat16Params.Count > 0;
+            // The FloatAsIntCast / IntAsFloatCast paths also emit these helpers when the IR
+            // type is Float16 but the WGSL type is "f32" (emulated path), which happens in
+            // kernels that handle RadixSortPair<Half, int> - the Half lives in a struct field,
+            // not a direct parameter, so _subWordFloat16Params stays empty. Track that case
+            // via _kernelReferencesF16Helpers set at emit time.
+            bool needsF16Emulation = _subWordFloat16Params.Count > 0 || _kernelReferencesF16Helpers;
 
             // Emit minimal emulation library: only functions actually used by the kernel body
             if (needsF64Emulation || needsI64Emulation || needsF16Emulation)
