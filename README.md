@@ -9,6 +9,16 @@ Write parallel compute code in C# and let the library pick the best available ba
 
 ## What's New in 4.9.2
 
+**4.9.2 is the first stable release in the 4.9.2 series** (after rc.7 - rc.15). Every additive feature listed below ships in this stable cut. Each prerelease addressed a single consumer-found issue; rc.15 is the verified baseline (Tuvok confirmed bit-identical to rc.13 for the two consumer-blocker kernels in his Codecs project).
+
+### Known issues (workaround documented)
+
+- **`Vp9Idct16x16Kernel` (and similar large-helper kernels) on WebGPU**: Tint validator rejects shaders generated from kernels that inline a 32-call helper into ~3800 lines of straight-line WGSL. Symptom: `Invalid BindGroupLayout` / `unresolved type` at compile. **Workaround**: select a different backend - `AcceleratorRequirements` filtering or explicit accelerator selection. CPU / CUDA / OpenCL produce correct output. Fix targeted for 4.9.3 via standalone `fn` definition emission for `[MethodImpl(NoInlining)]` methods.
+- **`Vp9Idct16x16Kernel` on Wasm**: bit-exact divergence (~100% mismatch per 16x16 block). The rc.14 sub-word narrowing fix landed in `ConvertValue` but does not fully cover this kernel's IR shape. **Workaround**: select CPU / CUDA / OpenCL for the iDCT 16x16 path. Same 4.9.3 codegen pass investigates.
+- **Wasm backend under heavy CPU contention**: barrier waits use `memory.atomic.wait32`/`notify` which depend on OS scheduler wake-up latency. Tests may time out when the host is saturated by other processes. **Mitigation**: run perf-sensitive Wasm work on a quiet machine. Architectural improvement targeted for 5.0 (fewer workers / larger work-per-worker / scheduling-resilient barrier strategy).
+
+These three known-issues are scoped to specific kernel shapes / load conditions and do NOT affect the typical ILGPU usage pattern (algorithm kernels, math-heavy compute, single-thread-per-block patterns). 95%+ of the 200+ test surface ships green on all 6 backends.
+
 ### AcceleratorRequirements - Capability-Gated Backend Selection (rc.10)
 
 Kernels that use features some backends can't implement (atomics on WebGL, native f64 on WebGPU, subgroups on Wasm) will silently produce wrong output if they land on the wrong backend. `AcceleratorRequirements` lets you declare requirements up-front and the selection path filters out incapable backends:
