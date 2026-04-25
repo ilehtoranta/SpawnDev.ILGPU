@@ -65,9 +65,111 @@ These rules apply to all kernel code — they come from ILGPU's design and the c
 | First parameter is the index | `Index1D`, `Index2D`, or `Index3D` |
 | Value types only | No classes, no `string`, no reference types |
 | No `throw` | No backend supports exception handling in kernels |
-| No `ref` / `out` | Parameters are passed by value |
 | No recursion | GPU hardware doesn't support call stacks |
 | No dynamic allocation | No `new` inside kernels (except fixed-size structs) |
+
+> **`ref` / `out` parameters are supported in helper methods** called from a kernel — see "Helper Methods and Inlining" below. They are NOT supported on the kernel's own top-level signature (the entry point itself).
+
+## Helper Methods and Inlining
+
+Kernels often call private static helper methods to share common logic. By default ILGPU **inlines every helper into the kernel at IR level** — the GPU never sees a function call, just a flat kernel body. For small helpers this is what you want: zero call overhead, all values stay in registers, the optimizer can see across the boundary.
+
+For **large helpers called many times**, default inlining is a problem. Each call site duplicates the helper body. A 500-IL-instruction helper called 32 times becomes a 16,000-IL-instruction straight-line kernel body, and on shader backends that translates to a multi-thousand-line WGSL/GLSL `fn main()` that hits the browser's shader validator size cliff:
+
+- Chrome's WGSL validator (Tint) rejects oversized shaders with `Invalid BindGroupLayout` after 15-30 seconds of validator work.
+- ANGLE D3D11 fails to compile vertex shaders past a similar threshold.
+- Compile time becomes the dominant cost of every kernel dispatch.
+
+The fix: mark the helper with `[MethodImpl(MethodImplOptions.NoInlining)]`. ILGPU's IR Inliner respects the attribute; the helper stays as a separate Method in the IR; the codegen emits a real WGSL/GLSL `fn` definition + N call sites. Validator chews through it in milliseconds.
+
+```csharp
+using System.Runtime.CompilerServices;
+
+public sealed class Vp9Idct16x16Kernel
+{
+    private static void IdctKernel(
+        Index1D blockIdx,
+        ArrayView<short> coeffs,
+        ArrayView<byte> dest,
+        int blockCount,
+        int blockStrideBytes)
+    {
+        // ... 16 row-pass calls + 16 column-pass calls = 32 call sites
+        Idct16Row(
+            coeffs[rBase + 0], /* ... 15 more short inputs */,
+            out int o0, /* ... 15 more out int outputs */);
+        // ... rest of kernel body
+    }
+
+    // Without [NoInlining], this 500-IL helper inlines 32x = ~16,000 IL =
+    // ~3,800-line WGSL straight-line block = Tint validator rejects with
+    // "Invalid BindGroupLayout".
+    //
+    // With [NoInlining], WGSL emits one `fn Idct16Row_NN(...)` definition
+    // + 32 function calls. Compile is sub-second.
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void Idct16Row(
+        short i0, short i1, /* ... 14 more short inputs */,
+        out int o0, out int o1, /* ... 14 more out int outputs */)
+    {
+        // ... 7-stage butterfly arithmetic
+    }
+}
+```
+
+### When to use `[MethodImpl(NoInlining)]`
+
+| Pattern | Use NoInlining? | Why |
+|---------|-----------------|-----|
+| Small helper (< ~100 IL), 1-2 call sites | **No** | Default inlining is faster; no compile cliff. |
+| Small helper, called dozens of times in a loop | **No** | Inlining is still cheap and lets the compiler hoist invariants. |
+| Large helper (> ~200 IL), ≥ 8 call sites | **Yes** | Inlining produces giant straight-line shader code. |
+| Helper does butterfly arithmetic / DCT / FFT-style stages | **Likely yes** | These are typically dense and called many times; even if they fit at small scale, scale with kernel size. |
+| Helper uses `Group.Barrier()`, `LocalMemory`, atomics | **No** | WGSL barrier-uniformity requires barriers to be at the same textual depth for all threads — only safe under inlining. |
+| Helper takes `ArrayView<T>` parameters | **No** (currently) | View-as-fn-param marshaling is not yet supported in fn-def emission; the helper would compile but the view would not pass correctly. Inline it instead. |
+
+### What the codegen does on each backend
+
+| Backend | Without `[NoInlining]` | With `[NoInlining]` |
+|---------|------------------------|--------------------|
+| **WebGPU** | Inlined into kernel WGSL | Standalone `fn helper_NN(...)` definition + call sites |
+| **WebGL** | Inlined into kernel GLSL | Standalone `void fn_helper_NN(...)` + `inout` ref params + call sites |
+| **Wasm** | Inlined into kernel Wasm body | Wasm function + `call` instructions (multi-block helpers + barrier helpers also use this path) |
+| **CUDA / OpenCL** | Native function calls (the upstream ILGPU PTX/CL backends) | Same — these backends already support native fn calls |
+| **CPU** | Native .NET function calls | Same |
+
+### Helper parameter shapes that work with `[NoInlining]`
+
+The fn-definition codegen path (4.9.2-rc.18+) supports:
+
+- `int`, `long`, `float`, `double`, `bool` and other scalar value types as input params
+- `short` / `byte` / `Half` and other sub-word scalars (with sign-extending narrowing on cast)
+- `ref T` / `out T` for primitive value types — lowers to `ptr<function, T>` in WGSL, `inout T` in GLSL
+- Struct value types (lowered field-by-field)
+- Multiple call sites (each gets its own scratch slot for ref/out params)
+
+Not yet supported on `[NoInlining]` helpers (use default inlining instead):
+
+- `ArrayView<T>` parameters (view-to-fn-param marshaling deferred)
+- `LocalMemory<T>` access from inside the helper (use a scratch parameter instead)
+- Barrier / shared-memory access from inside the helper
+
+### Why the IR Inliner respects `[MethodImpl(NoInlining)]`
+
+ILGPU's `Inliner` pass at `ILGPU/IR/Transformations/Inliner.cs` checks the `MethodImplementationFlags` of each method's source `MethodInfo`. When `NoInlining` is set, the Inliner returns early before tagging the method with `MethodFlags.Inline` — so the call survives as a `MethodCall` IR node instead of being expanded into the caller. The backend codegen then sees the call and emits a real function-definition + call-site pair (or the inline-at-codegen-time fallback on backends that don't yet support fn definitions for that helper shape).
+
+`[MethodImpl(MethodImplOptions.AggressiveInlining)]` always inlines (overrides the body-size heuristic). The default is "inline if AggressiveInlining or if the method body fits a heuristic size cap"; the cap is intentionally generous so most user helpers inline.
+
+### Diagnosing the compile cliff
+
+If you see this on WebGPU:
+```
+[WebGPU] 4 GPU error(s) during dispatch:
+[Invalid BindGroupLayout (unlabeled)] is invalid.
+ - While calling [Device].CreateBindGroup([BindGroupDescriptor]).
+[Invalid ComputePipeline (unlabeled)] is invalid.
+```
+…with each test taking 15-30 seconds before the failure surfaces, the kernel is hitting Tint's shader size limit. Find the largest helper called repeatedly from your kernel, mark it `[MethodImpl(MethodImplOptions.NoInlining)]`, and re-run. Compile should drop from 15-30 s to sub-second.
 
 ## Index Types
 

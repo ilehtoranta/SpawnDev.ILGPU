@@ -9,6 +9,33 @@ Write parallel compute code in C# and let the library pick the best available ba
 
 ## What's New in 4.9.2
 
+### Helper Method Fn-Definition Emission - Compile Cliff Fix (rc.18)
+
+Large helper methods called many times from a kernel can produce a multi-thousand-line WGSL/GLSL `fn main()` that hits the browser shader validator's size limit (Tint rejects with `Invalid BindGroupLayout`). Tag the helper with `[MethodImpl(MethodImplOptions.NoInlining)]` and SpawnDev.ILGPU now emits a real WGSL/GLSL `fn` definition + N call sites instead of N inline expansions:
+
+```csharp
+using System.Runtime.CompilerServices;
+
+private static void IdctKernel(Index1D blockIdx, ArrayView<short> coeffs, ArrayView<byte> dest)
+{
+    // 32 calls to the helper - default inlining = ~3,800-line WGSL = compile cliff
+    Idct16Row(coeffs[r0], coeffs[r1], /* ... 14 short inputs */, out int o0, out int o1, /* ... */);
+    // ... 31 more calls
+}
+
+[MethodImpl(MethodImplOptions.NoInlining)]
+private static void Idct16Row(
+    short i0, short i1, /* ... */,
+    out int o0, out int o1, /* ... */)
+{
+    // 7-stage butterfly arithmetic
+}
+```
+
+Supports `int / float / short / byte / Half / bool` value params, `ref T` / `out T` for primitive value types (lowers to `ptr<function, T>` on WGSL, `inout T` on GLSL), struct value types, multiple call sites with per-call scratch slots. **Not yet supported on `[NoInlining]` helpers**: `ArrayView<T>` parameters, `LocalMemory<T>` access, barrier / shared-memory access — for those, use default inlining.
+
+See [`Docs/kernels.md` — Helper Methods and Inlining](Docs/kernels.md#helper-methods-and-inlining) for when to use `[NoInlining]`, when not to, and what each backend does.
+
 ### AcceleratorRequirements - Capability-Gated Backend Selection (rc.10)
 
 Kernels that use features some backends can't implement (atomics on WebGL, native f64 on WebGPU, subgroups on Wasm) will silently produce wrong output if they land on the wrong backend. `AcceleratorRequirements` lets you declare requirements up-front and the selection path filters out incapable backends:

@@ -71,17 +71,19 @@ Kernels can only work with **value types** (structs, primitives). Reference type
 | `int[]` (managed array) | `ArrayView<int>` |
 | `object` | Primitives and value-type structs |
 
-## No `ref` / `out` Parameters
+## No `ref` / `out` on the Kernel Entry Point
 
-Kernel parameters are passed by value. Use `ArrayView<T>` for output:
+The kernel's top-level signature must use only by-value parameters. Use `ArrayView<T>` for output:
 
 ```csharp
-// ❌ Won't work
+// ❌ Won't work — kernel entry point can't take ref/out
 static void Bad(Index1D i, ref int result) { }
 
 // ✅ Use a buffer
 static void Good(Index1D i, ArrayView<int> result) { result[0] = 42; }
 ```
+
+**Helper methods called from a kernel CAN use `ref` / `out` parameters** (4.9.2-rc.18+). See [`kernels.md` — Helper Methods and Inlining](kernels.md#helper-methods-and-inlining) for when to mark helpers `[MethodImpl(MethodImplOptions.NoInlining)]` to avoid the WGSL/GLSL shader compile cliff at large kernels.
 
 ## No Recursion
 
