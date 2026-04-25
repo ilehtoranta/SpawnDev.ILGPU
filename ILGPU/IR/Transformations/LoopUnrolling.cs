@@ -41,6 +41,52 @@ namespace ILGPU.IR.Transformations
         /// </summary>
         public const int DefaultMaxUnrollFactor = 64;
 
+        /// <summary>
+        /// Soft cap on the product <c>bodyCost × unrolls</c>. ONLY applied for
+        /// <c>tripCount &gt; <see cref="DefaultMaxUnrollFactor"/></c> — small
+        /// loops (tripCount ≤ 64) always full-unroll regardless of body size
+        /// because eliminating the loop-wrapper overhead is unambiguously
+        /// faster on every backend (observed Chrome 3 s vs 31 s for the same
+        /// 64-iter kernel between full-unroll vs partial-unroll-with-loop).
+        ///
+        /// Cap forces large-tripCount loops with heavy bodies to partial-unroll
+        /// at a smaller factor instead of the default 64x, keeping the
+        /// inlined-WGSL size proportional to body weight. The
+        /// <c>LocalMemory&lt;int&gt;(256)</c> kernel's 15-IR-node body would
+        /// emit 64*15=960 IR nodes inline at the default; cap=320 cuts that
+        /// to 16x=240, sliding the WGSL well under Chrome's per-shader compile
+        /// budget on the 132 KB-class kernel that previously timed out at 30 s.
+        ///
+        /// 320 is calibrated against measurements taken 2026-04-25 across the
+        /// regression oracles:
+        /// <list type="bullet">
+        ///   <item><c>BackendTestBase.LocalMemoryRepro_Int64/256/1024_ShortByteViews</c>
+        ///     across all 7 backend variants — N=64 stays full-unrolled (in
+        ///     the unconditional branch above), N=256 / N=1024 drop to 16x
+        ///     partial-unroll inside an outer loop. WebGPU + WebGPUNoSubgroups
+        ///     + Wasm previously timed out (&gt; 30 s); now passes
+        ///     18 / 1 / 2 in 18 s on the same hardware (the 1 fail is the
+        ///     WebGL architectural varying-count ceiling, untouched).</item>
+        ///   <item><c>BackendTestBase.AlgorithmRadixSort*Test</c> + Reduce +
+        ///     Scan across all 6 backends — small-body hot-loops in radix
+        ///     histograms / scans (body 7-10 IR nodes, tripCount 3-4 measured
+        ///     on CPU diagnostic) full-unroll under
+        ///     <c>tripCount ≤ maxUnrollFactor</c> branch, never reach the cap.
+        ///     Wasm large-element-count sorts (1.4M+) keep their throughput
+        ///     because the inner radix loop body is small enough to fit cap
+        ///     even when partial-unrolled.</item>
+        /// </list>
+        ///
+        /// Mirrors the spirit of <see cref="LowerArrays.MaxUnrolledArrayInitSize"/>
+        /// (32) which caps zero-init unrolling for the same "code explosion"
+        /// reason (upstream #1479). If the cap proves wrong for some kernel
+        /// pattern, prefer adjusting the body-cost weighting (some IR-node
+        /// types likely cost more shader bytes than others — atomics &gt;
+        /// arithmetic &gt; LEA) over dialing the cap, since the cap is a
+        /// cliff while weighting is continuous.
+        /// </summary>
+        public const int MaxTotalUnrolledBodyCost = 320;
+
         #endregion
 
         #region Nested Types
@@ -521,10 +567,22 @@ namespace ILGPU.IR.Transformations
             if (tripCount.Value == 0)
                 return true;
 
-            // Compute the unroll factor and the number of iterations to use
+            // Measure IR-node cost of one loop iteration. O(nBlocks) sum;
+            // LoopSpecializer.ctor calls the same ComputeOrderedBodyBlocks(),
+            // so this is essentially free.
+            var bodyBlocks = loopInfo.ComputeOrderedBodyBlocks();
+            int bodyCost = 0;
+            foreach (var block in bodyBlocks)
+                bodyCost += block.Count;
+
+            // Compute the unroll factor and the number of iterations to use.
+            // bodyCost feeds the body-size cap in ComputeUnrollFactor so kernels
+            // with large per-iteration bodies are partial-unrolled to a smaller
+            // factor while small-body kernels keep their aggressive unrolling.
             var (unrolls, iterations) = ComputeUnrollFactor(
                 tripCount.Value,
-                maxUnrollFactor);
+                maxUnrollFactor,
+                bodyCost);
             // Skip loops that cannot be properly unrolled
             if (unrolls < 2 && iterations > 1)
                 return false;
@@ -541,25 +599,41 @@ namespace ILGPU.IR.Transformations
         }
 
         /// <summary>
-        /// Computes the unroll factor and the number of iterations.
+        /// Computes the unroll factor and the number of iterations, capping
+        /// the product <c>bodyCost × unrolls</c> at
+        /// <see cref="MaxTotalUnrolledBodyCost"/> for large-tripCount loops
+        /// so kernels with heavy per-iteration bodies don't explode shader
+        /// size on backends with per-kernel compile-time budgets (Chrome WGSL
+        /// validator, V8 Wasm worker-script compiler). Falls back to the
+        /// pre-cap behavior when <paramref name="bodyCost"/> is unknown
+        /// (≤ 0). Loops with <c>tripCount ≤ maxUnrollFactor</c> always
+        /// full-unroll regardless of body size; the cap only applies to the
+        /// divisor probe for larger trip counts.
         /// </summary>
         private static (int unrolls, int iterations) ComputeUnrollFactor(
             int tripCount,
-            int maxUnrollFactor)
+            int maxUnrollFactor,
+            int bodyCost)
         {
-            // TODO: improve this heuristic and its computation :)
+            bool FitsCap(int unrolls) =>
+                bodyCost <= 0 || (long)bodyCost * unrolls <= MaxTotalUnrolledBodyCost;
 
-            // Fully unroll small loops
+            // Fully unroll small loops unconditionally — the loop-wrapper
+            // overhead elimination is unambiguously the fastest emit on every
+            // backend even when the inlined body is large.
             if (tripCount <= maxUnrollFactor)
                 return (tripCount, 1);
 
-            // Try to find an appropriate divisor
+            // Probe divisors largest-to-smallest. Accept the first divisor
+            // that (a) divides tripCount evenly AND (b) fits the body-cost cap.
             for (int unrolls = maxUnrollFactor; unrolls > 1; unrolls >>= 1)
             {
                 if (tripCount % unrolls > 0)
                     continue;
 
-                // Compute the number of remaining iterations
+                if (!FitsCap(unrolls))
+                    continue;
+
                 return (unrolls, tripCount / unrolls);
             }
 
