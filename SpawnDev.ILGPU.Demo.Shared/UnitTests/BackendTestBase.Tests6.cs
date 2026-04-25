@@ -1728,6 +1728,108 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             }
         });
 
+        /// <summary>
+        /// Tuvok-range stress test: same Idct16Row-shape helper but inputs
+        /// are random shorts in [-4096, 4096) (the range Vp9Idct16x16Kernel
+        /// uses for its Random/Batched tests, the two Tuvok still sees fail
+        /// on rc.17 with a small 24-byte residual). My earlier Q14 test used
+        /// values in [-1600, 1600] which pass on WebGPU; this widens the
+        /// range to provoke the same edge-case mismatch Tuvok sees.
+        /// </summary>
+        [TestMethod]
+        public async Task NoInliningIdct16RowQ14StressHelperBitExactTest() => await RunTest(async accelerator =>
+        {
+            const int Trials = 4;
+            // Tuvok seed 0xADA51610 - same byte stream he gets in his Random test.
+            var rng = new Random(unchecked((int)0xADA51610u));
+            using var inputBuf = accelerator.Allocate1D<short>(16);
+            using var outputBuf = accelerator.Allocate1D<int>(16);
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<short>, ArrayView<int>>(
+                Idct16RowQ14NarrowKernel);
+
+            for (int trial = 0; trial < Trials; trial++)
+            {
+                short[] inputs = new short[16];
+                for (int i = 0; i < 16; i++) inputs[i] = (short)rng.Next(-4096, 4096);
+                inputBuf.CopyFromCPU(inputs);
+
+                try
+                {
+                    kernel(1, inputBuf.View, outputBuf.View);
+                    await accelerator.SynchronizeAsync();
+                }
+                catch (Exception ex)
+                {
+                    throw new Exception($"trial {trial} dispatch failed: {ex.Message}");
+                }
+
+                var result = await outputBuf.CopyToHostAsync<int>();
+                short[] expected = new short[16];
+                ComputeQ14NarrowReference(inputs, expected);
+                for (int i = 0; i < 16; i++)
+                {
+                    if (result[i] != expected[i])
+                        throw new Exception(
+                            $"trial {trial} idx {i}: expected {expected[i]} got {result[i]} " +
+                            $"(inputs[{i}]={inputs[i]}, inputs[{(i + 1) % 16}]={inputs[(i + 1) % 16]})");
+                }
+            }
+        });
+
+        /// <summary>
+        /// Tests that `(short)int` narrowing inside a NoInlining helper produces
+        /// the correctly sign-extended short value when the int input is
+        /// outside short range. Without proper narrowing in WGSL fn-def emission,
+        /// the high bits stay intact and downstream arithmetic on the "narrowed"
+        /// value diverges from the C# semantics. This is the specific path
+        /// causing Tuvok's residual 24-byte mismatch on Vp9Idct16x16Kernel
+        /// Random/Batched tests at rc.17 - the butterfly stages produce
+        /// intermediates just outside short range, the (short)((x + (1&lt;&lt;13)) &gt;&gt; 14)
+        /// narrowing pattern doesn't truncate, subsequent stages compute on
+        /// the wrong (un-narrowed) values.
+        /// </summary>
+        [TestMethod]
+        public async Task NoInliningShortNarrowingInsideHelperBitExactTest() => await RunTest(async accelerator =>
+        {
+            // Inputs deliberately chosen to push the (short) cast through:
+            // each value, narrowed to short, has a different sign and magnitude
+            // than the un-narrowed int it came from.
+            int[] bigInts = { 100000, -100000, 32768, -32769, 70000, 98304, -98304, 1234567 };
+            using var inputBuf = accelerator.Allocate1D<int>(bigInts.Length);
+            using var outputBuf = accelerator.Allocate1D<int>(bigInts.Length);
+            inputBuf.CopyFromCPU(bigInts);
+
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<
+                Index1D, ArrayView<int>, ArrayView<int>>(NarrowAndUseKernel);
+            kernel(bigInts.Length, inputBuf.View, outputBuf.View);
+            await accelerator.SynchronizeAsync();
+
+            var result = await outputBuf.CopyToHostAsync<int>();
+            for (int i = 0; i < bigInts.Length; i++)
+            {
+                short narrowed = (short)bigInts[i];
+                int expected = narrowed * 7;
+                if (result[i] != expected)
+                    throw new Exception(
+                        $"NarrowAndUse[{i}] expected {expected} got {result[i]} " +
+                        $"(input {bigInts[i]}, narrowed-short = {narrowed})");
+            }
+        });
+
+        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+        private static int NarrowAndUseHelper(int bigInt)
+        {
+            short s = (short)bigInt;
+            return s * 7;
+        }
+
+        static void NarrowAndUseKernel(
+            Index1D index, ArrayView<int> input, ArrayView<int> output)
+        {
+            int gid = index;
+            output[gid] = NarrowAndUseHelper(input[gid]);
+        }
+
         static void Idct16RowQ14MultiCallKernel(
             Index1D index, ArrayView<short> input, ArrayView<int> output)
         {

@@ -5429,7 +5429,23 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             }
 
             // ---- Standard scalar → scalar ----
-            AppendLine($"{prefix}{target} = {targetType}({source});");
+            // Sub-word narrowing for Int16 / Int8 targets baked into the
+            // cast expression: WGSL has no native i16/i8, so `i32(int_val)`
+            // is identity. Without explicit narrowing, `(short)((x + (1<<13)) >> 14)`
+            // butterfly patterns leave high bits intact (Tuvok's iDCT 16x16
+            // residual). Combine into one expression because `let v_X = ...`
+            // is immutable. Mirrors the base WGSL handler.
+            string castExpr = $"{targetType}({source})";
+            if (targetType == "i32")
+            {
+                bool isTargetUnsigned = (value.Flags & ConvertFlags.TargetUnsigned) == ConvertFlags.TargetUnsigned;
+                var dstBasicType = value.Type.BasicValueType;
+                if (dstBasicType == BasicValueType.Int16)
+                    castExpr = isTargetUnsigned ? $"({castExpr} & 0xFFFFi)" : $"(({castExpr} << 16u) >> 16u)";
+                else if (dstBasicType == BasicValueType.Int8)
+                    castExpr = isTargetUnsigned ? $"({castExpr} & 0xFFi)" : $"(({castExpr} << 24u) >> 24u)";
+            }
+            AppendLine($"{prefix}{target} = {castExpr};");
         }
 
         public override void GenerateCode(global::ILGPU.IR.Values.GetField value)

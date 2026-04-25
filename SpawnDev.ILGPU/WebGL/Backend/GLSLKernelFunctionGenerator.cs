@@ -2780,7 +2780,22 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 return;
             }
 
-            AppendLine($"{prefix}{target} = {targetType}({source});");
+            // Sub-word narrowing for Int16 / Int8 targets baked into the cast
+            // expression - same pattern as base GLSL + WGSL + Wasm fixes.
+            // Combine into one statement so the declaration prefix
+            // (`int v_X = ...`) wraps the narrowed value cleanly without a
+            // re-declaration.
+            string castExpr = $"{targetType}({source})";
+            if (targetType == "int")
+            {
+                bool isTargetUnsigned = (value.Flags & ConvertFlags.TargetUnsigned) == ConvertFlags.TargetUnsigned;
+                var dstBasicType = value.Type.BasicValueType;
+                if (dstBasicType == BasicValueType.Int16)
+                    castExpr = isTargetUnsigned ? $"({castExpr} & 0xFFFF)" : $"(({castExpr} << 16) >> 16)";
+                else if (dstBasicType == BasicValueType.Int8)
+                    castExpr = isTargetUnsigned ? $"({castExpr} & 0xFF)" : $"(({castExpr} << 24) >> 24)";
+            }
+            AppendLine($"{prefix}{target} = {castExpr};");
         }
 
         #endregion

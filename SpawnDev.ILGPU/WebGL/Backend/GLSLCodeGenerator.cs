@@ -1160,11 +1160,27 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             var targetType = TypeGenerator[value.Type];
             var sourceType = TypeGenerator[value.Value.Type];
             Declare(target);
-            // Skip redundant casts when types are already the same
-            if (targetType == sourceType)
-                AppendLine($"{target} = {source};");
-            else
-                AppendLine($"{target} = {targetType}({source});");
+
+            // Build the cast expression. Skip redundant cast when types match.
+            string castExpr = (targetType == sourceType)
+                ? source.ToString()
+                : $"{targetType}({source})";
+
+            // Sub-word narrowing for Int16 / Int8 targets - same pattern as
+            // WGSL + Wasm fixes. GLSL has no native int16/int8 so `int(int_val)`
+            // is identity. `(short)((x + (1 << 13)) >> 14)` in butterfly
+            // arithmetic needs explicit narrowing or high bits leak into
+            // downstream stages (Tuvok's Vp9Idct16x16Kernel residual).
+            if (targetType == "int")
+            {
+                bool isTargetUnsigned = (value.Flags & ConvertFlags.TargetUnsigned) == ConvertFlags.TargetUnsigned;
+                var dstBasicType = value.Type.BasicValueType;
+                if (dstBasicType == BasicValueType.Int16)
+                    castExpr = isTargetUnsigned ? $"({castExpr} & 0xFFFF)" : $"(({castExpr} << 16) >> 16)";
+                else if (dstBasicType == BasicValueType.Int8)
+                    castExpr = isTargetUnsigned ? $"({castExpr} & 0xFF)" : $"(({castExpr} << 24) >> 24)";
+            }
+            AppendLine($"{target} = {castExpr};");
         }
 
         // Memory Operations — GLSL has no pointers; arrays accessed directly

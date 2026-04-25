@@ -1380,8 +1380,26 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             }
             else
             {
-                // Standard conversion (or emu_i64 → emu_u64 which are same repr)
-                AppendLine($"{target} = {targetType}({source});");
+                // WGSL has no native i16/i8 types, so `i32(int_value)` is
+                // identity when both source and target lower to i32. Without
+                // explicit narrowing, `(short)((x + (1 << 13)) >> 14)` patterns
+                // in butterfly arithmetic (Tuvok's Vp9Idct16x16Kernel) leave
+                // high bits intact when intermediates are just above short
+                // range - producing small bit-exact divergence vs CPU oracle
+                // on Random/Batched inputs. Mirrors rc.14 Wasm `i32.extend16_s`.
+                // Combine cast + narrowing into one expression because helper
+                // bodies use `let v_X = ...;` (immutable, cannot reassign).
+                string castExpr = $"{targetType}({source})";
+                if (targetType == "i32")
+                {
+                    bool isTargetUnsigned = (value.Flags & ConvertFlags.TargetUnsigned) == ConvertFlags.TargetUnsigned;
+                    var dstBasicType = value.Type.BasicValueType;
+                    if (dstBasicType == BasicValueType.Int16)
+                        castExpr = isTargetUnsigned ? $"({castExpr} & 0xFFFFi)" : $"(({castExpr} << 16u) >> 16u)";
+                    else if (dstBasicType == BasicValueType.Int8)
+                        castExpr = isTargetUnsigned ? $"({castExpr} & 0xFFi)" : $"(({castExpr} << 24u) >> 24u)";
+                }
+                AppendLine($"{target} = {castExpr};");
             }
         }
 
