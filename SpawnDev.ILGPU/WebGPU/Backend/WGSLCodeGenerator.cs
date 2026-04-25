@@ -1395,9 +1395,9 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     bool isTargetUnsigned = (value.Flags & ConvertFlags.TargetUnsigned) == ConvertFlags.TargetUnsigned;
                     var dstBasicType = value.Type.BasicValueType;
                     if (dstBasicType == BasicValueType.Int16)
-                        castExpr = isTargetUnsigned ? $"({castExpr} & 0xFFFFi)" : $"(({castExpr} << 16u) >> 16u)";
+                        castExpr = isTargetUnsigned ? $"({castExpr} & 0xFFFFi)" : $"extractBits({castExpr}, 0u, 16u)";
                     else if (dstBasicType == BasicValueType.Int8)
-                        castExpr = isTargetUnsigned ? $"({castExpr} & 0xFFi)" : $"(({castExpr} << 24u) >> 24u)";
+                        castExpr = isTargetUnsigned ? $"({castExpr} & 0xFFi)" : $"extractBits({castExpr}, 0u, 8u)";
                 }
                 AppendLine($"{target} = {castExpr};");
             }

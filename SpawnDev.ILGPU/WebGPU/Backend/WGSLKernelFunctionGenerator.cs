@@ -5251,21 +5251,29 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         }
         public override void GenerateCode(AddressSpaceCast value)
         {
-            var target = Load(value);
-            var source = Load(value.Value);
             // When the source is a kernel-side local alloca, the kernel emits
             // it as `var v_X : i32;` (a function-scope value, not a pointer).
             // To produce a real WGSL pointer for the cast target — needed when
             // the cast feeds a fn-def call expecting `ptr<function, T>` — we
-            // must take the address with `&v_X`. Without this, the call sees
-            // the alloca's *value* (typically zero-initialized) and the
-            // helper's `*ptr = ...` writes through a non-pointer in WGSL,
-            // producing a type error or silent wrong output.
-            if (target.Type.StartsWith("ptr<") && _localAllocaVarNames.Contains(source.Name))
+            // must take the address with `&v_X`.
+            //
+            // Earlier shape was `let v_target = &v_source;` (one extra `let`
+            // per cast). For Tuvok's iDCT 16x16 with 32 helper calls × 16
+            // ref-int outputs = 512 addrSpaceCast emissions, this added ~50KB
+            // of WGSL and pushed Tint validator past the 30s timeout for
+            // ZeroCoefficients. Now: alias the cast result directly to the
+            // expression `&v_source` and let the call emit pick it up inline.
+            // No separate `let` line per cast → 50KB saved per kernel.
+            var source = Load(value.Value);
+            if (value.Type is AddressSpaceType
+                && _localAllocaVarNames.Contains(source.Name))
             {
-                if (declaredVariables.Add(target.Name))
-                    AppendLine($"let {target} = &{source}; // addrSpaceCast (alloca address)");
-                return;
+                var ptrType = TypeGenerator[value.Type];
+                if (ptrType.StartsWith("ptr<"))
+                {
+                    valueVariables[value] = new Variable($"&{source}", ptrType);
+                    return;
+                }
             }
             // Fall through to base for non-alloca / non-ptr cases.
             base.GenerateCode(value);
@@ -5440,10 +5448,13 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             {
                 bool isTargetUnsigned = (value.Flags & ConvertFlags.TargetUnsigned) == ConvertFlags.TargetUnsigned;
                 var dstBasicType = value.Type.BasicValueType;
+                // WGSL `extractBits` built-in: signed extract sign-extends.
+                // Single intrinsic call vs shift chain - smaller WGSL, faster
+                // validator. See base WGSLCodeGenerator handler for details.
                 if (dstBasicType == BasicValueType.Int16)
-                    castExpr = isTargetUnsigned ? $"({castExpr} & 0xFFFFi)" : $"(({castExpr} << 16u) >> 16u)";
+                    castExpr = isTargetUnsigned ? $"({castExpr} & 0xFFFFi)" : $"extractBits({castExpr}, 0u, 16u)";
                 else if (dstBasicType == BasicValueType.Int8)
-                    castExpr = isTargetUnsigned ? $"({castExpr} & 0xFFi)" : $"(({castExpr} << 24u) >> 24u)";
+                    castExpr = isTargetUnsigned ? $"({castExpr} & 0xFFi)" : $"extractBits({castExpr}, 0u, 8u)";
             }
             AppendLine($"{prefix}{target} = {castExpr};");
         }

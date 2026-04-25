@@ -1830,6 +1830,72 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             output[gid] = NarrowAndUseHelper(input[gid]);
         }
 
+        /// <summary>
+        /// Locks the bit-exact behavior of Tuvok's `Vp9Idct16x16Kernel`-shape
+        /// kernel under all-zero coefficient inputs. Helper called 32 times
+        /// (16 row-pass + 16 column-pass), each with all-zero short inputs.
+        /// All outputs must be zero (the Q14 butterfly of zeros is zero).
+        ///
+        /// The kernel structure (32 unrolled calls, 16 short inputs + 16 ref-int
+        /// outputs each, fn-def emission on shader backends) is intrinsically
+        /// expensive to compile — measured 5-7s on Chrome's Tint validator on
+        /// dev hardware. That's a structural cost of the kernel shape, not a
+        /// codegen bug. Documented here as the floor for any compile-time
+        /// regressions; if a future change pushes this over 30s the test will
+        /// time out at the runner's default and surface the regression.
+        /// </summary>
+        [TestMethod]
+        public async Task NoInliningIdct16Row32CallsZeroInputCompileTimeTest() => await RunTest(async accelerator =>
+        {
+            using var inputBuf = accelerator.Allocate1D<short>(16);
+            using var outputBuf = accelerator.Allocate1D<int>(16);
+            short[] zeros = new short[16];
+            inputBuf.CopyFromCPU(zeros);
+
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<short>, ArrayView<int>>(
+                Idct16Row32CallsZeroInputKernel);
+            kernel(1, inputBuf.View, outputBuf.View);
+            await accelerator.SynchronizeAsync();
+
+            var result = await outputBuf.CopyToHostAsync<int>();
+            for (int i = 0; i < 16; i++)
+                if (result[i] != 0)
+                    throw new Exception($"Zero-input output[{i}] expected 0 got {result[i]} (math bug under zero input)");
+        });
+
+        static void Idct16Row32CallsZeroInputKernel(
+            Index1D index, ArrayView<short> input, ArrayView<int> output)
+        {
+            // 16 row-pass calls
+            for (int r = 0; r < 16; r++)
+            {
+                Idct16RowQ14NarrowHelper(
+                    input[0],  input[1],  input[2],  input[3],
+                    input[4],  input[5],  input[6],  input[7],
+                    input[8],  input[9],  input[10], input[11],
+                    input[12], input[13], input[14], input[15],
+                    out short _, out short _, out short _, out short _,
+                    out short _, out short _, out short _, out short _,
+                    out short _, out short _, out short _, out short _,
+                    out short _, out short _, out short _, out short _);
+            }
+            // 16 column-pass calls
+            for (int c = 0; c < 16; c++)
+            {
+                Idct16RowQ14NarrowHelper(
+                    input[0],  input[1],  input[2],  input[3],
+                    input[4],  input[5],  input[6],  input[7],
+                    input[8],  input[9],  input[10], input[11],
+                    input[12], input[13], input[14], input[15],
+                    out short _, out short _, out short _, out short _,
+                    out short _, out short _, out short _, out short _,
+                    out short _, out short _, out short _, out short _,
+                    out short _, out short _, out short _, out short _);
+            }
+            // Predictably zero outputs.
+            output[0] = 0;
+        }
+
         static void Idct16RowQ14MultiCallKernel(
             Index1D index, ArrayView<short> input, ArrayView<int> output)
         {
