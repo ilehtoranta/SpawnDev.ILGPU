@@ -56,6 +56,37 @@ namespace SpawnDev.ILGPU.WebGPU
         // Accumulated GPU validation errors surfaced via ThrowIfGpuErrors()
         private readonly List<string> _pendingGpuErrors = new();
 
+        // Tracks in-flight CheckShaderAsync tasks. SynchronizeAsync awaits these before
+        // calling ThrowIfGpuErrors so a fire-and-forget shader-validation error from THIS
+        // dispatch is surfaced HERE, not in the next caller's sync. Without tracking,
+        // the test's `await accelerator.SynchronizeAsync()` could return before
+        // CheckShaderAsync calls AddShaderError, and the queued error would leak to the
+        // next test (rc.13 ILGPUReduceHalfTest seeing a stale 12-binding error from the
+        // prior ManyViews_11Views test).
+        private readonly List<System.Threading.Tasks.Task> _pendingShaderChecks = new();
+        private readonly object _pendingShaderChecksLock = new();
+
+        internal void TrackShaderCheck(System.Threading.Tasks.Task task)
+        {
+            lock (_pendingShaderChecksLock)
+            {
+                _pendingShaderChecks.Add(task);
+            }
+        }
+
+        internal async System.Threading.Tasks.Task DrainShaderChecksAsync()
+        {
+            System.Threading.Tasks.Task[] snapshot;
+            lock (_pendingShaderChecksLock)
+            {
+                if (_pendingShaderChecks.Count == 0) return;
+                snapshot = _pendingShaderChecks.ToArray();
+                _pendingShaderChecks.Clear();
+            }
+            try { await System.Threading.Tasks.Task.WhenAll(snapshot); }
+            catch { /* individual task exceptions are surfaced via AddShaderError -> ThrowIfGpuErrors */ }
+        }
+
         /// <summary>
         /// Called by CheckShaderAsync to feed shader compilation errors into the pending
         /// error list. These errors are surfaced as hard failures on the next Synchronize() call.

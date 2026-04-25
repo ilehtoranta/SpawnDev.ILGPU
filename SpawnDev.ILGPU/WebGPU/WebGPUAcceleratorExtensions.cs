@@ -32,6 +32,16 @@ namespace SpawnDev.ILGPU.WebGPU
             {
                 await queue.OnSubmittedWorkDone();
             }
+            // Drain pending CheckShaderAsync background tasks. If the dispatch we just
+            // flushed compiled a shader that fails validation, CheckShaderAsync queues
+            // the error via AddShaderError. Without this drain, the queued error leaks
+            // into the NEXT Synchronize and surfaces there with a stale message (the
+            // rc.13 ILGPUReduceHalfTest 12-binding leak from a prior ManyViews_11Views
+            // test was caused by exactly this). DrainShaderChecksAsync awaits all
+            // tracked background validations so ThrowIfGpuErrors sees this dispatch's
+            // errors HERE rather than later. Mirrors SynchronizeInternal()'s behavior.
+            await accelerator.NativeAccelerator.DrainShaderChecksAsync();
+            accelerator.NativeAccelerator.ThrowIfGpuErrors();
         }
 
         /// <summary>
@@ -46,6 +56,10 @@ namespace SpawnDev.ILGPU.WebGPU
             {
                 await queue.OnSubmittedWorkDone();
             }
+            // See note above on the WebGPUAccelerator overload — drain pending shader
+            // validation tasks then surface any queued errors at THIS call site.
+            await accelerator.DrainShaderChecksAsync();
+            accelerator.ThrowIfGpuErrors();
         }
     }
 }

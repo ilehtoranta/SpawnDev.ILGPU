@@ -74,9 +74,13 @@ namespace SpawnDev.ILGPU.WebGPU
             // Get bind group layout
             _bindGroupLayout = _pipeline.GetBindGroupLayout(0);
 
-            // Fire-and-forget but errors are fed into _pendingGpuErrors for hard failure on next sync
+            // Background shader validation. Errors fed into _pendingGpuErrors via AddShaderError
+            // so ThrowIfGpuErrors() surfaces them on the NEXT Synchronize. Track the Task so
+            // SynchronizeAsync can await it before calling ThrowIfGpuErrors — otherwise the
+            // CHECK may not have completed by the time the caller's sync runs, and the queued
+            // error leaks into a later dispatch's sync (the rc.13 ILGPUReduceHalfTest leak).
             var capturedModule = _shaderModule;
-            _ = CheckShaderAsync(capturedModule, entryPoint, device, accelerator);
+            accelerator.TrackShaderCheck(CheckShaderAsync(capturedModule, entryPoint, device, accelerator));
         }
 
         #endregion

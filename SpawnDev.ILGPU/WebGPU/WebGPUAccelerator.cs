@@ -1380,6 +1380,25 @@ namespace SpawnDev.ILGPU.WebGPU
                 if (finalBindingCount > maxBindings)
                 {
                     var kernelName = compiledKernel.Name ?? "unknown";
+                    // Background CheckShaderAsync for this dispatch's shader module is in
+                    // flight. It will queue a "12 bindings exceeds 10" validation error
+                    // via AddShaderError when it completes — but the caller has already
+                    // received OUR exception below. If we don't consume that pending
+                    // error here it will leak into the NEXT Synchronize call and surface
+                    // there with a stale message, breaking unrelated tests (the rc.13
+                    // ManyViews_11Views → ILGPUReduceHalfTest leak). Discard it on the
+                    // background thread so this runtime exception is the ONLY one the
+                    // caller sees from this dispatch.
+                    var nativeAccelForDrain = webGpuAccel.NativeAccelerator;
+                    _ = System.Threading.Tasks.Task.Run(async () =>
+                    {
+                        try
+                        {
+                            await nativeAccelForDrain.DrainShaderChecksAsync();
+                            try { nativeAccelForDrain.ThrowIfGpuErrors(); } catch { /* swallow — caller already got our InvalidOperationException */ }
+                        }
+                        catch { }
+                    });
                     throw new InvalidOperationException(
                         $"[WebGPU] Kernel '{kernelName}' requires {finalBindingCount} storage buffer bindings " +
                         $"but this device only supports {maxBindings} (maxStorageBuffersPerShaderStage). " +
