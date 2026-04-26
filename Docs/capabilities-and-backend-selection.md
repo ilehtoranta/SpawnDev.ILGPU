@@ -57,6 +57,7 @@ Every flag below is `bool`, defaults to `false` (no requirement), and can be set
 | `RequiresFloat16Native` | WebGL, Wasm; WebGPU without `shader-f16`; OpenCL without `cl_khr_fp16` | Performance-critical Half kernels where emulation overhead matters |
 | `RequiresFloat64` | (none — every backend supports it) | Documentation that you use `double`. Filter is a no-op. |
 | `RequiresFloat64Native` | WebGPU, WebGL (emulate via Dekker) | Numerics where exact IEEE 754 matters or Dekker overhead is unacceptable |
+| `RequiresFloat64Strict` | (none — every backend can satisfy it) | Strict IEEE 754 f64 semantics. Native-f64 backends always satisfy; WebGPU/WebGL are auto-configured to Ozaki by `CreatePreferredAcceleratorAsync`. See "Strict IEEE 754 f64" section below. |
 | `RequiresInt64` | (none — every backend supports it) | Documentation. WebGPU/WebGL emulate via vec2&lt;u32&gt;. |
 | `RequiresInt64Native` | WebGPU, WebGL | Performance-critical i64/u64 kernels |
 | `RequiresInt64Atomics` | WebGL; OpenCL without `cl_khr_int64_base_atomics` | `Atomic.Add(ref long, ...)` and friends |
@@ -177,6 +178,58 @@ catch (UnsupportedKernelFeatureException ex)
     throw;
 }
 ```
+
+## Strict IEEE 754 f64 — `RequiresFloat64Strict`
+
+`RequiresFloat64Native` and `RequiresFloat64Strict` look similar but are different shapes. The first is a hardware-only filter; the second is a correctness contract that every backend can satisfy through some path.
+
+| Flag | What it filters | What it configures |
+|---|---|---|
+| `RequiresFloat64Native` | Rules out WebGPU + WebGL because they don't have hardware f64. Routes to CPU / CUDA / OpenCL / Wasm only. | Nothing — picks a backend that already has the feature. |
+| `RequiresFloat64Strict` | Rules out nothing. Every backend can produce IEEE 754 f64 — natively on CPU/CUDA/OpenCL/Wasm, via Ozaki emulation on WebGPU/WebGL. | Sets `F64Emulation = Ozaki` on browser-backend accelerators when `CreatePreferredAcceleratorAsync` picks one. |
+
+Use `Float64Strict` when you care about the **mathematical semantics** (full 53-bit IEEE 754) and the runtime should pick the right path; use `Float64Native` when you specifically want **hardware f64** for performance and are willing to skip browser backends entirely.
+
+### Async-only entry point
+
+The configuration step happens at accelerator-create time, so the strict-f64 path is only available via the async overload:
+
+```csharp
+using SpawnDev.ILGPU;
+using ILGPU.Runtime;
+
+using var context = await Context.CreateAsync(builder => builder.AllAcceleratorsAsync());
+
+// On browser: WebGPU is auto-configured for Ozaki (vec4<f32> emulation).
+// On desktop: routes to CPU/CUDA/OpenCL/Wasm (always strict).
+using var accelerator = await context.CreatePreferredAcceleratorAsync(
+    new AcceleratorRequirements { RequiresFloat64Strict = true });
+```
+
+The synchronous `CreatePreferredAccelerator(requirements)` keeps working for desktop hosts but does not configure browser backends — use the async overload for cross-platform code.
+
+### Runtime mode flips
+
+If you already have a `WebGPUAccelerator` or `WebGLAccelerator` and want to switch precision modes without recreating the device, set the `F64Mode` property directly:
+
+```csharp
+using SpawnDev.ILGPU;
+using SpawnDev.ILGPU.WebGPU;
+
+WebGPUAccelerator accelerator = ...;
+
+// Promote to strict for the next compile:
+accelerator.F64Mode = F64EmulationMode.Ozaki;
+
+// Drop back to fast Dekker mode for everyday work:
+accelerator.F64Mode = F64EmulationMode.Dekker;
+```
+
+The flip affects subsequent kernel compiles. Cached compiled kernels retain the mode they were compiled under — clear the kernel cache if you need everything to recompile under the new mode.
+
+### P2P swarms
+
+When dispatching across a P2P swarm, the coordinator carries the requested mode in `KernelDispatchRequest.F64Mode`; the receiving peer's worker auto-configures its WebGPU/WebGL accelerator to that mode before compiling the kernel. Native-f64 peers (CPU/CUDA/OpenCL/Wasm) ignore the field — they're always strict regardless. Coordinators can pre-flight filter peers by calling `PeerCapabilities.SupportsStrictFloat64()` before dispatching. See [`p2p-compute.md`](p2p-compute.md) for the full P2P API.
 
 ## See also
 

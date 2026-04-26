@@ -80,9 +80,9 @@ tracker flakiness cannot hide real regressions.
 - [ ] `CrossPlatform_BrowserCoord_DesktopWorker` - Chromium coord, desktop CPU worker
 - [ ] `CrossPlatform_BrowserBrowser_TwoContexts` - 2 separate Playwright contexts
 
-### Phase 6: Buffer, State, Stress, Pipeline [PARTIAL — IN-PROCESS DONE]
-- [ ] `Buffer_1MB_Chunked_Verified` - 16 chunks, byte-for-byte
-- [ ] `Buffer_4MB_Stress` - data channel queuing under load
+### Phase 6: Buffer, State, Stress, Pipeline [PARTIAL — IN-PROCESS + REAL-WEBRTC BUFFER DONE]
+- [x] `Buffer_1MB_Chunked_Verified` - covered by `RealWebRtcPipelineTests.LargeBuffer_1MB_DispatchedOverRealWebRtc_BitExact` (1 MB float buffers, byte-for-byte, real WebRTC)
+- [x] `Buffer_4MB_Stress` - exceeded by `RealWebRtcPipelineTests.LargeBuffer_10MB_DispatchedOverRealWebRtc_BitExact` (10 MB) and the optional `LargeBuffer_100MB_DispatchedOverRealWebRtc_BitExact` aspirational ceiling
 - [x] `State_PublishSubscribe_RealDHT` - BEP 46 publish/subscribe (covered by `Bep46PropagationTests.BEP46_CoordinatorStateReachesWorkerViaRealDht` end-to-end test)
 - [x] `State_CoordinatorAnnouncement` - DHT announcement received (covered by `Bep46PropagationTests` suite)
 - [x] `Stress_RapidJoinLeave_10Cycles` - 10 join/leave cycles, no leaks (in-process simulated peers, `StressTests.cs`)
