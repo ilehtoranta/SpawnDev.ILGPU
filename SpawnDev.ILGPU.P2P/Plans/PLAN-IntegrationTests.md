@@ -80,15 +80,17 @@ tracker flakiness cannot hide real regressions.
 - [ ] `CrossPlatform_BrowserCoord_DesktopWorker` - Chromium coord, desktop CPU worker
 - [ ] `CrossPlatform_BrowserBrowser_TwoContexts` - 2 separate Playwright contexts
 
-### Phase 6: Buffer, State, Stress, Pipeline [NOT STARTED]
+### Phase 6: Buffer, State, Stress, Pipeline [PARTIAL — IN-PROCESS DONE]
 - [ ] `Buffer_1MB_Chunked_Verified` - 16 chunks, byte-for-byte
 - [ ] `Buffer_4MB_Stress` - data channel queuing under load
-- [ ] `State_PublishSubscribe_RealDHT` - BEP 46 publish/subscribe
-- [ ] `State_CoordinatorAnnouncement` - DHT announcement received
-- [ ] `Stress_RapidJoinLeave_10Cycles` - 10 join/leave cycles, no leaks
-- [ ] `Stress_Concurrent_20Dispatches` - 20 simultaneous to 3 workers
-- [ ] `Stress_LargeSwarm_5Peers` - 5 workers, 15 dispatches
-- [ ] `Pipeline_TwoStage_EndToEnd` - FillSequence -> VectorScale
+- [x] `State_PublishSubscribe_RealDHT` - BEP 46 publish/subscribe (covered by `Bep46PropagationTests.BEP46_CoordinatorStateReachesWorkerViaRealDht` end-to-end test)
+- [x] `State_CoordinatorAnnouncement` - DHT announcement received (covered by `Bep46PropagationTests` suite)
+- [x] `Stress_RapidJoinLeave_10Cycles` - 10 join/leave cycles, no leaks (in-process simulated peers, `StressTests.cs`)
+- [x] `Stress_Concurrent_20Dispatches_InProcess` - 20 simultaneous to 3 workers (in-process simulated, `StressTests.cs`)
+- [x] `Stress_LargeSwarm_5Peers_15Dispatches` - 5 workers, 15 dispatches with TFLOPS-varied scoring (in-process simulated, `StressTests.cs`)
+- [x] `Pipeline_TwoStage_EndToEnd_InProcess` - FillSequence -> VectorScale (in-process simulated, `StressTests.cs`)
+
+Note: the `_InProcess` variants exercise the dispatcher's concurrency model and disposal cleanup using `HandlePeerConnected` simulated peers + `HandleResult` simulated completions - no real WebRTC / SCTP. Real-WebRTC stress is the next layer up; getting the in-process layer green first is the gate before paying the WebRTC dispatch cost on every iteration.
 
 ---
 
