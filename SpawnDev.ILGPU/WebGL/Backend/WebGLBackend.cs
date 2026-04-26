@@ -68,11 +68,23 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         /// </summary>
         public WebGLBackendOptions Options { get; }
 
+        /// <summary>
+        /// Effective F64 emulation mode for this backend. Defaults to <c>Options.F64Emulation</c>
+        /// at construction time and can be promoted at runtime via <see cref="WebGLAccelerator.F64Mode"/>
+        /// for callers that need to switch between Dekker and Ozaki without recreating the
+        /// backend (e.g. <c>AcceleratorRequirements.RequiresFloat64Strict</c> applied after
+        /// the accelerator already exists). Codegen reads this property, so changing it
+        /// will affect kernels compiled AFTER the change. Cached compiled kernels still
+        /// reflect the mode in effect when they were generated; callers that depend on
+        /// re-compilation after a mode flip should clear the kernel cache.
+        /// </summary>
+        public F64EmulationMode F64Mode { get; set; }
+
         /// <summary>True if f64 emulation is enabled (Dekker or Ozaki).</summary>
-        internal bool EnableF64Emulation => Options.F64Emulation != F64EmulationMode.Disabled;
+        internal bool EnableF64Emulation => F64Mode != F64EmulationMode.Disabled;
 
         /// <summary>True if using Ozaki quad-float f64 emulation.</summary>
-        internal bool UseOzakiF64Emulation => Options.F64Emulation == F64EmulationMode.Ozaki;
+        internal bool UseOzakiF64Emulation => F64Mode == F64EmulationMode.Ozaki;
 
         /// <summary>Always true — i64 emulation is required by ILGPU IR.</summary>
         internal bool EnableI64Emulation => true;
@@ -96,6 +108,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                   new WebGLArgumentMapper(context))
         {
             Options = options ?? WebGLBackendOptions.Default;
+            F64Mode = Options.F64Emulation;
 
             InitIntrinsicProvider();
             RegisterMathIntrinsics();

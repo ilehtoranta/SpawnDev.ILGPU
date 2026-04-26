@@ -48,6 +48,21 @@ namespace SpawnDev.ILGPU.WebGPU
         public WebGPUBackend Backend { get; private set; } = null!;
 
         /// <summary>
+        /// Effective F64 emulation mode for kernels compiled on this accelerator. Reads
+        /// from / writes to the underlying <see cref="WebGPUBackend.F64Mode"/>. Use this
+        /// to flip between Dekker (fast, ~48-53 bit), Ozaki (strict IEEE 754), and
+        /// Disabled (f32 promotion) without recreating the accelerator. Kernels compiled
+        /// before the flip retain their original mode in cache; new compilations pick up
+        /// the change. See <see cref="AcceleratorRequirements.RequiresFloat64Strict"/>
+        /// for the consumer-facing path that auto-promotes to Ozaki.
+        /// </summary>
+        public F64EmulationMode F64Mode
+        {
+            get => Backend.F64Mode;
+            set => Backend.F64Mode = value;
+        }
+
+        /// <summary>
         /// Gets the set of WebGPU features enabled on this device.
         /// </summary>
         public HashSet<string> EnabledFeatures => NativeAccelerator?.EnabledFeatures ?? new HashSet<string>();
