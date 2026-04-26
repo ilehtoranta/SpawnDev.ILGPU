@@ -81,6 +81,26 @@ accelerator.Synchronize();  // Blocking — safe on desktop, deadlocks in browse
 var results = bufC.GetAsArray1D();  // Synchronous readback
 ```
 
+### Capability-Gated Selection
+
+`CreatePreferredAccelerator(requirements)` filters out backends that can't run a given kernel before they get picked. Use this when your kernel relies on features that aren't universal — atomics (no WebGL), native f64 (no WebGPU/WebGL), 64-bit atomics (no WebGL, no OpenCL without `cl_khr_int64_base_atomics`), etc.:
+
+```csharp
+using SpawnDev.ILGPU;
+
+using var accelerator = context.CreatePreferredAccelerator(
+    new AcceleratorRequirements
+    {
+        RequiresAtomics = true,        // rules out WebGL
+        RequiresFloat64Native = true,  // rules out WebGPU + WebGL
+    });
+// On desktop: CUDA > OpenCL > CPU
+// On browser with the above combo: only Wasm survives
+// Throws NotSupportedException with a diagnostic message if nothing matches
+```
+
+The flag set mirrors the per-backend feature matrix below. See [capabilities-and-backend-selection.md](capabilities-and-backend-selection.md) for the full list of flags, the `EnumerateCompatibleDevices` / `Satisfies` companion methods, and the `UnsupportedKernelFeatureException` runtime safety net for cases where a kernel pins to a specific backend.
+
 ## WebGPU Backend
 
 The fastest backend. Uses GPU compute shaders via the WebGPU API, transpiling kernels to WGSL.

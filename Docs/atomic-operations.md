@@ -166,3 +166,22 @@ If a buffer has BOTH atomic and non-atomic access patterns (e.g., `Atomic.And(re
 | FullCombinedPatternTest | Tests19 | i64 Atomic.And + Add + bit packing combined |
 | ChainedDispatch3KernelTest | Tests18 | Implicit stream ordering (no sync between dispatches) |
 | ImplicitSyncOnReadbackTest | Tests18 | CopyToHostAsync without explicit SynchronizeAsync |
+
+---
+
+## Filtering Out Incompatible Backends Up Front
+
+Rather than letting `NotSupportedException` surface from kernel compilation on a backend that can't run your kernel, declare the requirement at backend-selection time:
+
+```csharp
+using SpawnDev.ILGPU;
+
+using var accelerator = context.CreatePreferredAccelerator(
+    new AcceleratorRequirements
+    {
+        RequiresAtomics = true,           // rules out WebGL
+        RequiresInt64Atomics = true,      // rules out WebGL + OpenCL without cl_khr_int64_base_atomics
+    });
+```
+
+The selection path picks a backend that can satisfy every flag, or throws `NotSupportedException` naming the unmet requirement and the available devices. See [capabilities-and-backend-selection.md](capabilities-and-backend-selection.md) for the full flag set and per-backend "rules out" matrix.
