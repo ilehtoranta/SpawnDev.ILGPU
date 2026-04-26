@@ -208,9 +208,18 @@ For P2P: a swarm test where the coordinator sets `RequiresFloat64Strict` and dis
 
 ## Sequencing / ship gate
 
-- 4.9.2 stable: ships without this plan. WebGPU/WebGL F64 mode stays at registration-time-immutable, users either accept Dekker or set `WebGPUBackendOptions.F64Emulation = Ozaki` at startup.
-- 4.9.3 candidate: Phase 1 implementation (dynamic F64 mode on accelerator + `RequiresFloat64Strict` flag in local AND P2P).
-- 4.9.4 or later: Phase 2 ack handshake — only if a real consumer surfaces mode-honor bug.
+**Updated 2026-04-25:** plan splits into three rcs given the architectural surface.
+
+- **4.9.2-rc.21 (this rc, shipped):** Phase 1 Local v1. Adds `RequiresFloat64Strict` flag, `Satisfies()` semantics, `Describe()` entry, new `CreatePreferredAcceleratorAsync(Context, requirements)` overload that passes `F64Emulation = Ozaki` at accelerator-create time when WebGPU/WebGL is selected with the strict flag set. Native-f64 backends accepted unchanged. The flag is now usable end-to-end for browser pipelines that need strict IEEE 754; the runtime auto-configures Ozaki at create time.
+- **4.9.2-rc.22 (next, planned):** Phase 1 Local v2. Make `WebGPUBackend.F64Mode` and `WebGLBackend.F64Mode` settable post-create (mutating the existing internal `EnableF64Emulation` / `UseOzakiF64Emulation` getters to read from a backing field that defaults to `Options.F64Emulation`). Add a settable `F64Mode` pass-through on `WebGPUAccelerator` / `WebGLAccelerator`. Shader cache key gains the F64 mode component so a single accelerator instance can hold both Dekker and Ozaki shader caches. Lets a user that already created their accelerator promote it to strict-f64 without recreating the backend.
+- **4.9.2-rc.23 (planned):** Phase 1 P2P. `ComputePeerCapabilities.float64_modes_supported` per browser backend. `KernelDispatchRequest.f64_mode` dispatch field. Receiving peer auto-configures `F64Mode` on its WebGPU/WebGL accelerator using the rc.22 plumbing. Coordinator pre-flight check rejects pre-Ozaki peers under `RequiresFloat64Strict` (theoretical for current rc.10+ peers, real for any future older peer).
+- **4.9.3 or later:** Phase 2 ack handshake — only if a real consumer surfaces a mode-honor bug.
+
+## v1 limitations (rc.21)
+
+- The flag must be set BEFORE `CreatePreferredAcceleratorAsync`. A user that creates their accelerator without the flag, then later decides they want strict mode, has to dispose and recreate. v2 (rc.22) fixes this by adding a runtime mode-flip on the existing accelerator.
+- The flag is browser-side only for the configuration step. Native-f64 backends (CPU/CUDA/OpenCL/Wasm) are accepted but no configuration is applied (they're always strict).
+- No P2P wire format yet. Each peer's local accelerator is configured independently; coordinator-driven mode coordination ships with rc.23.
 
 ## See also
 

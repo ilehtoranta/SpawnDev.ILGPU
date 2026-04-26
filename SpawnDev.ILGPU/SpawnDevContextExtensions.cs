@@ -101,35 +101,73 @@ namespace SpawnDev.ILGPU
         /// </summary>
         /// <param name="context">The ILGPU context (must have devices registered).</param>
         /// <returns>The best available accelerator.</returns>
+        public static Task<Accelerator> CreatePreferredAcceleratorAsync(
+            this Context context) => context.CreatePreferredAcceleratorAsync(AcceleratorRequirements.None);
+
+        /// <summary>
+        /// Creates the preferred accelerator that satisfies the given requirements.
+        /// Same priority order as the no-arg overload (WebGPU &gt; WebGL &gt; Wasm &gt; CPU on
+        /// browser, Cuda &gt; OpenCL &gt; CPU on desktop), restricted to devices that pass
+        /// <see cref="AcceleratorRequirements"/> filtering.
+        ///
+        /// When <see cref="AcceleratorRequirements.RequiresFloat64Strict"/> is set and a
+        /// WebGPU or WebGL device is selected, the accelerator is created with
+        /// <c>F64Emulation = Ozaki</c> instead of the default Dekker. This is the v1
+        /// shape of the strict-f64 path - native-f64 backends are always strict, browser
+        /// backends are configured at create time.
+        ///
+        /// Throws <see cref="NotSupportedException"/> when no available device satisfies
+        /// the requirements.
+        /// </summary>
         public static async Task<Accelerator> CreatePreferredAcceleratorAsync(
-            this Context context)
+            this Context context, AcceleratorRequirements requirements)
         {
+            ArgumentNullException.ThrowIfNull(context);
+            ArgumentNullException.ThrowIfNull(requirements);
+
+            var compatible = context.EnumerateCompatibleDevices(requirements);
+            if (compatible.Count == 0)
+            {
+                throw new NotSupportedException(
+                    $"No compatible accelerator found for requirements: {requirements.Describe()}. " +
+                    $"Available devices: {string.Join(", ", context.Devices.Select(d => d.AcceleratorType))}.");
+            }
+
             if (OperatingSystem.IsBrowser())
             {
                 // Try WebGPU first (true GPU compute)
-                var webGpuDevices = context.GetDevices<WebGPUILGPUDevice>();
-                if (webGpuDevices.Count > 0)
+                var webGpuDevice = compatible.OfType<WebGPUILGPUDevice>().FirstOrDefault();
+                if (webGpuDevice != null)
                 {
-                    return await webGpuDevices[0].CreateAcceleratorAsync(context, null);
+                    var options = requirements.RequiresFloat64Strict
+                        ? new WebGPUBackendOptions { F64Emulation = F64EmulationMode.Ozaki }
+                        : null;
+                    return await webGpuDevice.CreateAcceleratorAsync(context, options);
                 }
 
                 // Try WebGL2 (GPU compute via Transform Feedback)
-                var webGlDevices = context.GetDevices<WebGLILGPUDevice>();
-                if (webGlDevices.Count > 0)
+                var webGlDevice = compatible.OfType<WebGLILGPUDevice>().FirstOrDefault();
+                if (webGlDevice != null)
                 {
-                    return webGlDevices[0].CreateAccelerator(context);
+                    var options = requirements.RequiresFloat64Strict
+                        ? new WebGLBackendOptions { F64Emulation = F64EmulationMode.Ozaki }
+                        : null;
+                    return webGlDevice.CreateAccelerator(context, options);
                 }
 
                 // Try Wasm (near-native WebAssembly compute)
-                var wasmDevices = context.GetDevices<WasmILGPUDevice>();
-                if (wasmDevices.Count > 0)
+                var wasmDevice = compatible.OfType<WasmILGPUDevice>().FirstOrDefault();
+                if (wasmDevice != null)
                 {
                     return await WasmAccelerator.Create(context);
                 }
             }
 
             // Desktop: Cuda > OpenCL > CPU  |  Browser fallback: CPU
-            return context.GetPreferredDevice(preferCPU: false).CreateAccelerator(context);
+            // Prefer non-CPU when a GPU backend is compatible.
+            var preferred = compatible.FirstOrDefault(d => d.AcceleratorType != AcceleratorType.CPU)
+                            ?? compatible[0];
+            return preferred.CreateAccelerator(context);
         }
 
         /// <summary>

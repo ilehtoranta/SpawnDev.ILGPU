@@ -179,6 +179,42 @@ public class AcceleratorRequirementsTests
     }
 
     [TestMethod]
+    public Task Enumerate_Float64Strict_CoversCpuAtMinimum()
+    {
+        // Strict IEEE 754 f64 must accept native-f64 backends (CPU/CUDA/Wasm always; OpenCL
+        // when cl.Float64 is present). The browser-side Ozaki-configuration path is verified
+        // in the WASM test suite.
+        using var context = Context.CreateDefault();
+        var req = new AcceleratorRequirements { RequiresFloat64Strict = true };
+        var compatible = context.EnumerateCompatibleDevices(req);
+        if (!compatible.Any(d => d.AcceleratorType == AcceleratorType.CPU))
+            throw new Exception("CPU must satisfy RequiresFloat64Strict - native f64 is always IEEE 754 strict.");
+        return Task.CompletedTask;
+    }
+
+    [TestMethod]
+    public Task Describe_Float64Strict_ReturnsLabel()
+    {
+        var req = new AcceleratorRequirements { RequiresFloat64Strict = true };
+        var description = req.Describe();
+        if (description != "Float64Strict")
+            throw new Exception($"Expected 'Float64Strict', got '{description}'");
+        return Task.CompletedTask;
+    }
+
+    [TestMethod]
+    public Task Satisfies_Float64Strict_AcceptsCpu()
+    {
+        using var context = Context.CreateDefault();
+        var cpu = context.Devices.FirstOrDefault(d => d.AcceleratorType == AcceleratorType.CPU);
+        if (cpu == null) throw new UnsupportedTestException("No CPU device available - unexpected on desktop.");
+        var req = new AcceleratorRequirements { RequiresFloat64Strict = true };
+        if (!cpu.Satisfies(req))
+            throw new Exception("CPU must satisfy RequiresFloat64Strict per the strict-f64 capability rule.");
+        return Task.CompletedTask;
+    }
+
+    [TestMethod]
     public Task PreferredAccelerator_PrefersGpuOverCpuWhenAvailable()
     {
         using var context = Context.CreateDefault();

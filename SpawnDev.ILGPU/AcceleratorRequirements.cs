@@ -81,6 +81,36 @@ public sealed class AcceleratorRequirements
     public bool RequiresFloat64Native { get; init; }
 
     /// <summary>
+    /// Kernel requires strict IEEE 754 double-precision arithmetic.
+    ///
+    /// Distinct from <see cref="RequiresFloat64Native"/>: every backend can satisfy strict
+    /// f64, just not all at the same speed.
+    ///   - CPU / CUDA / OpenCL / Wasm: strict f64 is native; accepted unchanged.
+    ///   - WebGPU / WebGL: strict f64 requires <see cref="F64EmulationMode.Ozaki"/>
+    ///     (full IEEE 754, vec4&lt;f32&gt;). The default <see cref="F64EmulationMode.Dekker"/>
+    ///     (~48-53 bit mantissa, vec2&lt;f32&gt;) is REJECTED because it diverges from
+    ///     IEEE 754 53-bit semantics.
+    ///
+    /// <para>v1 shipping behavior (4.9.2-rc.23): this flag filters at backend-selection
+    /// time. WebGPU / WebGL are accepted only when the backend was registered with
+    /// <c>F64Emulation = Ozaki</c> (via <c>WebGPUBackendOptions</c> /
+    /// <c>WebGLBackendOptions</c> at <c>Context.Create</c> time). If the backend is in
+    /// Dekker or Disabled mode, the device is filtered out under this flag.</para>
+    ///
+    /// <para>v2 (planned): a settable <c>F64Mode</c> property on
+    /// <c>WebGPUAccelerator</c> / <c>WebGLAccelerator</c> will let
+    /// <see cref="AcceleratorRequirementsExtensions.CreatePreferredAccelerator"/> promote
+    /// a Dekker-registered backend to Ozaki on demand. v3 extends the same shape across
+    /// the P2P wire (peer reports supported modes, dispatch carries requested mode). See
+    /// <c>Plans/accelerator-requirements-mode-flags.md</c>.</para>
+    ///
+    /// <para>This is a CORRECTNESS CONTRACT, not a preference. A consumer that sets this
+    /// flag and dispatches to a Dekker backend gets silently-wrong numbers. Setting the
+    /// flag tells the runtime to refuse such backends rather than ship wrong precision.</para>
+    /// </summary>
+    public bool RequiresFloat64Strict { get; init; }
+
+    /// <summary>
     /// Kernel uses Int64 (<c>long</c>). True is compatible with every backend (emulated
     /// on WebGPU/WebGL). Use <see cref="RequiresInt64Native"/> for no-emulation.
     /// </summary>
@@ -172,6 +202,7 @@ public static class AcceleratorRequirementsExtensions
         if (requirements.RequiresFloat16Native && !HasFloat16Native(device)) return false;
         if (requirements.RequiresFloat64 && !HasFloat64(device)) return false;
         if (requirements.RequiresFloat64Native && !HasFloat64Native(device)) return false;
+        if (requirements.RequiresFloat64Strict && !HasFloat64Strict(device)) return false;
         if (requirements.RequiresInt64 && !HasInt64(backend)) return false;
         if (requirements.RequiresInt64Native && !HasInt64Native(backend)) return false;
         if (requirements.RequiresInt64Atomics && !HasInt64Atomics(device)) return false;
@@ -233,6 +264,19 @@ public static class AcceleratorRequirementsExtensions
         _ => true,
     };
 
+    // Strict IEEE 754 f64. Native-f64 backends always satisfy. WebGPU/WebGL devices
+    // are accepted at the device level - the actual switch to Ozaki happens at
+    // accelerator-create time inside CreatePreferredAcceleratorAsync, which passes
+    // F64Emulation = Ozaki when RequiresFloat64Strict is set. The user can also
+    // pre-configure Ozaki by passing options to CreateAcceleratorAsync directly.
+    private static bool HasFloat64Strict(Device device) => device.AcceleratorType switch
+    {
+        AcceleratorType.OpenCL => device.Capabilities is CLCapabilityContext cl && cl.Float64,
+        // Every other backend can satisfy strict f64: native on CPU/CUDA/Wasm,
+        // via Ozaki on WebGPU/WebGL.
+        _ => true,
+    };
+
     private static bool HasInt64(AcceleratorType backend) => true; // emulated everywhere needed
 
     private static bool HasInt64Native(AcceleratorType backend) => backend switch
@@ -271,6 +315,7 @@ public static class AcceleratorRequirementsExtensions
         if (r.RequiresFloat16Native) flags.Add("Float16Native");
         if (r.RequiresFloat64) flags.Add("Float64");
         if (r.RequiresFloat64Native) flags.Add("Float64Native");
+        if (r.RequiresFloat64Strict) flags.Add("Float64Strict");
         if (r.RequiresInt64) flags.Add("Int64");
         if (r.RequiresInt64Native) flags.Add("Int64Native");
         if (r.RequiresInt64Atomics) flags.Add("Int64Atomics");
