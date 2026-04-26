@@ -32,7 +32,7 @@ kernel((Index1D)length, buffer.View);
 
 ### Higher-Order Kernels with DelegateSpecialization
 
-`DelegateSpecialization<T>` lets you write one kernel that accepts different operations as parameters. The delegate is resolved at dispatch time and inlined at compile time — the GPU never sees a function pointer:
+`DelegateSpecialization<T>` lets you write one kernel that accepts different operations as parameters. The delegate is resolved at dispatch time and **inlined at compile time** — the GPU never sees a function pointer, never branches on op-tag, never pays a virtual-call cost:
 
 ```csharp
 static int Negate(int x) => -x;
@@ -52,7 +52,49 @@ kernel(size, buffer, new DelegateSpecialization<Func<int, int>>(Negate));
 kernel(size, buffer, new DelegateSpecialization<Func<int, int>>(Square));
 ```
 
-Each unique target method produces a cached specialized kernel compilation. Target methods must be `static`.
+Each unique target method produces a **cached specialized kernel compilation**. The first dispatch with `Negate` compiles a kernel that has `-x` baked in. The first dispatch with `Square` compiles a separate kernel that has `x * x` baked in. Subsequent dispatches with the same target method reuse the cached compilation.
+
+#### When to use it
+
+The pattern shines when you have **one data-shape, many ops**. Without `DelegateSpecialization` you'd write N near-identical kernels; with it you write one and pay a single compilation per op variant you actually call.
+
+Real-world examples:
+- **Element-wise tensor ops** — Add, Sub, Mul, Div, Min, Max all run over the same `(ArrayView<float> a, ArrayView<float> b, ArrayView<float> out)` shape.
+- **Reductions** — sum, product, min, max, all, any all reduce over the same input view, only the combine function differs.
+- **Activation functions** in ML — ReLU, GELU, Sigmoid, Tanh applied element-wise over the same buffer shape.
+- **Sort / scan with custom comparators or combiners** — `ILGPU.Algorithms` uses this pattern internally.
+
+If you find yourself writing four kernels named `AddKernel`, `SubKernel`, `MulKernel`, `DivKernel` that differ only by one operator, that's the moment to collapse them into a single `BinaryOpKernel<DelegateSpecialization<Func<float, float, float>>>` and four delegate values. Same final code on the GPU; one source-of-truth on the C# side.
+
+#### Multi-argument signatures
+
+Any `Func<...>` or `Action<...>` shape works as long as the parameter and return types are kernel-legal value types:
+
+```csharp
+static float Add(float a, float b) => a + b;
+static float Mul(float a, float b) => a * b;
+
+static void BinaryOpKernel(
+    Index1D index,
+    ArrayView<float> a, ArrayView<float> b, ArrayView<float> result,
+    DelegateSpecialization<Func<float, float, float>> op)
+{
+    result[index] = op.Value(a[index], b[index]);
+}
+
+var kernel = accelerator.LoadAutoGroupedStreamKernel<
+    Index1D, ArrayView<float>, ArrayView<float>, ArrayView<float>,
+    DelegateSpecialization<Func<float, float, float>>>(BinaryOpKernel);
+
+kernel(length, aView, bView, sumView, new DelegateSpecialization<Func<float, float, float>>(Add));
+kernel(length, aView, bView, prdView, new DelegateSpecialization<Func<float, float, float>>(Mul));
+```
+
+#### Rules
+
+- **Target method must be `static`.** Instance methods cannot be specialized.
+- **No captured locals.** A lambda that captures variables (`(x) => x + capturedScalar`) won't work — `DelegateSpecialization` resolves the target method by reflection and bakes that method's body in. There's no closure to carry the captured value. If you need a captured scalar, pass it as an explicit kernel parameter alongside the delegate.
+- **Target body follows kernel rules.** No `throw`, no `ref`/`out` on the delegate's signature itself, value types only. Helper methods called from the target body still follow `[MethodImpl(NoInlining)]` rules described above.
 
 ## Kernel Rules
 

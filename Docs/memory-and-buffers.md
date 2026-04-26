@@ -80,6 +80,41 @@ static void MyKernel(Index1D index, ArrayView<float> data, float multiplier, int
 kernel((Index1D)length, buffer.View, 2.5f, 10);
 ```
 
+### Via CopyFromJS (Browser Backends — Zero-Copy from JS)
+
+When data originates in JavaScript — fetched from a `WebSocket`, decoded by a `FileReader`, pulled from `IndexedDB`, returned by `fetch`, produced by `MediaRecorder`, etc. — going through `CopyFromCPU` would marshal every byte through .NET arrays for no reason. `CopyFromJS` is the zero-copy path: data stays in JS, gets pushed straight into the GPU buffer. Available on **all three browser backends** (WebGPU, WebGL, Wasm). Not available on desktop (CUDA / OpenCL / CPU don't have JS).
+
+```csharp
+using SpawnDev.ILGPU;
+using SpawnDev.BlazorJS.JSObjects;
+
+// Get the IBrowserMemoryBuffer for any GPU buffer
+var browserBuffer = (IBrowserMemoryBuffer)((IArrayView)buffer.View).Buffer;
+
+// From a JS TypedArray (e.g. data already in JS land)
+Int16Array jsData = ...;            // 16-bit PCM samples from a WebSocket message
+browserBuffer.CopyFromJS(jsData);
+
+// From a raw ArrayBuffer (e.g. a fetch() result body)
+ArrayBuffer rawBytes = ...;          // image bytes from a fetch response
+browserBuffer.CopyFromJS(rawBytes);
+
+// Optional target offset — write into the middle of an existing GPU buffer
+browserBuffer.CopyFromJS(jsData, targetByteOffset: 1024);
+```
+
+**Per-backend behavior:**
+- **WebGPU** — calls `queue.WriteBuffer` directly on the JS-side typed array. Zero copy through .NET, no managed allocation.
+- **WebGL** — copies the JS bytes into the buffer's backing array and sets `NeedsUpload = true`; the data is uploaded to the GPU on the next dispatch (not immediately, by design — WebGL has no async write queue).
+- **Wasm** — pure JS→JS copy within the SharedArrayBuffer that backs Wasm linear memory. Worker threads see the new bytes immediately.
+
+**When to use it:**
+- Streaming pipelines where JS produces data (audio decode, video frames, network bytes)
+- Loading models / assets from `fetch` or `IndexedDB`
+- Canvas → GPU pipelines where you read `ImageData` once on the JS side and want to skip the .NET round trip
+
+If your data is already in a `byte[]` / `float[]` / etc., use `CopyFromCPU` — that's the right path for managed-array sources. `CopyFromJS` is specifically for when the data hasn't crossed into .NET yet and you want to keep it that way.
+
 ## Copying Between GPU Buffers (GPU→GPU)
 
 Use `CopyFrom` to copy data between GPU buffers. This works on **all six backends** — it's a native GPU operation with no CPU involvement:
@@ -102,6 +137,7 @@ Not all copy operations work the same way on every backend. This table shows wha
 |-----------|--------|--------------------:|-------:|------:|-----:|
 | **GPU→GPU** | `CopyFrom` | Sync | `CopyBufferToBuffer` | TF readback | SharedArrayBuffer |
 | **CPU→GPU** | `CopyFromCPU` / `Allocate1D(data)` | Sync | `queue.WriteBuffer` | `texImage2D` | SharedArrayBuffer |
+| **JS→GPU** | `IBrowserMemoryBuffer.CopyFromJS` | N/A | `queue.WriteBuffer` | Backing-array copy + `NeedsUpload` | JS→JS within SharedArrayBuffer |
 | **GPU→CPU (async)** | `CopyToHostAsync` | Sync fallback | `mapAsync(Read)` | Readback | SharedArrayBuffer |
 | **GPU→CPU (sync)** | `CopyTo` / `CopyToCPU` / `GetAsArray1D` | Sync | **THROWS** | **THROWS** | **THROWS** |
 

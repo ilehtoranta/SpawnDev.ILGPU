@@ -116,6 +116,17 @@ All sub-word types now have **complete Read/Write/EndToEnd support on ALL 7 back
 | **OpenCL** | Native types for Int8/UInt8/Int16/UInt16. Float16 via `vload_half`/`vstore_half` with tracked LEA base pointer. | Native type support |
 | **CPU/CUDA** | Native sub-word support, no special handling needed. | Native |
 
+### Sub-Word Usage Notes
+
+These apply to any kernel using `ArrayView<byte>`, `ArrayView<sbyte>`, `ArrayView<short>`, `ArrayView<ushort>`, or `ArrayView<Half>`:
+
+- **Use `ILGPU.Half`, NOT `System.Half`, in kernel signatures.** Implicit conversion operators are defined for interop, so you can mix the two on the host side; inside the kernel signature the `ILGPU.Half` type is what the IR + codegen expect.
+- **Sub-word writes on WebGPU lower to atomic RMW.** Two threads writing different halves of the same `u32` word would race without RMW; the codegen always synthesizes `atomicAnd` mask + `atomicOr` set so the writes are thread-safe. Setting `RequiresAtomics = true` in `AcceleratorRequirements` (or pinning to a backend with atomics) is therefore mandatory whenever a kernel writes a sub-word view — WebGL has no atomics and rejects sub-word writes at compile time. See [capabilities-and-backend-selection.md](capabilities-and-backend-selection.md).
+- **Sub-word view reads can return stale data on WebGPU if you wrote to the same slot in the same kernel invocation.** Byte writes lower to atomic RMW on WebGPU; reading a byte slot you just wrote may observe pre-RMW state in the same dispatch. Treat `ArrayView<byte>` and `ArrayView<sbyte>` as **write-only within a kernel invocation** — buffer the value in a register and route results through that register, not back through the view.
+- **`arrayLength()` on sub-word buffers returns the `u32`-count, not the element-count.** A 256-byte buffer reports `arrayLength = 64` (256/4 u32s). Multiply by elements-per-word (4 for byte/sbyte, 2 for short/ushort/Half) when computing element bounds inside the kernel.
+- **Sign extension on load is automatic.** `ArrayView<sbyte>` and `ArrayView<short>` reads sign-extend the narrow value to `int` when used in arithmetic. The codegen emits `extractBits(x, 0u, 16u)` (WGSL) / `int(int16_t(x))` (GLSL) / `i32.load16_s` (Wasm).
+- **Wasm minimum buffer size is 4 bytes.** Allocating an `ArrayView<byte>` of length 1, 2, or 3 throws `Invalid typed array length: 4` on Wasm. Pad per-block scalar buffers to `Math.Max(blockCount, 4L)` if your kernel writes one byte per block.
+
 ### Test Coverage
 
 **147 tests total** across 10 sub-word test methods x 7 backends + Half intrinsics:
