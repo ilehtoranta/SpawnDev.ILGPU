@@ -769,7 +769,19 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 // Store/Load/LoadFieldAddress must NOT dereference these with '*'.
                 _localAllocaVarNames.Add(variable.Name);
 
-                if (allocaInfo.IsArray)
+                // `AllocaKindInformation.IsArray` returns false when ArraySize == 1
+                // (it's defined as `ArraySize > 1`), but the IR distinguishes between
+                // "scalar local" (Alloca.IsSimpleAllocation) and "array of length 1"
+                // (Alloca.IsArrayAllocation with primitive value 1) - the latter is
+                // what `LocalMemory.Allocate<T>(1)` produces. Downstream codegen for
+                // `LoadArrayElementAddress` always emits `&v[idx]`, which is invalid
+                // WGSL when v is a scalar i32 ("cannot index type 'i32'"). Use the
+                // IR's IsArrayAllocation to preserve the array shape even at N=1.
+                bool emitAsArray =
+                    allocaInfo.IsArray
+                    || allocaInfo.Alloca.IsArrayAllocation(out _);
+
+                if (emitAsArray)
                 {
                     // The WGSL declaration carries the full array type; keep the tracked
                     // variable type in sync so downstream passes that look up variable
@@ -780,7 +792,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     // declared as scalar vars and subsequent `&v_X[i]` indexing silently
                     // produces wrong output or undeclared identifiers on WebGL.
                     // Fixes the core 2026-04-24 LocalMemory<int>(64) bug reported by
-                    // Tuvok for VP9 iDCT 8x8.
+                    // Tuvok for VP9 iDCT 8x8, and the 2026-04-25
+                    // NoHelperOutLikeAllocaTest WGSL "cannot index type 'i32'" bug.
                     var arrayWgslType = $"array<{elementType}, {allocaInfo.ArraySize}>";
                     valueVariables[allocaInfo.Alloca] = new Variable(variable.Name, arrayWgslType);
                     AppendLine($"var {variable.Name} : {arrayWgslType};");

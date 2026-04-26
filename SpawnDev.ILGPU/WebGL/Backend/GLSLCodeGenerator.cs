@@ -810,7 +810,17 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 var variable = Allocate(allocaInfo.Alloca);
                 var elementType = TypeGenerator[allocaInfo.ElementType];
 
-                if (allocaInfo.IsArray)
+                // `AllocaKindInformation.IsArray` returns false at N=1 (defined as
+                // `ArraySize > 1`). The IR distinguishes scalar locals from
+                // single-element arrays via `Alloca.IsArrayAllocation` - GLSL
+                // codegen for `LoadArrayElementAddress` always emits `v[idx]`,
+                // which is invalid when v is a scalar. Mirrors the WGSL fix in
+                // WGSLCodeGenerator.SetupAllocations for `LocalMemory.Allocate<T>(1)`.
+                bool emitAsArray =
+                    allocaInfo.IsArray
+                    || allocaInfo.Alloca.IsArrayAllocation(out _);
+
+                if (emitAsArray)
                     AppendLine($"{elementType} {variable.Name}[{allocaInfo.ArraySize}];");
                 else
                     AppendLine($"{elementType} {variable.Name};");
