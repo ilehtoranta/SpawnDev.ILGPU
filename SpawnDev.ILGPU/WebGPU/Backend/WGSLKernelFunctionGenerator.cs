@@ -3713,6 +3713,18 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 refPrefix = "&";
             }
 
+            // Local-alloca source: when NewView wraps a function-scope alloca that
+            // SetupAllocations declared as `var v_X : T`, we must take the address
+            // (`&v_X`) instead of copying by value. Without this, `let v_alias = v_X`
+            // produces a scalar copy and downstream `LoadElementAddress` emits
+            // `&v_alias[idx]` which WGSL rejects with "cannot index type 'T'".
+            // Mirrors the existing shared-memory branch above.
+            if (string.IsNullOrEmpty(refPrefix)
+                && _localAllocaVarNames.Contains(source.Name))
+            {
+                refPrefix = "&";
+            }
+
             // We use 'let' to alias the pointer, ensuring we don't copy the array
             // Optimization: If source is already a pointer (likely), we might not need &
             // But for Shared Memory (var<workgroup> arr), it's treated as value, so we need &
@@ -4024,13 +4036,24 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 if (_leaKernelName.Contains("MultiPassScan") || _leaKernelName.Contains("SingleGroupScan"))
                     WebGPUBackend.Log($"[DIAG-LEA] Fallback LEA: target={target.Name}, source={sourceVal.Name} (type={sourceVal.Type}), IR source type={value.Source.Type}, IR source kind={value.Source.Resolve().GetType().Name}, isNewView={value.Source.Resolve() is NewView}, isPointerType={value.Source.Type.IsPointerType}");
             }
+
             AppendIndent();
             Builder.Append($"let {target.Name} = ");
 
             // POINTER DEREFERENCE LOGIC
             // If the source comes from NewView, it's a pointer (let v_3 = &v_4).
-            // To access element at offset: (*ptr)[offset] -> &(*ptr)[offset] gives the address
-            if (value.Source is global::ILGPU.IR.Values.NewView || value.Source.Type.IsPointerType)
+            // To access element at offset: (*ptr)[offset] -> &(*ptr)[offset] gives the address.
+            // NOTE: `value.Source is NewView` doesn't pattern-match through ValueReference;
+            // use `Resolve()` for the IR walk-back. The original check `is NewView` was
+            // broken (always false on a ValueReference); the second condition
+            // `IsPointerType` covered the common case but missed the
+            // NewView-wrapping-scalarized-alloca shape, leaving WGSL with `&v[idx]`
+            // on a scalar i32. Resolved version fires correctly for both shapes -
+            // SetupAllocations now declares the alloca as `array<T, 1>` for
+            // user-array allocations and the NewView fix above emits `&v_alloca`
+            // (yielding `ptr<function, array<T, 1>>`), so `&(*v)[idx]` produces
+            // the right `ptr<function, T>` for the element address.
+            if (value.Source.Resolve() is global::ILGPU.IR.Values.NewView || value.Source.Type.IsPointerType)
             {
                 Builder.Append($"&(*{sourceVal})[{offsetExpr}];");
             }

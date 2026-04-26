@@ -816,9 +816,32 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 // codegen for `LoadArrayElementAddress` always emits `v[idx]`,
                 // which is invalid when v is a scalar. Mirrors the WGSL fix in
                 // WGSLCodeGenerator.SetupAllocations for `LocalMemory.Allocate<T>(1)`.
+                //
+                // Additional case: ILGPU IR can scalarize `LocalMemory.Allocate<T>(1)`
+                // so that BOTH IsArray and IsArrayAllocation return false (the
+                // ArrayLength gets optimized to non-primitive). The signal that
+                // distinguishes "user-array, scalarized" from "compiler-scratch
+                // scalar" is whether the alloca has a NewView consumer - the
+                // former always does (LocalMemory.Allocate returns ArrayView
+                // through NewView), the latter doesn't. Declare the user-array
+                // case as a 1-element array so downstream LEA + Store/Load
+                // preserve array semantics. Without this, GLSL emits a scalar
+                // declaration but downstream NewView falls back to a comment-only
+                // alias and v_5-style undeclared identifiers cascade.
+                bool hasNewViewConsumer = false;
+                foreach (var use in allocaInfo.Alloca.Uses)
+                {
+                    if (use.Resolve() is global::ILGPU.IR.Values.NewView)
+                    {
+                        hasNewViewConsumer = true;
+                        break;
+                    }
+                }
+
                 bool emitAsArray =
                     allocaInfo.IsArray
-                    || allocaInfo.Alloca.IsArrayAllocation(out _);
+                    || allocaInfo.Alloca.IsArrayAllocation(out _)
+                    || hasNewViewConsumer;
 
                 if (emitAsArray)
                     AppendLine($"{elementType} {variable.Name}[{allocaInfo.ArraySize}];");

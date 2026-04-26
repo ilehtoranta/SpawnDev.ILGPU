@@ -1053,6 +1053,46 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 return;
             }
 
+            // Scalarized-array case: ILGPU IR can optimize `LocalMemory.Allocate<T>(1)`
+            // so neither IsArrayAllocation nor IsSimpleAllocation reflects the
+            // user-array intent (ArrayLength gets simplified). The signal that
+            // distinguishes "user-array, scalarized" from "compiler-scratch scalar"
+            // is whether the alloca has a NewView consumer - LocalMemory returns
+            // an ArrayView through NewView; compiler-generated scratch doesn't.
+            // Treat the user-array case as a 1-element array so downstream
+            // NewView + LEA + Store/Load preserve array semantics. Without this,
+            // the GLSL emits `int v_X;` (scalar), NewView fallback emits a
+            // comment-only alias for v_Y, and downstream `v_Y + offset` is
+            // an undeclared identifier. Fixes WebGLTests.NoHelperOutLikeAllocaTest.
+            bool hasNewViewConsumer = false;
+            foreach (var use in value.Uses)
+            {
+                if (use.Resolve() is global::ILGPU.IR.Values.NewView)
+                {
+                    hasNewViewConsumer = true;
+                    break;
+                }
+            }
+            if (hasNewViewConsumer)
+            {
+                string elementType = TypeGenerator[value.AllocaType];
+                string arrayName = $"local_arr_{_localArrayCounter++}";
+                var target = Load(value);
+                _allocaArrayNames[target.Name] = arrayName;
+                declaredVariables.Add(target.Name);
+                if (IsStateMachineActive)
+                {
+                    VariableBuilder.AppendLine($"    {elementType} {arrayName}[1];");
+                    VariableBuilder.AppendLine($"    int {target.Name} = 0;");
+                }
+                else
+                {
+                    AppendLine($"{elementType} {arrayName}[1];");
+                    AppendLine($"int {target.Name} = 0;");
+                }
+                return;
+            }
+
             // Scalar alloca (e.g. `out int sum` lowering to a single int slot).
             // Without this declaration, downstream code that writes through the
             // alloca's variable name (e.g. `v_2 = v_1;` for the implicit zero

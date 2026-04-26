@@ -777,9 +777,31 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 // `LoadArrayElementAddress` always emits `&v[idx]`, which is invalid
                 // WGSL when v is a scalar i32 ("cannot index type 'i32'"). Use the
                 // IR's IsArrayAllocation to preserve the array shape even at N=1.
+                //
+                // Additional case: ILGPU IR can scalarize `LocalMemory.Allocate<T>(1)`
+                // so that both IsArray and IsArrayAllocation return false (the
+                // ArrayLength gets optimized to non-primitive). The signal that
+                // distinguishes "user-array, scalarized" from "compiler-scratch
+                // scalar" is whether the alloca has a NewView consumer - LocalMemory
+                // returns an ArrayView through NewView; compiler-generated scratch
+                // (helper out-params, etc.) doesn't. Declare the user-array case
+                // as `array<T, 1>` so the existing `&v[idx]` LEA codegen + Store/Load
+                // pipelines work without per-call special-casing. Mirrors the
+                // GLSL SetupAllocations logic.
+                bool hasNewViewConsumer = false;
+                foreach (var use in allocaInfo.Alloca.Uses)
+                {
+                    if (use.Resolve() is global::ILGPU.IR.Values.NewView)
+                    {
+                        hasNewViewConsumer = true;
+                        break;
+                    }
+                }
+
                 bool emitAsArray =
                     allocaInfo.IsArray
-                    || allocaInfo.Alloca.IsArrayAllocation(out _);
+                    || allocaInfo.Alloca.IsArrayAllocation(out _)
+                    || hasNewViewConsumer;
 
                 if (emitAsArray)
                 {
@@ -1632,10 +1654,59 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             var indexVar = Load(value.Dimensions[0]);
             string arrayName = _allocaArrayNames.TryGetValue(arraySource.Name, out var name)
                 ? name : arraySource.Name;
+
+            // Scalarized-alloca path: ILGPU IR optimizes single-element array
+            // allocations (e.g. `LocalMemory.Allocate<int>(1)`) into scalar
+            // allocations - `Alloca.IsArrayAllocation` returns false, the alloca
+            // is declared as `var v_5 : i32` and `NewView` aliases it with
+            // `let v_7 = v_5;` (value copy). The default codegen below would
+            // then emit `&v_7[v_8]` which WGSL rejects with "cannot index type
+            // 'i32'". Detect the pattern by walking the IR: if ArrayValue is
+            // a NewView wrapping a scalar Alloca (IsSimpleAllocation), the
+            // "array" is a single scalar storage and the index must be 0.
+            // Emit a direct address-of the alloca's var, skipping the indexing.
+            // Fixes WebGPUTests.NoHelperOutLikeAllocaTest reported by Captain
+            // on the GitHub Pages live demo 2026-04-25.
+            if (TryGetScalarizedAllocaName(value.ArrayValue, out var scalarAllocaName))
+            {
+                AppendIndent();
+                Builder.Append($"let {target.Name} = &{scalarAllocaName};");
+                Builder.AppendLine();
+                return;
+            }
+
             // Emit a WGSL pointer: let v_N = &array[index];
             AppendIndent();
             Builder.Append($"let {target.Name} = &{arrayName}[{indexVar}];");
             Builder.AppendLine();
+        }
+
+        /// <summary>
+        /// True when <paramref name="arrayValue"/> traces back via NewView to a
+        /// scalar (IsSimpleAllocation) Alloca that this codegen has registered as a
+        /// local-alloca var. Outputs the alloca's WGSL variable name on success.
+        /// Used by `LoadArrayElementAddress` to skip array indexing when the IR
+        /// has scalarized the underlying storage to a single element.
+        /// </summary>
+        private bool TryGetScalarizedAllocaName(
+            global::ILGPU.IR.Value arrayValue,
+            out string allocaVarName)
+        {
+            allocaVarName = string.Empty;
+            // Walk: arrayValue should resolve to a NewView whose Pointer
+            // resolves to an Alloca with IsSimpleAllocation = true.
+            if (arrayValue.Resolve() is not global::ILGPU.IR.Values.NewView newView)
+                return false;
+            if (newView.Pointer.Resolve() is not global::ILGPU.IR.Values.Alloca alloca)
+                return false;
+            if (!alloca.IsSimpleAllocation)
+                return false;
+            // Look up the alloca's WGSL variable name from valueVariables;
+            // SetupAllocations registered it under the Alloca IR node's identity.
+            if (!valueVariables.TryGetValue(alloca, out var allocaVar))
+                return false;
+            allocaVarName = allocaVar.Name;
+            return true;
         }
 
         // Constants
