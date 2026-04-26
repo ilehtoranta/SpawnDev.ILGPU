@@ -251,12 +251,6 @@ namespace ILGPU.Runtime.OpenCL
             )
         {
             var extensions = ImmutableArray.CreateBuilder<string>();
-            // f16-emulation-plan Phase 3: Float16 always true on OpenCL (emulated via
-            // vload_half/vstore_half when cl_khr_fp16 unavailable). Float16Native
-            // tracks the real extension. MANUAL edit - NOT in sync with .tt. If you
-            // run Transform All Templates in VS, re-apply this. See also the 6 gate
-            // points in CLCodeGenerator.Views.cs / CLKernelFunctionGenerator.cs /
-            // CLTypeGenerator.cs that depend on !Float16Native.
             Float16 = true;
             Float16Native = float16;
             if (Float16Native)
@@ -276,7 +270,7 @@ namespace ILGPU.Runtime.OpenCL
         internal CLCapabilityContext(CLDevice device)
         {
             var extensions = ImmutableArray.CreateBuilder<string>();
-            // f16-emulation-plan Phase 3: see note in the public ctor above.
+            // f16-emulation-plan Phase 3: see note in the public ctor.
             Float16Native = device.HasAllExtensions(Float16Extensions);
             Float16 = true;
             if (Float16Native)
@@ -303,16 +297,6 @@ namespace ILGPU.Runtime.OpenCL
         public ImmutableArray<string> Extensions { get; internal set; }
 
         /// <summary>
-        /// True when the OpenCL device has the <c>cl_khr_fp16</c> extension (native
-        /// <c>half</c> type support in kernel code). False means Float16 operations
-        /// are emulated via <c>vload_half</c> / <c>vstore_half</c> plus <c>float</c>
-        /// arithmetic. In both cases <see cref="CapabilityContext.Float16"/> is true;
-        /// <c>Float16Native</c> distinguishes which path the codegen will take.
-        /// Added by f16-emulation-plan Phase 3. MANUAL addition, NOT in sync with .tt.
-        /// </summary>
-        public bool Float16Native { get; internal set; }
-
-        /// <summary>
         /// Supports Float64 (double) data type.
         /// </summary>
         public bool Float64 { get; internal set; }
@@ -336,6 +320,16 @@ namespace ILGPU.Runtime.OpenCL
         /// Supports subgroup shuffle (Warp.Shuffle). Requires cl_intel_subgroups or cl_khr_subgroup_shuffle + cl_khr_subgroup_shuffle_relative.
         /// </summary>
         public bool SubGroupShuffle { get; internal set; }
+
+        /// <summary>
+        /// True when the OpenCL device has the <c>cl_khr_fp16</c> extension (native
+        /// <c>half</c> type support in kernel code). False means Float16 operations
+        /// are emulated via <c>vload_half</c> / <c>vstore_half</c> plus <c>float</c>
+        /// arithmetic. In both cases <see cref="Float16"/> remains true;
+        /// <c>Float16Native</c> distinguishes which path the codegen will take.
+        /// Added by f16-emulation-plan Phase 3.
+        /// </summary>
+        public bool Float16Native { get; internal set; }
 
         #endregion
 

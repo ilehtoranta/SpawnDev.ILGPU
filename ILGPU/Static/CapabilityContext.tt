@@ -236,6 +236,19 @@ namespace ILGPU.Runtime.OpenCL
             var extensions = ImmutableArray.CreateBuilder<string>();
 <#
     foreach (var c in allClCapabilities) {
+        // Float16 is special-cased: f16-emulation-plan Phase 3 makes Float16 always
+        // true on OpenCL (vload_half/vstore_half work without cl_khr_fp16) and exposes
+        // a Float16Native flag that tracks the actual extension. The auto-generated
+        // gating uses Float16Native instead of Float16.
+        if (c.Name == "Float16") {
+#>
+            Float16 = true;
+            Float16Native = <#= c.ParameterName #>;
+            if (Float16Native)
+                extensions.AddRange(Float16Extensions);
+<#
+            continue;
+        }
 #>
             <#= c.Name #> = <#= c.ParameterName #>;
 <#      if (!c.OpenCL.Manual) { #>
@@ -253,6 +266,16 @@ namespace ILGPU.Runtime.OpenCL
             var extensions = ImmutableArray.CreateBuilder<string>();
 <#
     foreach (var c in allClCapabilities) {
+        if (c.Name == "Float16") {
+#>
+            // f16-emulation-plan Phase 3: see note in the public ctor.
+            Float16Native = device.HasAllExtensions(Float16Extensions);
+            Float16 = true;
+            if (Float16Native)
+                extensions.AddRange(Float16Extensions);
+<#
+            continue;
+        }
         if (c.OpenCL.Manual) {
 #>
             <#= c.Name #> = false;
@@ -283,6 +306,16 @@ namespace ILGPU.Runtime.OpenCL
         public bool <#= c.Name #> { get; internal set; }
 
 <# } #>
+        /// <summary>
+        /// True when the OpenCL device has the <c>cl_khr_fp16</c> extension (native
+        /// <c>half</c> type support in kernel code). False means Float16 operations
+        /// are emulated via <c>vload_half</c> / <c>vstore_half</c> plus <c>float</c>
+        /// arithmetic. In both cases <see cref="Float16"/> remains true;
+        /// <c>Float16Native</c> distinguishes which path the codegen will take.
+        /// Added by f16-emulation-plan Phase 3.
+        /// </summary>
+        public bool Float16Native { get; internal set; }
+
         #endregion
 
         #region Methods
