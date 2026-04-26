@@ -747,6 +747,12 @@ Every contribution - whether it's a one-time donation or a monthly sponsorship -
 
 [![Sponsor LostBeard](https://img.shields.io/badge/Sponsor-❤️-ea4aaa?style=for-the-badge&logo=github-sponsors)](https://github.com/sponsors/LostBeard)
 
+## Contributing
+
+Before editing any `.cs` file under `ILGPU/` (the forked core), **read [`Docs/development.md`](Docs/development.md)** — particularly the section on T4 templates. The `ILGPU/` subdirectory has `.tt` files that silently regenerate `.cs` files on clean builds. Manual edits to a generated `.cs` file pass local builds but get clobbered by the T4 transform on CI / fresh-clone clean builds, leaving downstream consumers broken.
+
+CI runs a `T4 Drift Check` workflow on every push and PR that touches `ILGPU/` or `ILGPU.Algorithms/`. It does a clean build (which runs T4) and `git diff --exit-code` on the source tree. Any drift fails CI in ~30 seconds with a pointer to the fix.
+
 ## License
 
 This project is licensed under the same terms as ILGPU. See [LICENSE](LICENSE) for details.

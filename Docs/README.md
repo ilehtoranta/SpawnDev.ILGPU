@@ -25,6 +25,9 @@ Comprehensive documentation for SpawnDev.ILGPU — run ILGPU C# kernels on WebGP
 - **[Data Type Support](data-type-support.md)** — Per-type, per-backend verification matrix (buffer read/write, end-to-end, atomics)
 - **[Atomic Operations](atomic-operations.md)** — Per-operation, per-backend atomic support (Add, And, Min, Max, Exchange, CAS) with emulation details
 
+### Contributing
+- **[Development Notes](development.md)** — Build commands, test commands, and the traps you need to know before editing source — particularly the **T4 template trap in `ILGPU/`** that has bitten this repo at least three times
+
 ## Quick Links
 
 | Resource | Link |
