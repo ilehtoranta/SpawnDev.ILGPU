@@ -283,6 +283,48 @@ public class PeerCapabilities
     /// Used for quick identity lookups without full key comparison.
     /// </summary>
     public string? Fingerprint { get; set; }
+
+    /// <summary>
+    /// F64 emulation modes this peer can configure on its WebGPU/WebGL backend.
+    /// All rc.21+ peers advertise <c>["Dekker", "Ozaki"]</c>; older peers (or
+    /// non-browser peers that don't have a relevant backend) may advertise a
+    /// shorter list or null (treated as "no browser-side strict-f64 capability"
+    /// at coordinator filter time).
+    ///
+    /// Used by the coordinator to gate <c>AcceleratorRequirements.RequiresFloat64Strict</c>
+    /// dispatches: a peer that doesn't list "Ozaki" cannot satisfy the strict-f64
+    /// contract on its browser backends. Native-f64 peers (CPU/CUDA/OpenCL/Wasm)
+    /// don't need this field — their backend is always strict.
+    /// </summary>
+    public string[]? F64ModesSupported { get; set; }
+
+    /// <summary>
+    /// True when this peer can satisfy strict IEEE 754 f64 for its preferred backend.
+    /// Native-f64 backends (CPU/CUDA/OpenCL/Wasm) always pass; browser backends pass
+    /// only when their <see cref="F64ModesSupported"/> list contains "Ozaki".
+    ///
+    /// Coordinators dispatching with <c>AcceleratorRequirements.RequiresFloat64Strict</c>
+    /// should filter their peer list with this method before sending dispatch requests
+    /// — peers that don't pass cannot honor the strict-f64 contract.
+    /// </summary>
+    public bool SupportsStrictFloat64()
+    {
+        // Native-f64 backends are always strict regardless of F64ModesSupported.
+        switch (PreferredBackend)
+        {
+            case "CPU":
+            case "Cuda":
+            case "OpenCL":
+            case "Wasm":
+                return true;
+            case "WebGPU":
+            case "WebGL":
+                return F64ModesSupported != null
+                    && Array.IndexOf(F64ModesSupported, "Ozaki") >= 0;
+            default:
+                return false;
+        }
+    }
 }
 
 /// <summary>
@@ -324,6 +366,23 @@ public class KernelDispatchRequest
     /// pipeline intermediate stages whose output stays on the worker.
     /// </summary>
     public bool ReturnModifiedBuffers { get; set; } = true;
+
+    /// <summary>
+    /// Requested F64 emulation mode for this dispatch on the peer's WebGPU/WebGL
+    /// backend. Set to "Ozaki" by the coordinator when
+    /// <c>AcceleratorRequirements.RequiresFloat64Strict</c> is in effect; null
+    /// means "leave the peer's current mode alone" (preserves backwards compat
+    /// with rc.10-rc.22 dispatches that didn't carry this field).
+    ///
+    /// Native-f64 peers (CPU/CUDA/OpenCL/Wasm) ignore the field — their backend
+    /// is always strict regardless of what the coordinator requests.
+    ///
+    /// On receipt, the peer sets <c>WebGPUAccelerator.F64Mode</c> /
+    /// <c>WebGLAccelerator.F64Mode</c> to the requested value before compiling
+    /// the kernel. Mode-flip applies to subsequent compiles only; cached kernels
+    /// retain their original mode (see rc.22 limitation note).
+    /// </summary>
+    public string? F64Mode { get; set; }
 }
 
 /// <summary>

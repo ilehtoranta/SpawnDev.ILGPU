@@ -70,7 +70,8 @@ public static class P2PKernelSerializer
         MethodInfo kernelMethod,
         long gridDimX, long gridDimY = 1, long gridDimZ = 1,
         int groupDimX = 256, int groupDimY = 1, int groupDimZ = 1,
-        IReadOnlyDictionary<int, object>? scalarValues = null)
+        IReadOnlyDictionary<int, object>? scalarValues = null,
+        string? f64Mode = null)
     {
         var request = new KernelDispatchRequest
         {
@@ -82,6 +83,7 @@ public static class P2PKernelSerializer
             GroupDimX = groupDimX,
             GroupDimY = groupDimY,
             GroupDimZ = groupDimZ,
+            F64Mode = f64Mode,
         };
 
         if (scalarValues != null && scalarValues.Count > 0)

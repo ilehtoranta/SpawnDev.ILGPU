@@ -192,6 +192,10 @@ public class P2PWorker : IAsyncDisposable
             if (_accelerator == null || _context == null)
                 throw new InvalidOperationException("Worker not initialized");
 
+            // Apply requested F64 mode for browser backends. Native-f64 backends
+            // (CPU/CUDA/OpenCL/Wasm) ignore the field - they're always strict.
+            ApplyRequestedF64Mode(_accelerator, request.F64Mode);
+
             // 1. Resolve kernel method from loaded assemblies
             var kernelMethod = P2PKernelSerializer.ResolveKernel(request);
             if (kernelMethod == null)
@@ -371,7 +375,42 @@ public class P2PWorker : IAsyncDisposable
             IsCharging = true,
             BatteryLevel = -1,
             ThermalState = 0,
+            F64ModesSupported = GetF64ModesSupported(),
         };
+    }
+
+    private string[]? GetF64ModesSupported()
+    {
+        // Browser backends (WebGPU/WebGL) support both Dekker (default fast path) and
+        // Ozaki (strict IEEE 754) since rc.10. Native-f64 backends (CPU/CUDA/OpenCL/Wasm)
+        // are always strict regardless and don't need to advertise modes - the
+        // coordinator's pre-flight check skips F64ModesSupported when the peer's
+        // PreferredBackend is native-f64.
+        if (_accelerator == null) return null;
+        return _accelerator.AcceleratorType switch
+        {
+            AcceleratorType.WebGPU => new[] { "Dekker", "Ozaki" },
+            AcceleratorType.WebGL => new[] { "Dekker", "Ozaki" },
+            _ => null,
+        };
+    }
+
+    private static void ApplyRequestedF64Mode(Accelerator accelerator, string? requestedMode)
+    {
+        if (string.IsNullOrEmpty(requestedMode)) return;
+        if (!Enum.TryParse<F64EmulationMode>(requestedMode, ignoreCase: true, out var mode)) return;
+
+        // Only browser backends configure F64 mode; native-f64 backends (CPU/CUDA/OpenCL/Wasm)
+        // are always strict and have no F64Mode property to set.
+        switch (accelerator)
+        {
+            case WebGPU.WebGPUAccelerator wgpu when wgpu.F64Mode != mode:
+                wgpu.F64Mode = mode;
+                break;
+            case WebGL.WebGLAccelerator wgl when wgl.F64Mode != mode:
+                wgl.F64Mode = mode;
+                break;
+        }
     }
 
     private double EstimateLocalTflops()
