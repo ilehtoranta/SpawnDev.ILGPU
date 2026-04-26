@@ -1243,8 +1243,15 @@
     private void PublishToHarness(string key, object? value)
     {
         if (string.IsNullOrEmpty(TestId)) return;
+        // Three publish targets cover the harness patterns we drive the demo from:
+        //   - `opener.X`: window.open popup pattern (WasmP2PBrowserTests)
+        //   - `parent.X`: iframe pattern (future)
+        //   - `globalThis.X`: this window's own globals - enables Playwright-level
+        //     external test harnesses (PlaywrightMultiTest.ProjectRunner.P2PSwarmTwoTabTest)
+        //     that drive each tab via CDP and read state via Page.EvaluateAsync.
         try { JS.Set($"opener.{key}", value!); } catch { }
         try { JS.Set($"parent.{key}", value!); } catch { }
+        try { JS.Set(key, value!); } catch { }
     }
 
     /// <summary>

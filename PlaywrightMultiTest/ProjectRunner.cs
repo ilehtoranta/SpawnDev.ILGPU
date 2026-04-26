@@ -438,100 +438,103 @@ namespace PlaywrightMultiTest
         }
 
         /// <summary>
-        /// Playwright-level P2P test: opens two tabs — creates a swarm in tab 1,
-        /// joins from tab 2, verifies peer count, then closes tab 2 to test dropout.
+        /// Playwright-level P2P test: drives two tabs via CDP - creates a swarm in tab 1,
+        /// joins from tab 2 via the auto-shared join link, verifies peer count goes up,
+        /// then closes tab 2 to verify peer dropout.
+        ///
+        /// Reads ComputeSwarm state via the demo's PublishToHarness mechanism (same hook
+        /// WasmP2PBrowserTests.ComputeSwarm_Benchmark_RoundTrips_BetweenTwoPopups uses).
+        /// The demo writes <c>computeSwarmState_&lt;testId&gt;</c> to its own window when
+        /// <c>?testId=</c> is in the URL; Playwright reads it via Page.EvaluateAsync.
+        /// No DOM scraping, no fragile XPath, no fake "tracker can't relay same-context"
+        /// excuse - if peer discovery breaks, this test FAILS.
         /// </summary>
         private static async Task P2PSwarmTwoTabTest(IPage page1, TestableBlazorWasm blazorProj)
         {
             var baseUrl = "https://localhost:5451";
+            var coordTestId = $"twotab-coord-{Guid.NewGuid():N}".Substring(0, 24);
+            var workerTestId = $"twotab-work-{Guid.NewGuid():N}".Substring(0, 24);
 
-            // Tab 1: Open a NEW page for coordinator (don't reuse the test runner page)
+            // Tab 1: coordinator. autoCreate=true triggers the create-swarm flow on load.
             var coordPage = await blazorProj.BrowserContext.NewPageAsync();
             coordPage.Console += (_, msg) => LogStatus($"[Coord {msg.Type}] {msg.Text}");
 
-            await coordPage.GotoAsync($"{baseUrl}/compute");
-            await coordPage.WaitForSelectorAsync("button:has-text('Create Swarm')", new() { Timeout = 30000 });
-            await coordPage.ClickAsync("button:has-text('Create Swarm')");
+            var coordUrl = $"{baseUrl}/compute?testId={Uri.EscapeDataString(coordTestId)}&autoCreate=true";
+            await coordPage.GotoAsync(coordUrl);
 
-            // Wait for the join link to appear
-            await coordPage.WaitForSelectorAsync("text=Share this link", new() { Timeout = 30000 });
-            await Task.Delay(2000); // Let the swarm + tracker stabilize
+            // PublishToHarness writes the state as a JSON STRING via SpawnDev.BlazorJS's
+            // serializing JS.Set, so we parse on read. Helper isolates the parse.
+            const string parseStateJs = "(k) => { var v = globalThis[k]; return typeof v === 'string' ? JSON.parse(v) : v; }";
 
-            // Extract the join link
-            var joinLinkEl = coordPage.Locator("div").Filter(new() { HasText = "Share this link" })
-                .Locator("..").Locator("div[style*='monospace']").First;
-            var joinLink = (await joinLinkEl.InnerTextAsync()).Trim();
+            // Wait for the demo to publish a join link to its own window.
+            string? joinLink = await WaitForJsValueAsync(coordPage,
+                $"() => {{ var s = ({parseStateJs})('computeSwarmState_{coordTestId}'); return s ? s.joinLink : null; }}",
+                timeoutSeconds: 60,
+                label: $"coordinator joinLink for {coordTestId}");
 
             if (string.IsNullOrEmpty(joinLink) || !joinLink.StartsWith("http"))
-                throw new Exception($"Could not extract join link: '{joinLink}'");
+                throw new Exception($"Coordinator did not publish a usable joinLink: '{joinLink}'");
+            LogStatus($"[P2P TwoTab] Join URL: {joinLink[..Math.Min(80, joinLink.Length)]}...");
 
-            var separator = joinLink.Contains("?") ? "&" : "?";
-            var joinUrl = $"{joinLink}{separator}autojoin=1";
-            LogStatus($"[P2P TwoTab] Join URL: {joinUrl[..Math.Min(80, joinUrl.Length)]}...");
+            // Tab 2: worker. autojoin=1 skips the consent dialog.
+            var separator = joinLink.Contains('?') ? "&" : "?";
+            var workerUrl = $"{joinLink}{separator}autojoin=1&testId={Uri.EscapeDataString(workerTestId)}";
 
-            // Tab 2: Open join link
             var page2 = await blazorProj.BrowserContext.NewPageAsync();
-            page2.Console += (_, msg) => LogStatus($"[Tab2 {msg.Type}] {msg.Text}");
+            page2.Console += (_, msg) => LogStatus($"[Worker {msg.Type}] {msg.Text}");
             try
             {
-                await page2.GotoAsync(joinUrl);
-                LogStatus("[P2P TwoTab] Tab 2 opened, waiting for peer connection...");
+                await page2.GotoAsync(workerUrl);
+                LogStatus("[P2P TwoTab] Worker tab opened, waiting for peer discovery...");
 
-                // Test WebSocket connectivity to tracker from both pages
-                try
-                {
-                    var coordWs = await coordPage.EvaluateAsync<string>(@"() => new Promise((resolve) => {
-                        try {
-                            var ws = new WebSocket('wss://hub.spawndev.com:44365/announce');
-                            ws.onopen = () => { ws.close(); resolve('connected'); };
-                            ws.onerror = (e) => resolve('error');
-                            setTimeout(() => resolve('timeout'), 5000);
-                        } catch(e) { resolve('exception: ' + e.message); }
-                    })");
-                    LogStatus($"[P2P TwoTab] Coord WebSocket to tracker: {coordWs}");
-                }
-                catch (Exception ex) { LogStatus($"[P2P TwoTab] WS test failed: {ex.Message}"); }
-
-                // Wait for peer count on tab 1 to go above 0
-                var deadline = DateTime.UtcNow.AddSeconds(30);
-                string peerCount = "0";
-                while (DateTime.UtcNow < deadline)
-                {
-                    try
+                // Wait for coordinator to see at least one peer. Real WebRTC peer
+                // discovery + DTLS over hub.spawndev.com can take up to ~60-80s on
+                // a cold tracker connection. Logged per poll so we can see progress.
+                var peerCountJs = $"() => {{ var s = ({parseStateJs})('computeSwarmState_{coordTestId}'); return s ? s.peerCount : null; }}";
+                int lastLogged = -1;
+                var peerCount = await WaitForJsValueAsync(coordPage, peerCountJs,
+                    timeoutSeconds: 120,
+                    label: "coordinator.peerCount >= 1",
+                    predicate: v =>
                     {
-                        // Peer count is the first bold number in the stats bar
-                        peerCount = await coordPage.Locator("text=Peers").Locator("xpath=../div[1]").InnerTextAsync();
-                        if (peerCount != "0") break;
-                    }
-                    catch { }
-                    await Task.Delay(1000);
-                }
+                        var n = AsInt(v);
+                        if (n.HasValue && n.Value != lastLogged)
+                        {
+                            LogStatus($"[P2P TwoTab] coord.peerCount={n.Value}");
+                            lastLogged = n.Value;
+                        }
+                        return n.HasValue && n.Value >= 1;
+                    });
 
-                LogStatus($"[P2P TwoTab] Coordinator peer count: {peerCount}");
+                var pc = AsInt(peerCount) ?? -1;
+                if (pc < 1)
+                    throw new Exception($"Coordinator never saw a peer (final peerCount={peerCount}). " +
+                        "Check that BrowserContext.NewPageAsync produces distinct WebTorrent PeerIds " +
+                        "and the tracker is reachable.");
 
-                if (peerCount == "0")
-                {
-                    LogStatus("[P2P TwoTab] Peer discovery timed out — tracker may not relay same-context peers. SKIP.");
-                    Assert.Ignore("Tracker did not relay peers between same-context tabs (external dependency)");
-                }
+                LogStatus($"[P2P TwoTab] Peer connected ✓ (coord.peerCount={pc})");
 
-                LogStatus("[P2P TwoTab] Peer connected ✓");
-
-                // Close tab 2 to test peer dropout
+                // Close worker tab to verify dropout.
                 await page2.CloseAsync();
                 page2 = null;
 
-                LogStatus("[P2P TwoTab] Tab 2 closed, waiting for peer dropout...");
-                await Task.Delay(3000);
+                LogStatus("[P2P TwoTab] Worker closed, waiting for peer dropout...");
+                var lastDropLogged = -1;
+                var droppedCount = await WaitForJsValueAsync(coordPage, peerCountJs,
+                    timeoutSeconds: 90,
+                    label: "coordinator.peerCount returns to 0",
+                    predicate: v =>
+                    {
+                        var n = AsInt(v);
+                        if (n.HasValue && n.Value != lastDropLogged)
+                        {
+                            LogStatus($"[P2P TwoTab] coord.peerCount (post-drop)={n.Value}");
+                            lastDropLogged = n.Value;
+                        }
+                        return AsInt(v) == 0;
+                    });
 
-                // Check peer count dropped back to 0
-                try
-                {
-                    peerCount = await coordPage.Locator("text=Peers").Locator("xpath=../div[1]").InnerTextAsync();
-                }
-                catch { peerCount = "?"; }
-
-                LogStatus($"[P2P TwoTab] Coordinator peer count after dropout: {peerCount}");
+                LogStatus($"[P2P TwoTab] Coordinator peer count after dropout: {droppedCount}");
                 LogStatus("[P2P TwoTab] Two-tab peer discovery + dropout: COMPLETE ✓");
             }
             finally
@@ -543,6 +546,61 @@ namespace PlaywrightMultiTest
                 try { await coordPage.CloseAsync(); } catch { }
             }
         }
+
+        // Polls a JS expression on the page until it returns a non-null value (or one that
+        // satisfies the optional predicate). Throws on timeout - no fake skip-on-timeout.
+        // Returns the last value seen on the page when the predicate matches.
+        private static async Task<object?> WaitForJsValueAsync(IPage page, string jsExpr,
+            int timeoutSeconds, string label, Func<object?, bool>? predicate = null)
+        {
+            var deadline = DateTime.UtcNow.AddSeconds(timeoutSeconds);
+            object? lastValue = null;
+            while (DateTime.UtcNow < deadline)
+            {
+                try
+                {
+                    var raw = await page.EvaluateAsync<object?>(jsExpr);
+                    lastValue = raw is JsonElement je
+                        ? (je.ValueKind == JsonValueKind.Number ? (object)je.GetInt32()
+                           : je.ValueKind == JsonValueKind.String ? je.GetString()
+                           : je.ValueKind == JsonValueKind.True ? true
+                           : je.ValueKind == JsonValueKind.False ? false
+                           : je.ValueKind == JsonValueKind.Null ? null
+                           : raw)
+                        : raw;
+                    if (predicate != null)
+                    {
+                        if (predicate(lastValue)) return lastValue;
+                    }
+                    else if (lastValue != null)
+                    {
+                        return lastValue;
+                    }
+                }
+                catch { /* page navigating or not yet ready */ }
+                await Task.Delay(500);
+            }
+            throw new Exception($"Timeout ({timeoutSeconds}s) waiting for {label}. Last value: {lastValue}");
+        }
+
+        // String overload helper - typed wait for a JS expression that returns a string.
+        private static async Task<string?> WaitForJsValueAsync(IPage page, string jsExpr,
+            int timeoutSeconds, string label)
+        {
+            var raw = await WaitForJsValueAsync(page, jsExpr, timeoutSeconds, label, v => v is string s && !string.IsNullOrEmpty(s));
+            return raw as string;
+        }
+
+        // Coerces whatever shape Page.EvaluateAsync returns for a JS number (JsonElement,
+        // long, int, double) into a nullable int. Returns null for non-numeric / null.
+        private static int? AsInt(object? v) => v switch
+        {
+            int i => i,
+            long l => (int)l,
+            double d => (int)d,
+            JsonElement je when je.ValueKind == JsonValueKind.Number => je.GetInt32(),
+            _ => null,
+        };
 
         /// <summary>
         /// This is called after tests have been enumerated bu before they are run. You can use this to start up any services or infrastructure needed for the tests.

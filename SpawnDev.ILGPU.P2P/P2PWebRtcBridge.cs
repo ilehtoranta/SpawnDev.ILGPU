@@ -48,6 +48,20 @@ public class P2PWebRtcBridge : IAsyncDisposable
             if (string.IsNullOrEmpty(peerId))
                 peerId = Guid.NewGuid().ToString("N");
 
+            // Wire-close detection: when a peer's underlying transport dies (tab closed,
+            // network drop, browser navigated away, etc.), we need to remove them from
+            // the active peer set. Without this hook the coordinator's PeerCount stays
+            // stale and dispatch routing keeps trying to use a dead peer until heartbeat
+            // timeout (~30s+). Tying directly to `Wire.OnClose` keeps the dispatcher's
+            // peer view honest in real time.
+            var closedPeerId = peerId; // capture for closure - peerId arg is by-value but be explicit
+            wire.OnClose += () =>
+            {
+                _extensions.TryRemove(closedPeerId, out _);
+                _notified.TryRemove(closedPeerId, out _);
+                _transport.UnregisterPeer(closedPeerId);
+            };
+
             // Check if the wire already has an SdComputeExtension (from UseExtension factory)
             var existing = wire.GetExtension<SdComputeExtension>();
             if (existing != null)
