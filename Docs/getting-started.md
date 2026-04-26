@@ -175,5 +175,6 @@ This copies data from the GPU back to a C# array. It works with all six backends
 ## Next Steps
 
 - **[Backends](backends.md)** — Learn about each backend's capabilities and configuration options
+- **[Capabilities & Backend Selection](capabilities-and-backend-selection.md)** — Declare what your kernel needs upfront so the right backend is auto-selected (and incompatible ones rejected with a typed exception instead of silent garbage)
 - **[Writing Kernels](kernels.md)** — Deeper dive into kernel programming, math functions, and advanced patterns
 - **[Memory & Buffers](memory-and-buffers.md)** — Buffer allocation, transfer patterns, and zero-allocation readback
