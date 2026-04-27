@@ -33,7 +33,7 @@ a production swarm uses. Every real-WebRTC test carries `[Retry(3)]` so public-
 tracker flakiness cannot hide real regressions.
 - [x] `VectorAdd_1024_DispatchedOverRealWebRtc_BitExact` - 1024 elements, all verified
 - [x] `LargeBuffer_1MB_DispatchedOverRealWebRtc_BitExact` - 1MB (256K floats), ~16 chunks each direction
-- [ ] `CorePipeline_ScalarParams` - **deferred pending library task #33** (P2PKernelSerializer.CreateDispatch does not yet serialize scalar kernel parameters, so VectorScale over P2P receives scalar=0)
+- [x] `CorePipeline_ScalarParams` - covered by `CorePipelineTests.CorePipeline_InProcess_ScalarParams` (in-process baseline, 889ms) + `RealWebRtcPipelineTests.VectorScale_ScalarOverRealWebRtc_BitExact` (real WebRTC, 6s). Library task #33 (P2PKernelSerializer.CreateDispatch scalar serialization) shipped earlier; the "deferred" note this line carried was stale.
 - [x] `DataIntegrity_SHA256_IdentityOverRealWebRtc` - 64KB random ints, Identity kernel, hash round-trip
 - [x] `TwoPeers_DiscoverEachOtherViaLocalTracker` / `…ViaPublicHubTracker` - tracker + sd_compute handshake
 - Existing `CorePipeline_InProcess_Baseline` (in-process) remains as regression baseline
