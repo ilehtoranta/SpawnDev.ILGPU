@@ -686,6 +686,114 @@ public class RealWebRtcPipelineTests
     }
 
     /// <summary>
+    /// Phase 4 RBAC test: when a worker joins a swarm whose coordinator has a
+    /// KeyRegistry set, the registry is auto-distributed to the worker on the
+    /// initial CapabilityResponse handshake. This verifies the production
+    /// authority chain - workers know which keys are Owner / Admin / Coordinator
+    /// without the coordinator having to push the registry separately.
+    ///
+    /// Path under test: P2PTransport.HandleCapabilityResponse - line ~351
+    /// calls SendRegistryAsync(peerId) when _coordinator.GetRegistry() != null.
+    /// On the worker side, P2PTransport.HandleRegistryUpdateAsync deserializes
+    /// the registry and calls _worker?.SetKeyRegistry, which populates
+    /// P2PWorker.SwarmRegistry and fires OnRegistryUpdated.
+    /// </summary>
+    [TestMethod(Timeout = 180000, RetryCount = 2)]
+    public async Task Security_RegistryDistributed_OnJoin_OverRealWebRtc()
+    {
+        EnsureAllowlist();
+        var trackers = DispatchTrackers;
+
+        // Build the registry the coordinator will distribute. Owner key is the
+        // coordinator's own identity (so the worker accepts subsequent dispatch
+        // signatures from this same key), plus a Worker entry with a fingerprint
+        // distinct enough that the test can prove the registry round-tripped
+        // verbatim instead of being silently regenerated on the worker side.
+        var ownerIdentity = await SwarmIdentity.CreateAsync(_crypto, "registry-owner");
+        var workerKeyIdentity = await SwarmIdentity.CreateAsync(_crypto, "registry-worker-key");
+        var registry = new KeyRegistry();
+        registry.AddKey(ownerIdentity.PublicKeySpki, SwarmRole.Owner, "registry-owner");
+        registry.AddKey(workerKeyIdentity.PublicKeySpki, SwarmRole.Worker, "registry-worker-key");
+        await registry.SignAsync(ownerIdentity);
+
+        await using var coordClient = new SpawnDev.WebTorrent.WebTorrentClient();
+        await using var workerClient = new SpawnDev.WebTorrent.WebTorrentClient();
+
+        await using var coordinator = await P2PCompute.CreateSwarmAsync(
+            _crypto, coordClient, "registry-distributed-onjoin", trackers: trackers);
+
+        // Stamp the registry on the coordinator BEFORE the worker joins so the
+        // CapabilityResponse handler has something to send.
+        coordinator.Coordinator.UpdateRegistry(registry);
+
+        using var workerContext = Context.Create(b => b.CPU());
+        using var workerAccelerator = workerContext.CreateCPUAccelerator(0);
+
+        // Capture the worker's OnRegistryUpdated event. Has to be wired before
+        // join so a fast handshake doesn't lose the event.
+        KeyRegistry? receivedRegistry = null;
+        var registryReceived = new TaskCompletionSource<bool>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+
+        await using var worker = await P2PCompute.JoinSwarmAsync(
+            _crypto, workerClient, workerAccelerator, coordinator.MagnetLink!);
+
+        if (worker.Transport == null)
+            throw new Exception("Worker transport should be wired after JoinSwarmAsync.");
+        worker.Transport.OnRegistryUpdated += r =>
+        {
+            receivedRegistry = r;
+            registryReceived.TrySetResult(true);
+        };
+
+        await WaitForPeersAsync(coordinator, worker);
+
+        // Wait for the registry to land. The CapabilityResponse handler triggers
+        // SendRegistryAsync, which travels through real WebRTC + signature verify
+        // before HandleRegistryUpdateAsync fires the event.
+        var deadline = Task.Delay(DiscoveryTimeoutMs);
+        var firstDone = await Task.WhenAny(registryReceived.Task, deadline);
+        if (firstDone == deadline)
+            throw new Exception(
+                $"Worker did not receive RegistryUpdate within {DiscoveryTimeoutMs}ms after joining. " +
+                $"P2PTransport.HandleCapabilityResponse should call SendRegistryAsync " +
+                $"when _coordinator.GetRegistry() != null.");
+
+        if (receivedRegistry == null)
+            throw new Exception("OnRegistryUpdated fired but receivedRegistry was null.");
+
+        // Worker's P2PWorker should also have the registry installed
+        // (HandleRegistryUpdateAsync calls _worker?.SetKeyRegistry).
+        if (worker.Worker == null)
+            throw new Exception("Worker.Worker should be populated.");
+        if (worker.Worker.SwarmRegistry == null)
+            throw new Exception(
+                "Worker.SwarmRegistry should be set after RegistryUpdate. " +
+                "HandleRegistryUpdateAsync didn't call SetKeyRegistry.");
+
+        // Round-trip verification: keys + roles match what the coordinator sent.
+        if (worker.Worker.SwarmRegistry.Keys.Count != registry.Keys.Count)
+            throw new Exception(
+                $"Registry key count mismatch: coordinator had {registry.Keys.Count}, " +
+                $"worker received {worker.Worker.SwarmRegistry.Keys.Count}.");
+
+        var ownerKeyB64 = Convert.ToBase64String(ownerIdentity.PublicKeySpki);
+        var workerKeyB64 = Convert.ToBase64String(workerKeyIdentity.PublicKeySpki);
+        if (!worker.Worker.SwarmRegistry.HasRole(ownerKeyB64, SwarmRole.Owner))
+            throw new Exception("Worker registry should have Owner role for ownerIdentity.");
+        if (!worker.Worker.SwarmRegistry.HasRole(workerKeyB64, SwarmRole.Worker))
+            throw new Exception("Worker registry should have Worker role for workerKeyIdentity.");
+
+        // Sequence number is the replay-protection axis. The worker must accept
+        // exactly the sequence the coordinator signed - bumping it would let
+        // a stale replay through; ignoring it would freeze updates.
+        if (worker.Worker.SwarmRegistry.Sequence != registry.Sequence)
+            throw new Exception(
+                $"Registry sequence mismatch: coordinator sent {registry.Sequence}, " +
+                $"worker received {worker.Worker.SwarmRegistry.Sequence}.");
+    }
+
+    /// <summary>
     /// Phase 3 multi-peer test: 10 concurrent dispatches across 2 real-WebRTC workers.
     /// Verifies the dispatcher's load balancer routes work to both peers under
     /// concurrent load and every dispatch returns its modified buffer bit-exact.
