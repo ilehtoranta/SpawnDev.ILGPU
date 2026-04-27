@@ -378,4 +378,125 @@ public class StressTests
 
         await Task.CompletedTask;
     }
+
+    /// <summary>
+    /// Endurance: 1000 dispatches against a 3-worker swarm. Verifies the
+    /// dispatcher has no leak (pending queue drains) and no slowdown
+    /// (last-quartile dispatch time is not pathologically slower than the
+    /// first-quartile). Exercises the internal state machine at production
+    /// scale - long-running swarms (ML training jobs, scientific batch runs)
+    /// will see this volume in normal operation.
+    ///
+    /// Coverage gap closed: existing stress tests exercise the dispatcher at
+    /// 15-20 dispatches. A leak that adds O(1) state per dispatch wouldn't
+    /// surface there but would over 1000. A slowdown caused by list/dict
+    /// growth or unbounded cache wouldn't either.
+    /// </summary>
+    [TestMethod(Timeout = 60000)]
+    public async Task Endurance_1000Dispatches_NoLeakNoSlowdown_InProcess()
+    {
+        P2PKernelSerializer.RegisterKernelType(typeof(P2PTestKernels));
+
+        const int dispatchCount = 1000;
+        const int workerCount = 3;
+        const int n = 64;
+
+        using var context = Context.Create(builder => builder.CPU());
+
+        var coordinator = new P2PSwarmCoordinator(new SpawnDev.WebTorrent.WebTorrentClient());
+        var p2pAccel = coordinator.CreateAccelerator(context);
+        var dispatcher = new P2PDispatcher(p2pAccel);
+
+        for (int i = 0; i < workerCount; i++)
+        {
+            var caps = new PeerCapabilities
+            {
+                PeerId = $"worker-{i}",
+                EstimatedTflops = 2.0,
+                AvailableMemory = 1L << 32,
+                IsCharging = true,
+                ThermalState = 0,
+            };
+            coordinator.HandlePeerConnected(caps.PeerId, caps);
+            p2pAccel.AddPeer(new RemotePeer
+            {
+                PeerId = caps.PeerId,
+                IsConnected = true,
+                Capabilities = caps,
+            });
+        }
+
+        var sentTo = new ConcurrentBag<string>();
+        dispatcher.OnSendMessage += (peerId, msg) => sentTo.Add(peerId);
+
+        var method = typeof(P2PTestKernels).GetMethod(nameof(P2PTestKernels.VectorAdd))!;
+        var perDispatchTicks = new long[dispatchCount];
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+
+        // Sequential dispatch + immediate result handling to simulate a
+        // steady-state swarm where each kernel completes before the next is
+        // queued. The rapid-churn variant covers concurrency; this covers
+        // long-haul state-machine integrity.
+        for (int d = 0; d < dispatchCount; d++)
+        {
+            var t0 = sw.ElapsedTicks;
+            var request = P2PKernelSerializer.CreateDispatch(method, gridDimX: n);
+            request.Buffers = new[]
+            {
+                new BufferBinding { ParameterIndex = 1, BufferId = $"a{d}", Length = n, ElementSize = 4 },
+                new BufferBinding { ParameterIndex = 2, BufferId = $"b{d}", Length = n, ElementSize = 4 },
+                new BufferBinding { ParameterIndex = 3, BufferId = $"r{d}", Length = n, ElementSize = 4 },
+            };
+            var dispatchId = dispatcher.Dispatch(request);
+            dispatcher.HandleResult(dispatchId, new KernelDispatchResult
+            {
+                DispatchId = dispatchId,
+                Success = true,
+                DurationMs = 1.0,
+            });
+            perDispatchTicks[d] = sw.ElapsedTicks - t0;
+        }
+        sw.Stop();
+
+        // Leak check: pending queue must drain to zero after every dispatch
+        // has been resulted. Any leftover means a dispatchId never matched a
+        // result, or HandleResult silently no-op'd.
+        if (dispatcher.PendingCount != 0)
+            throw new Exception(
+                $"Pending queue not drained after {dispatchCount} dispatches: " +
+                $"{dispatcher.PendingCount} entries leaked. Indicates HandleResult " +
+                $"failed to match dispatchIds, or _pending wasn't removed on success.");
+
+        // Leak check: peer count must be unchanged. Dispatch should not mutate
+        // peer state (no add/remove from the dispatcher's perspective).
+        if (coordinator.PeerCount != workerCount)
+            throw new Exception(
+                $"Peer count drifted: expected {workerCount}, got {coordinator.PeerCount}. " +
+                $"Dispatch path mutated peer registry.");
+
+        // Routing check: every dispatch produced exactly one OnSendMessage event.
+        if (sentTo.Count != dispatchCount)
+            throw new Exception(
+                $"Expected {dispatchCount} OnSendMessage events, got {sentTo.Count}. " +
+                $"Dispatches were silently dropped over the long run.");
+
+        // Slowdown check: compare median dispatch time of the last quartile
+        // against the first quartile. Sort within each window so a single
+        // GC blip doesn't tank the comparison. A 5x degradation between
+        // first and last quartile is the threshold - the steady-state cost
+        // should be flat (this dispatcher does no per-dispatch list scans
+        // that grow with history).
+        var quartile = dispatchCount / 4;
+        var firstQuartile = perDispatchTicks.Take(quartile).OrderBy(t => t).ToArray();
+        var lastQuartile = perDispatchTicks.Skip(dispatchCount - quartile).OrderBy(t => t).ToArray();
+        var firstMedian = firstQuartile[quartile / 2];
+        var lastMedian = lastQuartile[quartile / 2];
+        if (lastMedian > firstMedian * 5 && lastMedian > 100_000) // ignore sub-10us noise floor
+            throw new Exception(
+                $"Dispatch latency degraded: first-quartile median = {firstMedian} ticks, " +
+                $"last-quartile median = {lastMedian} ticks ({(double)lastMedian / firstMedian:F1}x). " +
+                $"Indicates O(N) work per dispatch as history grows.");
+
+        await Task.CompletedTask;
+    }
 }
