@@ -130,9 +130,12 @@ namespace PlaywrightMultiTest
 
                     var indexPath = Path.Combine(testableProject.ProjectDetails.WwwRoot, "index.html");
 
-                    // build a publish version of the app for testing
+                    // build a publish version of the app for testing.
+                    // -p:BuildInParallel=false + -maxcpucount:1 keep the publish single-threaded so
+                    // MSBuild worker nodes do not crash with MSB4166 ("Child node exited prematurely")
+                    // when other crew (Riker / Tuvok) are running their own PMT sweeps in parallel.
                     LogStatus($"Publishing {project.Name}...");
-                    var pubResult = await RunDotnetAsync($"publish \"{project.CsprojPath}\" -c Release", project.Directory).ConfigureAwait(false);
+                    var pubResult = await RunDotnetAsync($"publish \"{project.CsprojPath}\" -c Release -p:BuildInParallel=false -maxcpucount:1", project.Directory).ConfigureAwait(false);
                     LogStatus($"Publish {project.Name}: exit={pubResult}");
                     if (pubResult != 0 || !File.Exists(indexPath))
                     {
@@ -313,9 +316,10 @@ namespace PlaywrightMultiTest
                     var buildTest = new ProjectTest(testableProject, $"Build {project.Name}");
                     testableProject.Tests.Add(buildTest);
 
-                    // build a publish version of the app for testing
+                    // build a publish version of the app for testing.
+                    // Same MSBuild-worker resilience as the Blazor branch above.
                     LogStatus($"Publishing {project.Name}...");
-                    var pubResult = await RunDotnetAsync($"publish \"{project.CsprojPath}\" -c Release", project.Directory).ConfigureAwait(false);
+                    var pubResult = await RunDotnetAsync($"publish \"{project.CsprojPath}\" -c Release -p:BuildInParallel=false -maxcpucount:1", project.Directory).ConfigureAwait(false);
                     LogStatus($"Publish {project.Name}: exit={pubResult}");
                     var publishedBinary = project.ExistingPublishBinary;
                     if (pubResult != 0 || string.IsNullOrEmpty(publishedBinary))
