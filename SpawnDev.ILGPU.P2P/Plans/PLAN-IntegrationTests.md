@@ -48,7 +48,7 @@ tracker flakiness cannot hide real regressions.
 ### Phase 3: Multi-Peer and Fault Tolerance [IN-PROCESS TESTS PASSING]
 - [x] `MultiPeer_TwoWorkers_BothReceive` - 2 workers, 4 dispatches, both get work (in-process)
 - [x] `MultiPeer_ThreeWorkers_LoadBalance` - different TFLOPS, highest gets more (in-process)
-- [ ] `MultiPeer_Concurrent_10` - 10 simultaneous dispatches to 2 workers (needs WebRTC)
+- [x] `MultiPeer_Concurrent_10` - covered by `RealWebRtcPipelineTests.MultiPeer_Concurrent_10_DispatchedOverRealWebRtc_BitExact` (10 concurrent VectorAdd dispatches across 2 real-WebRTC workers, all bit-exact, both peers hit, 9s)
 - [x] `Fault_WorkerDies_RetrySucceeds` - kill worker A, retry to B succeeds (in-process)
 - [x] `Fault_AllWorkersDie_DispatchFails` - no peers, OnDispatchFailed (in-process)
 - [x] `Fault_CoordinatorDies_ElectionHappens` - kill coordinator, strongest worker wins (in-process)
@@ -62,7 +62,7 @@ tracker flakiness cannot hide real regressions.
 - [x] `Security_RevokedKey_Rejected` - revoked key dispatch rejected (real DotNetCrypto)
 - [x] `Security_Kick_RemovesPeer` - coordinator kicks, worker removed (in-process)
 - [x] `Security_Block_PreventsReconnect` - blocked peer rejected on reconnect (in-process)
-- [ ] `Security_RegistryDistributed_OnJoin` - worker receives KeyRegistry on join (needs WebRTC)
+- [x] `Security_RegistryDistributed_OnJoin` - covered by `RealWebRtcPipelineTests.Security_RegistryDistributed_OnJoin_OverRealWebRtc` (coord stamps KeyRegistry, worker joins, registry round-trips through real WebRTC + signature verify in 6s; keys / roles / sequence verified)
 - [x] `Identity_CrossVerify_Ed25519` - create, sign, verify, tamper detection (real DotNetCrypto)
 - [x] `Identity_RoleAssignment_Signed` - signed role grant + verification (real DotNetCrypto)
 - [x] `Identity_Election_RespectsRegistry` - Admin wins over higher-TFLOPS Worker (in-process)
