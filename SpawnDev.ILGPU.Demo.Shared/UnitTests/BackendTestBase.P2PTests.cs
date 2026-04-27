@@ -3114,6 +3114,21 @@ public abstract partial class BackendTestBase
         string? retriedTo = null;
         p2pAccel.Dispatcher.OnDispatchRetried += (id, from, to) => retriedTo = to;
 
+        // Track worker-2 kernel lifecycle. Use a TCS to wait deterministically for
+        // OnKernelCompleted instead of a hardcoded Task.Delay - the latter was
+        // timing-fragile and silently failed under any CPU contention.
+        string? w2KernelStarted = null;
+        string? w2KernelCompletedId = null;
+        bool? w2KernelSuccess = null;
+        var w2Done = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        worker2.OnKernelStarted += id => w2KernelStarted = id;
+        worker2.OnKernelCompleted += (id, success, _) =>
+        {
+            w2KernelCompletedId = id;
+            w2KernelSuccess = success;
+            w2Done.TrySetResult(success);
+        };
+
         // Wire dispatcher send (signed messages for authority verification)
         p2pAccel.Dispatcher.OnSendMessage += (peerId, msg) =>
         {
@@ -3136,8 +3151,16 @@ public abstract partial class BackendTestBase
         if (retriedTo != "worker-2")
             throw new Exception($"Should retry on worker-2, got: {retriedTo}");
 
-        // Give async transport + signed message + kernel execution time to complete
-        await Task.Delay(500);
+        // Wait deterministically for worker-2 to finish the kernel. 5s ceiling is
+        // far more than any backend's worst case for a 4-element fill kernel; if it
+        // expires the diagnostic below pinpoints which stage stalled.
+        var completed = await Task.WhenAny(w2Done.Task, Task.Delay(TimeSpan.FromSeconds(5))) == w2Done.Task;
+        if (!completed)
+            throw new Exception(
+                $"Worker-2 did not complete kernel within 5s. " +
+                $"OnKernelStarted={w2KernelStarted ?? "<not fired>"}, " +
+                $"OnKernelCompleted={w2KernelCompletedId ?? "<not fired>"}, " +
+                $"LastDispatchError={worker2.LastDispatchError ?? "<none>"}");
 
         // Verify worker-2 actually executed
         var result = worker2.GetBuffer("data");
@@ -3147,7 +3170,12 @@ public abstract partial class BackendTestBase
         var outInts = new int[4];
         Buffer.BlockCopy(result, 0, outInts, 0, 16);
         if (outInts[0] != 42)
-            throw new Exception($"Worker-2 result wrong: expected 42, got {outInts[0]}");
+            throw new Exception(
+                $"Worker-2 result wrong: expected 42, got {outInts[0]}. " +
+                $"OnKernelStarted={w2KernelStarted ?? "<not fired>"}, " +
+                $"OnKernelCompleted={w2KernelCompletedId ?? "<not fired>"}, " +
+                $"success={w2KernelSuccess?.ToString() ?? "<n/a>"}, " +
+                $"LastDispatchError={worker2.LastDispatchError ?? "<none>"}");
 
         Console.WriteLine($"[P2P Resilience] Dropout retry: worker-1 crashed → worker-2 executed (42) ✓");
 
