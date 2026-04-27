@@ -89,6 +89,7 @@ tracker flakiness cannot hide real regressions.
 - [x] `Stress_Concurrent_20Dispatches_InProcess` - 20 simultaneous to 3 workers (in-process simulated, `StressTests.cs`)
 - [x] `Stress_LargeSwarm_5Peers_15Dispatches` - 5 workers, 15 dispatches with TFLOPS-varied scoring (in-process simulated, `StressTests.cs`)
 - [x] `Pipeline_TwoStage_EndToEnd_InProcess` - FillSequence -> VectorScale (in-process simulated, `StressTests.cs`)
+- [x] `Endurance_1000Dispatches_NoLeakNoSlowdown_InProcess` - 1000 dispatches, pending drains, peer count stable, last-quartile median dispatch time not pathologically slower than first-quartile (in-process simulated, `StressTests.cs`, ~3s)
 
 Note: the `_InProcess` variants exercise the dispatcher's concurrency model and disposal cleanup using `HandlePeerConnected` simulated peers + `HandleResult` simulated completions - no real WebRTC / SCTP. Real-WebRTC stress is the next layer up; getting the in-process layer green first is the gate before paying the WebRTC dispatch cost on every iteration.
 
