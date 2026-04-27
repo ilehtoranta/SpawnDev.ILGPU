@@ -518,6 +518,12 @@ namespace PlaywrightMultiTest
 
                 LogStatus($"[P2P TwoTab] Peer connected ✓ (coord.peerCount={pc})");
 
+                // Diagnostic: dump peerIds so a phantom-registration bug can be diagnosed
+                // when peerCount > 1 (one tab, but the coordinator sees multiple peers).
+                var peerIdsJs = $"() => {{ var s = ({parseStateJs})('computeSwarmState_{coordTestId}'); return s ? JSON.stringify(s.peerIds) : '[]'; }}";
+                var peerIdsConnected = await coordPage.EvaluateAsync<string>(peerIdsJs);
+                LogStatus($"[P2P TwoTab] peerIds at connected: {peerIdsConnected}");
+
                 // Close worker tab to verify dropout.
                 await page2.CloseAsync();
                 page2 = null;

@@ -1269,6 +1269,8 @@
                 testId = TestId,
                 role = _compute?.Role.ToString() ?? "None",
                 peerCount = _compute?.PeerCount ?? 0,
+                peerIds = _compute?.Coordinator.GetPeerList()
+                    .Select(p => p.PeerId).ToArray() ?? System.Array.Empty<string>(),
                 joinLink = _compute?.JoinLink,
                 benchmarkRunning = _benchmarkRunning,
                 benchmarkComplete = _benchmarkComplete,
