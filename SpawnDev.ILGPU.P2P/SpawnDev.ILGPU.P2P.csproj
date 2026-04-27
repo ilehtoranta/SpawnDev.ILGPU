@@ -4,7 +4,8 @@
 		<TargetFramework>net10.0</TargetFramework>
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>enable</Nullable>
-		<Version>4.9.2-rc.25</Version>
+		<Version>4.9.2-rc.26</Version>
+		<PackageReleaseNotes>v4.9.2-rc.26: P2P bridge dedup by canonical BT peer id + worker pushes buffers before sending KernelResult. (1) `P2PWebRtcBridge` no longer pre-seeds `SdComputeExtension._peerId` with the OnWire-time per-wire id - the BEP-10 handshake now populates it with the cross-side-stable BitTorrent peer id. The bridge tracks active wires per canonical id (`_wiresByBtPeerId`), captures wire->canonical mappings at NotifyCanonical time (`_wireToCanonical`), and only fires `UnregisterPeer` when the LAST wire for a canonical peer closes. Closes the duplicate-peer leak where one physical worker registered twice (once per registration path) and the activity log filled with 6-8 "Peer joined" events for the same peerId. (2) `P2PWorker.HandleDispatchAsync` now awaits buffer push-back BEFORE sending KernelResult; if any push fails, `result.Success` is set to false with a clear "Buffer push-back failed for X of Y buffers" error. Previously the result was sent first with success=true, then push-back happened in a fire-and-forget try/catch that swallowed errors - consumers got "kernel succeeded" while the buffer never arrived, and demos like Mandelbrot timed out 30s later with a blank canvas. (3) Bumps SpawnDev.WebTorrent 3.2.1 -> 3.2.2-rc.1 to consume the matching wire-layer fixes (SCTP backpressure + duplicate-handshake hardening) that prevent the original push-back failures.</PackageReleaseNotes>
 		<GeneratePackageOnBuild>True</GeneratePackageOnBuild>
 		<GenerateDocumentationFile>true</GenerateDocumentationFile>
 		<EmbedAllSources>true</EmbedAllSources>
