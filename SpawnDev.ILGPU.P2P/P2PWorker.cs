@@ -253,20 +253,18 @@ public class P2PWorker : IAsyncDisposable
         sw.Stop();
         result.DurationMs = sw.Elapsed.TotalMilliseconds;
 
-        OnKernelCompleted?.Invoke(request.DispatchId, result.Success, result.DurationMs);
-
-        // Send result metadata back to coordinator
-        await _transport.SendMessageAsync(fromPeerId, new P2PMessage
-        {
-            Type = P2PMessageType.KernelResult,
-            Payload = JsonSerializer.SerializeToElement(result),
-        });
-
-        // Auto-push modified buffer data back to the coordinator so the
-        // caller that issued DispatchAsync can observe the computed output.
-        // Suppressed when the request is a pipeline intermediate.
+        // Push modified buffer data back to the coordinator BEFORE sending
+        // KernelResult. Order matters: if a buffer push fails (wire died, SCTP
+        // backpressure, etc.), the coordinator's DispatchAsync should observe
+        // result.Success=false instead of getting "kernel succeeded" while the
+        // computed output never actually arrived. The previous order (result
+        // first, buffer pushes after with try/catch swallowing errors) caused
+        // demos like the Mandelbrot fractal to time out on WaitForResultBufferAsync
+        // 30 seconds later with no actionable diagnostic - they got success=true
+        // followed by "buffer never came back."
         if (result.Success && request.ReturnModifiedBuffers && result.ModifiedBuffers.Length > 0)
         {
+            var bufferPushErrors = new List<string>();
             foreach (var bufferId in result.ModifiedBuffers)
             {
                 if (!_bufferStore.TryGetValue(bufferId, out var data) || data == null)
@@ -277,11 +275,31 @@ public class P2PWorker : IAsyncDisposable
                 }
                 catch (Exception ex)
                 {
-                    Console.WriteLine(
-                        $"[P2PWorker] Pushing modified buffer '{bufferId}' to {fromPeerId} failed: {ex.Message}");
+                    var msg = $"Pushing modified buffer '{bufferId}' to {fromPeerId} failed: {ex.Message}";
+                    Console.WriteLine($"[P2PWorker] {msg}");
+                    bufferPushErrors.Add(msg);
                 }
             }
+            if (bufferPushErrors.Count > 0)
+            {
+                result.Success = false;
+                result.Error = $"Buffer push-back failed for {bufferPushErrors.Count} of " +
+                    $"{result.ModifiedBuffers.Length} buffers: {string.Join("; ", bufferPushErrors)}";
+                LastDispatchError = result.Error;
+            }
         }
+
+        // Result is sent LAST with the buffer-push-back outcome reflected in
+        // result.Success / result.Error. The Stopwatch already snapshot DurationMs
+        // before the buffer pushes - that timing is the kernel-execution duration,
+        // not the round-trip duration, which is what callers care about.
+        await _transport.SendMessageAsync(fromPeerId, new P2PMessage
+        {
+            Type = P2PMessageType.KernelResult,
+            Payload = JsonSerializer.SerializeToElement(result),
+        });
+
+        OnKernelCompleted?.Invoke(request.DispatchId, result.Success, result.DurationMs);
     }
 
     /// <summary>
