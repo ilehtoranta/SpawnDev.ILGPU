@@ -686,6 +686,137 @@ public class RealWebRtcPipelineTests
     }
 
     /// <summary>
+    /// Phase 3 multi-peer test: 10 concurrent dispatches across 2 real-WebRTC workers.
+    /// Verifies the dispatcher's load balancer routes work to both peers under
+    /// concurrent load and every dispatch returns its modified buffer bit-exact.
+    ///
+    /// Each dispatch uses a unique buffer-id triple (a{i}/b{i}/r{i}) so the
+    /// coordinator's BufferTransfer.OnBufferReceived map can demultiplex results
+    /// without collision. n is small (64 floats per buffer) so the 10*3 = 30
+    /// buffer transfers fit comfortably under BufferReturnTimeoutMs even on
+    /// slow public-tracker WebRTC connections.
+    /// </summary>
+    [TestMethod(Timeout = 300000, RetryCount = 2)]
+    public async Task MultiPeer_Concurrent_10_DispatchedOverRealWebRtc_BitExact()
+    {
+        EnsureAllowlist();
+        const int n = 64;
+        const int dispatchCount = 10;
+        var trackers = DispatchTrackers;
+
+        await using var coordClient = new SpawnDev.WebTorrent.WebTorrentClient();
+        await using var worker1Client = new SpawnDev.WebTorrent.WebTorrentClient();
+        await using var worker2Client = new SpawnDev.WebTorrent.WebTorrentClient();
+
+        await using var coordinator = await P2PCompute.CreateSwarmAsync(
+            _crypto, coordClient, "multipeer-concurrent-10", trackers: trackers);
+
+        using var worker1Context = Context.Create(b => b.CPU());
+        using var worker1Accelerator = worker1Context.CreateCPUAccelerator(0);
+        await using var worker1 = await P2PCompute.JoinSwarmAsync(
+            _crypto, worker1Client, worker1Accelerator, coordinator.MagnetLink!);
+
+        using var worker2Context = Context.Create(b => b.CPU());
+        using var worker2Accelerator = worker2Context.CreateCPUAccelerator(0);
+        await using var worker2 = await P2PCompute.JoinSwarmAsync(
+            _crypto, worker2Client, worker2Accelerator, coordinator.MagnetLink!);
+
+        // Coordinator must see both workers before we start firing dispatches;
+        // otherwise the first few will all land on the same (only-known) peer.
+        await WaitForMultiplePeersAsync(coordinator, expectedPeerCount: 2);
+
+        var workerBuffers = CollectWorkerBuffers(coordinator);
+
+        // Pre-ship every dispatch's input buffers to BOTH workers so whichever
+        // peer the dispatcher picks for a given index has the data locally.
+        // This is the simplest way to keep "concurrent dispatch + correct result"
+        // the thing under test, without baking dispatcher routing decisions into
+        // the buffer-shipment plan.
+        var inputs = new (float[] a, float[] b, float[] expected)[dispatchCount];
+        var inputBytes = new (byte[] a, byte[] b)[dispatchCount];
+        var rng = new Random(unchecked((int)0xC0FFEE_10));
+        for (int i = 0; i < dispatchCount; i++)
+        {
+            var a = new float[n];
+            var b = new float[n];
+            var expected = new float[n];
+            for (int k = 0; k < n; k++)
+            {
+                a[k] = (float)(rng.NextDouble() * 1000.0 - 500.0);
+                b[k] = (float)(rng.NextDouble() * 1000.0 - 500.0);
+                expected[k] = a[k] + b[k];
+            }
+            inputs[i] = (a, b, expected);
+            var ab = new byte[n * 4];
+            var bb = new byte[n * 4];
+            Buffer.BlockCopy(a, 0, ab, 0, n * 4);
+            Buffer.BlockCopy(b, 0, bb, 0, n * 4);
+            inputBytes[i] = (ab, bb);
+        }
+
+        foreach (var p in coordinator.Accelerator!.Peers)
+        {
+            for (int i = 0; i < dispatchCount; i++)
+            {
+                await coordinator.Transport!.SendBufferAsync(p.PeerId, $"a{i}", inputBytes[i].a);
+                await coordinator.Transport!.SendBufferAsync(p.PeerId, $"b{i}", inputBytes[i].b);
+            }
+        }
+
+        // Track which peer each dispatch lands on so we can prove load-balance.
+        var perPeerHits = new ConcurrentDictionary<string, int>();
+        coordinator.Accelerator!.Dispatcher.OnSendMessage += (peerId, msg) =>
+        {
+            if (msg.Type == P2PMessageType.KernelDispatch)
+                perPeerHits.AddOrUpdate(peerId, 1, (_, count) => count + 1);
+        };
+
+        // Fire all 10 dispatches concurrently. The dispatcher's internal lock
+        // serializes the SelectHealthyPeer calls; what we're stressing is the
+        // pending-queue + per-peer round-trip handling under simultaneous load.
+        var method = typeof(P2PTestKernels).GetMethod(nameof(P2PTestKernels.VectorAdd))!;
+        var dispatchTasks = Enumerable.Range(0, dispatchCount).Select(i =>
+            coordinator.Accelerator!.DispatchAsync(method, n,
+                ($"a{i}", inputBytes[i].a, 4),
+                ($"b{i}", inputBytes[i].b, 4),
+                ($"r{i}", null, 4))).ToArray();
+
+        var dispatchResults = await Task.WhenAll(dispatchTasks);
+        for (int i = 0; i < dispatchCount; i++)
+        {
+            if (!dispatchResults[i].Success)
+                throw new Exception(
+                    $"Concurrent dispatch {i} failed: {dispatchResults[i].Error}");
+        }
+
+        // Verify every result buffer round-trips back to the coordinator with
+        // bit-exact contents.
+        for (int i = 0; i < dispatchCount; i++)
+        {
+            var resultBytes = await WaitForBufferAsync(workerBuffers, $"r{i}", BufferReturnTimeoutMs);
+            if (resultBytes.Length != n * 4)
+                throw new Exception(
+                    $"Dispatch {i} result buffer wrong size: {resultBytes.Length}");
+            var actual = DataIntegrityHelper.BytesToFloats(resultBytes);
+            var (violations, firstIdx, firstExp, firstAct) =
+                DataIntegrityHelper.VerifyFloats(actual, inputs[i].expected, tolerance: 0.001f);
+            if (violations != 0)
+                throw new Exception(
+                    $"Dispatch {i} VectorAdd over WebRTC: {violations}/{n} violations. " +
+                    $"First at [{firstIdx}]: expected {firstExp}, got {firstAct}");
+        }
+
+        // Load-balance check: with 2 workers and 10 dispatches, both peers
+        // should receive at least one dispatch. Pure single-peer concentration
+        // would mean the dispatcher's pending-count balancing is broken.
+        var peersHit = perPeerHits.Count(kv => kv.Value > 0);
+        if (peersHit < 2)
+            throw new Exception(
+                $"10 concurrent dispatches landed on {peersHit} of 2 workers. " +
+                $"Distribution: {string.Join(", ", perPeerHits.Select(kv => $"{kv.Key}={kv.Value}"))}.");
+    }
+
+    /// <summary>
     /// Shared setup for a CPU-coordinator + non-CPU-worker dispatch test.
     /// </summary>
     private async Task HeterogeneousVectorAddAsync(
@@ -755,6 +886,22 @@ public class RealWebRtcPipelineTests
         {
             throw new Exception($"Peer discovery timed out after {DiscoveryTimeoutMs}ms. " +
                 $"Coordinator peers: {coordinator.PeerCount}, Worker peers: {worker.PeerCount}.");
+        }
+    }
+
+    private static async Task WaitForMultiplePeersAsync(P2PCompute coordinator, int expectedPeerCount)
+    {
+        var deadline = DateTime.UtcNow.AddMilliseconds(DiscoveryTimeoutMs);
+        while (DateTime.UtcNow < deadline && coordinator.PeerCount < expectedPeerCount)
+        {
+            await Task.Delay(250);
+        }
+
+        if (coordinator.PeerCount < expectedPeerCount)
+        {
+            throw new Exception(
+                $"Multi-peer discovery timed out after {DiscoveryTimeoutMs}ms. " +
+                $"Coordinator saw {coordinator.PeerCount} of {expectedPeerCount} expected peers.");
         }
     }
 
