@@ -363,7 +363,15 @@ namespace ILGPU.Runtime.CPU
                       Marshal.AllocHGlobal(new IntPtr(length * elementSize)),
                       length,
                       elementSize)
-            { }
+            {
+                // Zero-init to match every other ILGPU backend (WebGPU, WebGL,
+                // Wasm, CUDA, OpenCL all hand back zeroed buffers). Marshal.
+                // AllocHGlobal returns uninitialized memory, so without this
+                // a kernel reading an unwritten slot leaks process-wide state
+                // and produces nondeterministic results across runs.
+                if (LengthInBytes > 0)
+                    CPUMemSet(NativePtr, 0, 0, LengthInBytes);
+            }
 
             #endregion
 
