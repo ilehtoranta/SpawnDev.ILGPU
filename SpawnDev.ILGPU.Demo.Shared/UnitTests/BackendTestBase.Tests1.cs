@@ -272,6 +272,97 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
         }
 
         [TestMethod]
+        public async Task FloatBitIdentityRoundTripTest() => await RunTest(async accelerator =>
+        {
+            // Verifies that IEEE 754 f32 bit patterns survive end-to-end:
+            // C# float[] -> BlazorJS marshalling -> backend buffer -> kernel
+            // copy (load + store) -> backend buffer -> BlazorJS marshalling
+            // -> C# float[]. Compares bits exactly (BitConverter.SingleToInt32Bits)
+            // except for NaN which we accept as "any NaN" because Wasm spec
+            // permits arithmetic canonicalisation (storage-only round trip
+            // should still preserve bits, but a copy kernel goes through the
+            // f32 register so the GPU may canonicalise).
+            //
+            // Diagnostic for the C#-vs-JS bit-interpretation hypothesis on
+            // the Wasm spinwait race: if marshalling drifts bits anywhere,
+            // we'll see it here. If this test passes on all backends, the
+            // BlazorJS TypedArray bit-identity assumption is sound.
+            var values = new float[]
+            {
+                0.0f,
+                BitConverter.Int32BitsToSingle(unchecked((int)0x80000000)),  // -0.0
+                1.0f,
+                -1.0f,
+                float.MinValue,
+                float.MaxValue,
+                float.Epsilon,
+                float.PositiveInfinity,
+                float.NegativeInfinity,
+                float.NaN,                                                    // qNaN 0x7FC00000
+                BitConverter.Int32BitsToSingle(unchecked((int)0x7FC00001)),  // qNaN with payload
+                BitConverter.Int32BitsToSingle(unchecked((int)0xFFC00000)),  // qNaN negative sign
+                BitConverter.Int32BitsToSingle(unchecked((int)0x7F800001)),  // sNaN
+            };
+            using var srcBuf = accelerator.Allocate1D(values);
+            using var dstBuf = accelerator.Allocate1D<float>(values.Length);
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<float>, ArrayView<float>>(BitIdentityCopyKernel);
+            kernel((Index1D)values.Length, srcBuf.View, dstBuf.View);
+            await accelerator.SynchronizeAsync();
+            var result = await dstBuf.CopyToHostAsync<float>();
+            for (int i = 0; i < values.Length; i++)
+            {
+                int expectedBits = BitConverter.SingleToInt32Bits(values[i]);
+                int actualBits = BitConverter.SingleToInt32Bits(result[i]);
+                if (float.IsNaN(values[i]))
+                {
+                    if (!float.IsNaN(result[i]))
+                        throw new Exception($"Slot {i}: input was NaN (bits 0x{expectedBits:X8}) but output is not NaN (bits 0x{actualBits:X8}, value {result[i]})");
+                }
+                else if (expectedBits != actualBits)
+                {
+                    throw new Exception($"Slot {i}: bit drift. Expected 0x{expectedBits:X8} ({values[i]}), got 0x{actualBits:X8} ({result[i]})");
+                }
+            }
+        });
+
+        private static void BitIdentityCopyKernel(Index1D i, ArrayView<float> src, ArrayView<float> dst)
+        {
+            dst[i] = src[i];
+        }
+
+        [TestMethod]
+        public async Task FloatNoKernelBitIdentityRoundTripTest() => await RunTest(async accelerator =>
+        {
+            // Pure marshalling round trip: write f32 bit patterns into a
+            // backend buffer, do NOT dispatch any kernel, read back. Tests
+            // ONLY the BlazorJS TypedArray marshalling layer (no GPU
+            // load/store, no Wasm worker dispatch, no compute path). If
+            // this test passes on every backend, the bit-identity
+            // assumption SpawnDev.BlazorJS makes is sound for f32.
+            var values = new float[]
+            {
+                0.0f,
+                BitConverter.Int32BitsToSingle(unchecked((int)0x80000000)),
+                float.PositiveInfinity,
+                float.NegativeInfinity,
+                float.NaN,
+                BitConverter.Int32BitsToSingle(unchecked((int)0x7FC00001)),
+                BitConverter.Int32BitsToSingle(unchecked((int)0xFFC00000)),
+                BitConverter.Int32BitsToSingle(unchecked((int)0x7F800001)),
+            };
+            using var buf = accelerator.Allocate1D(values);
+            // No kernel dispatch - just read back.
+            var result = await buf.CopyToHostAsync<float>();
+            for (int i = 0; i < values.Length; i++)
+            {
+                int expectedBits = BitConverter.SingleToInt32Bits(values[i]);
+                int actualBits = BitConverter.SingleToInt32Bits(result[i]);
+                if (expectedBits != actualBits)
+                    throw new Exception($"Slot {i}: marshalling bit drift. Expected 0x{expectedBits:X8} ({values[i]}), got 0x{actualBits:X8} ({result[i]})");
+            }
+        });
+
+        [TestMethod]
         public async Task FloatNaNComparisonTest() => await RunTest(async accelerator =>
         {
             // IEEE-754 multi-comparison NaN regression for f32. Mirrors

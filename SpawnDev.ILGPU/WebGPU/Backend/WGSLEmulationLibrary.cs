@@ -76,9 +76,10 @@ fn f64_from_ieee754_bits(lo: u32, hi: u32) -> emu_f64 {
     let mantissa_hi20 = hi & 0xFFFFFu;
     let mantissa_lo32 = lo;
 
-    // Zero
+    // Zero (preserve sign of zero - f32 also has signed zero)
     if (exponent == 0u && mantissa_hi20 == 0u && mantissa_lo32 == 0u) {
-        return emu_f64(0.0, 0.0);
+        let zero_bits = sign_bit << 31u;
+        return emu_f64(bitcast<f32>(zero_bits), 0.0);
     }
     // Inf/NaN: preserve in f32 high word so IsNaN/IsInf propagation works.
     // Map +Inf/-Inf to f32 Inf, NaN to f32 NaN (sign preserved via sign_bit).
@@ -150,8 +151,12 @@ fn f64_to_ieee754_bits(v: emu_f64) -> vec2<u32> {
     let val_hi = v.x;
     let val_lo = v.y;
 
-    if (val_hi == 0.0 && val_lo == 0.0) {
-        return vec2<u32>(0u, 0u);
+    // Zero check via bit pattern (so -0.0 and +0.0 are distinguished -
+    // f32 == compares -0.0 and +0.0 as equal under IEEE).
+    let f32_bits_h_check = bitcast<u32>(val_hi);
+    if ((f32_bits_h_check & 0x7FFFFFFFu) == 0u && val_lo == 0.0) {
+        // Preserve sign of zero in f64 high word.
+        return vec2<u32>(0u, f32_bits_h_check & 0x80000000u);
     }
 
     let f32_bits_h = bitcast<u32>(val_hi);
@@ -734,8 +739,10 @@ fn f64_from_ieee754_bits(lo: u32, hi: u32) -> emu_f64 {
     let mantissa_hi20 = hi & 0xFFFFFu;
     let mantissa_lo32 = lo;
 
+    // Zero (preserve sign of zero - f32 also has signed zero)
     if (exponent == 0u && mantissa_hi20 == 0u && mantissa_lo32 == 0u) {
-        return emu_f64(0.0, 0.0, 0.0, 0.0);
+        let zero_bits = sign_bit << 31u;
+        return emu_f64(bitcast<f32>(zero_bits), 0.0, 0.0, 0.0);
     }
     // Inf/NaN: preserve in f32 high word so IsNaN/IsInf propagation works.
     if (exponent == 0x7FFu) {
@@ -795,8 +802,11 @@ fn f64_to_ieee754_bits(v: emu_f64) -> vec2<u32> {
     let val_hi = v.x;
     let val_lo = v.y;
 
-    if (val_hi == 0.0 && val_lo == 0.0) {
-        return vec2<u32>(0u, 0u);
+    // Zero check via bit pattern (so -0.0 and +0.0 are distinguished -
+    // f32 == compares -0.0 and +0.0 as equal under IEEE).
+    let f32_bits_h_check = bitcast<u32>(val_hi);
+    if ((f32_bits_h_check & 0x7FFFFFFFu) == 0u && val_lo == 0.0) {
+        return vec2<u32>(0u, f32_bits_h_check & 0x80000000u);
     }
 
     let f32_bits_h = bitcast<u32>(val_hi);

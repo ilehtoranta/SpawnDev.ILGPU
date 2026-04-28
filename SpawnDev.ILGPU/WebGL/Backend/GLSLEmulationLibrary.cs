@@ -49,8 +49,10 @@ vec2 f64_from_ieee754_bits(uint lo, uint hi) {
     uint mantissa_hi20 = hi & 0xFFFFFu;
     uint mantissa_lo32 = lo;
 
+    // Zero (preserve sign of zero - f32 also has signed zero)
     if (exponent == 0u && mantissa_hi20 == 0u && mantissa_lo32 == 0u) {
-        return vec2(0.0, 0.0);
+        uint zero_bits = sign_bit << 31u;
+        return vec2(uintBitsToFloat(zero_bits), 0.0);
     }
     // Inf / NaN: preserve f32 Inf or NaN encoding in the high lane so
     // f64_is_inf / f64_is_nan / f64_eq operate correctly. The pre-fix
@@ -116,11 +118,15 @@ uvec2 f64_to_ieee754_bits(vec2 v) {
     float val_hi = v.x;
     float val_lo = v.y;
 
-    if (val_hi == 0.0 && val_lo == 0.0) {
-        return uvec2(0u, 0u);
+    // Zero check via bit pattern (preserves -0.0 vs +0.0).
+    // floatBitsToUint preserves sign of zero where some drivers normalise
+    // through the floatBitsToInt+uint cast path.
+    uint f32_bits_h_check = floatBitsToUint(val_hi);
+    if ((f32_bits_h_check & 0x7FFFFFFFu) == 0u && val_lo == 0.0) {
+        return uvec2(0u, f32_bits_h_check & 0x80000000u);
     }
 
-    uint f32_bits_h = uint(floatBitsToInt(val_hi));
+    uint f32_bits_h = floatBitsToUint(val_hi);
     uint sign = (f32_bits_h >> 31u) & 1u;
     uint f32_exp = (f32_bits_h >> 23u) & 0xFFu;
     uint f32_mantissa = f32_bits_h & 0x7FFFFFu;
@@ -618,8 +624,10 @@ vec4 f64_from_ieee754_bits(uint lo, uint hi) {
     uint mantissa_hi20 = hi & 0xFFFFFu;
     uint mantissa_lo32 = lo;
 
+    // Zero (preserve sign of zero)
     if (exponent == 0u && mantissa_hi20 == 0u && mantissa_lo32 == 0u) {
-        return vec4(0.0, 0.0, 0.0, 0.0);
+        uint zero_bits = sign_bit << 31u;
+        return vec4(uintBitsToFloat(zero_bits), 0.0, 0.0, 0.0);
     }
     if (exponent == 0x7FFu) {
         return vec4(0.0, 0.0, 0.0, 0.0);
@@ -670,8 +678,10 @@ uvec2 f64_to_ieee754_bits(vec4 v) {
     float val_hi = v.x;
     float val_lo = v.y;
 
-    if (val_hi == 0.0 && val_lo == 0.0) {
-        return uvec2(0u, 0u);
+    // Zero check via bit pattern (preserves -0.0 vs +0.0)
+    uint f32_bits_h_check = uint(floatBitsToInt(val_hi));
+    if ((f32_bits_h_check & 0x7FFFFFFFu) == 0u && val_lo == 0.0) {
+        return uvec2(0u, f32_bits_h_check & 0x80000000u);
     }
 
     uint f32_bits_h = uint(floatBitsToInt(val_hi));
