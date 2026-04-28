@@ -26,6 +26,15 @@ namespace SpawnDev.ILGPU.P2P;
 /// </summary>
 public class P2PCompute : IAsyncDisposable
 {
+    /// <summary>
+    /// Enables diagnostic Console.WriteLine output across the P2P stack
+    /// (bridge / transport / extension / worker / compute facade).
+    /// Default false — production code never builds the interpolated log
+    /// strings unless this is set, matching the WebTorrentClient pattern.
+    /// Toggle from a consumer's startup or set in unit tests.
+    /// </summary>
+    public static bool VerboseLogging { get; set; }
+
     /// <summary>The swarm coordinator.</summary>
     public P2PSwarmCoordinator Coordinator { get; }
 
@@ -207,10 +216,10 @@ public class P2PCompute : IAsyncDisposable
         // subscriber is in place by the time torrent.OnWire fires.
         bridge.OnComputePeerCapabilities += (peerId, caps) =>
         {
-            Console.WriteLine($"[P2PCompute] Bridge OnComputePeerCapabilities: peerId={peerId}, caps={caps != null}");
+            if (P2PCompute.VerboseLogging) Console.WriteLine($"[P2PCompute] Bridge OnComputePeerCapabilities: peerId={peerId}, caps={caps != null}");
             caps ??= new PeerCapabilities { PreferredBackend = "remote" };
             var result = coordinator.HandlePeerConnected(peerId, caps);
-            Console.WriteLine($"[P2PCompute] HandlePeerConnected result: {result}, PeerCount: {coordinator.PeerCount}");
+            if (P2PCompute.VerboseLogging) Console.WriteLine($"[P2PCompute] HandlePeerConnected result: {result}, PeerCount: {coordinator.PeerCount}");
         };
 
         // Attach bridge to torrent for peer connection events
@@ -326,10 +335,10 @@ public class P2PCompute : IAsyncDisposable
         // through bridge.OnComputePeerCapabilities with no listener attached yet.
         bridge.OnComputePeerCapabilities += (peerId, caps) =>
         {
-            Console.WriteLine($"[P2PCompute Join] Bridge OnComputePeerCapabilities: peerId={peerId}, caps={caps != null}");
+            if (P2PCompute.VerboseLogging) Console.WriteLine($"[P2PCompute Join] Bridge OnComputePeerCapabilities: peerId={peerId}, caps={caps != null}");
             caps ??= worker.BuildCapabilities(peerId);
             var result = coordinator.HandlePeerConnected(peerId, caps);
-            Console.WriteLine($"[P2PCompute Join] HandlePeerConnected result: {result}, PeerCount: {coordinator.PeerCount}");
+            if (P2PCompute.VerboseLogging) Console.WriteLine($"[P2PCompute Join] HandlePeerConnected result: {result}, PeerCount: {coordinator.PeerCount}");
         };
 
         if (coordinator.Swarm != null)
@@ -346,13 +355,13 @@ public class P2PCompute : IAsyncDisposable
 
             compute.StateManager.OnStateUpdated += (state) =>
             {
-                Console.WriteLine($"[P2PCompute Join] DHT state update: coordinator={state.CoordinatorPeerId}, " +
+                if (P2PCompute.VerboseLogging) Console.WriteLine($"[P2PCompute Join] DHT state update: coordinator={state.CoordinatorPeerId}, " +
                     $"peers={state.PeerCount}, TFLOPS={state.TotalTflops:F1}");
             };
 
             compute.StateManager.OnCoordinatorAnnounced += (announcement) =>
             {
-                Console.WriteLine($"[P2PCompute Join] New coordinator announced: {announcement.CoordinatorPeerId}");
+                if (P2PCompute.VerboseLogging) Console.WriteLine($"[P2PCompute Join] New coordinator announced: {announcement.CoordinatorPeerId}");
                 worker.NotifyCoordinatorChanged();
             };
         }
@@ -408,7 +417,7 @@ public class P2PCompute : IAsyncDisposable
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"[P2PCompute] GetBrowserBaseUrl failed: {ex.Message}");
+            if (P2PCompute.VerboseLogging) Console.WriteLine($"[P2PCompute] GetBrowserBaseUrl failed: {ex.Message}");
         }
         return null;
     }
@@ -479,13 +488,13 @@ public class P2PCompute : IAsyncDisposable
     {
         try
         {
-            Console.WriteLine($"[P2PCompute] Subscribing worker state channel to coord DHT pubkey " +
+            if (P2PCompute.VerboseLogging) Console.WriteLine($"[P2PCompute] Subscribing worker state channel to coord DHT pubkey " +
                 $"{Convert.ToHexString(remotePubKey)[..16].ToLowerInvariant()}...");
             await stateManager.SubscribeAsync(remotePubKey);
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"[P2PCompute] SubscribeAsync failed: {ex.Message}");
+            if (P2PCompute.VerboseLogging) Console.WriteLine($"[P2PCompute] SubscribeAsync failed: {ex.Message}");
         }
     }
 

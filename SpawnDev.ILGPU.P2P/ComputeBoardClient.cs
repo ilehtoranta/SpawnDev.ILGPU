@@ -41,7 +41,7 @@ public class ComputeBoardClient
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"[ComputeBoard] POST failed: {ex.Message}");
+            if (P2PCompute.VerboseLogging) Console.WriteLine($"[ComputeBoard] POST failed: {ex.Message}");
         }
         return null;
     }
@@ -57,7 +57,7 @@ public class ComputeBoardClient
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"[ComputeBoard] GET requests failed: {ex.Message}");
+            if (P2PCompute.VerboseLogging) Console.WriteLine($"[ComputeBoard] GET requests failed: {ex.Message}");
             return new();
         }
     }
@@ -73,7 +73,7 @@ public class ComputeBoardClient
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"[ComputeBoard] GET stats failed: {ex.Message}");
+            if (P2PCompute.VerboseLogging) Console.WriteLine($"[ComputeBoard] GET stats failed: {ex.Message}");
             return null;
         }
     }
@@ -91,7 +91,7 @@ public class ComputeBoardClient
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"[ComputeBoard] DELETE failed: {ex.Message}");
+            if (P2PCompute.VerboseLogging) Console.WriteLine($"[ComputeBoard] DELETE failed: {ex.Message}");
             return false;
         }
     }

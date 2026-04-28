@@ -150,7 +150,7 @@ public class P2PStateManager
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"[P2PState] Failed to process state update: {ex.Message}");
+            if (P2PCompute.VerboseLogging) Console.WriteLine($"[P2PState] Failed to process state update: {ex.Message}");
         }
     }
 

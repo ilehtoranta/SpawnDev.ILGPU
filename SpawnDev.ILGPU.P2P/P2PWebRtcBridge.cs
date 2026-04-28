@@ -250,7 +250,7 @@ public class P2PWebRtcBridge : IAsyncDisposable
                         }
                         catch (Exception ex)
                         {
-                            Console.WriteLine($"[P2PBridge] Failed to deserialize capabilities from peer {peerId}: {ex.Message}");
+                            if (P2PCompute.VerboseLogging) Console.WriteLine($"[P2PBridge] Failed to deserialize capabilities from peer {peerId}: {ex.Message}");
                         }
                         NotifyCanonical(caps);
                     }
@@ -268,7 +268,7 @@ public class P2PWebRtcBridge : IAsyncDisposable
                     }
                     catch (Exception ex)
                     {
-                        Console.WriteLine($"[P2PBridge] Failed to deserialize buffered capabilities from peer {peerId}: {ex.Message}");
+                        if (P2PCompute.VerboseLogging) Console.WriteLine($"[P2PBridge] Failed to deserialize buffered capabilities from peer {peerId}: {ex.Message}");
                     }
                     NotifyCanonical(caps);
                 }
@@ -276,7 +276,7 @@ public class P2PWebRtcBridge : IAsyncDisposable
             else
             {
                 // No factory extension — UseExtension was NOT called before the torrent was created.
-                Console.WriteLine($"[P2PBridge] WARNING: No factory extension for peer {peerId}. " +
+                if (P2PCompute.VerboseLogging) Console.WriteLine($"[P2PBridge] WARNING: No factory extension for peer {peerId}. " +
                     "UseExtension must be called BEFORE creating/joining the torrent. " +
                     "sd_compute will not work for this peer.");
             }

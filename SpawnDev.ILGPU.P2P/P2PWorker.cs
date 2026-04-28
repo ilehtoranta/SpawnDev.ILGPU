@@ -276,7 +276,7 @@ public class P2PWorker : IAsyncDisposable
                 catch (Exception ex)
                 {
                     var msg = $"Pushing modified buffer '{bufferId}' to {fromPeerId} failed: {ex.Message}";
-                    Console.WriteLine($"[P2PWorker] {msg}");
+                    if (P2PCompute.VerboseLogging) Console.WriteLine($"[P2PWorker] {msg}");
                     bufferPushErrors.Add(msg);
                 }
             }

@@ -124,12 +124,12 @@ public class SdComputeExtension : SpawnDev.WebTorrent.IWireExtension
         // the peer supports sd_compute.
         IsSupported = true;
 
-        Console.WriteLine($"[sd_compute] OnExtendedHandshake: peerId={_peerId}, IsSupported={IsSupported}");
+        if (P2PCompute.VerboseLogging) Console.WriteLine($"[sd_compute] OnExtendedHandshake: peerId={_peerId}, IsSupported={IsSupported}");
 
         // Check for version info
         if (handshake.TryGetValue("sd_compute_version", out var version))
         {
-            Console.WriteLine($"[sd_compute] Peer {_peerId} supports sd_compute version {version}");
+            if (P2PCompute.VerboseLogging) Console.WriteLine($"[sd_compute] Peer {_peerId} supports sd_compute version {version}");
         }
 
         // Extract remote DHT pubkey if advertised. Values come through as either string
@@ -157,13 +157,13 @@ public class SdComputeExtension : SpawnDev.WebTorrent.IWireExtension
             if (decoded != null && decoded.Length == 32)
             {
                 RemoteDhtPublicKey = decoded;
-                Console.WriteLine(
+                if (P2PCompute.VerboseLogging) Console.WriteLine(
                     $"[sd_compute] Peer {_peerId} advertised DHT pubkey " +
                     $"{Convert.ToHexString(decoded)[..16].ToLowerInvariant()}...");
                 try { OnRemoteDhtPublicKeyReceived?.Invoke(decoded); }
                 catch (Exception ex)
                 {
-                    Console.WriteLine($"[sd_compute] OnRemoteDhtPublicKeyReceived handler threw: {ex.Message}");
+                    if (P2PCompute.VerboseLogging) Console.WriteLine($"[sd_compute] OnRemoteDhtPublicKeyReceived handler threw: {ex.Message}");
                 }
             }
         }
@@ -189,7 +189,7 @@ public class SdComputeExtension : SpawnDev.WebTorrent.IWireExtension
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"[sd_compute] Capability exchange failed for peer {_peerId}: {ex.Message}");
+                if (P2PCompute.VerboseLogging) Console.WriteLine($"[sd_compute] Capability exchange failed for peer {_peerId}: {ex.Message}");
             }
         });
     }
@@ -200,7 +200,7 @@ public class SdComputeExtension : SpawnDev.WebTorrent.IWireExtension
     /// </summary>
     public void OnMessage(byte[] payload)
     {
-        Console.WriteLine($"[sd_compute] OnMessage: peerId={_peerId}, {payload.Length} bytes, IsSupported={IsSupported}");
+        if (P2PCompute.VerboseLogging) Console.WriteLine($"[sd_compute] OnMessage: peerId={_peerId}, {payload.Length} bytes, IsSupported={IsSupported}");
         // Route to the P2P transport for handling (fire-and-forget since OnMessage is sync).
         // The transport owns the single primary parse (binary fast-path or JSON).
         _ = _transport.HandleIncomingDataAsync(_peerId, payload);

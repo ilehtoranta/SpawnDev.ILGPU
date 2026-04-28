@@ -159,7 +159,7 @@ public class P2PTransport : IAsyncDisposable
             message.Type != P2PMessageType.CapabilityRequest &&
             !_channels.ContainsKey(peerId))
         {
-            Console.WriteLine($"[P2PTransport] Rejected {message.Type} from unregistered peer {peerId}");
+            if (P2PCompute.VerboseLogging) Console.WriteLine($"[P2PTransport] Rejected {message.Type} from unregistered peer {peerId}");
             return;
         }
 
