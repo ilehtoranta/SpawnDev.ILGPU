@@ -185,8 +185,13 @@ namespace SpawnDev.ILGPU.Wasm
         {
             var device = new WasmILGPUDevice();
             var accelerator = new WasmAccelerator(context, device);
-            // Use navigator.hardwareConcurrency for optimal parallelism.
-            // On modern machines this is typically 8-24 workers.
+            // Default to navigator.hardwareConcurrency - 2, leaving 2 cores
+            // for the browser UI thread + Mono runtime + OS. This avoids
+            // starving the host machine when one tab runs heavy compute and
+            // dramatically reduces oversubscription severity in multi-tab
+            // scenarios (each tab's pure-spin barrier needs the OS scheduler
+            // to actually run all workers within the spin window). Override
+            // with WasmBackendOptions.WorkerCount.
             int hwConcurrency = 4;
             try
             {
@@ -194,7 +199,7 @@ namespace SpawnDev.ILGPU.Wasm
                 hwConcurrency = js.Get<int>("navigator.hardwareConcurrency");
             }
             catch { }
-            accelerator._workerCount = options?.WorkerCount ?? Math.Max(hwConcurrency, 1);
+            accelerator._workerCount = options?.WorkerCount ?? Math.Max(2, hwConcurrency - 2);
             var backend = new WasmBackend(context, options ?? new WasmBackendOptions());
             accelerator.Backend = backend;
             accelerator.Init(backend);

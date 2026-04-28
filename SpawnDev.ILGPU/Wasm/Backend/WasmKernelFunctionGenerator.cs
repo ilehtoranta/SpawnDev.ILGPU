@@ -3861,7 +3861,14 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             Code.Add(0x02);
             Code.Add(0x00);
 
-            // i32.atomic.rmw.add(genAddr, 1) — bump generation
+            // i32.atomic.rmw.add(genAddr, 1) — bump generation. No notify:
+            // V8 14.7+ has a confirmed FutexEmulation race for memory.atomic.notify
+            // (g-issues.chromium.org/issues/490434403). The pure-spin path below
+            // exits on value-mismatch fast-check, so notify is unnecessary.
+            // History: rc.7 used wait32+notify; rc.8 attempted variants; rc.25 ported
+            // the dispatcher to pure-spin + JS-side Atomics.wait yield. rc.27
+            // removes the last wait32+notify call from the in-kernel EmitBarrier
+            // path so the entire Wasm backend is wait/notify-free.
             WasmModuleBuilder.EmitLocalGet(Code, genAddrLocal);
             WasmModuleBuilder.EmitI32Const(Code, 1);
             Code.Add(WasmOpCodes.AtomicPrefix);
@@ -3870,20 +3877,13 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             Code.Add(0x00);
             Code.Add(WasmOpCodes.Drop); // discard old value
 
-            // memory.atomic.notify(genAddr, MAX_WAITERS)
-            WasmModuleBuilder.EmitLocalGet(Code, genAddrLocal);
-            WasmModuleBuilder.EmitI32Const(Code, int.MaxValue);
-            Code.Add(WasmOpCodes.AtomicPrefix);
-            WasmModuleBuilder.EmitU32Leb128(Code, WasmOpCodes.MemoryAtomicNotify);
-            Code.Add(0x02);
-            Code.Add(0x00);
-            Code.Add(WasmOpCodes.Drop);
-
             Code.Add(WasmOpCodes.Else);
 
-            // === NOT LAST: spin-wait until generation advances ===
-            Code.Add(WasmOpCodes.Block);
-            Code.Add(WasmOpCodes.Void);
+            // === NOT LAST: pure spin-wait until generation advances ===
+            // No memory.atomic.wait32: V8 14.7+ FutexEmulation race makes the
+            // wasm-side wait/notify path unreliable. Pure spin works correctly
+            // across all engines. Outer dispatcher's spin-yield + JS Atomics.wait
+            // mechanism handles OS-level descheduling under CPU oversubscription.
             Code.Add(WasmOpCodes.Loop);
             Code.Add(WasmOpCodes.Void);
 
@@ -3896,29 +3896,14 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             Code.Add(0x00);
             WasmModuleBuilder.EmitLocalSet(Code, curGenLocal);
 
-            // if (curGen != myGen) break — generation advanced
+            // if (curGen == myGen) br $spin — keep spinning
             WasmModuleBuilder.EmitLocalGet(Code, curGenLocal);
             WasmModuleBuilder.EmitLocalGet(Code, myGenLocal);
-            Code.Add(WasmOpCodes.I32Ne);
+            Code.Add(WasmOpCodes.I32Eq);
             Code.Add(WasmOpCodes.BrIf);
-            WasmModuleBuilder.EmitU32Leb128(Code, 1); // br_if $exit
-
-            // memory.atomic.wait32(genAddr, curGen, -1)
-            WasmModuleBuilder.EmitLocalGet(Code, genAddrLocal);
-            WasmModuleBuilder.EmitLocalGet(Code, curGenLocal);
-            WasmModuleBuilder.EmitI64Const(Code, -1);
-            Code.Add(WasmOpCodes.AtomicPrefix);
-            WasmModuleBuilder.EmitU32Leb128(Code, WasmOpCodes.MemoryAtomicWait32);
-            Code.Add(0x02);
-            Code.Add(0x00);
-            Code.Add(WasmOpCodes.Drop);
-
-            // br $spin
-            Code.Add(WasmOpCodes.Br);
-            WasmModuleBuilder.EmitU32Leb128(Code, 0);
+            WasmModuleBuilder.EmitU32Leb128(Code, 0); // br_if $spin (continue loop)
 
             Code.Add(WasmOpCodes.End); // end loop $spin
-            Code.Add(WasmOpCodes.End); // end block $exit
             Code.Add(WasmOpCodes.End); // end if/else
 
             // === Step 5: Fence — acquire ===

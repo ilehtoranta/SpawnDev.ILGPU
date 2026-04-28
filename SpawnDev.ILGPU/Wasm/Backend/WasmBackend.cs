@@ -1168,9 +1168,17 @@ namespace SpawnDev.ILGPU.Wasm.Backend
     {
         /// <summary>
         /// Number of Web Workers to use for parallel dispatch.
-        /// Defaults to navigator.hardwareConcurrency.
+        /// Defaults to <c>Math.Max(2, navigator.hardwareConcurrency - 2)</c>,
+        /// leaving 2 hardware threads free for the browser UI, Mono runtime,
+        /// and OS. The pure-spin phase barrier needs the OS scheduler to run
+        /// every worker within the spin window; over-saturating the CPU
+        /// (e.g. equal-to-hardwareConcurrency workers + multi-tab oversub)
+        /// can cause one worker to be descheduled long enough that other
+        /// workers spin past the YIELD_SPIN_THRESHOLD and yield to JS, then
+        /// re-dispatch and spin again, losing throughput. Leaving headroom
+        /// keeps the descheduling window short.
         /// </summary>
-        public int WorkerCount { get; set; } = WasmILGPUDevice.GetHardwareConcurrency();
+        public int WorkerCount { get; set; } = Math.Max(2, WasmILGPUDevice.GetHardwareConcurrency() - 2);
     }
 
     /// <summary>
