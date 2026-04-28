@@ -4,8 +4,8 @@
 		<TargetFramework>net10.0</TargetFramework>
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>enable</Nullable>
-		<Version>4.9.2-rc.30</Version>
-		<PackageReleaseNotes>v4.9.2-rc.30: P2PDispatcher per-attempt budget bumped from 30s to 60s (cumulative `DispatchTimeoutMs * MaxRetries` from 90s to 180s). The 30s default was too tight for two real-world cases the rc.28+/rc.29 SCTP backpressure fixes exposed: (1) >1MB result push-back at ~1.5 MB/s SCTP throughput hits 30s after just ~45MB; (2) 10-way concurrent dispatch contends per-peer message queues, so 5+ dispatches per peer serialize and accumulate compute+transfer latency past 30s. Diagnosed against `MultiPeer_Concurrent_10_DispatchedOverRealWebRtc_BitExact`: 3-attempt failure exactly at 4:52 (3 * 90s + setup), every attempt timed out at 90s. New default covers MultiPeer + LargeBuffer_10MB; LargeBuffer_100MB Stress test still needs custom override (~250s budget for 100MB push-back). Also documents the misleading semantics of MaxRetries — peer-loss retries (HandlePeerLost) fire only when a peer disconnects mid-dispatch; the multiplier just expands the result-wait budget. No API breakage; consumers can still override `dispatcher.DispatchTimeoutMs` and `dispatcher.MaxRetries` per swarm.</PackageReleaseNotes>
+		<Version>4.9.2-rc.31</Version>
+		<PackageReleaseNotes>v4.9.2-rc.31: SpawnDev.WebTorrent 3.2.2-rc.4 dep bump (which pulls in SpawnDev.RTC 1.1.8-rc.2). RTC rc.2 adds a browser-side `RTCPeerConnection.connectionState` polling fallback that closes the `P2PSwarm.TwoTab_PeerDiscovery` regression - Chromium under Playwright fails to fire `connectionstatechange` when a remote tab closes, so `wire.OnClose` never fired in the bridge and `coord.peerCount` stayed at 1 indefinitely. P2P code unchanged from rc.30.</PackageReleaseNotes>
 		<GeneratePackageOnBuild>True</GeneratePackageOnBuild>
 		<GenerateDocumentationFile>true</GenerateDocumentationFile>
 		<EmbedAllSources>true</EmbedAllSources>
@@ -28,7 +28,7 @@
 
 	<ItemGroup>
 		<ProjectReference Include="..\SpawnDev.ILGPU\SpawnDev.ILGPU.csproj" />
-		<PackageReference Include="SpawnDev.WebTorrent" Version="3.2.2-rc.3" />
+		<PackageReference Include="SpawnDev.WebTorrent" Version="3.2.2-rc.4" />
 	</ItemGroup>
 
 </Project>
