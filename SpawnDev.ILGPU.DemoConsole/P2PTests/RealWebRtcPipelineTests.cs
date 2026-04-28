@@ -999,18 +999,31 @@ public class RealWebRtcPipelineTests
 
     private static async Task WaitForMultiplePeersAsync(P2PCompute coordinator, int expectedPeerCount)
     {
-        var deadline = DateTime.UtcNow.AddMilliseconds(DiscoveryTimeoutMs);
+        var start = DateTime.UtcNow;
+        var deadline = start.AddMilliseconds(DiscoveryTimeoutMs);
+        var lastPeerCount = -1;
+        var lastLogSec = -1;
         while (DateTime.UtcNow < deadline && coordinator.PeerCount < expectedPeerCount)
         {
+            var elapsedSec = (int)(DateTime.UtcNow - start).TotalSeconds;
+            var pc = coordinator.PeerCount;
+            if (pc != lastPeerCount || (elapsedSec % 5 == 0 && elapsedSec != lastLogSec))
+            {
+                Console.WriteLine($"[WAIT-PEERS {elapsedSec:D2}s] coord.PeerCount={pc}/{expectedPeerCount} (bridge.ComputePeerCount={coordinator.Bridge?.ComputePeerCount ?? -1})");
+                lastPeerCount = pc;
+                lastLogSec = elapsedSec;
+            }
             await Task.Delay(250);
         }
 
         if (coordinator.PeerCount < expectedPeerCount)
         {
+            Console.WriteLine($"[WAIT-PEERS] FINAL: coord.PeerCount={coordinator.PeerCount}/{expectedPeerCount}, bridge.ComputePeerCount={coordinator.Bridge?.ComputePeerCount ?? -1}, elapsed={(DateTime.UtcNow - start).TotalSeconds:F1}s");
             throw new Exception(
                 $"Multi-peer discovery timed out after {DiscoveryTimeoutMs}ms. " +
                 $"Coordinator saw {coordinator.PeerCount} of {expectedPeerCount} expected peers.");
         }
+        Console.WriteLine($"[WAIT-PEERS] OK after {(DateTime.UtcNow - start).TotalSeconds:F1}s");
     }
 
     private static ConcurrentDictionary<string, byte[]> CollectWorkerBuffers(P2PCompute coordinator)

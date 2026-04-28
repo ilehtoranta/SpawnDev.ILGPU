@@ -10,13 +10,17 @@ namespace SpawnDev.ILGPU.DemoConsole.P2PTests;
 ///
 /// Lifecycle: call <see cref="InitAsync"/> once before running any tests that need
 /// the tracker (in DemoConsole's <c>Program.cs</c>, before <c>ConsoleRunner.Run</c>).
-/// The tracker process dies when the test runner process exits, so no explicit
-/// teardown is required. Static <see cref="IsAvailable"/> and
-/// <see cref="GetTrackerUrl"/> expose the run state to test methods.
+/// The tracker child process is killed via <c>AppDomain.CurrentDomain.ProcessExit</c>
+/// when the test runner exits - so a test failure or PMT subprocess kill does not
+/// leave an orphan tracker holding the parent shell's stdout pipe (which previously
+/// caused diagnostic bash pipelines to hang for minutes per run; observed 2026-04-27).
+/// Static <see cref="IsAvailable"/> and <see cref="GetTrackerUrl"/> expose the run
+/// state to test methods.
 /// </summary>
 public static class LocalTrackerFixture
 {
     private static Process? _trackerProcess;
+    private static int _exitHandlerInstalled;
 
     /// <summary>Tracker WebSocket URL for tests to use.</summary>
     public const string TrackerUrl = "ws://localhost:5561/announce";
@@ -94,6 +98,18 @@ public static class LocalTrackerFixture
         _trackerProcess.BeginOutputReadLine();
         _trackerProcess.BeginErrorReadLine();
 
+        // Kill the tracker subprocess when the test runner exits. Without this,
+        // PMT (or any parent shell that pipes our stdout) hangs after the test
+        // completes because the tracker subprocess inherits a handle on the
+        // pipe and keeps the pipeline open. Using Interlocked.Exchange so that
+        // a second InitAsync (different test session) does not double-register.
+        if (System.Threading.Interlocked.Exchange(ref _exitHandlerInstalled, 1) == 0)
+        {
+            AppDomain.CurrentDomain.ProcessExit += (_, _) => StopTracker();
+            // Ctrl-C / Ctrl-Break also need to clean up the tracker.
+            Console.CancelKeyPress += (_, _) => StopTracker();
+        }
+
         var deadline = DateTime.UtcNow.AddSeconds(30);
         while (DateTime.UtcNow < deadline)
         {
@@ -131,5 +147,24 @@ public static class LocalTrackerFixture
         {
             return false;
         }
+    }
+
+    /// <summary>
+    /// Kill the tracker child process and any of its descendants. Also closes the
+    /// inherited stdout/stderr pipe handles so a parent shell pipeline can terminate.
+    /// Safe to call multiple times (idempotent) and from process-exit handlers.
+    /// </summary>
+    private static void StopTracker()
+    {
+        var proc = System.Threading.Interlocked.Exchange(ref _trackerProcess, null);
+        if (proc == null) return;
+        try
+        {
+            if (!proc.HasExited)
+                proc.Kill(entireProcessTree: true);
+        }
+        catch { /* best-effort cleanup; never let exit-handler exceptions bubble */ }
+        try { proc.Dispose(); }
+        catch { }
     }
 }

@@ -83,25 +83,20 @@ public class P2PWebRtcBridge : IAsyncDisposable
             wire.OnClose += () =>
             {
                 _extensions.TryRemove(peerId, out _);
-                _wireToCanonical.TryRemove(wire, out var canonical);
-                // Try every plausible identifier this wire could have been registered
-                // under. UnregisterPeer is idempotent (TryRemove no-ops on missing keys)
-                // so this is safe. Defensive coverage closes the phantom-peer leak where
-                // a registration path used one id and the close path resolves a different
-                // id - which happens during the BEP-10 vs JSON-CapabilityResponse
-                // handshake-race window.
-                var ids = new HashSet<string>(StringComparer.Ordinal);
-                if (!string.IsNullOrEmpty(canonical)) ids.Add(canonical!);
-                if (!string.IsNullOrEmpty(wire.PeerId)) ids.Add(wire.PeerId!);
-                if (!string.IsNullOrEmpty(peerId)) ids.Add(peerId);
-                foreach (var id in ids)
-                {
-                    _notified.TryRemove(id, out _);
-                    _transport.UnregisterPeer(id);
-                }
+                bool wasNotified = _wireToCanonical.TryRemove(wire, out var canonical)
+                    && !string.IsNullOrEmpty(canonical);
 
-                // Bookkeeping: remove this wire from canonical-to-wires map for completeness.
-                if (!string.IsNullOrEmpty(canonical))
+                // Decrement the canonical-to-wires bookkeeping. Used to gate UnregisterPeer
+                // below: when the BEP-10 handshake race produces N wires for one canonical
+                // peer, the losers close immediately (per Torrent.OnHandshake duplicate
+                // -destroy logic) while the winner stays live. Unregistering on every loser
+                // close evicts the surviving peer from P2PSwarmCoordinator._peers via
+                // HandlePeerDisconnected, manifesting as PeerCount stuck at <expected>.
+                // Diagnosed 2026-04-27 against MultiPeer_Concurrent_10_DispatchedOverRealWebRtc_BitExact:
+                // bridge.ComputePeerCount transiently spikes to 4-5 then settles to 2,
+                // each close call removing the surviving peer.
+                bool isLastWireForCanonical = true;
+                if (wasNotified)
                 {
                     lock (_wiresByBtPeerIdLock)
                     {
@@ -110,8 +105,37 @@ public class P2PWebRtcBridge : IAsyncDisposable
                             wireSet.Remove(wire);
                             if (wireSet.Count == 0)
                                 _wiresByBtPeerId.TryRemove(canonical!, out _);
+                            else
+                                isLastWireForCanonical = false;
                         }
                     }
+                }
+
+                // Only unregister the peer if THIS wire actually completed capability
+                // exchange (NotifyCanonical fired -> wasNotified true) AND it is the last
+                // wire for the canonical peer. Wires that close before capability exchange
+                // never contributed an entry to _peers, so calling UnregisterPeer for any
+                // of their plausible ids would only evict a peer added by another wire
+                // (the canonical-peer winner of the race).
+                if (!wasNotified || !isLastWireForCanonical)
+                    return;
+
+                // Genuine peer departure. Try every plausible identifier this wire could
+                // have been registered under. UnregisterPeer is idempotent (TryRemove
+                // no-ops on missing keys). Defensive coverage closes the phantom-peer
+                // leak where a registration path used one id and the close path resolves
+                // a different id - which happens during the BEP-10 vs JSON-CapabilityResponse
+                // handshake-race window. Now safe because we only reach here for wires
+                // that completed capability exchange and were the last wire for their
+                // canonical peer.
+                var ids = new HashSet<string>(StringComparer.Ordinal);
+                ids.Add(canonical!);
+                if (!string.IsNullOrEmpty(wire.PeerId)) ids.Add(wire.PeerId!);
+                if (!string.IsNullOrEmpty(peerId)) ids.Add(peerId);
+                foreach (var id in ids)
+                {
+                    _notified.TryRemove(id, out _);
+                    _transport.UnregisterPeer(id);
                 }
             };
 
