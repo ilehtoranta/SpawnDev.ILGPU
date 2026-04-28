@@ -83,20 +83,17 @@ public class P2PWebRtcBridge : IAsyncDisposable
             wire.OnClose += () =>
             {
                 _extensions.TryRemove(peerId, out _);
-                bool wasNotified = _wireToCanonical.TryRemove(wire, out var canonical)
+                // wasTracked = this wire was registered under canonical (BEP-10 fired
+                // OR NotifyCanonical fired). Both paths populate _wireToCanonical.
+                bool wasTracked = _wireToCanonical.TryRemove(wire, out var canonical)
                     && !string.IsNullOrEmpty(canonical);
 
-                // Decrement the canonical-to-wires bookkeeping. Used to gate UnregisterPeer
-                // below: when the BEP-10 handshake race produces N wires for one canonical
-                // peer, the losers close immediately (per Torrent.OnHandshake duplicate
-                // -destroy logic) while the winner stays live. Unregistering on every loser
-                // close evicts the surviving peer from P2PSwarmCoordinator._peers via
-                // HandlePeerDisconnected, manifesting as PeerCount stuck at <expected>.
-                // Diagnosed 2026-04-27 against MultiPeer_Concurrent_10_DispatchedOverRealWebRtc_BitExact:
-                // bridge.ComputePeerCount transiently spikes to 4-5 then settles to 2,
-                // each close call removing the surviving peer.
+                // Decrement the canonical-to-wires bookkeeping. When the BEP-10
+                // handshake race produces N wires for one canonical peer, the losers
+                // close while the winner stays live. UnregisterPeer must only fire
+                // when EVERY wire for the canonical is gone.
                 bool isLastWireForCanonical = true;
-                if (wasNotified)
+                if (wasTracked)
                 {
                     lock (_wiresByBtPeerIdLock)
                     {
@@ -111,32 +108,95 @@ public class P2PWebRtcBridge : IAsyncDisposable
                     }
                 }
 
-                // Only unregister the peer if THIS wire actually completed capability
-                // exchange (NotifyCanonical fired -> wasNotified true) AND it is the last
-                // wire for the canonical peer. Wires that close before capability exchange
-                // never contributed an entry to _peers, so calling UnregisterPeer for any
-                // of their plausible ids would only evict a peer added by another wire
-                // (the canonical-peer winner of the race).
-                if (!wasNotified || !isLastWireForCanonical)
+                // If this wire was never tracked under any canonical, it didn't
+                // contribute to peer registration - nothing to unregister. If other
+                // wires are still live for this canonical, the peer is still up.
+                if (!wasTracked || !isLastWireForCanonical)
                     return;
 
-                // Genuine peer departure. Try every plausible identifier this wire could
-                // have been registered under. UnregisterPeer is idempotent (TryRemove
-                // no-ops on missing keys). Defensive coverage closes the phantom-peer
-                // leak where a registration path used one id and the close path resolves
-                // a different id - which happens during the BEP-10 vs JSON-CapabilityResponse
-                // handshake-race window. Now safe because we only reach here for wires
-                // that completed capability exchange and were the last wire for their
-                // canonical peer.
-                var ids = new HashSet<string>(StringComparer.Ordinal);
-                ids.Add(canonical!);
-                if (!string.IsNullOrEmpty(wire.PeerId)) ids.Add(wire.PeerId!);
-                if (!string.IsNullOrEmpty(peerId)) ids.Add(peerId);
-                foreach (var id in ids)
+                // The canonical was never promoted to a registered peer (no wire's
+                // CapabilityResponse arrived -> NotifyCanonical never fired ->
+                // _notified[canonical] never set). Nothing to unregister.
+                if (!_notified.ContainsKey(canonical!))
+                    return;
+
+                // Cross-check torrent.Wires for a LIVE replacement wire bound to the same
+                // canonical BT peer id. Closes the BEP-10 vs CapabilityResponse race that
+                // rc.27's _wiresByBtPeerId-only check still missed:
+                //
+                //   1. Wire #1 connects, BEP-10 completes, capability response arrives ->
+                //      bridge's NotifyCanonical fires, _wiresByBtPeerId[canonical] = {wire1}
+                //   2. Wire #2 connects, OnWire fires (bridge subscribes wire2.OnClose).
+                //   3. Wire #2's BEP-10 completes:
+                //        a. Torrent's OnHandshake handler (subscribed FIRST in Torrent.AddPeer
+                //           BEFORE OnWire?.Invoke fires) detects duplicate, calls
+                //           existingPeer.Destroy() on wire1. wire1.OnClose fires INLINE.
+                //        b. Bridge's wire1.OnClose runs: _wiresByBtPeerId[canonical] = {wire1},
+                //           remove wire1 -> set empty -> isLastWireForCanonical = true ->
+                //           UnregisterPeer fires, evicting the peer from coord/_peers.
+                //        c. Wire #2's CapabilityResponse hadn't arrived yet, so wire2 was
+                //           never in _wiresByBtPeerId.
+                //   4. Wire #2's CapabilityResponse arrives later, P2PTransport
+                //      .HandleCapabilityResponse re-registers via HandlePeerConnected, but
+                //      the test's dispatch fires inside the unregistered window and sees
+                //      "No healthy peers available for dispatch."
+                //
+                // Fix: at this point, walk torrent.Wires for a non-destroyed wire (other
+                // than this closing one) with PeerId == canonical. If one exists, the
+                // duplicate-detection just shifted ownership; the canonical peer is still
+                // live on the new wire. Skip UnregisterPeer entirely. The new wire's
+                // CapabilityResponse will fire bridge events when it arrives (or already
+                // did, ahead of the close). Diagnosed 2026-04-29 against
+                // LargeBuffer_1MB_DispatchedOverRealWebRtc_BitExact: stack trace pinned
+                // every close to Wire._onHandshakeBuffer -> Torrent.AddPeer.b__5 ->
+                // Peer.Destroy(null), all from the duplicate-handshake destroy path.
+                foreach (var otherWire in torrent.Wires.ToArray())
                 {
-                    _notified.TryRemove(id, out _);
-                    _transport.UnregisterPeer(id);
+                    if (otherWire == wire) continue;
+                    if (otherWire.Destroyed) continue;
+                    if (string.Equals(otherWire.PeerId, canonical, StringComparison.Ordinal))
+                        return;
                 }
+
+                // Even with no live replacement RIGHT NOW, the duplicate-handshake-destroy
+                // cascade typical of a fanned-out tracker announce (4-8 ICE-candidate-driven
+                // RTCPeerConnections converging on the same remote BT peerId) can have a
+                // brand-new wire's BEP-10 handshake about to fire within a few hundred ms.
+                // Unregistering immediately and then re-registering on the next capability
+                // response races the consumer's dispatch path - we saw `LargeBuffer_1MB
+                // _DispatchedOverRealWebRtc_BitExact` blow through 3 retries (240s) because
+                // every dispatch landed in the unregistered-but-about-to-recover window.
+                //
+                // Defer the unregister by a grace period; cancel if a new wire registers for
+                // the same canonical before the timer fires. This preserves the genuine-
+                // departure case (no recovery within UnregisterGraceMs -> peer is gone for
+                // real) while absorbing transient cascades.
+                ScheduleDeferredUnregister(canonical!, wire.PeerId, peerId);
+            };
+
+            // Hook BEP-10 handshake completion to register the wire under its canonical
+            // peer-id IMMEDIATELY (before capability exchange completes). Two reasons:
+            //
+            //   (a) The cross-check in wire.OnClose walks `torrent.Wires` for a
+            //       non-destroyed wire with PeerId == canonical to detect "duplicate
+            //       handshake destroyed the loser, but the winner is alive." That
+            //       check works at the torrent level. Adding to the bridge's own
+            //       `_wiresByBtPeerId` set here lets `isLastWireForCanonical`
+            //       computation in OnClose see early arrivals too.
+            //   (b) Cancels any pending deferred-unregister for this canonical: a new
+            //       wire's BEP-10 handshake means the peer is back, even if its
+            //       capability response hasn't arrived yet.
+            wire.OnHandshake += (infoHash, btPeerId, exts) =>
+            {
+                if (string.IsNullOrEmpty(btPeerId)) return;
+                _wireToCanonical[wire] = btPeerId;
+                lock (_wiresByBtPeerIdLock)
+                {
+                    var wireSet = _wiresByBtPeerId.GetOrAdd(btPeerId, _ => new HashSet<SpawnDev.WebTorrent.Wire>());
+                    wireSet.Add(wire);
+                }
+                // Cancel any pending deferred unregister - the peer is back online.
+                CancelDeferredUnregister(btPeerId);
             };
 
             // Check if the wire already has an SdComputeExtension (from UseExtension factory)
@@ -226,6 +286,81 @@ public class P2PWebRtcBridge : IAsyncDisposable
     private readonly System.Collections.Concurrent.ConcurrentDictionary<string, bool> _notified = new();
 
     /// <summary>
+    /// Pending deferred unregister timers, keyed by canonical BT peer id. Set when the
+    /// last wire for a canonical closes; cancelled if a new wire's BEP-10 handshake
+    /// fires for the same canonical before the timer elapses.
+    /// </summary>
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, System.Threading.CancellationTokenSource> _pendingUnregisters = new();
+
+    /// <summary>
+    /// Grace period before firing UnregisterPeer when the last wire for a canonical
+    /// peer dies. Absorbs the duplicate-handshake-destroy cascade typical of a
+    /// tracker-fanned-out connection (4-8 ICE-driven RTCPeerConnections converging
+    /// on the same BT peerId, each round of BEP-10 handshakes destroying one wire
+    /// to keep the swarm at one stable peer connection).
+    /// </summary>
+    public int UnregisterGraceMs { get; set; } = 5_000;
+
+    private void ScheduleDeferredUnregister(string canonical, string? wirePeerId, string transientPeerId)
+    {
+        var cts = new System.Threading.CancellationTokenSource();
+        // Cancel any prior pending unregister for this canonical and replace.
+        if (_pendingUnregisters.TryRemove(canonical, out var prior))
+        {
+            try { prior.Cancel(); } catch { }
+            prior.Dispose();
+        }
+        _pendingUnregisters[canonical] = cts;
+
+        // Capture identifiers up front. The wire reference is going away; these
+        // ids are what UnregisterPeer needs.
+        var ids = new HashSet<string>(StringComparer.Ordinal) { canonical };
+        if (!string.IsNullOrEmpty(wirePeerId)) ids.Add(wirePeerId!);
+        if (!string.IsNullOrEmpty(transientPeerId)) ids.Add(transientPeerId);
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await Task.Delay(UnregisterGraceMs, cts.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                return; // Cancelled by a new wire's BEP-10 handshake.
+            }
+
+            // Grace period elapsed without a new wire arriving. Make sure no other
+            // path re-armed _pendingUnregisters[canonical] in between.
+            if (!_pendingUnregisters.TryGetValue(canonical, out var current) || current != cts)
+                return;
+
+            _pendingUnregisters.TryRemove(canonical, out _);
+            // Final safety check: if a wire materialized for this canonical after the
+            // delay started but before we got here, bail out.
+            lock (_wiresByBtPeerIdLock)
+            {
+                if (_wiresByBtPeerId.TryGetValue(canonical, out var liveSet) && liveSet.Count > 0)
+                    return;
+            }
+
+            foreach (var id in ids)
+            {
+                _notified.TryRemove(id, out _);
+                _transport.UnregisterPeer(id);
+            }
+        });
+    }
+
+    private void CancelDeferredUnregister(string canonical)
+    {
+        if (_pendingUnregisters.TryRemove(canonical, out var cts))
+        {
+            try { cts.Cancel(); } catch { }
+            cts.Dispose();
+        }
+    }
+
+    /// <summary>
     /// Send a compute message to a specific peer via the real WebRTC channel.
     /// </summary>
     public async Task SendAsync(string peerId, P2PMessage message)
@@ -254,6 +389,12 @@ public class P2PWebRtcBridge : IAsyncDisposable
         {
             _wiresByBtPeerId.Clear();
         }
+        foreach (var kv in _pendingUnregisters)
+        {
+            try { kv.Value.Cancel(); } catch { }
+            kv.Value.Dispose();
+        }
+        _pendingUnregisters.Clear();
         return ValueTask.CompletedTask;
     }
 }
