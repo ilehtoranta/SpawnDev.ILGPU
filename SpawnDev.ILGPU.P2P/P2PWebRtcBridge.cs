@@ -136,39 +136,28 @@ public class P2PWebRtcBridge : IAsyncDisposable
                     $"canonical={canonical} before={beforeFilter} after={afterFilter} dump=[{wireSetDump}]"); } catch { }
 
                 // If this wire was never tracked under any canonical, it didn't
-                // contribute to peer registration - nothing to unregister.
-                if (!wasTracked)
+                // contribute to peer registration - nothing to unregister. If
+                // other wires are still live for this canonical (after the
+                // RemoveWhere(Destroyed) filter above), the survivor keeps the
+                // peer up and the duplicate-handshake-destroy cascade is just
+                // shifting ownership.
+                //
+                // NOTE: an earlier draft added a long-grace fallback for the
+                // Chromium-under-Playwright bug where some RTCPeerConnections
+                // never fire OnClose even after the remote tab closes (their
+                // wires stay phantom-alive). That fallback regressed
+                // LargeBuffer_100MB - the duplicate-handshake-destroy at the
+                // start of the connection left isLastWireForCanonical=false and
+                // the fallback then fired 30s in, killing the live dispatch.
+                // Reverted to the strict "wait for actual last wire" behavior;
+                // the TwoTab Chromium-under-Playwright phantom-alive case needs
+                // a separate active-liveness probe (data channel readyState
+                // poll, last-activity-time, etc.) before it can be closed
+                // without the 100MB regression.
+                if (!wasTracked || !isLastWireForCanonical)
                 {
                     try { SpawnDev.BlazorJS.BlazorJSRuntime.JS.Set("__bridge_short_circuit",
                         $"wasTracked={wasTracked} isLastWire={isLastWireForCanonical} canonical={canonical} wirePeerId={wire.PeerId}"); } catch { }
-                    return;
-                }
-
-                // Other wires are still nominally live for this canonical. In real-
-                // Chrome production this means the duplicate-handshake-destroy
-                // cascade is shifting ownership and a survivor will keep the peer
-                // up; skip unregister and let the survivor's normal flow continue.
-                //
-                // BUT in Chromium-under-Playwright the close-event path for some
-                // RTCPeerConnections gets stuck (`connectionState` stays
-                // "connected", data channel stays "open") even after the remote
-                // tab closes. Those phantom-alive wires never fire OnClose, so
-                // isLastWireForCanonical never becomes true and the canonical
-                // peer would stay "alive" forever in our bookkeeping.
-                //
-                // Fallback: schedule a LONGER deferred unregister regardless of
-                // isLastWireForCanonical. If a NEW wire's BEP-10 handshake fires
-                // for the same canonical inside the grace window, the cancel path
-                // wipes the timer (peer is genuinely back). If the grace expires
-                // without a new wire arriving, we declare the canonical gone -
-                // matching the production "all wires really did close" outcome
-                // even though some phantom wires are stuck in our bookkeeping.
-                if (!isLastWireForCanonical)
-                {
-                    try { SpawnDev.BlazorJS.BlazorJSRuntime.JS.Set("__bridge_short_circuit",
-                        $"wasTracked={wasTracked} isLastWire={isLastWireForCanonical} canonical={canonical} wirePeerId={wire.PeerId} fallthrough=true"); } catch { }
-                    if (!_notified.ContainsKey(canonical!)) return;
-                    ScheduleDeferredUnregister(canonical!, wire.PeerId, peerId, useFallback: true);
                     return;
                 }
 
@@ -368,17 +357,7 @@ public class P2PWebRtcBridge : IAsyncDisposable
     /// </summary>
     public int UnregisterGraceMs { get; set; } = 5_000;
 
-    /// <summary>
-    /// Longer grace period used when the canonical's wireSet still contains
-    /// phantom-alive wires (Chromium-under-Playwright bug: some RTCPeerConnections
-    /// stay stuck at connectionState=connected even after the remote tab closes,
-    /// so wire.OnClose never fires for those wires). After this period without a
-    /// new BEP-10 handshake, declare the canonical gone regardless of phantom
-    /// wires.
-    /// </summary>
-    public int UnregisterFallbackGraceMs { get; set; } = 30_000;
-
-    private void ScheduleDeferredUnregister(string canonical, string? wirePeerId, string transientPeerId, bool useFallback = false)
+    private void ScheduleDeferredUnregister(string canonical, string? wirePeerId, string transientPeerId)
     {
         var cts = new System.Threading.CancellationTokenSource();
         // Cancel any prior pending unregister for this canonical and replace.
@@ -395,12 +374,11 @@ public class P2PWebRtcBridge : IAsyncDisposable
         if (!string.IsNullOrEmpty(wirePeerId)) ids.Add(wirePeerId!);
         if (!string.IsNullOrEmpty(transientPeerId)) ids.Add(transientPeerId);
 
-        var graceMs = useFallback ? UnregisterFallbackGraceMs : UnregisterGraceMs;
         _ = Task.Run(async () =>
         {
             try
             {
-                await Task.Delay(graceMs, cts.Token).ConfigureAwait(false);
+                await Task.Delay(UnregisterGraceMs, cts.Token).ConfigureAwait(false);
             }
             catch (OperationCanceledException)
             {
@@ -415,33 +393,10 @@ public class P2PWebRtcBridge : IAsyncDisposable
             _pendingUnregisters.TryRemove(canonical, out _);
             // Final safety check: if a wire materialized for this canonical after the
             // delay started but before we got here, bail out.
-            //
-            // Skipped on useFallback=true paths because that path is specifically
-            // designed to force unregister WHEN the wireSet still contains
-            // phantom-alive wires (Chromium-under-Playwright stuck wires that
-            // never fire OnClose). Reading the wireSet here would always see
-            // those phantoms and short-circuit, defeating the fallback's purpose.
-            // For real new-wire arrivals during the long grace, BEP-10
-            // OnHandshake calls CancelDeferredUnregister, which is the correct
-            // cancel signal in both modes - the wireSet count check is the
-            // belt-and-suspenders that we explicitly remove on the fallback.
-            if (!useFallback)
+            lock (_wiresByBtPeerIdLock)
             {
-                lock (_wiresByBtPeerIdLock)
-                {
-                    if (_wiresByBtPeerId.TryGetValue(canonical, out var liveSet) && liveSet.Count > 0)
-                        return;
-                }
-            }
-            else
-            {
-                // For fallback paths we DO clear the canonical's wireSet entry
-                // since we're force-treating those wires as gone. Future wire
-                // arrivals on the same canonical will re-add via OnHandshake.
-                lock (_wiresByBtPeerIdLock)
-                {
-                    _wiresByBtPeerId.TryRemove(canonical, out _);
-                }
+                if (_wiresByBtPeerId.TryGetValue(canonical, out var liveSet) && liveSet.Count > 0)
+                    return;
             }
 
             try

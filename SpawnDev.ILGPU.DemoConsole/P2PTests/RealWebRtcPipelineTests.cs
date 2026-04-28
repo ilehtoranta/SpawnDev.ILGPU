@@ -329,6 +329,14 @@ public class RealWebRtcPipelineTests
         await using var coordinator = await P2PCompute.CreateSwarmAsync(
             _crypto, coordClient, "largebuffer-100mb-test", trackers: trackers);
 
+        // 100MB result push-back at ~1.5 MB/s SCTP throughput plus chunking overhead
+        // exceeds the default 60s * 3 = 180s dispatch budget. Bump per-attempt timeout
+        // to 240s (240 * 3 = 720s = 12 min cumulative budget). The test method's own
+        // Timeout=600000 (10 min) caps the actual upper bound; the dispatcher's
+        // budget needs to be >= the method timeout so the dispatcher doesn't bail
+        // before the method does.
+        coordinator.Accelerator!.Dispatcher!.DispatchTimeoutMs = 240_000;
+
         using var workerContext = Context.Create(b => b.CPU());
         using var workerAccelerator = workerContext.CreateCPUAccelerator(0);
 
@@ -364,7 +372,10 @@ public class RealWebRtcPipelineTests
 
         if (!dispatchResult.Success) throw new Exception($"Dispatch failed: {dispatchResult.Error}");
 
-        var resultBytes = await WaitForBufferAsync(workerBuffers, "large100_out", BufferReturnTimeoutMs);
+        // 100MB push-back at ~1.5 MB/s SCTP throughput + chunking overhead exceeds
+        // the default 120s buffer-return timeout. Bump to 480s (8 min) for the 100MB
+        // case; the test method's own Timeout=600000 (10 min) caps the upper bound.
+        var resultBytes = await WaitForBufferAsync(workerBuffers, "large100_out", 480_000);
         if (resultBytes.Length != n * 4) throw new Exception($"100MB buffer wrong size: {resultBytes.Length}");
 
         var actual = DataIntegrityHelper.BytesToFloats(resultBytes);
