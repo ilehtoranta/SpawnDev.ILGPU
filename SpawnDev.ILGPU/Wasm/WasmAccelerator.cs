@@ -48,13 +48,51 @@ namespace SpawnDev.ILGPU.Wasm
         /// Tracks which pool workers have already received and cached
         /// the compiled Wasm module, so we don't re-send wasmBytes.
         /// </summary>
-        private readonly HashSet<int> _initializedWorkers = new();
+        private readonly HashSet<Worker> _initializedWorkers = new();
 
         /// <summary>
         /// Reference to the last wasmBytes sent to workers.
         /// When a different kernel is dispatched, we clear _initializedWorkers.
         /// </summary>
         private byte[]? _lastWasmBytes;
+
+        /// <summary>
+        /// Per-worker dispatch state for persistent handlers (Hypothesis #1, 2026-04-26).
+        /// The previous design attached/detached OnMessage and OnError handlers on every
+        /// dispatch. That was suspected of triggering V8 deopt cycles that exposed timing
+        /// windows in the wait/notify spinwait race. With persistent handlers, each worker
+        /// has exactly ONE OnMessage and ONE OnError listener installed for its lifetime.
+        /// Per-dispatch we update the state's CurrentTcs + diagnostic context before
+        /// PostMessage, and the persistent handler reads CurrentTcs when the response
+        /// arrives.
+        ///
+        /// Single-thread-safe by Blazor WASM's single-threaded execution model: the event
+        /// loop runs handlers as microtasks, never interleaving with the C# call setting
+        /// CurrentTcs.
+        /// </summary>
+        private readonly Dictionary<Worker, WorkerDispatchState> _workerHandlers = new();
+
+        /// <summary>
+        /// Per-worker mutable dispatch state. The TCS is swapped per dispatch; the handlers
+        /// read it when a worker response arrives.
+        /// </summary>
+        private sealed class WorkerDispatchState
+        {
+            public TaskCompletionSource? CurrentTcs;
+            public int WorkerIdx;
+            public int DispNum;
+            public bool HasBarriers;
+            public int ScratchBase;
+            public int SharedMemBase;
+            public int FenceSlot;
+            public int GroupSize;
+            public int ScratchPerThread;
+            public int TotalItems;
+            public int WorkerCount;
+            public string ViewLayoutDiag = "";
+            public Action<MessageEvent>? MsgHandler;
+            public Action<Event>? ErrHandler;
+        }
 
         /// <summary>
         /// Cached WebAssembly.Memory to avoid per-frame allocation.
@@ -608,14 +646,20 @@ namespace SpawnDev.ILGPU.Wasm
                 // Barrier slots region: each barrier = 8 bytes (arrival counter i32 + sense flag i32)
                 int barrierBase = (afterShared + 3) & ~3; // 4-byte align
                 int barrierSize = compiledKernel.BarrierCount * 8;
-                // Add 32 bytes for inter-worker synchronization:
-                // Phase barrier: 2 × i32 (arrival counter + generation) @ fenceSlot+0
-                // Group barrier: 2 × i32 (arrival counter + generation) @ fenceSlot+8
-                // Global yield: 1 × i32 (yield counter across workers) @ fenceSlot+16
-                // Phase exit:   1 × i32 (exit flag: 1=all done) @ fenceSlot+20
-                // Reserved:     2 × i32 (future use) @ fenceSlot+24
+                // Inter-worker synchronization region at fenceSlot:
+                //   [0..3]   phase arrival counter (i32)
+                //   [4..7]   phase generation     (i32)
+                //   [8..11]  global yield count   (i32)
+                //   [12..15] exit flag            (i32)
+                //   [16..19] group arrival       (i32)
+                //   [20..23] group generation    (i32)
+                //   [24..23 + 16*N] per-worker spin-yield save/restore buffers (16 bytes each)
+                //     where N = max workerCount (= _workerCount). Each worker's buffer holds
+                //     [yieldFlag, savedG, savedPhase, savedGen]. See WasmBackend.GeneratePhaseDispatcher.
                 int fenceSlot = barrierBase + barrierSize;
-                int totalWithBarriers = fenceSlot + 32;
+                int yieldStateRegionBase = fenceSlot + 24;
+                int yieldStateRegionSize = 16 * Math.Max(1, _workerCount);
+                int totalWithBarriers = yieldStateRegionBase + yieldStateRegionSize;
 
                 if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm] Memory layout: buffers={totalMemoryBytes}, scratch={scratchBase}(spt={scratchPerThread}), structRegion={structRegionBase}({totalStructBytes}), sharedMem={sharedMemBase}({sharedMemSize}), barrier={barrierBase}({barrierSize}), hasBarriers={compiledKernel.HasBarriers}, groupSize={groupSize}");
 
@@ -1035,7 +1079,7 @@ namespace SpawnDev.ILGPU.Wasm
                 // Dispatch to workers
                 await DispatchToWorkers(
                     totalItems, gridDimX, gridDimY, scratchBase, scratchPerThread,
-                    sharedMemBase, barrierBase, fenceSlot, compiledKernel,
+                    sharedMemBase, barrierBase, fenceSlot, yieldStateRegionBase, compiledKernel,
                     groupSize, numGroups,
                     flatArgs, compiledKernel.WasmBinary,
                     wasmMemory, memoryBuffer, bufferOffsets, bufferInfos, bufferRanges,
@@ -1059,6 +1103,67 @@ namespace SpawnDev.ILGPU.Wasm
         }
 
         /// <summary>
+        /// Installs persistent OnMessage and OnError handlers on a worker the first time we
+        /// dispatch to it. The handlers stay installed for the worker's lifetime and read the
+        /// current dispatch's TCS + diagnostic context from <see cref="WorkerDispatchState"/>.
+        ///
+        /// This was Hypothesis #1 in the wait/notify race investigation (2026-04-26). The prior
+        /// per-dispatch attach/detach pattern was suspected of triggering V8 deopt that exposed
+        /// timing windows in the wait/notify barrier protocol. Empirically, even with the
+        /// switch from wait/notify to spin-yield, the persistent-handler refactor remains
+        /// load-bearing for `RadixSortRepeatedResortTest`: per-dispatch handler churn over
+        /// hundreds of phases triggers enough V8 deopt that the test misses its 120s timeout.
+        /// </summary>
+        private void EnsurePersistentHandlers(Worker worker)
+        {
+            if (_workerHandlers.ContainsKey(worker)) return;
+
+            var state = new WorkerDispatchState();
+            _workerHandlers[worker] = state;
+
+            state.MsgHandler = new Action<MessageEvent>((msg) =>
+            {
+                var tcs = state.CurrentTcs;
+                if (tcs == null) return; // No in-flight dispatch; ignore late or stray message.
+                state.CurrentTcs = null;
+                _workerPool?.Return(worker);
+                UnregisterTcs(tcs);
+
+                var response = msg.GetData<WasmDispatchResponse>();
+
+                // Capture diagnostic from worker 0 (preserves prior behavior)
+                if (state.WorkerIdx == 0 && _dispatchCount <= 6 && response.diag != null && WasmBackend.VerboseLogging)
+                {
+                    var d0 = response.diag.Length > 0 ? (int?)response.diag[0] : null;
+                    var d1 = response.diag.Length > 1 ? (int?)response.diag[1] : null;
+                    _dispatchLog += $"|W0mem=[{d0},{d1}]";
+                }
+
+                if (!response.done)
+                {
+                    var errorMsg = response.error ?? "Unknown worker error";
+                    tcs.TrySetException(new Exception(
+                        $"[Wasm] Worker {state.WorkerIdx} error: {errorMsg} | disp={state.DispNum} pages={_cachedWasmPages} mem={_cachedWasmPages * 65536} barriers={state.HasBarriers} scratch={state.ScratchBase} shared={state.SharedMemBase} fence={state.FenceSlot} gs={state.GroupSize} spt={state.ScratchPerThread} items={state.TotalItems} wc={state.WorkerCount} views={state.ViewLayoutDiag}"));
+                    return;
+                }
+                tcs.TrySetResult();
+            });
+
+            state.ErrHandler = new Action<Event>((err) =>
+            {
+                var tcs = state.CurrentTcs;
+                if (tcs == null) return;
+                state.CurrentTcs = null;
+                _workerPool?.Return(worker);
+                UnregisterTcs(tcs);
+                tcs.TrySetException(new Exception($"[Wasm] Worker {state.WorkerIdx} error during kernel execution"));
+            });
+
+            worker.OnMessage += state.MsgHandler;
+            worker.OnError += state.ErrHandler;
+        }
+
+        /// <summary>
         /// Dispatches the Wasm kernel across multiple Web Workers for true Wasm multithreading.
         /// For barrier kernels: distributes groups across workers. Each worker runs all threads within its groups.
         /// For non-barrier kernels: distributes items across workers with flat range dispatch.
@@ -1072,6 +1177,7 @@ namespace SpawnDev.ILGPU.Wasm
             int sharedMemBase,
             int barrierBase,
             int fenceSlot,
+            int yieldStateRegionBase,
             WasmCompiledKernel compiledKernel,
             int groupSize,
             int numGroups,
@@ -1158,86 +1264,53 @@ namespace SpawnDev.ILGPU.Wasm
             if (hasBarriers)
             {
                 // Barrier dispatch: each worker gets its threadId (0..groupSize-1)
-                // All workers process the same groups sequentially
+                // All workers process the same groups sequentially.
                 for (int w = 0; w < workerCount; w++)
                 {
                     var worker = workers[w];
                     var tcs = new TaskCompletionSource();
                     RegisterTcs(tcs);
-                    int workerIdx = w;
 
-                    Action<MessageEvent>? msgHandler = null;
-                    Action<Event>? errHandler = null;
-
-                    msgHandler = new Action<MessageEvent>((msg) =>
-                    {
-                        worker.OnMessage -= msgHandler!;
-                        worker.OnError -= errHandler!;
-                        _workerPool?.Return(worker);
-                        UnregisterTcs(tcs);
-
-                        // Capture diagnostic from worker 0
-                        if (workerIdx == 0 && _dispatchCount <= 6)
-                        {
-                            try
-                            {
-                                var d0 = msg.JSRef!.Get<int?>("data.diag.0");
-                                var d1 = msg.JSRef!.Get<int?>("data.diag.1");
-                                if (WasmBackend.VerboseLogging) _dispatchLog += $"|W0mem=[{d0},{d1}]";
-                            }
-                            catch { }
-                        }
-
-                        var done = msg.JSRef!.Get<bool>("data.done");
-                        if (!done)
-                        {
-                            var errorMsg = msg.JSRef!.Get<string?>("data.error") ?? "Unknown worker error";
-                            tcs.TrySetException(new Exception($"[Wasm] Worker {workerIdx} error: {errorMsg} | disp={dispNum} pages={_cachedWasmPages} mem={_cachedWasmPages*65536} barriers={hasBarriers} scratch={scratchBase} shared={sharedMemBase} fence={fenceSlot} gs={groupSize} spt={scratchPerThread} items={totalItems} wc={workerCount} views={_lastViewLayoutDiag}"));
-                            return;
-                        }
-                        tcs.TrySetResult();
-                    });
-
-                    errHandler = new Action<Event>((err) =>
-                    {
-                        worker.OnMessage -= msgHandler!;
-                        worker.OnError -= errHandler!;
-                        _workerPool?.Return(worker);
-                        UnregisterTcs(tcs);
-                        tcs.TrySetException(new Exception($"[Wasm] Worker {workerIdx} error during kernel execution"));
-                    });
-
-                    worker.OnMessage += msgHandler;
-                    worker.OnError += errHandler;
+                    // Persistent handlers (Hypothesis #1, 2026-04-26): install OnMessage +
+                    // OnError ONCE per worker, then update the per-worker state's CurrentTcs
+                    // each dispatch. Eliminates the per-dispatch attach/detach churn that
+                    // accumulated V8 deopt over hundreds of phases of RadixSortRepeatedResortTest.
+                    EnsurePersistentHandlers(worker);
+                    var handlerState = _workerHandlers[worker];
+                    handlerState.CurrentTcs = tcs;
+                    handlerState.WorkerIdx = w;
+                    handlerState.DispNum = dispNum;
+                    handlerState.HasBarriers = hasBarriers;
+                    handlerState.ScratchBase = scratchBase;
+                    handlerState.SharedMemBase = sharedMemBase;
+                    handlerState.FenceSlot = fenceSlot;
+                    handlerState.GroupSize = groupSize;
+                    handlerState.ScratchPerThread = scratchPerThread;
+                    handlerState.TotalItems = totalItems;
+                    handlerState.WorkerCount = workerCount;
+                    handlerState.ViewLayoutDiag = _lastViewLayoutDiag;
 
                     // Send fiber range to worker.
                     // Fiber dispatch: each worker handles a contiguous range of threads.
                     int fibersPerWorker = (groupSize + workerCount - 1) / workerCount;
                     int threadStart = w * fibersPerWorker;
                     int threadEnd = Math.Min(threadStart + fibersPerWorker, groupSize);
+                    // Per-worker spin-yield save/restore buffer (16 bytes).
+                    // Layout: [yieldFlag, savedG, savedPhase, savedGen]. The dispatcher
+                    // uses this to persist its position when it yields back to JS so the
+                    // re-dispatch can resume the spin loop where it left off.
+                    int yieldStateAddr = yieldStateRegionBase + w * 16;
 
-                    var workerId = worker.JSRef!.GetHashCode();
-                    if (_initializedWorkers.Add(workerId))
+                    bool firstTimeOnWorker = _initializedWorkers.Add(worker);
+                    worker.PostMessage(new WasmBarrierDispatchMessage
                     {
-                        worker.PostMessage(new
-                        {
-                            script = workerScript,
-                            wasmBytes = wasmBytes,
-                            memory = wasmMemory,
-                            threadStart,
-                            threadEnd,
-                        });
-                    }
-                    else
-                    {
-                        worker.PostMessage(new
-                        {
-                            script = workerScript,
-                            memory = wasmMemory,
-                            threadStart,
-                            threadEnd,
-                        });
-                    }
+                        script = workerScript,
+                        wasmBytes = firstTimeOnWorker ? wasmBytes : null,
+                        memory = wasmMemory,
+                        threadStart = threadStart,
+                        threadEnd = threadEnd,
+                        yieldStateAddr = yieldStateAddr,
+                    });
 
                     tasks.Add(tcs.Task);
                 }
@@ -1257,67 +1330,32 @@ namespace SpawnDev.ILGPU.Wasm
 
                     var tcs = new TaskCompletionSource();
                     RegisterTcs(tcs);
-                    int workerIdx = w;
 
-                    Action<MessageEvent>? msgHandler = null;
-                    Action<Event>? errHandler = null;
+                    EnsurePersistentHandlers(worker);
+                    var handlerState = _workerHandlers[worker];
+                    handlerState.CurrentTcs = tcs;
+                    handlerState.WorkerIdx = w;
+                    handlerState.DispNum = dispNum;
+                    handlerState.HasBarriers = hasBarriers;
+                    handlerState.ScratchBase = scratchBase;
+                    handlerState.SharedMemBase = sharedMemBase;
+                    handlerState.FenceSlot = fenceSlot;
+                    handlerState.GroupSize = groupSize;
+                    handlerState.ScratchPerThread = scratchPerThread;
+                    handlerState.TotalItems = totalItems;
+                    handlerState.WorkerCount = workerCount;
+                    handlerState.ViewLayoutDiag = _lastViewLayoutDiag;
 
-                    msgHandler = new Action<MessageEvent>((msg) =>
+                    bool firstTimeOnWorker = _initializedWorkers.Add(worker);
+                    worker.PostMessage(new WasmFlatDispatchMessage
                     {
-                        worker.OnMessage -= msgHandler!;
-                        worker.OnError -= errHandler!;
-                        _workerPool?.Return(worker);
-                        UnregisterTcs(tcs);
-
-                        var done = msg.JSRef!.Get<bool>("data.done");
-                        if (!done)
-                        {
-                            var errorMsg = msg.JSRef!.Get<string?>("data.error") ?? "Unknown worker error";
-                            tcs.TrySetException(new Exception($"[Wasm] Worker {workerIdx} error: {errorMsg} | disp={dispNum} pages={_cachedWasmPages} mem={_cachedWasmPages*65536} barriers={hasBarriers} scratch={scratchBase} shared={sharedMemBase} fence={fenceSlot} gs={groupSize} spt={scratchPerThread} items={totalItems} wc={workerCount} views={_lastViewLayoutDiag}"));
-                            return;
-                        }
-                        tcs.TrySetResult();
+                        script = workerScript,
+                        wasmBytes = firstTimeOnWorker ? wasmBytes : null,
+                        memory = wasmMemory,
+                        startIdx = startIdx,
+                        endIdx = endIdx,
+                        myScratch = myScratch,
                     });
-
-                    errHandler = new Action<Event>((err) =>
-                    {
-                        worker.OnMessage -= msgHandler!;
-                        worker.OnError -= errHandler!;
-                        _workerPool?.Return(worker);
-                        UnregisterTcs(tcs);
-                        tcs.TrySetException(new Exception($"[Wasm] Worker {workerIdx} error during kernel execution"));
-                    });
-
-                    worker.OnMessage += msgHandler;
-                    worker.OnError += errHandler;
-
-                    // Only include wasmBytes on first dispatch to this worker;
-                    // the bootstrap caches the compiled module.
-                    // Always include memory since each dispatch creates a new WebAssembly.Memory.
-                    var workerId = worker.JSRef!.GetHashCode();
-                    if (_initializedWorkers.Add(workerId))
-                    {
-                        worker.PostMessage(new
-                        {
-                            script = workerScript,
-                            wasmBytes = wasmBytes,
-                            memory = wasmMemory,
-                            startIdx = startIdx,
-                            endIdx = endIdx,
-                            myScratch = myScratch,
-                        });
-                    }
-                    else
-                    {
-                        worker.PostMessage(new
-                        {
-                            script = workerScript,
-                            memory = wasmMemory,
-                            startIdx = startIdx,
-                            endIdx = endIdx,
-                            myScratch = myScratch,
-                        });
-                    }
 
                     tasks.Add(tcs.Task);
                 }
@@ -1399,22 +1437,60 @@ namespace SpawnDev.ILGPU.Wasm
                 // Phase dispatcher: runs the thread/phase/group loop entirely in Wasm.
                 // Eliminates ~1M JS-Wasm boundary crossings for large sorts.
                 // The "dispatcher" function is compiled into the Wasm module.
+                //
+                // SPIN-YIELD LOOP (2026-04-29 port from Riker's fork): the dispatcher may
+                // return mid-spin when a phase barrier fails to advance within
+                // YIELD_SPIN_THRESHOLD iterations (~5ms at ~5ns/iter on modern Wasm). When
+                // it does, yieldStateAddr[0] is left as 1 (yieldFlag) and the dispatcher's
+                // spin-loop position is saved to the per-worker yield buffer. This wrapper
+                // re-invokes the dispatcher with resumeMode=1 so it picks up exactly where
+                // it left off. JS-side `Atomics.wait` between iterations OS-parks the worker
+                // thread (50us timeout, no notify required - the next gen-bump satisfies the
+                // value-mismatch fast-exit), giving the OS a chance to schedule any worker
+                // that was descheduled mid-spin. This bypasses the broken WASM
+                // `memory.atomic.wait32`/`notify` lowering in V8 14.7+ and SpiderMonkey's
+                // recent FutexEmulation, while still avoiding pure-spin starvation under
+                // CPU oversub.
                 sb.AppendLine("    const dispatcher = d._instance.exports.dispatcher;");
                 sb.AppendLine("    const threadStart = d.threadStart;");
                 sb.AppendLine("    const threadEnd = d.threadEnd;");
-                // Verify memory is big enough before dispatching
+                sb.AppendLine("    const yieldStateAddr = d.yieldStateAddr;");
+                // Verify memory is big enough before dispatching. Account for per-worker
+                // yield region: yieldStateAddr + 16 bytes per worker is the upper bound.
                 sb.AppendLine($"    const memBytes = d.memory.buffer.byteLength;");
-                sb.AppendLine($"    const needed = {fenceSlot + 32};");
+                sb.AppendLine($"    const needed = yieldStateAddr + 16;");
                 sb.AppendLine($"    if (memBytes < needed) {{ self.postMessage({{ done: false, error: 'MEM TOO SMALL: buffer=' + memBytes + ' needed=' + needed + ' fence={fenceSlot} scratch={scratchBase}+{scratchPerThread}*{groupSize} shared={sharedMemBase}' }}); return; }}");
-                sb.AppendLine("    try {");
-                sb.Append($"      dispatcher(threadStart, threadEnd, {numGroups}, {groupSize}, {gridDimX}, {gridDimY}, {scratchBase}, {scratchPerThread}, {sharedMemBase}, {barrierBase}, {dynamicSharedLength}, {zeroRegionSize}, {workerCount}, {fenceSlot}");
+                // i32 view over the SAB, used for yieldFlag + Atomics.wait on the phase gen.
+                // (The same buffer underlies d.memory; aliasing is intentional.)
+                sb.AppendLine("    const yMem32 = new Int32Array(d.memory.buffer);");
+                sb.AppendLine($"    const yieldFlagIdx = yieldStateAddr >>> 2;");
+                // gen index in i32 view: fenceSlot+4 is the phase generation slot.
+                sb.AppendLine($"    const genIdx = {(fenceSlot + 4) >>> 2};");
+                sb.AppendLine("    let resumeMode = 0;");
+                sb.AppendLine("    let yieldIters = 0;");
+                sb.AppendLine("    const MAX_YIELD_ITERS = 1000000;");
+                sb.AppendLine("    while (true) {");
+                sb.AppendLine("      try {");
+                sb.Append($"        dispatcher(threadStart, threadEnd, {numGroups}, {groupSize}, {gridDimX}, {gridDimY}, {scratchBase}, {scratchPerThread}, {sharedMemBase}, {barrierBase}, {dynamicSharedLength}, {zeroRegionSize}, {workerCount}, {fenceSlot}, yieldStateAddr, resumeMode");
                 if (argStr.Length > 0)
                 {
                     sb.Append(", ");
                     sb.Append(argStr);
                 }
                 sb.AppendLine(");");
-                sb.AppendLine("    } catch(e) { self.postMessage({ done: false, error: 'Dispatcher trap: ' + e.message + ' memSize=' + d.memory.buffer.byteLength }); return; }");
+                sb.AppendLine("      } catch(e) { self.postMessage({ done: false, error: 'Dispatcher trap: ' + e.message + ' memSize=' + d.memory.buffer.byteLength + ' yieldIters=' + yieldIters }); return; }");
+                sb.AppendLine("      const yieldFlag = Atomics.load(yMem32, yieldFlagIdx);");
+                sb.AppendLine("      if (yieldFlag === 0) break;");
+                sb.AppendLine("      yieldIters++;");
+                sb.AppendLine("      if (yieldIters >= MAX_YIELD_ITERS) { self.postMessage({ done: false, error: 'Dispatcher exceeded MAX_YIELD_ITERS=' + MAX_YIELD_ITERS }); return; }");
+                // Atomics.wait OS-parks the worker thread (50us timeout). Returns "not-equal"
+                // immediately if gen has already advanced -- zero overhead in that case.
+                // We never call notify; the WASM gen-bump (atomic.store) is enough because
+                // Atomics.wait re-checks the value after wakeup and exits on mismatch.
+                sb.AppendLine("      const savedGen = yMem32[yieldFlagIdx + 3];");
+                sb.AppendLine("      Atomics.wait(yMem32, genIdx, savedGen, 0.05);");
+                sb.AppendLine("      resumeMode = 1;");
+                sb.AppendLine("    }");
             }
             else
             {
