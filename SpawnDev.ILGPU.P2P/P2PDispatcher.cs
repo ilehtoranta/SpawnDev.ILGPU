@@ -20,12 +20,24 @@ public class P2PDispatcher : IDisposable
     private Timer? _heartbeatTimer;
 
     /// <summary>
-    /// Timeout for kernel execution (ms). If a peer doesn't respond, work is retried.
+    /// Per-attempt budget for kernel compute + result push-back from the worker
+    /// (ms). The cumulative dispatch budget is <see cref="DispatchTimeoutMs"/> *
+    /// <see cref="MaxRetries"/>; a single dispatch's <see cref="DispatchAsync"/>
+    /// throws <see cref="TimeoutException"/> after that elapsed. 60s per attempt
+    /// covers realistic compute + multi-MB result push-back over LAN-loopback
+    /// SCTP at ~1.5 MB/s; previously 30s, which was too tight for >1MB result
+    /// buffers and 10-way concurrent dispatch (workers serialize per-peer message
+    /// processing, so 5+ concurrent dispatches per peer accumulate latency).
     /// </summary>
-    public int DispatchTimeoutMs { get; set; } = 30_000;
+    public int DispatchTimeoutMs { get; set; } = 60_000;
 
     /// <summary>
-    /// Maximum retry attempts before giving up on a dispatch.
+    /// Cumulative-budget multiplier on <see cref="DispatchTimeoutMs"/>. Naming
+    /// is historical: actual peer-loss retries (see <see cref="HandlePeerLost"/>)
+    /// fire only when a peer disconnects mid-dispatch; the multiplier here just
+    /// expands the wait budget on the result task to absorb realistic compute +
+    /// transfer variance. 3 -> total per-dispatch budget = 180s with default
+    /// <see cref="DispatchTimeoutMs"/>.
     /// </summary>
     public int MaxRetries { get; set; } = 3;
 
