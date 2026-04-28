@@ -82,9 +82,11 @@ public class P2PWebRtcBridge : IAsyncDisposable
             // surface as a peer-departure to the dispatcher.
             wire.OnClose += () =>
             {
+                var ctr = System.Threading.Interlocked.Increment(ref _bridgeOnCloseCounter);
+                if (P2PCompute.VerboseLogging)
+                    Console.WriteLine($"[P2PWebRtcBridge][CLOSE-DIAG] #{ctr} peer={peerId} btPeer={wire.PeerId} destroyed={wire.Destroyed} stackTop={new System.Diagnostics.StackTrace(1, false).GetFrame(0)?.GetMethod()?.Name}");
                 try
                 {
-                    var ctr = System.Threading.Interlocked.Increment(ref _bridgeOnCloseCounter);
                     SpawnDev.BlazorJS.BlazorJSRuntime.JS.Set("__bridge_wire_onclose",
                         $"#{ctr} peer={peerId} btPeer={wire.PeerId} destroyed={wire.Destroyed}");
                 } catch { }

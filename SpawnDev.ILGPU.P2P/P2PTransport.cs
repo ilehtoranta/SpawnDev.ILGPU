@@ -88,6 +88,21 @@ public class P2PTransport : IAsyncDisposable
     /// </summary>
     public void UnregisterPeer(string peerId)
     {
+        // Capture the call site (gated on VerboseLogging) for diagnosing mid-
+        // dispatch peer disconnects. Identifies which path triggered the
+        // unregister: bridge wire OnClose, P2PMessageType.Disconnect message,
+        // etc. Cheap - only fires once per UnregisterPeer when enabled.
+        if (P2PCompute.VerboseLogging)
+        {
+            try
+            {
+                var stack = new System.Diagnostics.StackTrace(1, false).ToString();
+                var firstFew = string.Join(" | ", stack.Split('\n').Take(3).Select(l => l.Trim()));
+                Console.WriteLine($"[P2PTransport][UNREG-DIAG] peerId={peerId} stack=[{firstFew}]");
+                try { SpawnDev.BlazorJS.BlazorJSRuntime.JS.Set("__p2p_unregister_caller",
+                    $"peerId={peerId} stack=[{firstFew}]"); } catch { }
+            } catch { }
+        }
         _channels.TryRemove(peerId, out _);
         if (_peerQueues.TryRemove(peerId, out var queue))
             _ = queue.ShutdownAsync();
