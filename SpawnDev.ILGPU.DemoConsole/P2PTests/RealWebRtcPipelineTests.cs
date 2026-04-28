@@ -320,6 +320,16 @@ public class RealWebRtcPipelineTests
     public async Task LargeBuffer_100MB_DispatchedOverRealWebRtc_BitExact()
     {
         EnsureAllowlist();
+        // Diagnostic mode: enable VerboseLogging so wire.OnClose path + UnregisterPeer
+        // path emit Console.WriteLine traces. Captures the actual mid-dispatch
+        // peer-disconnect trigger (bridge wire OnClose, polling fallback, stale-peer
+        // check, etc.) for tomorrow's investigation. Reset at end of test.
+        var prevP2PVerbose = P2PCompute.VerboseLogging;
+        var prevWtVerbose = SpawnDev.WebTorrent.WebTorrentClient.VerboseLogging;
+        P2PCompute.VerboseLogging = true;
+        SpawnDev.WebTorrent.WebTorrentClient.VerboseLogging = true;
+        try
+        {
         const int n = 100 * 256 * 1024;
         var trackers = DispatchTrackers;
 
@@ -386,6 +396,12 @@ public class RealWebRtcPipelineTests
             throw new Exception(
                 $"100MB VectorAdd over WebRTC: {violations}/{n} violations. " +
                 $"First at [{firstIdx}]: expected {firstExp}, got {firstAct}");
+        }
+        finally
+        {
+            P2PCompute.VerboseLogging = prevP2PVerbose;
+            SpawnDev.WebTorrent.WebTorrentClient.VerboseLogging = prevWtVerbose;
+        }
     }
 
     /// <summary>
