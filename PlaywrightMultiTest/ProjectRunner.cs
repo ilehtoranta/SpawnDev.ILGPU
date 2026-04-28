@@ -354,7 +354,19 @@ namespace PlaywrightMultiTest
 
                         rowTest.TestFunc = async (page) =>
                         {
-                            var result = await ProcessRunner.Run(publishedBinary, rowTest.Name, timeout: 120_000).ConfigureAwait(false);
+                            // Subprocess timeout: 10 minutes covers every test that ships with the
+                            // demo today plus 1-2 retries inside the subprocess. The slower P2P /
+                            // WebRTC paths take 135-260s standalone (LargeBuffer_1MB / 10MB) and
+                            // their TestMethod attributes specify 180s / 240s timeouts with up to
+                            // RetryCount=2 - PMT's outer timeout has to cover the worst-case retry
+                            // budget (3 * 240s = 720s). The TEST method's own [TestMethod
+                            // (Timeout=...)] attribute still bounds the in-test work; PMT's outer
+                            // timeout only fires if the subprocess itself wedges past the test's
+                            // own timeout + retry budget. The previous 120s hardcoded value
+                            // pre-empted every WebRTC test that did real peer discovery, even when
+                            // the test's own attribute granted 180s+. Bumping to 10 minutes
+                            // restores the contract: "PMT respects test-method timeouts."
+                            var result = await ProcessRunner.Run(publishedBinary, rowTest.Name, timeout: 600_000).ConfigureAwait(false);
                             var resultLines = result.Text.Split(new[] { '\n', '\r' }, StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
                             var testResltTest = resultLines.LastOrDefault(o => o.StartsWith("TEST: "))?.Substring(6);
                             var unitTest = testResltTest != null ? JsonSerializer.Deserialize<UnitTest>(testResltTest) : null;
