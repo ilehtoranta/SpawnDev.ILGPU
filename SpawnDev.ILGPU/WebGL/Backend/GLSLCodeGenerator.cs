@@ -1039,6 +1039,36 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 return;
             }
 
+            // Emulated emu_f64 source needs different intrinsic codegen for IsNaN
+            // / IsInfinity: GLSL `isnan` / `isinf` operate on `float` only, not on
+            // `vec2`. Route to f64_is_nan / f64_is_inf helpers from
+            // GLSLEmulationLibrary which check the high f32 lane. Pass the result
+            // through CastIfNeeded (same path the f32 IsNaN/IsInf emission uses)
+            // so a bool target type is handled correctly - emitting
+            // `bool_target = (int)` directly trips "cannot convert from 'int' to
+            // 'bool'" GLSL parser errors.
+            if (Backend.EnableF64Emulation && operandType == "vec2")
+            {
+                // f64 IsNaN/IsInf return bool. Emit a bool expression and only
+                // wrap with the int-ternary when the IR target type is numeric -
+                // GLSL ES 3.0 forbids implicit bool↔int conversion.
+                string? f64Bool = value.Kind switch
+                {
+                    UnaryArithmeticKind.IsNaNF => $"f64_is_nan({operand})",
+                    UnaryArithmeticKind.IsInfF => $"f64_is_inf({operand})",
+                    UnaryArithmeticKind.IsFinF => $"(!f64_is_nan({operand}) && !f64_is_inf({operand}))",
+                    _ => null
+                };
+                if (f64Bool != null)
+                {
+                    if (target.Type == "bool")
+                        AppendLine($"{target} = {f64Bool};");
+                    else
+                        AppendLine($"{target} = ({f64Bool}) ? {target.Type}(1) : {target.Type}(0);");
+                    return;
+                }
+            }
+
             string result = value.Kind switch
             {
                 UnaryArithmeticKind.Neg => $"-{operand}",
@@ -1183,7 +1213,63 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 _ => "=="
             };
 
-            AppendLine($"{target} = {left} {op} {right};");
+            // f32 NaN safety - mirror of GLSLKernelFunctionGenerator override.
+            // Helper functions go through this base path so the same Nan-OR
+            // / Equal-NaN-guard treatment is required here.
+            string leftType = TypeGenerator[value.Left.Type];
+            string rightType = TypeGenerator[value.Right.Type];
+
+            // emu_f64 in GLSL: vec2 (Dekker) or vec4 (Ozaki). Raw == returns
+            // vec2/vec4 of bool which can't be assigned to bool. Route through
+            // f64_xx helpers same as the kernel function generator.
+            bool isEmulatedF64 = (leftType == "vec2" || leftType == "vec4" || rightType == "vec2" || rightType == "vec4")
+                && value.Left.BasicValueType == BasicValueType.Float64;
+            if (isEmulatedF64)
+            {
+                string? f = value.Kind switch
+                {
+                    CompareKind.LessThan => "f64_lt", CompareKind.LessEqual => "f64_le",
+                    CompareKind.GreaterThan => "f64_gt", CompareKind.GreaterEqual => "f64_ge",
+                    CompareKind.Equal => "f64_eq", CompareKind.NotEqual => "f64_ne", _ => null
+                };
+                if (f != null)
+                {
+                    if (value.IsUnsignedOrUnordered && value.Kind != CompareKind.NotEqual)
+                        AppendLine($"{target} = (_f32_is_nan_bits({left}.x) || _f32_is_nan_bits({right}.x)) || {f}({left}, {right});");
+                    else
+                        AppendLine($"{target} = {f}({left}, {right});");
+                    return;
+                }
+            }
+
+            bool isFloatScalar = (value.Left.BasicValueType == BasicValueType.Float32
+                    || value.Left.BasicValueType == BasicValueType.Float16)
+                && !leftType.StartsWith("vec") && !rightType.StartsWith("vec");
+            bool isNativeFloatUnordered = isFloatScalar && value.IsUnsignedOrUnordered
+                && value.Kind != CompareKind.NotEqual
+                && value.Kind != CompareKind.Equal;
+            bool isNativeFloatEqualLike = isFloatScalar
+                && (value.Kind == CompareKind.Equal || value.Kind == CompareKind.NotEqual);
+
+            if (isNativeFloatUnordered)
+            {
+                string LIsNaN = $"((floatBitsToUint({left}) & 0x7F800000u) == 0x7F800000u && (floatBitsToUint({left}) & 0x007FFFFFu) != 0u)";
+                string RIsNaN = $"((floatBitsToUint({right}) & 0x7F800000u) == 0x7F800000u && (floatBitsToUint({right}) & 0x007FFFFFu) != 0u)";
+                AppendLine($"{target} = ({LIsNaN} || {RIsNaN} || ({left} {op} {right}));");
+            }
+            else if (isNativeFloatEqualLike)
+            {
+                string LIsNaN = $"((floatBitsToUint({left}) & 0x7F800000u) == 0x7F800000u && (floatBitsToUint({left}) & 0x007FFFFFu) != 0u)";
+                string RIsNaN = $"((floatBitsToUint({right}) & 0x7F800000u) == 0x7F800000u && (floatBitsToUint({right}) & 0x007FFFFFu) != 0u)";
+                if (value.Kind == CompareKind.Equal)
+                    AppendLine($"{target} = (!({LIsNaN}) && !({RIsNaN}) && ({left} == {right}));");
+                else
+                    AppendLine($"{target} = ({LIsNaN} || {RIsNaN} || ({left} != {right}));");
+            }
+            else
+            {
+                AppendLine($"{target} = {left} {op} {right};");
+            }
         }
 
         public virtual void GenerateCode(ConvertValue value)
@@ -1401,9 +1487,17 @@ namespace SpawnDev.ILGPU.WebGL.Backend
 
         private string FormatFloat(float value)
         {
-            if (float.IsNaN(value)) return "0.0";
-            if (float.IsPositiveInfinity(value)) return "3.402823e+38";
-            if (float.IsNegativeInfinity(value)) return "-3.402823e+38";
+            // Inf / NaN have no GLSL ES 3.0 literal form; emit via
+            // uintBitsToFloat(u32) of the IEEE 754 bit pattern. Pre-fix this
+            // branch substituted +Inf with 3.402823e+38 (= float.MaxValue),
+            // which silently broke any kernel that compared against +Inf -
+            // notably IsInf, where (x == +Inf || x == -Inf) became
+            // (x == MaxValue || x == -MaxValue), returning 0 for actually-
+            // infinite x. See _DevComms/SpawnDev.ILGPU/data-to-geordi-isinf-
+            // wgsl-glsl-codegen-bug-2026-04-28.md.
+            if (float.IsPositiveInfinity(value)) return "uintBitsToFloat(0x7F800000u)";
+            if (float.IsNegativeInfinity(value)) return "uintBitsToFloat(0xFF800000u)";
+            if (float.IsNaN(value)) return "uintBitsToFloat(0x7FC00000u)";
             var str = value.ToString("G9");
             if (!str.Contains('.') && !str.Contains('e') && !str.Contains('E'))
                 str += ".0";

@@ -182,6 +182,23 @@ namespace ILGPU.Backends.OpenCL
                     value.Kind));
             statement.AppendCast(value.CompareType);
             statement.AppendArgument(right);
+            // IEEE 754 unordered float compare: NaN forces TRUE.
+            // ILGPU's IR negates `clt + brfalse` to `cge + brtrue [Unordered]`;
+            // OpenCL C `>=` is ordered (FALSE for NaN) so without the OR with
+            // isunordered(), the negated branch sets bits for NaN inputs
+            // (DoubleNaNComparisonTest 2026-04-29). NotEqual is already TRUE
+            // for NaN under ordered semantics, so it is excluded.
+            if (value.IsUnsignedOrUnordered &&
+                value.Left.BasicValueType.IsFloat() &&
+                value.Kind != CompareKind.NotEqual)
+            {
+                statement.AppendCommand("||");
+                statement.AppendCommand("isunordered(");
+                statement.AppendArgument(left);
+                statement.AppendCommand(",");
+                statement.AppendArgument(right);
+                statement.AppendCommand(")");
+            }
         }
 
         /// <summary cref="IBackendCodeGenerator.GenerateCode(ConvertValue)"/>

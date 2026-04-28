@@ -52,8 +52,16 @@ vec2 f64_from_ieee754_bits(uint lo, uint hi) {
     if (exponent == 0u && mantissa_hi20 == 0u && mantissa_lo32 == 0u) {
         return vec2(0.0, 0.0);
     }
+    // Inf / NaN: preserve f32 Inf or NaN encoding in the high lane so
+    // f64_is_inf / f64_is_nan / f64_eq operate correctly. The pre-fix
+    // collapsed every non-finite to vec2(0,0), causing
+    // `double.PositiveInfinity == 0.0` to compare TRUE on WebGL (both
+    // sides loaded as vec2(0,0)). Sign is preserved via sign_bit; quiet
+    // NaN bit pattern is 0x7FC00000 with sign in bit 31.
     if (exponent == 0x7FFu) {
-        return vec2(0.0, 0.0);
+        bool is_nan = (mantissa_hi20 != 0u) || (mantissa_lo32 != 0u);
+        uint hi_bits = (sign_bit << 31u) | (is_nan ? 0x7FC00000u : 0x7F800000u);
+        return vec2(intBitsToFloat(int(hi_bits)), 0.0);
     }
 
     int exp_bias = 1023;
@@ -221,29 +229,59 @@ vec2 f64_div(vec2 a, vec2 b) {
     return f64_add(yn, prod);
 }
 
-// emu_f64 comparisons (no precision-sensitive operations)
+// IEEE-strict NaN detection by f32 bit pattern. GLSL ES 3.0 `<`, `>`, `==`
+// on float operands have been observed to return TRUE in the presence of
+// NaN on some implementations (likely unordered-compare semantics). The
+// comparison helpers below explicitly exclude NaN via this bit-pattern
+// check before the `<` / `>` / `==` to guarantee IEEE-ordered behaviour.
+bool _f32_is_nan_bits(float v) {
+    uint bits = uint(floatBitsToInt(v));
+    return ((bits & 0x7F800000u) == 0x7F800000u) && ((bits & 0x007FFFFFu) != 0u);
+}
+
+// emu_f64 comparisons - IEEE-strict NaN handling via bit pattern.
 bool f64_lt(vec2 a, vec2 b) {
+    if (_f32_is_nan_bits(a.x) || _f32_is_nan_bits(b.x)) { return false; }
     return (a.x < b.x) || (a.x == b.x && a.y < b.y);
 }
 
 bool f64_le(vec2 a, vec2 b) {
+    if (_f32_is_nan_bits(a.x) || _f32_is_nan_bits(b.x)) { return false; }
     return (a.x < b.x) || (a.x == b.x && a.y <= b.y);
 }
 
 bool f64_gt(vec2 a, vec2 b) {
+    if (_f32_is_nan_bits(a.x) || _f32_is_nan_bits(b.x)) { return false; }
     return (a.x > b.x) || (a.x == b.x && a.y > b.y);
 }
 
 bool f64_ge(vec2 a, vec2 b) {
+    if (_f32_is_nan_bits(a.x) || _f32_is_nan_bits(b.x)) { return false; }
     return (a.x > b.x) || (a.x == b.x && a.y >= b.y);
 }
 
 bool f64_eq(vec2 a, vec2 b) {
+    if (_f32_is_nan_bits(a.x) || _f32_is_nan_bits(b.x)) { return false; }
     return a.x == b.x && a.y == b.y;
 }
 
 bool f64_ne(vec2 a, vec2 b) {
+    if (_f32_is_nan_bits(a.x) || _f32_is_nan_bits(b.x)) { return true; }
     return a.x != b.x || a.y != b.y;
+}
+
+// emu_f64 IEEE IsNaN: bit-pattern check (avoid relying on `isnan` which
+// some GLSL implementations short-circuit to FALSE for unordered compare).
+bool f64_is_nan(vec2 v) {
+    return _f32_is_nan_bits(v.x);
+}
+
+// emu_f64 IEEE IsInfinity: high lane carries f32 +/-Inf bit pattern
+// (exp == 0xFF, mantissa == 0). Bit-pattern check avoids unordered-compare
+// platform quirks.
+bool f64_is_inf(vec2 v) {
+    uint bits = uint(floatBitsToInt(v.x));
+    return (bits & 0x7FFFFFFFu) == 0x7F800000u;
 }
 
 // emu_f64 absolute value

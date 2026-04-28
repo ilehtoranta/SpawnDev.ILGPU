@@ -1273,15 +1273,23 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 // Bit-level NaN/Inf detection for f32 — GPU shader compilers may
                 // optimize away `val != val` or flush NaN in comparisons.
                 // f32 NaN: exponent=0xFF, mantissa!=0. f32 Inf: exponent=0xFF, mantissa==0.
+                // emu_f64 routes to f64_is_nan / f64_is_inf helpers (vec2/vec4
+                // comparisons would return vec2<bool>/vec4<bool>, not bool).
                 UnaryArithmeticKind.IsNaNF => operandType == "f32"
                     ? $"((bitcast<u32>({operand}) & 0x7F800000u) == 0x7F800000u && (bitcast<u32>({operand}) & 0x007FFFFFu) != 0u)"
-                    : $"({operand} != {operand})",
+                    : operandType == "emu_f64"
+                        ? $"f64_is_nan({operand})"
+                        : $"({operand} != {operand})",
                 UnaryArithmeticKind.IsInfF => operandType == "f32"
                     ? $"((bitcast<u32>({operand}) & 0x7FFFFFFFu) == 0x7F800000u)"
-                    : $"(abs({operand}) == (1.0 / 0.0))",
+                    : operandType == "emu_f64"
+                        ? $"f64_is_inf({operand})"
+                        : $"(abs({operand}) == (1.0 / 0.0))",
                 UnaryArithmeticKind.IsFinF => operandType == "f32"
                     ? $"((bitcast<u32>({operand}) & 0x7F800000u) != 0x7F800000u)"
-                    : $"(({operand} == {operand}) && (abs({operand}) != (1.0 / 0.0)))",
+                    : operandType == "emu_f64"
+                        ? $"(!f64_is_nan({operand}) && !f64_is_inf({operand}))"
+                        : $"(({operand} == {operand}) && (abs({operand}) != (1.0 / 0.0)))",
 
                 // Bit Operations
                 UnaryArithmeticKind.PopC => $"i32(countOneBits({operand}))",
@@ -1364,6 +1372,34 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 }
             }
 
+            bool isEmulatedF64 = (leftType == "emu_f64" || rightType == "emu_f64");
+            if (isEmulatedF64)
+            {
+                string? emulFunc = value.Kind switch
+                {
+                    CompareKind.LessThan => "f64_lt",
+                    CompareKind.LessEqual => "f64_le",
+                    CompareKind.GreaterThan => "f64_gt",
+                    CompareKind.GreaterEqual => "f64_ge",
+                    CompareKind.Equal => "f64_eq",
+                    CompareKind.NotEqual => "f64_ne",
+                    _ => null
+                };
+                if (emulFunc != null)
+                {
+                    if (value.IsUnsignedOrUnordered && value.Kind != CompareKind.NotEqual)
+                    {
+                        AppendLine(
+                            $"{target} = (_f32_is_nan_bits({left}.x) || _f32_is_nan_bits({right}.x)) || {emulFunc}({left}, {right});");
+                    }
+                    else
+                    {
+                        AppendLine($"{target} = {emulFunc}({left}, {right});");
+                    }
+                    return;
+                }
+            }
+
             // For unsigned integer comparisons, WGSL operators are type-sensitive:
             // i32 < i32 is signed, u32 < u32 is unsigned.
             // When ILGPU flags the comparison as unsigned, bitcast operands to u32.
@@ -1372,9 +1408,36 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 && value.Kind != CompareKind.Equal
                 && value.Kind != CompareKind.NotEqual;
 
+            // f32 NaN safety - mirror of the kernel-function-generator override.
+            // Helper functions still use this base class generator, so any
+            // helper using f32 compare also needs the same NaN-safe codegen.
+            bool isFloatScalar = (value.Left.BasicValueType == BasicValueType.Float32
+                    || value.Left.BasicValueType == BasicValueType.Float16)
+                && !leftType.StartsWith("vec") && !rightType.StartsWith("vec");
+            bool isNativeFloatUnordered = isFloatScalar && value.IsUnsignedOrUnordered
+                && value.Kind != CompareKind.NotEqual
+                && value.Kind != CompareKind.Equal;
+            bool isNativeFloatEqualLike = isFloatScalar
+                && (value.Kind == CompareKind.Equal || value.Kind == CompareKind.NotEqual);
+
             if (needsUnsignedCast)
             {
                 AppendLine($"{target} = bitcast<u32>({left}) {op} bitcast<u32>({right});");
+            }
+            else if (isNativeFloatUnordered)
+            {
+                string LIsNaN = $"((bitcast<u32>({left}) & 0x7F800000u) == 0x7F800000u && (bitcast<u32>({left}) & 0x007FFFFFu) != 0u)";
+                string RIsNaN = $"((bitcast<u32>({right}) & 0x7F800000u) == 0x7F800000u && (bitcast<u32>({right}) & 0x007FFFFFu) != 0u)";
+                AppendLine($"{target} = ({LIsNaN} || {RIsNaN} || ({left} {op} {right}));");
+            }
+            else if (isNativeFloatEqualLike)
+            {
+                string LIsNaN = $"((bitcast<u32>({left}) & 0x7F800000u) == 0x7F800000u && (bitcast<u32>({left}) & 0x007FFFFFu) != 0u)";
+                string RIsNaN = $"((bitcast<u32>({right}) & 0x7F800000u) == 0x7F800000u && (bitcast<u32>({right}) & 0x007FFFFFu) != 0u)";
+                if (value.Kind == CompareKind.Equal)
+                    AppendLine($"{target} = (!({LIsNaN}) && !({RIsNaN}) && ({left} == {right}));");
+                else
+                    AppendLine($"{target} = ({LIsNaN} || {RIsNaN} || ({left} != {right}));");
             }
             else
             {
@@ -1777,12 +1840,35 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
         private string FormatFloat(float value)
         {
-            if (float.IsNaN(value)) return "0.0";
-            if (float.IsPositiveInfinity(value)) return "3.402823e+38";
-            if (float.IsNegativeInfinity(value)) return "-3.402823e+38";
+            // Inf / NaN have no WGSL literal form. WGSL's const-evaluator
+            // ALSO refuses to materialise non-finite values from a const
+            // bitcast: `bitcast<f32>(0x7F800000u)` is a const-expression that
+            // would evaluate to +Inf, and the spec rejects shader creation if
+            // a const-expression yields a non-finite value. So we cannot
+            // simply emit `bitcast<f32>(...)` for the literal - Chrome rejects
+            // the shader at pipeline creation ("Invalid ComputePipeline").
+            //
+            // Workaround: route through a tiny WGSL helper function. Function
+            // calls are not const-evaluated, so the bitcast happens at
+            // runtime and the +Inf / -Inf / NaN value is materialised inside
+            // the function body (which is a non-const context where bitcast
+            // to non-finite f32 is permitted). The helpers are declared once
+            // in WGSLEmulationLibrary and trimmed in if any kernel actually
+            // references an Inf or NaN literal.
+            //
+            // Pre-fix this branch substituted +Inf with 3.402823e+38
+            // (= float.MaxValue), which silently broke any kernel that
+            // compared against +Inf - notably IsInf, where
+            // (x == +Inf || x == -Inf) became (x == MaxValue || x == -MaxValue),
+            // returning 0 for actually-infinite x. See
+            // _DevComms/SpawnDev.ILGPU/data-to-geordi-isinf-wgsl-glsl-codegen-bug-2026-04-28.md.
+            if (float.IsPositiveInfinity(value)) return "_f32_pos_inf()";
+            if (float.IsNegativeInfinity(value)) return "_f32_neg_inf()";
+            if (float.IsNaN(value)) return "_f32_qnan()";
 
             // float.MaxValue / float.MinValue exceed what the WGSL parser
             // can represent as a decimal literal.  Use bitcast instead.
+            // (These ARE finite f32 values so const-bitcast is permitted.)
             if (value == float.MaxValue || value == float.MinValue ||
                 value == -float.MaxValue)
             {
@@ -3560,10 +3646,12 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     int i => i.ToString(),
                     uint u => $"{u}u",
                     float f => float.IsNegativeInfinity(f)
-                        ? "-3.40282347e+38f"
+                        ? "_f32_neg_inf()"
                         : float.IsPositiveInfinity(f)
-                            ? "3.40282347e+38f"
-                            : f.ToString("G9") + "f",
+                            ? "_f32_pos_inf()"
+                            : float.IsNaN(f)
+                                ? "_f32_qnan()"
+                                : f.ToString("G9") + "f",
                     long l => LongToEmuI64(l),
                     ulong ul => ULongToEmuU64(ul),
                     double d => DoubleToEmuF64(d),

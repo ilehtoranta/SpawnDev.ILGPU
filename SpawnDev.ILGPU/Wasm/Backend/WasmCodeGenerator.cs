@@ -564,18 +564,31 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                         Code.Add(WasmOpCodes.F32Div);
                     }
                     break;
-                // IsNaN: NaN != NaN is true in IEEE 754
+                // IsNaN: NaN != NaN is true in IEEE 754. Operates on the SOURCE
+                // type (f32/f64), not the result type. `wasmType` here is the
+                // RESULT type (i32 for the bool flag) — using it for the comparison
+                // opcode would incorrectly emit f32-typed instructions on f64
+                // sources, producing "f32.abs expected type f32, found local.get
+                // of type f64" Wasm validation errors. Diagnosed 2026-04-29
+                // against `BackendTestBase.DoubleIsNaNIntrinsicTest`.
                 case UnaryArithmeticKind.IsNaNF:
+                {
+                    var srcWasmType = GetWasmTypeFromIR(value.Value.Type);
                     EmitGetLocal(src);
                     EmitGetLocal(src);
-                    Code.Add(wasmType == WasmOpCodes.F64 ? WasmOpCodes.F64Ne : WasmOpCodes.F32Ne);
+                    Code.Add(srcWasmType == WasmOpCodes.F64 ? WasmOpCodes.F64Ne : WasmOpCodes.F32Ne);
                     // Result is i32 (0 or 1) but target local may be i32 too — fine for bool
                     break;
-                // IsInf: |x| == +Infinity
+                }
+                // IsInf: |x| == +Infinity. Same source-type-vs-result-type fix
+                // as IsNaN above. The original code keyed off `wasmType` (the
+                // i32 result type), so the F64 branch never fired.
                 case UnaryArithmeticKind.IsInfF:
+                {
+                    var srcWasmType = GetWasmTypeFromIR(value.Value.Type);
                     EmitGetLocal(src);
-                    Code.Add(wasmType == WasmOpCodes.F64 ? WasmOpCodes.F64Abs : WasmOpCodes.F32Abs);
-                    if (wasmType == WasmOpCodes.F64)
+                    Code.Add(srcWasmType == WasmOpCodes.F64 ? WasmOpCodes.F64Abs : WasmOpCodes.F32Abs);
+                    if (srcWasmType == WasmOpCodes.F64)
                     {
                         WasmModuleBuilder.EmitF64Const(Code, double.PositiveInfinity);
                         Code.Add(WasmOpCodes.F64Eq);
@@ -586,6 +599,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                         Code.Add(WasmOpCodes.F32Eq);
                     }
                     break;
+                }
                 // PopCount: native i32.popcnt / i64.popcnt
                 case UnaryArithmeticKind.PopC:
                     EmitGetLocal(src);
@@ -626,17 +640,19 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                         Code.Add(WasmOpCodes.I32Ctz);
                     }
                     break;
-                // IsFinite: !(isnan || isinf) → (x == x) && (abs(x) != inf)
+                // IsFinite: !(isnan || isinf) → (x == x) && (abs(x) != inf).
+                // Same source-type-vs-result-type fix as IsNaN/IsInf above.
                 case UnaryArithmeticKind.IsFinF:
                     {
+                        var srcWasmType = GetWasmTypeFromIR(value.Value.Type);
                         // Step 1: x == x (false if NaN)
                         EmitGetLocal(src);
                         EmitGetLocal(src);
-                        Code.Add(wasmType == WasmOpCodes.F64 ? WasmOpCodes.F64Eq : WasmOpCodes.F32Eq);
+                        Code.Add(srcWasmType == WasmOpCodes.F64 ? WasmOpCodes.F64Eq : WasmOpCodes.F32Eq);
                         // Step 2: abs(x) != inf (false if ±Inf)
                         EmitGetLocal(src);
-                        Code.Add(wasmType == WasmOpCodes.F64 ? WasmOpCodes.F64Abs : WasmOpCodes.F32Abs);
-                        if (wasmType == WasmOpCodes.F64)
+                        Code.Add(srcWasmType == WasmOpCodes.F64 ? WasmOpCodes.F64Abs : WasmOpCodes.F32Abs);
+                        if (srcWasmType == WasmOpCodes.F64)
                         {
                             WasmModuleBuilder.EmitF64Const(Code, double.PositiveInfinity);
                             Code.Add(WasmOpCodes.F64Ne);
@@ -964,6 +980,26 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             };
 
             Code.Add(opcode);
+            // IEEE 754 unordered float compare: result is TRUE if either operand
+            // is NaN, regardless of the underlying ordered op. ILGPU's IR negates
+            // `clt+brfalse` to `cge+brtrue [Unordered]`; Wasm's f32.ge / f64.ge
+            // are ORDERED so without this OR-with-isnan fixup the bit gets set
+            // for NaN inputs (DoubleNaNComparisonTest 2026-04-29). NotEqual is
+            // already TRUE for NaN under ordered semantics so it is excluded.
+            bool isFloat = srcType == WasmOpCodes.F32 || srcType == WasmOpCodes.F64;
+            if (isFloat && value.IsUnsignedOrUnordered && value.Kind != CompareKind.NotEqual)
+            {
+                byte neOp = srcType == WasmOpCodes.F32 ? WasmOpCodes.F32Ne : WasmOpCodes.F64Ne;
+                // Stack: ordered_result(i32). Now compute (isnan(left) || isnan(right) || ordered_result).
+                EmitGetLocalByIndex(leftLocalIdx);
+                EmitGetLocalByIndex(leftLocalIdx);
+                Code.Add(neOp);  // is_nan(left): NaN != NaN under ordered NE
+                Code.Add(WasmOpCodes.I32Or);
+                EmitGetLocalByIndex(rightLocalIdx);
+                EmitGetLocalByIndex(rightLocalIdx);
+                Code.Add(neOp);  // is_nan(right)
+                Code.Add(WasmOpCodes.I32Or);
+            }
             WasmModuleBuilder.EmitLocalSet(Code, target);
         }
 

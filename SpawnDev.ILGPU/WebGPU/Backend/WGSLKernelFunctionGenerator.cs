@@ -977,6 +977,22 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     Builder.ToString()));
             }
 
+            // F32 Inf/NaN literal helpers - always available because:
+            //   1. They're tiny (3 functions, ~6 lines).
+            //   2. Trimming them based on kernel body grep is fragile because
+            //      the codegen may emit them from FormatFloat in places we
+            //      can't easily detect (constants used as default values,
+            //      identity-property emission, etc.).
+            //   3. They MUST be functions (not const-bitcast literals)
+            //      because WGSL's const-evaluator rejects expressions that
+            //      yield non-finite values - `bitcast<f32>(0x7F800000u)`
+            //      would const-eval to +Inf and trip "Invalid ComputePipeline".
+            //   4. Function calls aren't const-evaluated, so the bitcast
+            //      runs at runtime where producing +Inf / -Inf / NaN is
+            //      explicitly permitted.
+            builder.AppendLine("// ============ F32 Special Value Helpers ============");
+            builder.AppendLine(WGSLEmulationLibrary.F32SpecialValueFunctions);
+
             // Emit hoisted i64 constants (deduplicated across kernel + helper bodies)
             if (_baseArgs.I64Constants.Count > 0)
             {
@@ -2652,6 +2668,11 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 "    let group_id = _ep_group_id;\n" +
                 "    let num_workgroups = _ep_num_workgroups;\n" +
                 "    let local_index = _ep_local_index;\n" +
+                "    // Seed the runtime-zero used by F32 special-value helpers from a\n" +
+                "    // @builtin value so Naga's const-evaluator cannot fold it. Required\n" +
+                "    // because `bitcast<f32>(const_u32_with_inf_bit_pattern)` is rejected\n" +
+                "    // at shader creation. See WGSLEmulationLibrary.F32SpecialValueFunctions.\n" +
+                "    _ilgpu_runtime_zero = local_id.x ^ local_id.x;\n" +
                 (bodyNeedsSubgroups ? "    let subgroup_id = _ep_local_index / subgroup_size;\n" : "");
 
             // Replace the sentinel with the real signature + builtin copies
@@ -4890,6 +4911,29 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             var source = Load(value.Value);
             string prefix = GetPrefix(value);
 
+            // Emu_f64 source needs different intrinsic codegen: the f32 syntax
+            // (e.g. `source != 0.0`) doesn't compile against vec2<f32>/vec4<f32>.
+            // IsInfF / IsNaNF route through helpers that read the high f32 lane
+            // (which carries IEEE-correct Inf/NaN encoding for both Dekker and
+            // Ozaki - see WGSLEmulationLibrary.f64_from_ieee754_bits Inf/NaN
+            // branches that preserve sign in the .x lane).
+            string sourceType = TypeGenerator[value.Value.Type];
+            bool isEmuF64Source = Backend.EnableF64Emulation && sourceType == "emu_f64";
+            if (isEmuF64Source)
+            {
+                string? f64Func = value.Kind switch
+                {
+                    UnaryArithmeticKind.IsNaNF => $"f64_is_nan({source})",
+                    UnaryArithmeticKind.IsInfF => $"f64_is_inf({source})",
+                    _ => null
+                };
+                if (f64Func != null)
+                {
+                    AppendLine($"{prefix}{target} = {f64Func};");
+                    return;
+                }
+            }
+
             // Handle math intrinsics that need function calls
             string? funcCall = value.Kind switch
             {
@@ -4913,13 +4957,13 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 UnaryArithmeticKind.FloorF => $"floor({source})",
                 UnaryArithmeticKind.CeilingF => $"ceil({source})",
                 UnaryArithmeticKind.Log10F => $"(log({source}) / 2.302585093)",
-                // IsNaN: NaN is the only value where x != x
-                UnaryArithmeticKind.IsNaNF => $"({source} != {source})",
-                // IsInf: infinity is unchanged by abs and equals itself
-                // Use abs(x) == abs(x) && abs(x) > 1e38 as a heuristic
-                // Or use (abs(x) * 0.0 != 0.0) - but that includes NaN
-                // Safest WGSL approach: (x != 0.0 && x == x * 2.0) - works for infinity
-                UnaryArithmeticKind.IsInfF => $"({source} != 0.0 && {source} == {source} * 2.0 && {source} == {source})",
+                // IsNaN on f32: NaN is the only value where x != x
+                UnaryArithmeticKind.IsNaNF => sourceType == "emu_f64" ? $"f64_is_nan({source})" : $"({source} != {source})",
+                // IsInf on f32: infinity-detect via (x != 0.0 && x == x * 2.0)
+                // - x != 0.0 excludes 0
+                // - x == x * 2.0 only +/-Inf satisfies (any finite x doubles)
+                // - x == x excludes NaN (since NaN != NaN)
+                UnaryArithmeticKind.IsInfF => sourceType == "emu_f64" ? $"f64_is_inf({source})" : $"({source} != 0.0 && {source} == {source} * 2.0 && {source} == {source})",
                 _ => null
             };
 
@@ -4929,8 +4973,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 return;
             }
 
-            // Handle emulated emu_i64/emu_u64 negation
-            var sourceType = TypeGenerator[value.Value.Type];
+            // Handle emulated emu_i64/emu_u64 negation (sourceType already
+            // computed at top of method for the IsInf/IsNaN emu_f64 routing)
             if (Backend.EnableI64Emulation && (sourceType == "emu_i64" || sourceType == "emu_u64") && value.Kind == UnaryArithmeticKind.Neg)
             {
                 AppendLine($"{prefix}{target} = i64_neg({source});");
@@ -5211,7 +5255,21 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
                 if (emulFunc != null)
                 {
-                    AppendLine($"{prefix}{target} = {emulFunc}({left}, {right});");
+                    // IEEE 754 unordered compare: NaN operand forces result TRUE
+                    // (except NotEqual which is already TRUE for NaN under ordered).
+                    // ILGPU's IR negation pass rewrites `clt + brfalse` as
+                    // `cge + brtrue` and toggles UnsignedOrUnordered to keep the
+                    // semantics. Backends that ignore the flag set bits for NaN
+                    // (DoubleNaNComparisonTest 2026-04-29).
+                    if (value.IsUnsignedOrUnordered && value.Kind != CompareKind.NotEqual)
+                    {
+                        AppendLine(
+                            $"{prefix}{target} = (_f32_is_nan_bits({left}.x) || _f32_is_nan_bits({right}.x)) || {emulFunc}({left}, {right});");
+                    }
+                    else
+                    {
+                        AppendLine($"{prefix}{target} = {emulFunc}({left}, {right});");
+                    }
                     return;
                 }
             }
@@ -5252,9 +5310,51 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 && value.Kind != CompareKind.Equal
                 && value.Kind != CompareKind.NotEqual;
 
+            bool isFloatScalar = (value.Left.BasicValueType == BasicValueType.Float32
+                    || value.Left.BasicValueType == BasicValueType.Float16)
+                && !leftIsVec && !rightIsVec;
+
+            // Three cases for f32 NaN safety:
+            //   1. Unordered LT/LE/GT/GE: emit `is_nan(l) || is_nan(r) || (l op r)`
+            //      to force TRUE for NaN. Required because ILGPU's IR negates
+            //      `clt+brfalse` to `cge+brtrue [Unordered]`.
+            //   2. Equal/NotEqual on f32 (ordered or unordered): Naga / Chrome
+            //      WGSL backend has a long-standing bug where bit-identical NaN
+            //      operands compare equal. Always apply explicit NaN guard for
+            //      IEEE-strict semantics. Equal returns FALSE for NaN, NotEqual
+            //      returns TRUE.
+            // Diagnosed against FloatNaNComparisonTest 2026-04-29.
+            bool isNativeFloatUnordered = isFloatScalar && value.IsUnsignedOrUnordered
+                && value.Kind != CompareKind.NotEqual
+                && value.Kind != CompareKind.Equal;
+            bool isNativeFloatEqualLike = isFloatScalar
+                && (value.Kind == CompareKind.Equal || value.Kind == CompareKind.NotEqual);
+
             if (needsUnsignedCast)
             {
                 AppendLine($"{prefix}{target} = bitcast<u32>({left}) {op} bitcast<u32>({right});");
+            }
+            else if (isNativeFloatUnordered)
+            {
+                // IEEE 754 NaN bit pattern: exponent all 1s AND mantissa nonzero.
+                // Bit-pattern detect (`val != val` may be optimised away by the
+                // shader compiler; bitcast survives optimisation).
+                string LIsNaN = $"((bitcast<u32>({left}) & 0x7F800000u) == 0x7F800000u && (bitcast<u32>({left}) & 0x007FFFFFu) != 0u)";
+                string RIsNaN = $"((bitcast<u32>({right}) & 0x7F800000u) == 0x7F800000u && (bitcast<u32>({right}) & 0x007FFFFFu) != 0u)";
+                AppendLine($"{prefix}{target} = ({LIsNaN} || {RIsNaN} || ({left} {op} {right}));");
+            }
+            else if (isNativeFloatEqualLike)
+            {
+                // Equal: IEEE result is FALSE for NaN regardless of ordered or
+                // unordered. NotEqual: IEEE result is TRUE for NaN regardless.
+                // Naga compares NaN bit patterns directly so explicit NaN guard
+                // is required for both flag states.
+                string LIsNaN = $"((bitcast<u32>({left}) & 0x7F800000u) == 0x7F800000u && (bitcast<u32>({left}) & 0x007FFFFFu) != 0u)";
+                string RIsNaN = $"((bitcast<u32>({right}) & 0x7F800000u) == 0x7F800000u && (bitcast<u32>({right}) & 0x007FFFFFu) != 0u)";
+                if (value.Kind == CompareKind.Equal)
+                    AppendLine($"{prefix}{target} = (!({LIsNaN}) && !({RIsNaN}) && ({left} == {right}));");
+                else // NotEqual
+                    AppendLine($"{prefix}{target} = ({LIsNaN} || {RIsNaN} || ({left} != {right}));");
             }
             else if (leftIsVec && !rightIsVec)
             {

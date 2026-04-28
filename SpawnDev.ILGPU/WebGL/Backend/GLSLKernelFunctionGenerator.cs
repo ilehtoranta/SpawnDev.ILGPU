@@ -2744,7 +2744,22 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                     CompareKind.GreaterThan => "f64_gt", CompareKind.GreaterEqual => "f64_ge",
                     CompareKind.Equal => "f64_eq", CompareKind.NotEqual => "f64_ne", _ => null
                 };
-                if (f != null) { AppendLine($"{prefix}{target} = {f}({left}, {right});"); return; }
+                if (f != null)
+                {
+                    // IEEE 754 unordered compare: NaN forces TRUE except NotEqual.
+                    // ILGPU's IR negates `clt+brfalse` to `cge+brtrue [Unordered]`;
+                    // an ordered cge for NaN is FALSE so the bit gets set.
+                    if (value.IsUnsignedOrUnordered && value.Kind != CompareKind.NotEqual)
+                    {
+                        AppendLine(
+                            $"{prefix}{target} = (_f32_is_nan_bits({left}.x) || _f32_is_nan_bits({right}.x)) || {f}({left}, {right});");
+                    }
+                    else
+                    {
+                        AppendLine($"{prefix}{target} = {f}({left}, {right});");
+                    }
+                    return;
+                }
             }
 
             if (isEmulatedI64)
@@ -2759,7 +2774,43 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             }
 
             string op = GetCompareOp(value.Kind);
-            AppendLine($"{prefix}{target} = {left} {op} {right};");
+
+            bool isFloatScalar = (value.Left.BasicValueType == BasicValueType.Float32
+                || value.Left.BasicValueType == BasicValueType.Float16);
+
+            // Two cases for f32 NaN safety - mirror of WGSL fix:
+            //   1. Unordered LT/LE/GT/GE: emit `is_nan(l) || is_nan(r) || (l op r)`.
+            //   2. Equal/NotEqual: drivers may compare NaN bit patterns as equal.
+            //      Always apply NaN guard for IEEE-strict semantics.
+            // Diagnosed against FloatNaNComparisonTest 2026-04-29.
+            bool isNativeFloatUnordered = isFloatScalar && value.IsUnsignedOrUnordered
+                && value.Kind != CompareKind.NotEqual
+                && value.Kind != CompareKind.Equal;
+            bool isNativeFloatEqualLike = isFloatScalar
+                && (value.Kind == CompareKind.Equal || value.Kind == CompareKind.NotEqual);
+
+            if (isNativeFloatUnordered)
+            {
+                // Inline the bit-pattern NaN check (exponent all 1s AND mantissa
+                // nonzero) so we don't depend on _f32_is_nan_bits being included
+                // — that helper is only emitted with the f64 emulation library.
+                string LIsNaN = $"((floatBitsToUint({left}) & 0x7F800000u) == 0x7F800000u && (floatBitsToUint({left}) & 0x007FFFFFu) != 0u)";
+                string RIsNaN = $"((floatBitsToUint({right}) & 0x7F800000u) == 0x7F800000u && (floatBitsToUint({right}) & 0x007FFFFFu) != 0u)";
+                AppendLine($"{prefix}{target} = ({LIsNaN} || {RIsNaN} || ({left} {op} {right}));");
+            }
+            else if (isNativeFloatEqualLike)
+            {
+                string LIsNaN = $"((floatBitsToUint({left}) & 0x7F800000u) == 0x7F800000u && (floatBitsToUint({left}) & 0x007FFFFFu) != 0u)";
+                string RIsNaN = $"((floatBitsToUint({right}) & 0x7F800000u) == 0x7F800000u && (floatBitsToUint({right}) & 0x007FFFFFu) != 0u)";
+                if (value.Kind == CompareKind.Equal)
+                    AppendLine($"{prefix}{target} = (!({LIsNaN}) && !({RIsNaN}) && ({left} == {right}));");
+                else
+                    AppendLine($"{prefix}{target} = ({LIsNaN} || {RIsNaN} || ({left} != {right}));");
+            }
+            else
+            {
+                AppendLine($"{prefix}{target} = {left} {op} {right};");
+            }
         }
 
 
