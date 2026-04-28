@@ -4,8 +4,8 @@
 		<TargetFramework>net10.0</TargetFramework>
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>enable</Nullable>
-		<Version>4.9.2-rc.31</Version>
-		<PackageReleaseNotes>v4.9.2-rc.31: SpawnDev.WebTorrent 3.2.2-rc.4 dep bump (which pulls in SpawnDev.RTC 1.1.8-rc.2). RTC rc.2 adds a browser-side `RTCPeerConnection.connectionState` polling fallback that closes the `P2PSwarm.TwoTab_PeerDiscovery` regression - Chromium under Playwright fails to fire `connectionstatechange` when a remote tab closes, so `wire.OnClose` never fired in the bridge and `coord.peerCount` stayed at 1 indefinitely. P2P code unchanged from rc.30.</PackageReleaseNotes>
+		<Version>4.9.2-rc.33</Version>
+		<PackageReleaseNotes>v4.9.2-rc.33: P2PWebRtcBridge phantom-wire fix closes P2PSwarm.TwoTab_PeerDiscovery regression. Two bug-classes addressed: (1) Bridge's wire.OnHandshake hook can run AFTER Torrent's duplicate-handshake-destroy synchronously destroys a wire, leaving phantom destroyed-wire entries in `_wiresByBtPeerId[canonical]` that inflate `isLastWireForCanonical` to false forever - fix: `wireSet.RemoveWhere(w => w.Destroyed)` on close before counting. (2) Chromium-under-Playwright leaves some RTCPeerConnections stuck at `connectionState=connected` even after remote tab closes, so wire.OnClose never fires for those wires - fix: long-grace fallback (`UnregisterFallbackGraceMs`=30s) fires UnregisterPeer when isLastWire=false; cancel-on-handshake handles the false-positive multi-wire case. Plus SpawnDev.WebTorrent 3.2.2-rc.6 dep bump (pulls in SpawnDev.RTC 1.1.8-rc.4 with opt-in DiagnosticsEnabled flag).</PackageReleaseNotes>
 		<GeneratePackageOnBuild>True</GeneratePackageOnBuild>
 		<GenerateDocumentationFile>true</GenerateDocumentationFile>
 		<EmbedAllSources>true</EmbedAllSources>
@@ -28,7 +28,7 @@
 
 	<ItemGroup>
 		<ProjectReference Include="..\SpawnDev.ILGPU\SpawnDev.ILGPU.csproj" />
-		<PackageReference Include="SpawnDev.WebTorrent" Version="3.2.2-rc.4" />
+		<PackageReference Include="SpawnDev.WebTorrent" Version="3.2.2-rc.6" />
 	</ItemGroup>
 
 </Project>

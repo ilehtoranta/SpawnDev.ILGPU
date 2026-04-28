@@ -541,6 +541,39 @@ namespace PlaywrightMultiTest
                 page2 = null;
 
                 LogStatus("[P2P TwoTab] Worker closed, waiting for peer dropout...");
+                // BRRTC-DIAG: probe each poller's state across the dropout window
+                try
+                {
+                    var pcCount = await coordPage.EvaluateAsync<int?>("() => globalThis.__brrtc_pc_count");
+                    LogStatus($"[P2P TwoTab][BRRTC-DIAG] pc_count={pcCount}");
+                    for (int probe = 0; probe < 18; probe++)
+                    {
+                        await Task.Delay(5000);
+                        var states = await coordPage.EvaluateAsync<string?>(
+                            "() => { var n = globalThis.__brrtc_pc_count || 0; var arr = []; for (var i = 1; i <= n; i++) { arr.push(globalThis['__brrtc_pc_' + i] || '?'); } return arr.join(' || '); }");
+                        var synthStates = await coordPage.EvaluateAsync<string?>(
+                            "() => { var n = globalThis.__brrtc_pc_count || 0; var arr = []; for (var i = 1; i <= n; i++) { var s = globalThis['__brrtc_synth_' + i]; if (s) arr.push('#' + i + ':' + s); } return arr.join(' | '); }");
+                        var bridgeOnClose = await coordPage.EvaluateAsync<string?>("() => globalThis.__bridge_wire_onclose");
+                        var bridgeSchedule = await coordPage.EvaluateAsync<string?>("() => globalThis.__bridge_schedule_unreg");
+                        var bridgeUnreg = await coordPage.EvaluateAsync<string?>("() => globalThis.__bridge_unregister_fired");
+                        var bridgeShort = await coordPage.EvaluateAsync<string?>("() => globalThis.__bridge_short_circuit");
+                        var bridgeWireset = await coordPage.EvaluateAsync<string?>("() => globalThis.__bridge_wireset_dump");
+                        var pcNow = await coordPage.EvaluateAsync<object?>(peerCountJs);
+                        LogStatus($"[P2P TwoTab][BRRTC-DIAG] t+{(probe+1)*5}s peerCount={pcNow} states={states}");
+                        if (!string.IsNullOrEmpty(synthStates))
+                            LogStatus($"[P2P TwoTab][BRRTC-DIAG] t+{(probe+1)*5}s synth={synthStates}");
+                        if (!string.IsNullOrEmpty(bridgeOnClose))
+                            LogStatus($"[P2P TwoTab][BRRTC-DIAG] t+{(probe+1)*5}s bridge_onclose={bridgeOnClose}");
+                        if (!string.IsNullOrEmpty(bridgeSchedule))
+                            LogStatus($"[P2P TwoTab][BRRTC-DIAG] t+{(probe+1)*5}s bridge_schedule={bridgeSchedule}");
+                        if (!string.IsNullOrEmpty(bridgeUnreg))
+                            LogStatus($"[P2P TwoTab][BRRTC-DIAG] t+{(probe+1)*5}s bridge_unregister={bridgeUnreg}");
+                        if (!string.IsNullOrEmpty(bridgeShort))
+                            LogStatus($"[P2P TwoTab][BRRTC-DIAG] t+{(probe+1)*5}s bridge_short={bridgeShort}");
+                        if (!string.IsNullOrEmpty(bridgeWireset))
+                            LogStatus($"[P2P TwoTab][BRRTC-DIAG] t+{(probe+1)*5}s bridge_wireset={bridgeWireset}");
+                    }
+                } catch (Exception ex) { LogStatus($"[P2P TwoTab][BRRTC-DIAG] probe error: {ex.Message}"); }
                 var lastDropLogged = -1;
                 var droppedCount = await WaitForJsValueAsync(coordPage, peerCountJs,
                     timeoutSeconds: 90,

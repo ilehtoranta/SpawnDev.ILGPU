@@ -82,6 +82,12 @@ public class P2PWebRtcBridge : IAsyncDisposable
             // surface as a peer-departure to the dispatcher.
             wire.OnClose += () =>
             {
+                try
+                {
+                    var ctr = System.Threading.Interlocked.Increment(ref _bridgeOnCloseCounter);
+                    SpawnDev.BlazorJS.BlazorJSRuntime.JS.Set("__bridge_wire_onclose",
+                        $"#{ctr} peer={peerId} btPeer={wire.PeerId} destroyed={wire.Destroyed}");
+                } catch { }
                 _extensions.TryRemove(peerId, out _);
                 // wasTracked = this wire was registered under canonical (BEP-10 fired
                 // OR NotifyCanonical fired). Both paths populate _wireToCanonical.
@@ -92,7 +98,21 @@ public class P2PWebRtcBridge : IAsyncDisposable
                 // handshake race produces N wires for one canonical peer, the losers
                 // close while the winner stays live. UnregisterPeer must only fire
                 // when EVERY wire for the canonical is gone.
+                //
+                // Phantom-wire filter: the bridge's wire.OnHandshake hook is called
+                // AFTER Torrent's own OnHandshake handler. If Torrent's handler runs
+                // first and destroys the wire (duplicate-handshake-destroy), the
+                // bridge's handler still fires on the destroyed wire and adds it to
+                // _wiresByBtPeerId. The wire's subsequent OnClose runs with
+                // _wireToCanonical missing for that wire (race during the same
+                // handshake invocation chain), so wasTracked=false and the phantom
+                // entry stays. When the REAL surviving wire later closes, the
+                // phantom inflates the wireSet count and isLastWireForCanonical
+                // wrongly stays false, blocking ScheduleDeferredUnregister. Filter
+                // destroyed phantoms out of the count to recover.
                 bool isLastWireForCanonical = true;
+                int beforeFilter = -1, afterFilter = -1;
+                string wireSetDump = "?";
                 if (wasTracked)
                 {
                     lock (_wiresByBtPeerIdLock)
@@ -100,6 +120,11 @@ public class P2PWebRtcBridge : IAsyncDisposable
                         if (_wiresByBtPeerId.TryGetValue(canonical!, out var wireSet))
                         {
                             wireSet.Remove(wire);
+                            beforeFilter = wireSet.Count;
+                            wireSetDump = string.Join(",",
+                                wireSet.Select(w => $"d={w.Destroyed}/p={w.PeerId?[..Math.Min(8, w.PeerId.Length)] ?? "null"}"));
+                            wireSet.RemoveWhere(w => w.Destroyed);
+                            afterFilter = wireSet.Count;
                             if (wireSet.Count == 0)
                                 _wiresByBtPeerId.TryRemove(canonical!, out _);
                             else
@@ -107,18 +132,55 @@ public class P2PWebRtcBridge : IAsyncDisposable
                         }
                     }
                 }
+                try { SpawnDev.BlazorJS.BlazorJSRuntime.JS.Set("__bridge_wireset_dump",
+                    $"canonical={canonical} before={beforeFilter} after={afterFilter} dump=[{wireSetDump}]"); } catch { }
 
                 // If this wire was never tracked under any canonical, it didn't
-                // contribute to peer registration - nothing to unregister. If other
-                // wires are still live for this canonical, the peer is still up.
-                if (!wasTracked || !isLastWireForCanonical)
+                // contribute to peer registration - nothing to unregister.
+                if (!wasTracked)
+                {
+                    try { SpawnDev.BlazorJS.BlazorJSRuntime.JS.Set("__bridge_short_circuit",
+                        $"wasTracked={wasTracked} isLastWire={isLastWireForCanonical} canonical={canonical} wirePeerId={wire.PeerId}"); } catch { }
                     return;
+                }
+
+                // Other wires are still nominally live for this canonical. In real-
+                // Chrome production this means the duplicate-handshake-destroy
+                // cascade is shifting ownership and a survivor will keep the peer
+                // up; skip unregister and let the survivor's normal flow continue.
+                //
+                // BUT in Chromium-under-Playwright the close-event path for some
+                // RTCPeerConnections gets stuck (`connectionState` stays
+                // "connected", data channel stays "open") even after the remote
+                // tab closes. Those phantom-alive wires never fire OnClose, so
+                // isLastWireForCanonical never becomes true and the canonical
+                // peer would stay "alive" forever in our bookkeeping.
+                //
+                // Fallback: schedule a LONGER deferred unregister regardless of
+                // isLastWireForCanonical. If a NEW wire's BEP-10 handshake fires
+                // for the same canonical inside the grace window, the cancel path
+                // wipes the timer (peer is genuinely back). If the grace expires
+                // without a new wire arriving, we declare the canonical gone -
+                // matching the production "all wires really did close" outcome
+                // even though some phantom wires are stuck in our bookkeeping.
+                if (!isLastWireForCanonical)
+                {
+                    try { SpawnDev.BlazorJS.BlazorJSRuntime.JS.Set("__bridge_short_circuit",
+                        $"wasTracked={wasTracked} isLastWire={isLastWireForCanonical} canonical={canonical} wirePeerId={wire.PeerId} fallthrough=true"); } catch { }
+                    if (!_notified.ContainsKey(canonical!)) return;
+                    ScheduleDeferredUnregister(canonical!, wire.PeerId, peerId, useFallback: true);
+                    return;
+                }
 
                 // The canonical was never promoted to a registered peer (no wire's
                 // CapabilityResponse arrived -> NotifyCanonical never fired ->
                 // _notified[canonical] never set). Nothing to unregister.
                 if (!_notified.ContainsKey(canonical!))
+                {
+                    try { SpawnDev.BlazorJS.BlazorJSRuntime.JS.Set("__bridge_short_circuit",
+                        $"notified-miss canonical={canonical}"); } catch { }
                     return;
+                }
 
                 // Cross-check torrent.Wires for a LIVE replacement wire bound to the same
                 // canonical BT peer id. Closes the BEP-10 vs CapabilityResponse race that
@@ -171,6 +233,11 @@ public class P2PWebRtcBridge : IAsyncDisposable
                 // the same canonical before the timer fires. This preserves the genuine-
                 // departure case (no recovery within UnregisterGraceMs -> peer is gone for
                 // real) while absorbing transient cascades.
+                try
+                {
+                    SpawnDev.BlazorJS.BlazorJSRuntime.JS.Set("__bridge_schedule_unreg",
+                        $"canonical={canonical} wire={wire.PeerId} transient={peerId}");
+                } catch { }
                 ScheduleDeferredUnregister(canonical!, wire.PeerId, peerId);
             };
 
@@ -301,7 +368,17 @@ public class P2PWebRtcBridge : IAsyncDisposable
     /// </summary>
     public int UnregisterGraceMs { get; set; } = 5_000;
 
-    private void ScheduleDeferredUnregister(string canonical, string? wirePeerId, string transientPeerId)
+    /// <summary>
+    /// Longer grace period used when the canonical's wireSet still contains
+    /// phantom-alive wires (Chromium-under-Playwright bug: some RTCPeerConnections
+    /// stay stuck at connectionState=connected even after the remote tab closes,
+    /// so wire.OnClose never fires for those wires). After this period without a
+    /// new BEP-10 handshake, declare the canonical gone regardless of phantom
+    /// wires.
+    /// </summary>
+    public int UnregisterFallbackGraceMs { get; set; } = 30_000;
+
+    private void ScheduleDeferredUnregister(string canonical, string? wirePeerId, string transientPeerId, bool useFallback = false)
     {
         var cts = new System.Threading.CancellationTokenSource();
         // Cancel any prior pending unregister for this canonical and replace.
@@ -318,11 +395,12 @@ public class P2PWebRtcBridge : IAsyncDisposable
         if (!string.IsNullOrEmpty(wirePeerId)) ids.Add(wirePeerId!);
         if (!string.IsNullOrEmpty(transientPeerId)) ids.Add(transientPeerId);
 
+        var graceMs = useFallback ? UnregisterFallbackGraceMs : UnregisterGraceMs;
         _ = Task.Run(async () =>
         {
             try
             {
-                await Task.Delay(UnregisterGraceMs, cts.Token).ConfigureAwait(false);
+                await Task.Delay(graceMs, cts.Token).ConfigureAwait(false);
             }
             catch (OperationCanceledException)
             {
@@ -337,12 +415,40 @@ public class P2PWebRtcBridge : IAsyncDisposable
             _pendingUnregisters.TryRemove(canonical, out _);
             // Final safety check: if a wire materialized for this canonical after the
             // delay started but before we got here, bail out.
-            lock (_wiresByBtPeerIdLock)
+            //
+            // Skipped on useFallback=true paths because that path is specifically
+            // designed to force unregister WHEN the wireSet still contains
+            // phantom-alive wires (Chromium-under-Playwright stuck wires that
+            // never fire OnClose). Reading the wireSet here would always see
+            // those phantoms and short-circuit, defeating the fallback's purpose.
+            // For real new-wire arrivals during the long grace, BEP-10
+            // OnHandshake calls CancelDeferredUnregister, which is the correct
+            // cancel signal in both modes - the wireSet count check is the
+            // belt-and-suspenders that we explicitly remove on the fallback.
+            if (!useFallback)
             {
-                if (_wiresByBtPeerId.TryGetValue(canonical, out var liveSet) && liveSet.Count > 0)
-                    return;
+                lock (_wiresByBtPeerIdLock)
+                {
+                    if (_wiresByBtPeerId.TryGetValue(canonical, out var liveSet) && liveSet.Count > 0)
+                        return;
+                }
+            }
+            else
+            {
+                // For fallback paths we DO clear the canonical's wireSet entry
+                // since we're force-treating those wires as gone. Future wire
+                // arrivals on the same canonical will re-add via OnHandshake.
+                lock (_wiresByBtPeerIdLock)
+                {
+                    _wiresByBtPeerId.TryRemove(canonical, out _);
+                }
             }
 
+            try
+            {
+                SpawnDev.BlazorJS.BlazorJSRuntime.JS.Set("__bridge_unregister_fired",
+                    $"canonical={canonical} ids={string.Join(",", ids)}");
+            } catch { }
             foreach (var id in ids)
             {
                 _notified.TryRemove(id, out _);
@@ -350,6 +456,8 @@ public class P2PWebRtcBridge : IAsyncDisposable
             }
         });
     }
+
+    private static int _bridgeOnCloseCounter;
 
     private void CancelDeferredUnregister(string canonical)
     {

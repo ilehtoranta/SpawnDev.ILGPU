@@ -24,6 +24,12 @@ var builder = WebAssemblyHostBuilder.CreateDefault(args);
 
 // Ensure WebGPU verbose logging is disabled during Blazor unit tests
 WebGPUBackend.VerboseLogging = false;
+
+// Demo opts in to BrowserRTCPeerConnection's per-tick diagnostic flags so
+// PMT P2PSwarm.TwoTab_PeerDiscovery can probe wire-close paths via JS globals.
+// Production consumers leave this off (default) - the per-tick writes add JS
+// interop overhead and aren't needed unless investigating wire-close issues.
+SpawnDev.RTC.Browser.BrowserRTCPeerConnection.DiagnosticsEnabled = true;
 builder.Services.AddBlazorJSRuntime();
 builder.Services.AddPlatformCrypto();
 
