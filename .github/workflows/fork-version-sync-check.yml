@@ -1,0 +1,44 @@
+name: Fork Version Sync Check
+
+# Catches the "ILGPU.csproj <Version> bumped but SpawnDev.ILGPU.csproj's
+# Fork PackageReference left at the old version" trap that bit rc.28 on
+# 2026-04-28 - Tuvok wasted a verification cycle on a "fix" that could
+# not possibly reach the IR because the consumer was still pulling
+# SpawnDev.ILGPU.Fork 2.0.1 transitively.
+#
+# This workflow surfaces the trap on every push: it parses all four
+# version sites and fails fast if any disagree.
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'ILGPU/ILGPU.csproj'
+      - 'ILGPU.Algorithms/ILGPU.Algorithms.csproj'
+      - 'SpawnDev.ILGPU/SpawnDev.ILGPU.csproj'
+      - '_check-fork-version-sync.cs'
+      - '.github/workflows/fork-version-sync-check.yml'
+  pull_request:
+    branches: [master]
+    paths:
+      - 'ILGPU/ILGPU.csproj'
+      - 'ILGPU.Algorithms/ILGPU.Algorithms.csproj'
+      - 'SpawnDev.ILGPU/SpawnDev.ILGPU.csproj'
+      - '_check-fork-version-sync.cs'
+      - '.github/workflows/fork-version-sync-check.yml'
+  workflow_dispatch:
+
+jobs:
+  check-version-sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Verify ILGPU package versions are in lockstep
+        run: dotnet run _check-fork-version-sync.cs

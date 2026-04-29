@@ -4,8 +4,8 @@
 		<TargetFramework>net10.0</TargetFramework>
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>enable</Nullable>
-		<Version>4.9.2-rc.28</Version>
-		<PackageReleaseNotes>v4.9.2-rc.28: Two correctness fixes + diagnostic property. (1) IR: signed `Div by pow2` no longer rewrites to `Shr` — `>>` floors toward -infinity while `/` truncates toward zero per CLR / IL / C99 / C# spec, off-by-one for every odd-negative dividend. The rewrite is now gated on `(flags &amp; ArithmeticFlags.Unsigned)`; signed Div lowers to the backend's native signed-integer-division codegen. Diagnosed by Tuvok 2026-04-28 against `Vp9ForwardDct8x8Kernel` saturation regression. Reproduced on CUDA + OpenCL via 3-test minimal repro shipped at `SpawnDev.Codecs.Demo.Shared/UnitTests/CodecsTestBase.IlgpuIntDivByTwoRepro.cs`; canonical regression now in `SpawnDev.ILGPU.Demo.Shared/UnitTests/BackendTestBase.Tests1.cs::SignedIntDivByPow2TruncateTowardZeroTest` + `SignedIntDivByPow2_LargerDivisorsTest` (verified 14/14 across all 7 backends). (2) Wasm: `[NoInlining]` void helpers no longer silently dropped — the kernel codegen's void-value skip filter ate void `MethodCall` values, so any helper invocation with `ref`/`out` parameters returned 0 from the kernel-side ref'd local because the helper was never called. Filter now excludes `MethodCall`. Companion fix in helper dispatcher: void helper functions don't push a return value, so the post-call `Drop` was a Wasm stack underflow waiting to happen — now elided. Verified 7 NoInliningVoidHelper / NoInliningOutParam / ButterflyNarrowing / NoInliningIdct16Row* tests now pass. (3) New diagnostic: `WasmAccelerator.WorkerCount` is now a public read-only property mirroring the configured worker count.</PackageReleaseNotes>
+		<Version>4.9.2-rc.29</Version>
+		<PackageReleaseNotes>v4.9.2-rc.29: Respin of rc.28 to actually deliver the signed Div-by-pow2 fix. The rc.28 wrapper bumped this csproj's version but kept the transitive dependency at `SpawnDev.ILGPU.Fork 2.0.1`, so the consumer's resolved `ILGPU.dll` was still the unfixed Apr-23 build and Tuvok's repro fired identically. Two upstream issues compounded the miss: (a) the rc.28 build did not propagate the Fork bump (now caught by `_check-fork-version-sync.bat` at repo root + CI workflow), and (b) Tuvok's manual `.cs` edit landed on a T4-generated file whose source-of-truth is `ILGPU/Static/BinaryMathOperations.xml`; the next clean build silently regenerated the `.cs` without the gate (now caught by the existing T4-drift CI action and `_check-tt-drift.bat`). rc.29 bundles `SpawnDev.ILGPU.Fork 2.0.2` + `SpawnDev.ILGPU.Algorithms.Fork 2.0.2` which carry the corrected XML rewriter table; the regenerated `IRBuilder.BinaryArithmeticSimplify_RHS` now gates the `Div`-by-pow2 → `Shr` rewrite on `(flags &amp; ArithmeticFlags.Unsigned)` exactly as Tuvok diagnosed. No other behavioural change since rc.28 - the Wasm `[NoInlining]` void helper fix and the public `WasmAccelerator.WorkerCount` diagnostic are still in place (those changes ship in this wrapper DLL, not the Fork DLL). Regression coverage unchanged: `SignedIntDivByPow2TruncateTowardZeroTest` + `SignedIntDivByPow2_LargerDivisorsTest` in `BackendTestBase.Tests1`, 14/14 across all 7 backends.</PackageReleaseNotes>
 		<GeneratePackageOnBuild>True</GeneratePackageOnBuild>
 		<GenerateDocumentationFile>true</GenerateDocumentationFile>
 		<EmbedAllSources>true</EmbedAllSources>
@@ -32,14 +32,35 @@
 		<PackageReference Include="SpawnDev.BlazorJS" Version="3.5.3" />
 	</ItemGroup>
 
+	<!-- =====================================================================
+	     CRITICAL: FOUR-PACKAGE BUNDLE - read before bumping any one of these.
+	     =====================================================================
+	     A bug fixed under ILGPU/ ships in ILGPU.dll which lives in the SEPARATE
+	     SpawnDev.ILGPU.Fork nupkg, NOT in this SpawnDev.ILGPU wrapper. If you
+	     bump only this csproj, consumers transitively pull the OLD Fork from
+	     nuget.org and the fix is invisible to them. To ship an ILGPU/ fix you
+	     MUST bump all four together:
+
+	       (1) ILGPU/ILGPU.csproj                                  <Version>
+	       (2) ILGPU.Algorithms/ILGPU.Algorithms.csproj            <Version>
+	       (3) SpawnDev.ILGPU/SpawnDev.ILGPU.csproj                <Version>
+	       (4) The TWO PackageReference lines IMMEDIATELY BELOW
+	           (the !Exists branch) - in-repo dev uses ProjectReference and
+	           does not see these; the published nuspec dependency does.
+
+	     Then run _check-fork-version-sync.bat at repo root to verify all four
+	     match before commit. CI runs the same check on every push. If you skip
+	     step (4) the consumer ships rc.N with stale Fork 2.0.x and the fix
+	     never reaches the IR. This is exactly what bit rc.28 on 2026-04-28.
+	     ===================================================================== -->
 	<!-- Conditional fork reference: in-repo dev uses ProjectReference (fast iteration); external consumers use PackageReference via NuGet -->
 	<ItemGroup Condition="Exists('$(MSBuildThisFileDirectory)..\ILGPU\ILGPU.csproj')">
 		<ProjectReference Include="..\ILGPU\ILGPU.csproj" />
 		<ProjectReference Include="..\ILGPU.Algorithms\ILGPU.Algorithms.csproj" />
 	</ItemGroup>
 	<ItemGroup Condition="!Exists('$(MSBuildThisFileDirectory)..\ILGPU\ILGPU.csproj')">
-		<PackageReference Include="SpawnDev.ILGPU.Fork" Version="2.0.1" />
-		<PackageReference Include="SpawnDev.ILGPU.Algorithms.Fork" Version="2.0.1" />
+		<PackageReference Include="SpawnDev.ILGPU.Fork" Version="2.0.2" />
+		<PackageReference Include="SpawnDev.ILGPU.Algorithms.Fork" Version="2.0.2" />
 	</ItemGroup>
 
 	<ItemGroup>

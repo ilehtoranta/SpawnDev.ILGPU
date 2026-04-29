@@ -8,7 +8,11 @@
     <VersionPrefix>$(LibraryVersionPrefix)</VersionPrefix>
     <AssemblyVersion>$(LibraryAssemblyVersion)</AssemblyVersion>
     <FileVersion>$(LibraryFileVersion)</FileVersion>
-    <Version>2.0.1</Version>
+    <!-- ⚠ FOUR-PACKAGE BUNDLE: must match ILGPU/ILGPU.csproj <Version> AND both
+         SpawnDev.ILGPU.Fork* PackageReference Versions inside SpawnDev.ILGPU.csproj.
+         Run `_check-fork-version-sync.bat` at repo root. See the banner comment in
+         SpawnDev.ILGPU.csproj for the full procedure. -->
+    <Version>2.0.2</Version>
     <IsPackable>true</IsPackable>
     <GeneratePackageOnBuild>true</GeneratePackageOnBuild>
   </PropertyGroup>

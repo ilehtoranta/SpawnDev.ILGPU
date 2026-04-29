@@ -8,7 +8,15 @@
     <VersionPrefix>$(LibraryVersionPrefix)</VersionPrefix>
     <AssemblyVersion>$(LibraryAssemblyVersion)</AssemblyVersion>
     <FileVersion>$(LibraryFileVersion)</FileVersion>
-    <Version>2.0.1</Version>
+    <!-- ⚠ FOUR-PACKAGE BUNDLE: bumping this Version means you ALSO need to bump:
+         (a) ILGPU.Algorithms/ILGPU.Algorithms.csproj <Version> to match,
+         (b) BOTH PackageReference Versions inside SpawnDev.ILGPU/SpawnDev.ILGPU.csproj
+             (the !Exists branch - the published nuspec dependency).
+         Run `_check-fork-version-sync.bat` at repo root before commit. CI runs the same
+         check on push. Skipping (b) means consumers ship rc.N still pulling old Fork
+         transitively and the fix is invisible. See the banner comment in
+         SpawnDev.ILGPU.csproj for the full procedure. -->
+    <Version>2.0.2</Version>
     <IsPackable>true</IsPackable>
     <GeneratePackageOnBuild>true</GeneratePackageOnBuild>
   </PropertyGroup>
