@@ -5339,8 +5339,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 // IEEE 754 NaN bit pattern: exponent all 1s AND mantissa nonzero.
                 // Bit-pattern detect (`val != val` may be optimised away by the
                 // shader compiler; bitcast survives optimisation).
-                string LIsNaN = $"((bitcast<u32>({left}) & 0x7F800000u) == 0x7F800000u && (bitcast<u32>({left}) & 0x007FFFFFu) != 0u)";
-                string RIsNaN = $"((bitcast<u32>({right}) & 0x7F800000u) == 0x7F800000u && (bitcast<u32>({right}) & 0x007FFFFFu) != 0u)";
+                string LIsNaN = WGSLCodeGenerator.WgslIsNaNExprPublic($"{left}", leftType);
+                string RIsNaN = WGSLCodeGenerator.WgslIsNaNExprPublic($"{right}", rightType);
                 AppendLine($"{prefix}{target} = ({LIsNaN} || {RIsNaN} || ({left} {op} {right}));");
             }
             else if (isNativeFloatEqualLike)
@@ -5349,8 +5349,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 // unordered. NotEqual: IEEE result is TRUE for NaN regardless.
                 // Naga compares NaN bit patterns directly so explicit NaN guard
                 // is required for both flag states.
-                string LIsNaN = $"((bitcast<u32>({left}) & 0x7F800000u) == 0x7F800000u && (bitcast<u32>({left}) & 0x007FFFFFu) != 0u)";
-                string RIsNaN = $"((bitcast<u32>({right}) & 0x7F800000u) == 0x7F800000u && (bitcast<u32>({right}) & 0x007FFFFFu) != 0u)";
+                string LIsNaN = WGSLCodeGenerator.WgslIsNaNExprPublic($"{left}", leftType);
+                string RIsNaN = WGSLCodeGenerator.WgslIsNaNExprPublic($"{right}", rightType);
                 if (value.Kind == CompareKind.Equal)
                     AppendLine($"{prefix}{target} = (!({LIsNaN}) && !({RIsNaN}) && ({left} == {right}));");
                 else // NotEqual

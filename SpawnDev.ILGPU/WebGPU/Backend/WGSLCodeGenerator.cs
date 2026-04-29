@@ -1277,19 +1277,29 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 // comparisons would return vec2<bool>/vec4<bool>, not bool).
                 UnaryArithmeticKind.IsNaNF => operandType == "f32"
                     ? $"((bitcast<u32>({operand}) & 0x7F800000u) == 0x7F800000u && (bitcast<u32>({operand}) & 0x007FFFFFu) != 0u)"
-                    : operandType == "emu_f64"
-                        ? $"f64_is_nan({operand})"
-                        : $"({operand} != {operand})",
+                    : operandType == "f16"
+                        // Native f16: pack into vec2<f16> for valid bitcast<u32>; bottom 16 bits = f16 bits.
+                        // f16 NaN: exponent (bits 14-10) all 1s = 0x7C00, mantissa (bits 9-0) nonzero.
+                        ? $"((bitcast<u32>(vec2<f16>({operand}, 0.0h)) & 0x7C00u) == 0x7C00u && (bitcast<u32>(vec2<f16>({operand}, 0.0h)) & 0x03FFu) != 0u)"
+                        : operandType == "emu_f64"
+                            ? $"f64_is_nan({operand})"
+                            : $"({operand} != {operand})",
                 UnaryArithmeticKind.IsInfF => operandType == "f32"
                     ? $"((bitcast<u32>({operand}) & 0x7FFFFFFFu) == 0x7F800000u)"
-                    : operandType == "emu_f64"
-                        ? $"f64_is_inf({operand})"
-                        : $"(abs({operand}) == (1.0 / 0.0))",
+                    : operandType == "f16"
+                        // f16 Inf: exponent all 1s AND mantissa zero = bits 14-0 == 0x7C00 (sign-stripped).
+                        ? $"((bitcast<u32>(vec2<f16>({operand}, 0.0h)) & 0x7FFFu) == 0x7C00u)"
+                        : operandType == "emu_f64"
+                            ? $"f64_is_inf({operand})"
+                            : $"(abs({operand}) == (1.0 / 0.0))",
                 UnaryArithmeticKind.IsFinF => operandType == "f32"
                     ? $"((bitcast<u32>({operand}) & 0x7F800000u) != 0x7F800000u)"
-                    : operandType == "emu_f64"
-                        ? $"(!f64_is_nan({operand}) && !f64_is_inf({operand}))"
-                        : $"(({operand} == {operand}) && (abs({operand}) != (1.0 / 0.0)))",
+                    : operandType == "f16"
+                        // f16 Finite: exponent != all 1s.
+                        ? $"((bitcast<u32>(vec2<f16>({operand}, 0.0h)) & 0x7C00u) != 0x7C00u)"
+                        : operandType == "emu_f64"
+                            ? $"(!f64_is_nan({operand}) && !f64_is_inf({operand}))"
+                            : $"(({operand} == {operand}) && (abs({operand}) != (1.0 / 0.0)))",
 
                 // Bit Operations
                 UnaryArithmeticKind.PopC => $"i32(countOneBits({operand}))",
@@ -1426,14 +1436,14 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             }
             else if (isNativeFloatUnordered)
             {
-                string LIsNaN = $"((bitcast<u32>({left}) & 0x7F800000u) == 0x7F800000u && (bitcast<u32>({left}) & 0x007FFFFFu) != 0u)";
-                string RIsNaN = $"((bitcast<u32>({right}) & 0x7F800000u) == 0x7F800000u && (bitcast<u32>({right}) & 0x007FFFFFu) != 0u)";
+                string LIsNaN = WgslIsNaNExpr($"{left}", leftType);
+                string RIsNaN = WgslIsNaNExpr($"{right}", rightType);
                 AppendLine($"{target} = ({LIsNaN} || {RIsNaN} || ({left} {op} {right}));");
             }
             else if (isNativeFloatEqualLike)
             {
-                string LIsNaN = $"((bitcast<u32>({left}) & 0x7F800000u) == 0x7F800000u && (bitcast<u32>({left}) & 0x007FFFFFu) != 0u)";
-                string RIsNaN = $"((bitcast<u32>({right}) & 0x7F800000u) == 0x7F800000u && (bitcast<u32>({right}) & 0x007FFFFFu) != 0u)";
+                string LIsNaN = WgslIsNaNExpr($"{left}", leftType);
+                string RIsNaN = WgslIsNaNExpr($"{right}", rightType);
                 if (value.Kind == CompareKind.Equal)
                     AppendLine($"{target} = (!({LIsNaN}) && !({RIsNaN}) && ({left} == {right}));");
                 else
@@ -1444,6 +1454,35 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 AppendLine($"{target} = {left} {op} {right};");
             }
         }
+
+        /// <summary>
+        /// Emits an IEEE 754 NaN bit-pattern test for a WGSL float scalar. For f32,
+        /// `bitcast&lt;u32&gt;(x)` works directly. For native f16, the operand must be
+        /// packed via `vec2&lt;f16&gt;(x, 0.0h)` first because `bitcast&lt;u32&gt;(f16)`
+        /// is not valid WGSL (Tint rejects with "no matching call to bitcast&lt;u32&gt;(f16)";
+        /// see candidates list - only `vec2&lt;f16&gt; -&gt; u32` is valid).
+        /// f16 NaN: exponent bits 14-10 all 1s = 0x7C00, mantissa bits 9-0 nonzero (0x03FF mask).
+        /// f32 NaN: exponent bits 30-23 all 1s = 0x7F800000, mantissa bits 22-0 nonzero (0x007FFFFF mask).
+        /// </summary>
+        private static string WgslIsNaNExpr(string operand, string wgslType)
+        {
+            if (wgslType == "f16")
+            {
+                return $"((bitcast<u32>(vec2<f16>({operand}, 0.0h)) & 0x7C00u) == 0x7C00u && "
+                    + $"(bitcast<u32>(vec2<f16>({operand}, 0.0h)) & 0x03FFu) != 0u)";
+            }
+            // f32 path. Also reached for emulated-f16 (locals are f32 in that mode) -
+            // bits represent the f32 promotion of the original f16 value, so the f32
+            // NaN pattern is correct after promotion.
+            return $"((bitcast<u32>({operand}) & 0x7F800000u) == 0x7F800000u && "
+                + $"(bitcast<u32>({operand}) & 0x007FFFFFu) != 0u)";
+        }
+
+        /// <summary>Public proxy of <see cref="WgslIsNaNExpr"/> for use by partial-class /
+        /// derived generators (e.g. WGSLKernelFunctionGenerator) that need the same NaN
+        /// bit-pattern emit.</summary>
+        internal static string WgslIsNaNExprPublic(string operand, string wgslType)
+            => WgslIsNaNExpr(operand, wgslType);
 
         // Conversions
         public virtual void GenerateCode(ConvertValue value)

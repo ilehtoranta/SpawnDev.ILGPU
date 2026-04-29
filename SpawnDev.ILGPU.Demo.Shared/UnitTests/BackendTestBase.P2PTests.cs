@@ -138,7 +138,7 @@ public abstract partial class BackendTestBase
         var accelerator = (P2PAccelerator)device.CreateAccelerator(context);
         var dispatcher = new P2PDispatcher(accelerator);
 
-        if (dispatcher.DispatchTimeoutMs != 30_000)
+        if (dispatcher.DispatchTimeoutMs != 60_000)
             throw new Exception($"Timeout: {dispatcher.DispatchTimeoutMs}");
         if (dispatcher.MaxRetries != 3)
             throw new Exception($"MaxRetries: {dispatcher.MaxRetries}");

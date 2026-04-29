@@ -227,6 +227,109 @@ namespace SpawnDev.ILGPU
         }
 
         /// <summary>
+        /// Copies the data of an <see cref="ArrayView{T}"/> back to the host as a managed array.
+        /// Works on all backends (WebGPU, WebGL, Wasm, CUDA, OpenCL, CPU). The view's
+        /// <c>Length</c> elements starting at the view's index are returned.
+        ///
+        /// <para><b>Real per-backend partial readback.</b> Only the bytes inside the requested
+        /// view cross the device-to-host boundary - never the whole backing buffer. This is the
+        /// load-bearing rule of this API: data outside the view IS NOT READ BACK.</para>
+        /// <list type="bullet">
+        ///   <item>WebGPU: <c>queue.CopyBufferToBuffer(srcBuf, srcByteOffset, staging, 0, byteCount)</c> -> <c>mapAsync</c> on the staging buffer's exact byte range.</item>
+        ///   <item>WebGL: GL worker readback path with <c>(sourceByteOffset, byteCount)</c>.</item>
+        ///   <item>Wasm: SharedArrayBuffer direct slice - <c>new Uint8Array(SAB).SubArray(byteOffset, byteOffset+byteCount)</c>.</item>
+        ///   <item>CUDA / OpenCL / CPU: ILGPU's native <c>view.CopyToCPU(target)</c> - this is a real <c>cudaMemcpy</c> / <c>clEnqueueReadBuffer</c> / direct memcpy of just the view's range.</item>
+        /// </list>
+        ///
+        /// <para>Pair with <c>view.SubView(offset, count)</c> for tight per-channel / per-plane copies:</para>
+        ///
+        /// <code>
+        /// var y = await dRecon.View.SubView(0,                yLen).CopyToHostAsync();
+        /// var u = await dRecon.View.SubView(yLen,             uvLen).CopyToHostAsync();
+        /// var v = await dRecon.View.SubView(yLen + uvLen,     uvLen).CopyToHostAsync();
+        /// </code>
+        /// </summary>
+        /// <typeparam name="T">The element type of the view.</typeparam>
+        /// <param name="view">The view to read back. Only its byte range crosses to host.</param>
+        /// <returns>An array of <c>view.Length</c> elements.</returns>
+        public static async Task<T[]> CopyToHostAsync<T>(this ArrayView<T> view) where T : unmanaged
+        {
+            var iContig = (IContiguousArrayView)view;
+            var buffer = iContig.Buffer ?? throw new InvalidOperationException(
+                "ArrayView has no backing buffer.");
+            long countElems = view.Length;
+            int elementSize = ((IArrayView)view).ElementSize;
+            long byteOffset = iContig.IndexInBytes;
+            long byteCount = countElems * elementSize;
+            if (countElems == 0) return System.Array.Empty<T>();
+            if (byteOffset + byteCount > buffer.LengthInBytes)
+            {
+                throw new ArgumentOutOfRangeException(
+                    nameof(view),
+                    $"View byte range [{byteOffset}, {byteOffset + byteCount}) exceeds buffer length {buffer.LengthInBytes} bytes.");
+            }
+
+            // WebGPU: native partial-range CopyBufferToBuffer + mapAsync.
+            if (buffer is WebGPUMemoryBuffer webGpuBuffer)
+            {
+                using var u8 = await webGpuBuffer.NativeBuffer.CopyToHostUint8ArrayAsync(byteOffset, byteCount);
+                var bytes = u8.ReadBytes();
+                var result = new T[countElems];
+                MemoryMarshal.Cast<byte, T>(bytes).CopyTo(new Span<T>(result));
+                return result;
+            }
+
+            // WebGL: existing partial GL-worker readback (sourceByteOffset, length).
+            if (buffer is WebGLMemoryBuffer webGlBuffer)
+            {
+                var accel = (WebGLAccelerator)buffer.Accelerator;
+                using var u8 = await accel.ReadbackAndGetUint8ArrayAsync(webGlBuffer, byteOffset, byteCount);
+                var bytes = u8.ReadBytes();
+                var result = new T[countElems];
+                MemoryMarshal.Cast<byte, T>(bytes).CopyTo(new Span<T>(result));
+                return result;
+            }
+
+            // Wasm: SharedArrayBuffer direct slot slice. Only the slot's bytes are
+            // copied off the SAB - the rest of the wasm linear memory is not touched.
+            // CopyToHostUint8ArrayAsync syncs and returns a Uint8Array windowed onto
+            // exactly [byteOffset, byteOffset + byteCount).
+            if (buffer is WasmMemoryBuffer wasmBuffer)
+            {
+                using var u8 = await wasmBuffer.CopyToHostUint8ArrayAsync(byteOffset, byteCount);
+                var bytes = u8.ReadBytes();
+                var result = new T[countElems];
+                MemoryMarshal.Cast<byte, T>(bytes).CopyTo(new Span<T>(result));
+                return result;
+            }
+
+            // Desktop (CUDA / OpenCL / CPU): ILGPU's ArrayView<T>.CopyToCPU is a
+            // per-backend partial copy through cudaMemcpy / clEnqueueReadBuffer /
+            // direct memcpy. The view's start offset and length encode the partial
+            // range; the call only moves the view's bytes off the device.
+            var cpuResult = new T[countElems];
+            view.CopyToCPU(cpuResult);
+            return cpuResult;
+        }
+
+        /// <summary>
+        /// <see cref="ArrayView1D{T, TStride}"/> overload of
+        /// <see cref="CopyToHostAsync{T}(ArrayView{T})"/>.
+        /// Forwards to the <see cref="ArrayView{T}"/> implementation via
+        /// <see cref="ArrayView1D{T, TStride}.BaseView"/> so that
+        /// <c>buf.View.SubView(offset, count).CopyToHostAsync()</c> resolves naturally
+        /// without an explicit cast or <c>.BaseView</c> dereference.
+        /// </summary>
+        /// <typeparam name="T">The element type of the view.</typeparam>
+        /// <typeparam name="TStride">The 1D stride type.</typeparam>
+        /// <param name="view">The view to read back. Only its byte range crosses to host.</param>
+        /// <returns>An array of <c>view.Length</c> elements.</returns>
+        public static Task<T[]> CopyToHostAsync<T, TStride>(this ArrayView1D<T, TStride> view)
+            where T : unmanaged
+            where TStride : struct, IStride1D
+            => CopyToHostAsync<T>(view.BaseView);
+
+        /// <summary>
         /// Copies data from any ILGPU buffer (WebGPU, WebGL, Workers, or CPU) back to the host.
         /// Automatically detects the underlying buffer type and uses the appropriate method.
         /// Use this instead of backend-specific CopyToHostAsync to avoid ambiguity.
