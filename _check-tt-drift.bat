@@ -17,7 +17,12 @@ if exist ILGPU\bin rmdir /s /q ILGPU\bin
 if exist ILGPU.Algorithms\obj rmdir /s /q ILGPU.Algorithms\obj
 if exist ILGPU.Algorithms\bin rmdir /s /q ILGPU.Algorithms\bin
 
-dotnet build ILGPU\ILGPU.csproj -c Release --nologo
+REM -p:TextTemplateTransformSkipUpToDate=false forces T4 to regenerate on every build,
+REM mirroring CI's fresh-clone behavior (where all files have equal mtime). Without the
+REM flag, T4.Build's --skip-up-to-date check sees the working-tree .cs mtime as newer
+REM than the .tt and skips regen, which lets local builds silently pass while CI fails.
+REM Hit this 2026-04-28 - local drift check passed, CI flagged ArithmeticOperations.cs.
+dotnet build ILGPU\ILGPU.csproj -c Release --nologo -p:TextTemplateTransformSkipUpToDate=false
 if errorlevel 1 (
     echo [tt-drift] BUILD FAILED. Fix compile errors first, then re-run drift check.
     exit /b 1

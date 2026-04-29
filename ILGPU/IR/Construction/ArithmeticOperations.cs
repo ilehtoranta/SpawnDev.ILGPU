@@ -1017,16 +1017,7 @@ namespace ILGPU.IR.Construction
                 case BinaryArithmeticKind.Div:
                     if (right.HasIntValue(1))
                         return left;
-                    // Only rewrite Div by pow2 to Shr for UNSIGNED dividends.
-                    // For signed dividends, `>>` floors toward -infinity while
-                    // `/` truncates toward zero (CLR / IL `div` / C99 / C# spec).
-                    // The two semantics agree for non-negative dividends but
-                    // differ by 1 for odd-negative dividends - e.g. (-1)/2 is 0
-                    // (truncate) but -1>>1 is -1 (floor). Diagnosed by Tuvok
-                    // 2026-04-28 against `Vp9ForwardDct8x8Kernel` - reproduced
-                    // on CUDA + OpenCL via SpawnDev.Codecs minimal repro tests.
-                    if (right.IsInt && right.RawValue > 0 && Utilities.IsPowerOf2(right.RawValue)
-                        && (flags & ArithmeticFlags.Unsigned) == ArithmeticFlags.Unsigned)
+                    if (right.IsInt && right.RawValue > 0 &&Utilities.IsPowerOf2(right.RawValue) &&(flags & ArithmeticFlags.Unsigned) == ArithmeticFlags.Unsigned)
                         return CreateArithmetic(location,left,GetDivMulShiftAmount(location, right),BinaryArithmeticKind.Shr);
                     break;
                 case BinaryArithmeticKind.And:

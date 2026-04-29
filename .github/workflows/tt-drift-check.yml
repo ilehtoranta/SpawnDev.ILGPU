@@ -43,9 +43,13 @@ jobs:
           dotnet-version: 10.0.x
 
       - name: Force clean build of ILGPU/ (runs T4 transforms fresh)
+        # -p:TextTemplateTransformSkipUpToDate=false bypasses T4.Build's --skip-up-to-date
+        # check. On fresh CI clones all mtimes are equal so T4 runs anyway, but setting the
+        # flag explicitly keeps CI behavior identical to the local _check-tt-drift.bat
+        # which DOES need the flag (working-tree .cs mtimes are typically newer than .tt).
         run: |
           rm -rf ILGPU/obj ILGPU/bin ILGPU.Algorithms/obj ILGPU.Algorithms/bin
-          dotnet build ILGPU/ILGPU.csproj -c Release --nologo
+          dotnet build ILGPU/ILGPU.csproj -c Release --nologo -p:TextTemplateTransformSkipUpToDate=false
 
       - name: Verify no .tt template drift
         shell: bash
