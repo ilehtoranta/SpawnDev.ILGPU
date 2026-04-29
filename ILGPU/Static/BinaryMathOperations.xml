@@ -92,9 +92,18 @@
             <Target>{Value0}</Target>
         </Rewriter>
         <Rewriter>
+            <!-- Only rewrite Div by pow2 to Shr for UNSIGNED dividends.
+                 For signed dividends, `>>` floors toward -infinity while `/`
+                 truncates toward zero (CLR / IL `div` / C99 / C# spec). The
+                 two semantics agree for non-negative dividends but differ by
+                 1 for odd-negative dividends - e.g. (-1)/2 is 0 (truncate)
+                 but -1>>1 is -1 (floor). Diagnosed by Tuvok 2026-04-28
+                 against `Vp9ForwardDct8x8Kernel`; reproduced on CUDA + OpenCL
+                 via SpawnDev.Codecs minimal repro tests. -->
             <Source>
                 {Value1}.IsInt &amp;&amp; {Value1}.RawValue > 0 &amp;&amp;
-                Utilities.IsPowerOf2({Value1}.RawValue)
+                Utilities.IsPowerOf2({Value1}.RawValue) &amp;&amp;
+                ({Flags} &amp; ArithmeticFlags.Unsigned) == ArithmeticFlags.Unsigned
             </Source>
             <Target>
                 CreateArithmetic(
