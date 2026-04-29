@@ -9,7 +9,9 @@ Write parallel compute code in C# and let the library pick the best available ba
 
 ## Recent Highlights
 
-**4.9.2 (current):** OpenCL phi-binding-per-target codegen fix (Tuvok's `Av1RangeDecoderGpu.DecodeCdfQ15` round-trip green); rolls up the rc.7-rc.30 series (signed `Div by pow2` correctness, NaN/Inf codegen across WGSL/GLSL/Wasm/OpenCL, Wasm wait/notify-free + worker-headroom default, helper fn-definition emission for compile-cliff avoidance, `AcceleratorRequirements` capability gating, T4-drift + four-package version-sync CI guards).
+**4.9.3 (current):** New `ArrayView<T>.CopyToHostAsync()` extension - real per-backend partial readback for sub-views. One device buffer can be split into per-channel / per-plane host arrays without the host iterating over the full buffer. WebGPU `Half` NaN/Inf bit-pattern codegen fix (multi-compare paths now route f16 through `bitcast<u32>(vec2<f16>(x, 0.0h))` instead of the invalid `bitcast<u32>(f16)`). See [`Docs/memory-and-buffers.md` — Partial Readback](Docs/memory-and-buffers.md#arrayviewtcopytohostasync--partial-readback-493).
+
+**4.9.2:** OpenCL phi-binding-per-target codegen fix (Tuvok's `Av1RangeDecoderGpu.DecodeCdfQ15` round-trip green); rolls up the rc.7-rc.30 series (signed `Div by pow2` correctness, NaN/Inf codegen across WGSL/GLSL/Wasm/OpenCL, Wasm wait/notify-free + worker-headroom default, helper fn-definition emission for compile-cliff avoidance, `AcceleratorRequirements` capability gating, T4-drift + four-package version-sync CI guards).
 
 **4.9.0:** Complete sub-word data type support (`Int8`, `UInt8`, `Int16`, `UInt16`, `Float16`) across all 6 GPU backends + `CopyFromJS` zero-copy JS->GPU transfer.
 

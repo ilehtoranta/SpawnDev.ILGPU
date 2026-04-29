@@ -190,6 +190,62 @@ float[] cachedResults = new float[bufferLength];
 await buffer.CopyToHostAsync(cachedResults);
 ```
 
+### ArrayView&lt;T&gt;.CopyToHostAsync — Partial Readback (4.9.3+)
+
+Reads only a sub-range of a GPU buffer to a host array. The byte range outside the view never crosses the device-host boundary - this is a real per-backend partial copy, **not** a full-buffer readback followed by a CPU-side slice.
+
+Use this when a single GPU buffer holds multiple logical regions (per-channel image planes, per-tensor model outputs, per-frame audio chunks, etc.) and you need each region as its own host array:
+
+```csharp
+using SpawnDev.ILGPU;
+
+// One GPU buffer with three logical regions (Y / U / V planes for YUV 4:2:0):
+var y = await dRecon.View.SubView(0,            yLen ).CopyToHostAsync();
+var u = await dRecon.View.SubView(yLen,         uvLen).CopyToHostAsync();
+var v = await dRecon.View.SubView(yLen + uvLen, uvLen).CopyToHostAsync();
+```
+
+Each call only transfers its own slice's bytes. Compare with the full-buffer pattern, which reads the whole buffer and slices on the CPU:
+
+```csharp
+// AVOID — reads the entire dRecon buffer to host every call,
+// then slices on the CPU. Fine for small buffers, wasteful for large ones.
+var full = await dRecon.CopyToHostAsync<byte>();
+var y = new byte[yLen];  Buffer.BlockCopy(full, 0,             y, 0, yLen);
+var u = new byte[uvLen]; Buffer.BlockCopy(full, yLen,          u, 0, uvLen);
+var v = new byte[uvLen]; Buffer.BlockCopy(full, yLen + uvLen,  v, 0, uvLen);
+```
+
+**Per-backend implementation** (no fallback to full-buffer + slice on any backend):
+
+| Backend | Underlying primitive |
+|---|---|
+| **WebGPU** | `queue.CopyBufferToBuffer(srcBuf, srcByteOffset, staging, 0, byteCount)` -> `mapAsync(Read, 0, byteCount)`. Staging is sized to the slice, not the parent buffer. |
+| **WebGL** | GL-worker `ReadbackAndGetUint8ArrayAsync(buf, sourceByteOffset, byteCount)` partial range path. |
+| **Wasm** | `new Uint8Array(SharedBuffer, byteOffset, byteCount)` window onto the SAB slot. The rest of wasm linear memory is not touched. |
+| **CUDA / OpenCL / CPU** | ILGPU's native `view.CopyToCPU(target)`. The view's start offset and length encode the partial range, so this is one `cudaMemcpy` / `clEnqueueReadBuffer` / direct memcpy of just the slice's bytes. |
+
+**Two overloads** are provided so that `MemoryBuffer1D.View.SubView(...)` resolves naturally without an explicit cast:
+
+```csharp
+public static Task<T[]> CopyToHostAsync<T>(this ArrayView<T> view)
+    where T : unmanaged;
+
+public static Task<T[]> CopyToHostAsync<T, TStride>(this ArrayView1D<T, TStride> view)
+    where T : unmanaged
+    where TStride : struct, IStride1D;
+```
+
+The `ArrayView1D` overload forwards to the `ArrayView<T>` overload via `view.BaseView`, which is already the sliced range on a SubView'd 1D view.
+
+**Throws:**
+- `InvalidOperationException` if the view has no backing buffer.
+- `ArgumentOutOfRangeException` if the view's byte range exceeds the buffer's length.
+
+**When NOT to use this overload:**
+- You want the entire buffer's contents - use `buffer.CopyToHostAsync<T>()` directly. The `MemoryBuffer` overload exists for that case and avoids the SubView object construction.
+- You're writing into a pre-allocated array - use `buffer.CopyToHostAsync(targetArray)` for the per-frame render loop pattern. The partial-readback overload always allocates a fresh `T[]`.
+
 ### CopyToHostUint8ArrayAsync — JavaScript Interop
 
 Returns a JavaScript `Uint8Array` for direct use with browser APIs (Canvas, WebGL textures, etc.):
