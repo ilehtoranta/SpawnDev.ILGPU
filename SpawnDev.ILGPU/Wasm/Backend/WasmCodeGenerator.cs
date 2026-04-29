@@ -1851,13 +1851,19 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         {
             if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm-IR] Visit: {value.GetType().Name} Type={value.Type} IsVoid={value.Type.IsVoidType}");
 
-            // Skip void values (except terminators, stores, barriers)
+            // Skip void values (except terminators, stores, barriers, and
+            // void-returning method calls). Void MethodCall must reach the
+            // dispatcher: a `void Helper(int a, ref int b)` call has
+            // Type.IsVoidType but its side effects (writing through the ref
+            // param) are observable. Without this exception the kernel
+            // codegen silently drops the call site.
             if (value.Type.IsVoidType &&
                 !(value is TerminatorValue) &&
                 !(value is Store) &&
                 !(value is MemoryBarrier) &&
                 !(value is global::ILGPU.IR.Values.Barrier) &&
-                !(value is PredicateBarrier))
+                !(value is PredicateBarrier) &&
+                !(value is MethodCall))
             {
                 if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm-IR] Skipping void value: {value.GetType().Name}");
                 return;

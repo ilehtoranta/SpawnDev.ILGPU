@@ -363,6 +363,81 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
         });
 
         [TestMethod]
+        public async Task SignedIntDivByPow2TruncateTowardZeroTest() => await RunTest(async accelerator =>
+        {
+            // Regression test for ILGPU IR's Div-by-pow2 -> Shr rewrite.
+            // C# / IL `div` / C99 signed integer division truncates toward
+            // zero: (-1) / 2 == 0, (-3) / 2 == -1, (-5) / 2 == -2, ...
+            // Arithmetic shift right floors toward -infinity:
+            // -1 >> 1 == -1, -3 >> 1 == -2, -5 >> 1 == -3, ...
+            // Off-by-one for every odd-negative dividend. Diagnosed by
+            // Tuvok 2026-04-28 against `Vp9ForwardDct8x8Kernel` after the
+            // post-pass `output[i] /= 2` produced wrong results on CUDA +
+            // OpenCL (CPU passed because the IL backend bypasses the
+            // rewrite). Fix gates the rewrite on unsigned dividends only;
+            // signed Div is left alone for the backend to lower correctly.
+            int[] inputs =
+            {
+                -1, -3, -5, -7, -32639, -2147483647,
+                1, 3, 5, 7, 32639,
+                -2, -4, 0, 2, 4,
+                int.MinValue + 1, int.MaxValue,
+            };
+            using var inBuf = accelerator.Allocate1D(inputs);
+            using var outBuf = accelerator.Allocate1D<int>(inputs.Length);
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<int>, ArrayView<int>>(SignedIntDivByTwoKernel);
+            kernel((Index1D)inputs.Length, inBuf.View, outBuf.View);
+            await accelerator.SynchronizeAsync();
+            var result = await outBuf.CopyToHostAsync<int>();
+            for (int i = 0; i < inputs.Length; i++)
+            {
+                int expected = inputs[i] / 2;  // .NET CLR truncate-toward-zero
+                if (result[i] != expected)
+                    throw new Exception($"Slot {i}: input={inputs[i]} expected (truncate)={expected}, got={result[i]} (diff={result[i] - expected})");
+            }
+        });
+
+        private static void SignedIntDivByTwoKernel(Index1D i, ArrayView<int> input, ArrayView<int> output)
+        {
+            output[i] = input[i] / 2;
+        }
+
+        [TestMethod]
+        public async Task SignedIntDivByPow2_LargerDivisorsTest() => await RunTest(async accelerator =>
+        {
+            // Same regression but with several pow2 divisors (4, 8, 16, 32)
+            // and a wider input range. The div-by-pow2 rewrite applies to
+            // every pow2, so the fix needs to cover all of them.
+            int[] inputs = { -7, -15, -31, -63, -100, -1000, 7, 15, 31, 63, 100, 1000, 0 };
+            using var inBuf = accelerator.Allocate1D(inputs);
+            using var outBuf = accelerator.Allocate1D<int>(inputs.Length * 4);
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<int>, ArrayView<int>>(SignedIntDivByPow2Kernel);
+            kernel((Index1D)inputs.Length, inBuf.View, outBuf.View);
+            await accelerator.SynchronizeAsync();
+            var result = await outBuf.CopyToHostAsync<int>();
+            for (int i = 0; i < inputs.Length; i++)
+            {
+                int x = inputs[i];
+                int[] expected = { x / 4, x / 8, x / 16, x / 32 };
+                for (int j = 0; j < 4; j++)
+                {
+                    int got = result[i * 4 + j];
+                    if (got != expected[j])
+                        throw new Exception($"x={x} /{1 << (j + 2)}: expected={expected[j]}, got={got}");
+                }
+            }
+        });
+
+        private static void SignedIntDivByPow2Kernel(Index1D i, ArrayView<int> input, ArrayView<int> output)
+        {
+            int x = input[i];
+            output[i * 4 + 0] = x / 4;
+            output[i * 4 + 1] = x / 8;
+            output[i * 4 + 2] = x / 16;
+            output[i * 4 + 3] = x / 32;
+        }
+
+        [TestMethod]
         public async Task FloatNaNComparisonTest() => await RunTest(async accelerator =>
         {
             // IEEE-754 multi-comparison NaN regression for f32. Mirrors

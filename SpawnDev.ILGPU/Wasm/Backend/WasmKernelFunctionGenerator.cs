@@ -2732,10 +2732,14 @@ namespace SpawnDev.ILGPU.Wasm.Backend
 
                         // Option E: helper returns actual result. Store it.
                         // Yield flag is in scratch[0].
+                        // Void helpers push nothing on the stack - no Drop needed.
+                        // (Pre-fix: void MethodCall was silently skipped before reaching
+                        // this dispatcher so the Drop never ran. After the void-MethodCall
+                        // skip was lifted in WasmCodeGenerator.GenerateCodeFor, void helpers
+                        // reach here and a stale Drop caused a Wasm stack underflow that
+                        // showed up as RadixSort kernel hang / wrong output.)
                         if (resultLocal.HasValue)
                             WasmModuleBuilder.EmitLocalSet(Code, resultLocal.Value);
-                        else
-                            Code.Add(WasmOpCodes.Drop);
 
                         if (hb < helperPhaseCount - 1)
                         {

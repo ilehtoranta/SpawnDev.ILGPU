@@ -39,6 +39,15 @@ namespace SpawnDev.ILGPU.Wasm
         private int _workerCount = 4;
 
         /// <summary>
+        /// Number of Web Workers actually used for parallel kernel dispatch.
+        /// Set at construction from <see cref="WasmBackendOptions.WorkerCount"/>
+        /// or the default <c>Math.Max(2, navigator.hardwareConcurrency - 2)</c>.
+        /// Read-only at runtime; pass <c>WasmBackendOptions.WorkerCount</c> to
+        /// <see cref="Create"/> to override.
+        /// </summary>
+        public int WorkerCount => _workerCount;
+
+        /// <summary>
         /// Reusable worker pool — lazily initialized on first dispatch.
         /// Workers are created once and reused across kernel dispatches.
         /// </summary>

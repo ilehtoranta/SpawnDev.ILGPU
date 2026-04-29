@@ -560,26 +560,32 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
         // I32ReinterpretF32/F32ReinterpretI32 for Float16 — gives correct 16-bit bit patterns
         // for RadixSort onesComplementMask.
 
-        // Large sort tests: increase timeout from 30s to 120s for 260K+ elements.
-        [TestMethod(Timeout = 120000)]
+        // Large sort tests: 240s timeout (was 120s). Cold-start / small-batch
+        // conditions can see 100-200s for tests that pass in 30-90s mid-sweep
+        // (rc.27 1h17m full sweep had 4M at 42s; small-batch shows the same
+        // tests at 60-200s). 240s = matches the precedent at
+        // SubViewRange_HighDispatchCount (line 589).
+        // Verified 2026-04-28 with 5-test medium-large RadixSort batch: all
+        // pass well under 240s (40s-142s range).
+        [TestMethod(Timeout = 240000)]
         public new async Task RadixSortThresholdProbeTest() => await base.RadixSortThresholdProbeTest();
-        [TestMethod(Timeout = 120000)]
+        [TestMethod(Timeout = 240000)]
         public new async Task RadixSortDescendingWithSentinelsTest() => await base.RadixSortDescendingWithSentinelsTest();
-        [TestMethod(Timeout = 120000)]
+        [TestMethod(Timeout = 240000)]
         public new async Task RadixSortRepeatedResortTest() => await base.RadixSortRepeatedResortTest();
-        [TestMethod(Timeout = 120000)]
+        [TestMethod(Timeout = 240000)]
         public new async Task RadixSortHeavyDuplicateKeysTest() => await base.RadixSortHeavyDuplicateKeysTest();
-        [TestMethod(Timeout = 120000)]
+        [TestMethod(Timeout = 240000)]
         public new async Task RadixSortDescendingOddCountTest() => await base.RadixSortDescendingOddCountTest();
-        [TestMethod(Timeout = 120000)]
+        [TestMethod(Timeout = 240000)]
         public new async Task RadixSortSpawnSceneSimulationTest() => await base.RadixSortSpawnSceneSimulationTest();
-        [TestMethod(Timeout = 120000)]
+        [TestMethod(Timeout = 240000)]
         public new async Task RadixSortDescending1_4MTest() => await base.RadixSortDescending1_4MTest();
-        [TestMethod(Timeout = 120000)]
+        [TestMethod(Timeout = 240000)]
         public new async Task RadixSortDescending2MTest() => await base.RadixSortDescending2MTest();
-        [TestMethod(Timeout = 120000)]
+        [TestMethod(Timeout = 240000)]
         public new async Task RadixSortDescending4MTest() => await base.RadixSortDescending4MTest();
-        [TestMethod(Timeout = 120000)]
+        [TestMethod(Timeout = 240000)]
         public new async Task RadixSortAscending1_4MTest() => await base.RadixSortAscending1_4MTest();
 
         // 500 sequential dispatches x 2 kernels x SynchronizeAsync is genuinely slow on Wasm
