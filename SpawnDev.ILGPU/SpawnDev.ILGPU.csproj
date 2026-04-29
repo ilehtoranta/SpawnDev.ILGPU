@@ -4,8 +4,8 @@
 		<TargetFramework>net10.0</TargetFramework>
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>enable</Nullable>
-		<Version>4.9.2-rc.29</Version>
-		<PackageReleaseNotes>v4.9.2-rc.29: Respin of rc.28 to actually deliver the signed Div-by-pow2 fix. The rc.28 wrapper bumped this csproj's version but kept the transitive dependency at `SpawnDev.ILGPU.Fork 2.0.1`, so the consumer's resolved `ILGPU.dll` was still the unfixed Apr-23 build and Tuvok's repro fired identically. Two upstream issues compounded the miss: (a) the rc.28 build did not propagate the Fork bump (now caught by `_check-fork-version-sync.bat` at repo root + CI workflow), and (b) Tuvok's manual `.cs` edit landed on a T4-generated file whose source-of-truth is `ILGPU/Static/BinaryMathOperations.xml`; the next clean build silently regenerated the `.cs` without the gate (now caught by the existing T4-drift CI action and `_check-tt-drift.bat`). rc.29 bundles `SpawnDev.ILGPU.Fork 2.0.2` + `SpawnDev.ILGPU.Algorithms.Fork 2.0.2` which carry the corrected XML rewriter table; the regenerated `IRBuilder.BinaryArithmeticSimplify_RHS` now gates the `Div`-by-pow2 → `Shr` rewrite on `(flags &amp; ArithmeticFlags.Unsigned)` exactly as Tuvok diagnosed. No other behavioural change since rc.28 - the Wasm `[NoInlining]` void helper fix and the public `WasmAccelerator.WorkerCount` diagnostic are still in place (those changes ship in this wrapper DLL, not the Fork DLL). Regression coverage unchanged: `SignedIntDivByPow2TruncateTowardZeroTest` + `SignedIntDivByPow2_LargerDivisorsTest` in `BackendTestBase.Tests1`, 14/14 across all 7 backends.</PackageReleaseNotes>
+		<Version>4.9.2</Version>
+		<PackageReleaseNotes>v4.9.2 stable: rolls up the rc.7-rc.30 series. **Headline:** OpenCL phi-binding-per-target codegen fix - `CLCodeGenerator.Terminators.cs` now mirrors `PTXCodeGenerator`'s `BindPhis(target)` approach so phi bindings emit only on the edge actually being taken, not unconditionally before the conditional branch. Closes Tuvok's `Av1RangeCoderGpu_CdfQ15_RoundTrip_AllBackends` (was 1/3 FAIL on OpenCL) and `Av1CoefDecoderGpu_RoundTrip_*` (was 4/15 FAIL on OpenCL) - 18/18 PASS post-fix across CPU + CUDA + OpenCL. Also rolled up: signed `Div by pow2` IR correctness (rc.28-29 - off-by-one for odd-negative dividends, gated on `(flags &amp; ArithmeticFlags.Unsigned)`); IEEE 754 NaN/Inf codegen across WGSL/GLSL/Wasm/OpenCL (rc.26); Wasm wait/notify-free + worker-headroom default (rc.27); helper fn-definition emission for compile-cliff avoidance (rc.18); `AcceleratorRequirements` capability gating (rc.10); `UnsupportedKernelFeatureException` typed codegen errors (rc.10); `LocalMemory&lt;T&gt;(N >= 32)` WGSL codegen 5-layer fix (rc.10); Float16 (Half) everywhere - native or emulated; i64 `Atomic.Add` on WebGPU lock-free CAS loop; T4-drift CI guard + four-package version-sync CI guard. See [CHANGELOG.md](CHANGELOG.md) for the full per-version history.</PackageReleaseNotes>
 		<GeneratePackageOnBuild>True</GeneratePackageOnBuild>
 		<GenerateDocumentationFile>true</GenerateDocumentationFile>
 		<EmbedAllSources>true</EmbedAllSources>
@@ -59,8 +59,8 @@
 		<ProjectReference Include="..\ILGPU.Algorithms\ILGPU.Algorithms.csproj" />
 	</ItemGroup>
 	<ItemGroup Condition="!Exists('$(MSBuildThisFileDirectory)..\ILGPU\ILGPU.csproj')">
-		<PackageReference Include="SpawnDev.ILGPU.Fork" Version="2.0.2" />
-		<PackageReference Include="SpawnDev.ILGPU.Algorithms.Fork" Version="2.0.2" />
+		<PackageReference Include="SpawnDev.ILGPU.Fork" Version="2.0.3" />
+		<PackageReference Include="SpawnDev.ILGPU.Algorithms.Fork" Version="2.0.3" />
 	</ItemGroup>
 
 	<ItemGroup>

@@ -473,6 +473,11 @@ namespace ILGPU.Backends.OpenCL
             var intermediatePhiVariables = new Dictionary<Value, Variable>(
                 phiBindings.MaxNumIntermediatePhis);
 
+            // Stash for the per-target BindPhis emit during terminator codegen.
+            this.phiBindings = phiBindings;
+            this.phiBindingsValid = true;
+            this.intermediatePhiVariables = intermediatePhiVariables;
+
             // Generate code
             foreach (var block in blocks)
             {
@@ -503,55 +508,100 @@ namespace ILGPU.Backends.OpenCL
                     }
                 }
 
-                // Wire phi nodes
-                if (phiBindings.TryGetBindings(block, out var bindings))
-                {
-                    // Clear intermediate phi variables from previous blocks.
-                    // These intermediates are only valid within a single block's
-                    // phi binding set (for handling phi swaps within the same
-                    // block). Using stale intermediates from other blocks causes
-                    // incorrect source resolution (fixes issue #1539).
-                    intermediatePhiVariables.Clear();
-
-                    // Assign all temporaries
-                    foreach (var (phiValue, value) in bindings)
-                    {
-                        // Load the current phi target variable
-                        var phiTargetVariable = Load(phiValue);
-
-                        // Check for an intermediate phi value
-                        if (bindings.IsIntermediate(phiValue))
-                        {
-                            if (!intermediatePhiVariables.TryGetValue(
-                                phiValue,
-                                out var intermediateVariable))
-                            {
-                                intermediateVariable = AllocateType(phiValue.Type);
-                                intermediatePhiVariables.Add(
-                                    phiValue,
-                                    intermediateVariable);
-
-                                // Move this phi value into a temporary variable for reuse
-                                Declare(intermediateVariable);
-                            }
-                            Move(intermediateVariable, phiTargetVariable);
-                        }
-
-                        // Determine the source value from which we need to copy from
-                        var sourceVariable = intermediatePhiVariables
-                            .TryGetValue(value, out var tempVariable)
-                            ? tempVariable
-                            : Load(value);
-
-                        // Move contents
-                        Move(phiTargetVariable, sourceVariable);
-                    }
-                }
+                // Per-target phi binding emission moved into the terminator emit
+                // (see GenerateCode(IfBranch) / (UnconditionalBranch) / (SwitchBranch)).
+                // This mirrors PTXCodeGenerator's BindPhis(target) approach and fixes
+                // the "do-while loop with non-phi alias of a back-edge phi" bug:
+                // emitting all bindings unconditionally before the branch caused
+                // back-edge phi updates to fire even when the branch was going to a
+                // non-loop successor, stomping values that should have been preserved
+                // (e.g. `u = v` inside the loop where v is the loop's phi).
+                // Diagnosed 2026-04-28 against SpawnDev.Codecs Av1RangeDecoderGpu.DecodeCdfQ15.
 
                 // Build terminator
                 this.GenerateCodeFor(block.Terminator.AsNotNull());
                 Builder.AppendLine();
             }
+
+            // Clear the per-method state.
+            this.phiBindingsValid = false;
+            this.intermediatePhiVariables = null;
+        }
+
+        /// <summary>
+        /// Phi bindings stash; populated for the duration of GenerateCodeInternal so
+        /// the terminator emit (per-target BindPhis) can reach it. PhiBindings is a
+        /// readonly struct, not a class, so we use a `phiBindingsValid` companion flag
+        /// rather than nullable-struct (which loses the value-type semantics needed for
+        /// TryGetBindings).
+        /// </summary>
+        private PhiBindings phiBindings;
+        private bool phiBindingsValid;
+
+        /// <summary>
+        /// Intermediate phi variable cache; shared across BindPhis calls within a block
+        /// (a binding's source-temp save must be visible to the next BindPhis target call
+        /// from the same predecessor block).
+        /// </summary>
+        private Dictionary<Value, Variable>? intermediatePhiVariables;
+
+        /// <summary>
+        /// Emits phi bindings for the edge from the current block to <paramref name="target"/>.
+        /// When <paramref name="target"/> is null, emits all bindings (matches PTX null-target
+        /// fall-back when no per-target separation is needed). Mirrors PTXCodeGenerator.BindPhis.
+        /// </summary>
+        /// <param name="currentBlock">The block whose terminator is being emitted.</param>
+        /// <param name="target">The successor block being branched to, or null for "all".</param>
+        internal void BindPhis(BasicBlock currentBlock, BasicBlock? target)
+        {
+            if (!phiBindingsValid || intermediatePhiVariables == null) return;
+            if (!phiBindings.TryGetBindings(currentBlock, out var bindings)) return;
+
+            // The intermediate-temp dict is per-block (scope of phi swap detection within
+            // one binding set). Each new block emit starts with a fresh dict; per-target
+            // calls within the SAME block share the dict so a save-then-load handoff
+            // works across two BindPhis calls (e.g. for an IfBranch with both targets).
+            // We clear when we re-enter a new currentBlock; the outer loop handles that
+            // via the call sequence.
+
+            foreach (var (phiValue, value) in bindings)
+            {
+                // Reject phis not flowing to the target edge (PTX-style filter).
+                // When target is null, every binding emits.
+                if (target is not null && phiValue.BasicBlock != target)
+                    continue;
+
+                var phiTargetVariable = Load(phiValue);
+
+                if (bindings.IsIntermediate(phiValue))
+                {
+                    if (!intermediatePhiVariables.TryGetValue(
+                            phiValue,
+                            out var intermediateVariable))
+                    {
+                        intermediateVariable = AllocateType(phiValue.Type);
+                        intermediatePhiVariables.Add(phiValue, intermediateVariable);
+                        Declare(intermediateVariable);
+                    }
+                    Move(intermediateVariable, phiTargetVariable);
+                }
+
+                var sourceVariable = intermediatePhiVariables
+                    .TryGetValue(value, out var tempVariable)
+                    ? tempVariable
+                    : Load(value);
+
+                Move(phiTargetVariable, sourceVariable);
+            }
+        }
+
+        /// <summary>
+        /// Reset the intermediate-temp scope at the start of each terminator emit.
+        /// Called from the unconditional branch / if branch / switch branch generators.
+        /// </summary>
+        internal void ResetPhiBindingScope()
+        {
+            intermediatePhiVariables?.Clear();
         }
 
         #endregion

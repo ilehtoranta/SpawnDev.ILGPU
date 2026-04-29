@@ -7,11 +7,23 @@ Write parallel compute code in C# and let the library pick the best available ba
 
 > **Your existing ILGPU kernels run in the browser with zero changes to the kernel code - and the same code runs on desktop too.**
 
-## What's New in 4.9.2
+## Recent Highlights
 
-### Helper Method Fn-Definition Emission - Compile Cliff Fix (rc.18)
+**4.9.2 (current):** OpenCL phi-binding-per-target codegen fix (Tuvok's `Av1RangeDecoderGpu.DecodeCdfQ15` round-trip green); rolls up the rc.7-rc.30 series (signed `Div by pow2` correctness, NaN/Inf codegen across WGSL/GLSL/Wasm/OpenCL, Wasm wait/notify-free + worker-headroom default, helper fn-definition emission for compile-cliff avoidance, `AcceleratorRequirements` capability gating, T4-drift + four-package version-sync CI guards).
 
-Large helper methods called many times from a kernel can produce a multi-thousand-line WGSL/GLSL `fn main()` that hits the browser shader validator's size limit (Tint rejects with `Invalid BindGroupLayout`). Tag the helper with `[MethodImpl(MethodImplOptions.NoInlining)]` and SpawnDev.ILGPU now emits a real WGSL/GLSL `fn` definition + N call sites instead of N inline expansions:
+**4.9.0:** Complete sub-word data type support (`Int8`, `UInt8`, `Int16`, `UInt16`, `Float16`) across all 6 GPU backends + `CopyFromJS` zero-copy JS->GPU transfer.
+
+**4.8.0:** Wasm worker function caching (3-4x kernel dispatch speedup), full worker parallelism for non-barrier kernels.
+
+**4.7.1:** GPU-side test verification (`GpuTestVerify`, 10x+ faster than CPU readback), CPU default optimization, full DI integration.
+
+**4.6.0:** Wasm fiber-based barrier dispatch (full ILGPU Algorithms on Wasm, all RadixSort variants 100K-4M+ elements), 20+ Wasm bugs fixed, `ShaderDebugService` auto-dump for all generated shader code.
+
+**See [CHANGELOG.md](CHANGELOG.md)** for the full per-version history including code samples and per-backend implementation details.
+
+### Helper Method Fn-Definition Emission - Compile Cliff Fix (4.9.2)
+
+The most-asked-about feature from 4.9.2 - large helper methods called many times from a kernel produce a multi-thousand-line WGSL/GLSL `fn main()` that hits the browser shader validator's size limit (Tint rejects with `Invalid BindGroupLayout`). Tag the helper with `[MethodImpl(MethodImplOptions.NoInlining)]` and SpawnDev.ILGPU emits a real WGSL/GLSL `fn` definition + N call sites instead of N inline expansions:
 
 ```csharp
 using System.Runtime.CompilerServices;
@@ -36,238 +48,8 @@ Supports `int / float / short / byte / Half / bool` value params, `ref T` / `out
 
 See [`Docs/kernels.md` — Helper Methods and Inlining](Docs/kernels.md#helper-methods-and-inlining) for when to use `[NoInlining]`, when not to, and what each backend does.
 
-### AcceleratorRequirements - Capability-Gated Backend Selection (rc.10)
+For everything else - per-version code samples, per-backend implementation details, the rc.X investigation logs - see **[CHANGELOG.md](CHANGELOG.md)**.
 
-Kernels that use features some backends can't implement (atomics on WebGL, native f64 on WebGPU, subgroups on Wasm) will silently produce wrong output if they land on the wrong backend. `AcceleratorRequirements` lets you declare requirements up-front and the selection path filters out incapable backends:
-
-```csharp
-using SpawnDev.ILGPU;
-
-using var acc = context.CreatePreferredAccelerator(
-    new AcceleratorRequirements
-    {
-        RequiresAtomics = true,        // rules out WebGL
-        RequiresFloat64Native = true,  // rules out WebGPU + WebGL
-    });
-// -> on desktop: CUDA > OpenCL > CPU
-// -> on browser with this combo: only Wasm survives
-// -> throws NotSupportedException naming the unmet requirements when nothing matches
-```
-
-All flags mirror the 6-backend feature matrix: `RequiresAtomics`, `RequiresSharedMemory`, `RequiresBarriers`, `RequiresFloat16`, `RequiresFloat16Native`, `RequiresFloat64`, `RequiresFloat64Native`, `RequiresInt64`, `RequiresInt64Native`, `RequiresInt64Atomics`, `RequiresSubGroups`. Use `AcceleratorRequirements.None` for no filtering.
-
-Other entry points: `context.EnumerateCompatibleDevices(requirements)` for ranking your own pick, `device.Satisfies(requirements)` for per-device checks. Put the capability knowledge in one place so consuming projects stop hand-rolling `if (backend == WebGL) skip;` branches.
-
-### UnsupportedKernelFeatureException - Typed Codegen Errors (rc.10)
-
-New `SpawnDev.ILGPU.UnsupportedKernelFeatureException` replaces the prior anonymous `NotSupportedException` at WebGL atomic codegen sites with a typed exception carrying `Feature`, `Backend`, and `Remediation` properties:
-
-```csharp
-try { kernel = accelerator.LoadAutoGroupedStreamKernel<...>(...); }
-catch (UnsupportedKernelFeatureException ex)
-{
-    Console.WriteLine($"Feature {ex.Feature} not supported on {ex.Backend}");
-    Console.WriteLine($"Remediation: {ex.Remediation}");
-}
-```
-
-Thrown at kernel compile time (not dispatch time) so the failure mode is loud and self-documenting. Still inherits from `NotSupportedException` so existing catch-by-base code keeps working. Currently wired at the WebGL `GenericAtomic` and `AtomicCAS` sites; the plan is to expand coverage to every backend intrinsic that used to silently emit `target = 0` or similar garbage.
-
-### LocalMemory<T>(N >= 32) WGSL Codegen Fix (rc.10)
-
-Kernels declaring `LocalMemory.Allocate<int>(N)` with `N >= 32` produced incorrect WGSL on WebGPU (SSA-expanded the entire array into N scalar fields, then downstream DCE dropped some of them, producing garbage output). 5-layer fix:
-
-1. `SSAStructureConstruction.CanConvert` honors a 32-element SSA threshold and leaves larger allocas as memory.
-2. `WGSLCodeGenerator.SetupAllocations` tracks the full array type in `valueVariables` for LEA-through-alloca patterns.
-3. `WGSLKernelFunctionGenerator.HoistCrossBlockVariables` has an RHS-lookup fallback for missing declarations.
-4. WebGL `GLSLCodeGenerator` alloca emission also declares the `int` pointer variable for parity.
-5. WebGL `GLSLKernelFunctionGenerator` aliases local alloca backing and LEA offsets for sub-word read/write paths.
-
-Regression test `LocalMemoryRepro_Int64_ShortByteViews` locks down the happy path (5 backends) and the WebGL architectural varying-count ceiling (1 expected skip - WebGL's 1-thread-per-output-element topology caps per-kernel varying count, orthogonal to this fix).
-
-### Float16 (Half) Everywhere - Native or Emulated
-
-`Capabilities.Float16 = true` on every backend. Half kernels compile and run correctly across CPU, CUDA, OpenCL, WebGPU, WebGL, and Wasm - native when the hardware exposes it (CUDA SM_53+, OpenCL `cl_khr_fp16`, WebGPU `shader-f16`), emulated otherwise via `_f16_to_f32` / `_f32_to_f16` helpers with f32 arithmetic. `Capabilities.Float16Native` on WebGPU and OpenCL exposes whether native hardware f16 is active so downstream code can branch without a backend-type check. Emulation is lossless - f16 is a strict subset of f32's encoding, so values round-trip bit-for-bit. `WebGPUBackend.ForceEmulatedF16` test flag lets you force the emulation path on shader-f16-capable hardware for verification.
-
-`accelerator.Reduce<Half, AddHalf/MaxHalf/MinHalf>` (the Accelerator-level multi-workgroup reduction API) now works on 6 of 7 backend variants (CPU, CUDA, OpenCL, WebGPU with or without subgroups, Wasm). Routes through a widen-to-f32 dispatch: per-workgroup reduction in Half, cross-workgroup atomic combine in f32 via the existing `Atomic.Add(ref float)` / `Atomic.Min(ref float)` / `Atomic.Max(ref float)` CAS infrastructure, convert back to Half. Lossless and bit-for-bit identical across all 6 backends on the same inputs. WebGL legitimately skips - vertex shaders have no atomic operations (same structural wall every `ILGPUReduce<T>` variant hits).
-
-See **[Plans/f16-emulation-plan.md](Plans/f16-emulation-plan.md)** for the per-phase design notes and **[Docs/atomic-operations.md](Docs/atomic-operations.md)** Float16 row for the atomic-operation support matrix.
-
-### i64 Atomic.Add on WebGPU - Lock-Free CAS Loop
-
-`Atomic.Add` on `long`/`ulong` now works correctly on WebGPU with concurrent writers. The implementation uses a lock-free CAS loop on the lo half + `atomicAdd` on the hi half with carry propagation. No lock buffer, no extra binding slot, no spinlock.
-
-Previously, i64 arithmetic atomics used a non-atomic read-modify-write that silently produced wrong results under contention. Now they're correct.
-
-i64 bitwise atomics (`Atomic.And`, `Atomic.Or`, `Atomic.Xor`) continue to use dual independent i32 atomics, which is correct because bitwise operations are component-independent.
-
-i64 `Atomic.Min`, `Atomic.Max`, `Atomic.Exchange`, and `Atomic.CompareExchange` throw `NotSupportedException` - these require 64-bit CAS which WGSL does not provide. f64 atomics also throw for the same reason.
-
-See **[Docs/atomic-operations.md](Docs/atomic-operations.md)** for the full per-operation, per-backend support matrix.
-
-### WGSL Break-in-Loop Codegen Fix
-
-Fixed WGSL transpiler emitting `break` instead of `return` for early kernel exits inside loops. The `IsReturnExit` helper now correctly traces exit chains through empty pass-through blocks to distinguish "exit the loop" from "exit the kernel." This fixes kernels with `return` or value-assigning `break` inside `for`/`while` loops.
-
-Also fixed: WGSL codegen losing value assignments before `break` statements inside loops. The `HasNonPhiInstructions` check now correctly identifies post-loop merge code folded into the break path by the IR optimizer.
-
-### Mixed Atomic/Non-Atomic Buffer Access Fix
-
-When a buffer has both atomic operations (`Atomic.And(ref buf[x], mask)`) and non-atomic reads (`long val = buf[y]`), the WGSL codegen now correctly emits `atomicLoad` for ALL reads from that buffer. Previously, non-atomic reads on atomic buffers produced invalid WGSL that Chrome's validator rejected, causing silent pipeline creation failure.
-
-### WGSL Shader Validation Errors Surfaced
-
-Invalid WGSL shaders now produce hard failures instead of silent no-op pipelines. `CheckShaderAsync` feeds compilation errors into `_pendingGpuErrors`, which are thrown on the next `Synchronize()` or `ThrowIfGpuErrors()` call. Previously, a shader that failed Chrome's WGSL validator would silently dispatch as a no-op, producing all-zero output with no error.
-
-### Implicit SynchronizeAsync Before Readback
-
-Browser backends now implicitly call `SynchronizeAsync()` before GPU-to-CPU readback, matching the behavior of desktop backends (CUDA calls `cuStreamSynchronize`, OpenCL calls `clFinish`, CPU uses synchronous memcpy). Previously, the Wasm backend's `CopyToHostAsync` read directly from `SharedArrayBuffer` without waiting for pending kernel dispatches to complete, which could return stale data. WebGPU and WebGL already had implicit sync. All 5 Wasm readback paths are now patched, bringing all 6 backends to parity.
-
-### Stream Ordering Verified Correct
-
-Extensive testing confirmed that same-stream dispatch ordering is already correct on all 3 browser backends:
-- **WebGPU:** Single command encoder batches compute passes in recording order
-- **WebGL:** PostMessage to single-threaded JS worker processes messages sequentially
-- **Wasm:** Each `RunKernelAsync` awaits all prior pending work before dispatching
-
-Five new stream ordering tests (`Tests18`) verify the implicit ordering contract and will catch future regressions.
-
-### WebGL Unsupported Atomic Guards
-
-WebGL now throws `NotSupportedException` at kernel compilation time for all atomic operations except `Atomic.Add`. Previously, unsupported atomics silently emitted `target = int(0)`, producing wrong results with no error. `Atomic.Add` on WebGL uses the Transform Feedback vote pattern (partial support - the return value is always 0).
-
-### GLSL IsReturnExit Defense-in-Depth
-
-The GLSL codegen now has the same `IsReturnExit` helper as WGSL, correctly distinguishing loop-break from kernel-return in generated shaders. This prevents the same class of break-vs-return bug that was fixed in WGSL.
-
-## What's New in 4.9.0
-
-### Complete Sub-Word Data Type Support
-
-Full `Int8`, `UInt8`, `Int16`, `UInt16`, and `Float16` (`ILGPU.Half`) buffer support across all 6 GPU backends. Sub-word types are stored packed and extracted with correct stride on every backend - no more data corruption from type promotion mismatches.
-
-- **WebGPU** - Packed into `array<atomic<u32>>` storage buffers. Load via `atomicLoad` + shift + mask + sign-extend/zero-extend. Store via thread-safe `atomicAnd` + `atomicOr` for packed writes (prevents data races when threads write different halves of the same word). Float16 uses inline IEEE 754 f16-to-f32 conversion in WGSL.
-- **Wasm** - Native `i32.load8_s`/`i32.load8_u`/`i32.load16_s`/`i32.load16_u`/`i32.store8`/`i32.store16` opcodes. Float16 via `EmitF16ToF32`/`EmitF32ToF16` for direct ArrayView load/store.
-- **WebGL** - `texelFetch` from R32I texture with shift+mask extraction in GLSL. Float16 via `_f16_to_f32`/`_f32_to_f16` using `uintBitsToFloat`/`floatBitsToUint`.
-- **OpenCL** - Float16 promoted to `float` compute type. `vload_half`/`vstore_half` for buffer access (handles 2-byte stride internally).
-- **CUDA/CPU** - Native support, no changes needed.
-
-### ILGPU.Half Intrinsics
-
-- `Half.Abs`, `Half.Min`, `Half.Max`, `Half.Clamp` - GPU-accelerated half-precision math
-- Implicit `System.Half` <-> `ILGPU.Half` conversion operators for seamless interop
-- Use `ILGPU.Half` (not `System.Half`) in kernel signatures for correct transpilation
-
-### CopyFromJS - Zero-Copy JS-to-GPU Transfer
-
-New `IBrowserMemoryBuffer.CopyFromJS()` methods accept `TypedArray` or `ArrayBuffer` and write directly to GPU memory without .NET heap allocation. Available on all 3 browser backends (WebGPU, WebGL, Wasm).
-
-```csharp
-// Write JS data directly to GPU buffer - no .NET allocation
-var jsArray = new Int16Array(data);
-((IBrowserMemoryBuffer)buffer).CopyFromJS(jsArray);
-```
-
-## What's New in 4.8.0
-
-### Worker Function Caching (3-4x Speedup)
-
-Wasm backend now caches compiled `AsyncFunction` objects in the worker bootstrap. Previously, V8 recompiled each unique script string on every dispatch. Caching eliminates recompilation overhead - **3-4x faster** kernel dispatch on repeated calls.
-
-### Full Worker Parallelism
-
-Non-barrier Wasm workers uncapped from 2 to full `navigator.hardwareConcurrency`. Barrier-limited workers remain capped for synchronization correctness, but non-barrier kernels now use all available cores.
-
-### Memory Leak Fixes
-
-- `AllWasmBinaries` and `AllKernelInfos` collections gated behind debug dump flag - no longer accumulate in production
-- `_dispatchLog` gated with `VerboseLogging` - eliminated unbounded log growth
-- `ExtraImportCount` for correct Wasm function index calculation
-
-### Barrier Count Auto-Correction
-
-Automatic detection and correction of barrier count mismatches between the kernel's declared barrier count and the actual barriers found during compilation.
-
-## What's New in 4.7.1
-
-### GPU Test Verification (`GpuTestVerify`)
-
-Shared utility for verifying test results on the GPU without CPU readback. Data stays on the accelerator - CPU reads back only a few bytes of violation counts.
-
-- `VerifyDescendingSort` / `VerifyAscendingSort` - Sort order + index integrity + key-value tracking
-- `CompareBuffers` - Float comparison returning `(meanAbsError, maxAbsError)`
-- **10x+ faster** verification - 4M element RadixSort went from 120s timeout to 11s on CPU
-
-### QR Code Library (`SpawnDev.ILGPU.QR`)
-
-GPU-accelerated QR code encoder + decoder. Zero external dependencies.
-
-- **Encoder** - All 40 QR versions, 4 EC levels, byte mode, 8 mask patterns with penalty scoring
-- **Renderer** - GPU kernel for pixel rendering + CPU fallback + logo overlay (EC level H)
-- **Decoder** - Grayscale -> binarize -> finder detection -> grid sampling -> unmask -> Reed-Solomon -> data decode
-- **Round-trip verified** - Encode -> render -> decode = exact match, including with logo overlay
-
-### CPU Default Optimization
-
-CPU backend default changed from warp=4/warps=4 (group size 16) to **warp=8/warps=8 (group size 64)**, matching the Wasm backend's proven configuration. 4M element RadixSort: **TIMEOUT -> 11 seconds**. CPU is now faster than Wasm for the same workloads.
-
-### DI Integration
-
-- `AddPlatformCrypto()` - registers platform-appropriate `IPortableCrypto` (WebCrypto in browser, System.Security.Cryptography on desktop)
-- `WebTorrentClient` registered as DI singleton with tracker discovery
-- All test classes receive `IPortableCrypto` via constructor injection
-
-## What's New in 4.6.0
-
-### Wasm Fiber-Based Barrier Dispatch
-
-Complete rewrite of the Wasm backend's barrier synchronization model. Kernels with barriers now use a **fiber-based phase dispatch** - each barrier becomes a yield point where the kernel saves state and re-enters at the next phase. A **Wasm-native phase dispatcher** handles the entire thread/phase loop inside WebAssembly, eliminating JS-Wasm boundary crossings between phases. Barriers use **pure spin synchronization** via `i32.atomic.load` loops for correct multi-worker execution at full `hardwareConcurrency`.
-
-- **Full ILGPU Algorithms on Wasm** - All RadixSort variants (int, uint, float, pairs, descending, 100K-4M+ elements), Scan, Reduce, Histogram. Previously limited to <=64 elements.
-- **Pure spin barriers** - Replaced `memory.atomic.wait32`/`memory.atomic.notify` with atomic load spin loops after discovering a [V8 Atomics.wait visibility bug](https://issues.chromium.org/issues/495679735) where `wait32` returning "not-equal" does not provide happens-before guarantees for third-party stores with 3+ workers. [Live interactive demo](https://lostbeard.github.io/v8-atomics-wait-bug/).
-- **20+ bugs fixed** - fiber yield-per-phase, br depth miscalculation, scratch overflow, shared memory stomping, stale dispatch state, completion state persistence, shared memory alloca overlap (same-size dedup), IR address space aliasing (LowerStructures -> LowerArrays -> InferAddressSpaces chain), struct/scratch overlap, per-worker scratch isolation, atomic RMW opcode table, unsigned comparison, Float16, ViewSourceSequencer, subViewByteOffset, CopyFromBuffer, and more.
-- **ShaderDebugService** - auto-dumps all generated WGSL, GLSL, and Wasm binaries to a local folder on every kernel compilation. Backend-organized subfolders. IDB persistence. Full metadata headers.
-- **Test results writer** - `UnitTestsView` writes `latest.json` (live progress) and timestamped `test-run-*.json` (history) to the debug folder
-
-### Capturing Lambda Kernels (4.4.0)
-
-Write GPU kernels as C# lambdas that capture local variables. Captured scalar values are automatically passed to the GPU at dispatch time - no boilerplate, no separate static methods.
-
-```csharp
-int multiplier = 5;
-float offset = 0.5f;
-var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<float>>(
-    (index, buf) => { buf[index] = index * multiplier + offset; });
-kernel((Index1D)length, buffer.View);
-```
-
-### DelegateSpecialization - Higher-Order GPU Kernels (4.4.0)
-
-Write one kernel that accepts different operations as parameters. The delegate is resolved at dispatch time and its body is inlined directly into the kernel via compile-time specialization - no function pointers, no overhead.
-
-```csharp
-static void MapKernel(Index1D index, ArrayView<int> buf,
-    DelegateSpecialization<Func<int, int>> transform)
-{
-    buf[index] = transform.Value(buf[index]);
-}
-
-static int Negate(int x) => -x;
-static int DoubleIt(int x) => x * 2;
-
-var kernel = accelerator.LoadAutoGroupedStreamKernel<
-    Index1D, ArrayView<int>, DelegateSpecialization<Func<int, int>>>(MapKernel);
-
-kernel(size, buffer, new DelegateSpecialization<Func<int, int>>(Negate));
-kernel(size, buffer, new DelegateSpecialization<Func<int, int>>(DoubleIt));
-```
-
-### Previous Highlights (4.0.0)
-
-- **WebGPU backend refactor** - `SharedMemoryResolver`, `UniformityAnalyzer`, per-function emulation trimming, dead variable elimination, i64 constant hoisting, WGSL pre-validation
-- **WebGPU RadixSort** - All variants passing (4M+ elements, pairs, descending)
-- **Device loss detection** - WebGPU `device.lost` promise, WebGL `webglcontextlost` event
-- **Unified test infrastructure** - `PlaywrightMultiTest` runs all tests (desktop + browser) in a single `dotnet test` invocation
 
 ## Architecture
 
