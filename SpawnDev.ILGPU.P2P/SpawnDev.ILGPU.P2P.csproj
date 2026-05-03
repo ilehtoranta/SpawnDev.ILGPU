@@ -4,8 +4,8 @@
 		<TargetFramework>net10.0</TargetFramework>
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>enable</Nullable>
-		<Version>4.9.4</Version>
-		<PackageReleaseNotes>v4.9.4 stable: closes `P2PSwarm.TwoTab_PeerDiscovery` regression. `P2PWebRtcBridge.wire.OnClose` now filters phantom-alive wires (where `Destroyed=false` but underlying transport is dead) using the new `Wire.SimplePeer.IsTransportDead` accessor in SpawnDev.WebTorrent 3.2.3 stable. Both bridge filter sites updated: the wireSet `RemoveWhere` and the `torrent.Wires` cross-check walk. Catches the Chromium-under-Playwright bug where `connectionstatechange` doesn't propagate to `"failed"` on remote tab close. Verified: TwoTab passes 1m 37s standalone (was failing 90s timeout in 4.9.2-rc.34); LargeBuffer_100MB passes 3m 37s standalone (no regression). Stable rollup of 4.9.4-rc.1 + rc.2. SpawnDev.WebTorrent dep bumped 3.2.2 -&gt; 3.2.3 stable.</PackageReleaseNotes>
+		<Version>4.9.5-rc.1</Version>
+		<PackageReleaseNotes>v4.9.5-rc.1: bundle bump in lockstep with SpawnDev.WebTorrent 3.2.4-rc.1 (closes the duplicate-handshake-destroy SCTP cascade that broke RenderMandelbrot in real-world Chrome Stable + Canary cross-browser dispatch). P2P source unchanged — the bridge already dedupes by canonical BT peerId, which is exactly what WebTorrent 3.2.4-rc.1 now relies on instead of forcibly destroying duplicates at the BT layer. SpawnDev.WebTorrent dep bumped 3.2.3 -&gt; 3.2.4-rc.1.</PackageReleaseNotes>
 		<GeneratePackageOnBuild>True</GeneratePackageOnBuild>
 		<GenerateDocumentationFile>true</GenerateDocumentationFile>
 		<EmbedAllSources>true</EmbedAllSources>
@@ -28,7 +28,7 @@
 
 	<ItemGroup>
 		<ProjectReference Include="..\SpawnDev.ILGPU\SpawnDev.ILGPU.csproj" />
-		<PackageReference Include="SpawnDev.WebTorrent" Version="3.2.3" />
+		<PackageReference Include="SpawnDev.WebTorrent" Version="3.2.4-rc.1" />
 	</ItemGroup>
 
 </Project>
