@@ -2,6 +2,43 @@
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
 
+## 4.9.4-rc.2 (2026-05-03)
+
+### Fixes the rc.1 kernel-module memory import maximum mismatch
+
+rc.1 made the host-side `WebAssembly.Memory` `maximum` configurable via `WasmBackendOptions.MaxLinearMemoryPages`, but the compiled kernel module's WASM binary still hardcoded `maximum=16384` in its memory-import declaration. Per WebAssembly spec, the imported memory's max must be `<=` the import's declared max — when the host cap was raised above 16384, `WebAssembly.instantiate` rejected every kernel dispatch:
+
+```
+WebAssembly.instantiate(): Import #0 "env" "memory":
+memory import has a larger maximum size 32768 than the module's declared maximum 16384
+```
+
+Discovered by Data on DA3-Small with `MaxLinearMemoryPages=32768`; first dispatch failed instantly, all Wasm tests in the consuming project failed.
+
+`WasmBackend.CreateKernel` now reads `Options.MaxLinearMemoryPages` and threads it through `WasmModuleBuilder.ImportSharedMemory("env", "memory", 1, (uint)Options.MaxLinearMemoryPages)`. Both ends agree at any cap up to 65536 (4 GiB).
+
+Default behavior unchanged — consumers at the 16384 default see byte-identical module output vs rc.1.
+
+### SpawnDev.ILGPU.P2P 4.9.4-rc.2 (lockstep bundle)
+
+P2P source unchanged from rc.1; bumped to keep the bundle versioned in sync. Same `P2PWebRtcBridge.wire.OnClose` phantom-alive filter, same SpawnDev.WebTorrent 3.2.3-rc.2 dep.
+
+## 4.9.4-rc.1 (2026-05-03) (superseded by 4.9.4-rc.2)
+
+### Configurable Wasm linear-memory ceiling
+
+New `WasmBackendOptions.MaxLinearMemoryPages` knob (default 16384 / 1 GiB, configurable up to 65536 / 4 GiB). Threaded through `WasmAccelerator.Create` and the cached-memory `WebAssembly.Memory` `eval` strings. Default behavior unchanged. Required by SpawnDev.ILGPU.ML's DA3-Small graph executor where total live allocations exceed 1 GiB at op 93.
+
+**KNOWN ISSUE (fixed in rc.2):** The kernel module's memory-import maximum was still hardcoded at 16384 in this version, so consumers raising the host cap hit `WebAssembly.instantiate` failures. Use rc.2 instead.
+
+### SpawnDev.ILGPU.P2P 4.9.4-rc.1: TwoTab phantom-alive close
+
+`P2PWebRtcBridge.wire.OnClose` now filters phantom-alive wires (where `Destroyed=false` but the underlying transport is dead) using the new `Wire.SimplePeer.IsTransportDead` accessor in SpawnDev.WebTorrent 3.2.3-rc.2. Catches the Chromium-under-Playwright bug where `connectionstatechange` doesn't propagate to `"failed"` on remote tab close, leaving the wire's `Destroyed` flag false and inflating the canonical wireSet count. Both bridge filter sites updated: the wireSet `RemoveWhere` in `wire.OnClose` and the `torrent.Wires` cross-check walk.
+
+Verified: `P2PSwarm.TwoTab_PeerDiscovery` PASS in 1m 37s standalone (was failing 90s timeout in 4.9.2-rc.34); `LargeBuffer_100MB_DispatchedOverRealWebRtc_BitExact` PASS in 3m 37s standalone (no regression vs rc.34).
+
+SpawnDev.WebTorrent dep bumped 3.2.2 -> 3.2.3-rc.2.
+
 ## 4.9.3 (2026-04-29)
 
 ### `ArrayView<T>.CopyToHostAsync()` partial-readback extension
