@@ -3800,6 +3800,38 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 && value.Offset.Resolve().BasicValueType == BasicValueType.Int64;
             string offsetExpr = offsetIsEmulatedI64 ? $"i64_to_i32({offset})" : $"{offset}";
 
+            // SubView chain walk: if value.Source resolves through one or more
+            // SubViewValue nodes (`view.SubView(offset, length)`), the SubView IR
+            // node aliases its source view's pointer (see WGSLCodeGenerator
+            // GenerateCode(SubViewValue)) and the actual offset is accumulated
+            // here at the use site. Walk the chain, accumulate every SubView's
+            // offset into offsetExpr, and emit `let target = &underlyingSource[
+            // (svOffset1 + svOffset2 + ... + leaOffset)];`. This bypasses the
+            // body-struct / sub-word / packed-struct branches below — those paths
+            // are for direct kernel-parameter view access; SubView results in
+            // codecs kernels are always derived from a plain ArrayView<T> source.
+            // If a future codecs kernel calls `someBodyStructField.SubView(...)`,
+            // extend this walk to delegate back into the special-case paths after
+            // resolving to the underlying source.
+            var effectiveSourceValue = value.Source.Resolve();
+            bool wentThroughSubView = false;
+            while (effectiveSourceValue is global::ILGPU.IR.Values.SubViewValue sv)
+            {
+                wentThroughSubView = true;
+                var svOffsetVar = Load(sv.Offset);
+                bool svOffsetIsEmuI64 = Backend.EnableI64Emulation
+                    && sv.Offset.Resolve().BasicValueType == BasicValueType.Int64;
+                string svOffsetExpr = svOffsetIsEmuI64 ? $"i64_to_i32({svOffsetVar})" : $"{svOffsetVar}";
+                offsetExpr = $"(({svOffsetExpr}) + ({offsetExpr}))";
+                effectiveSourceValue = sv.Source.Resolve();
+            }
+            if (wentThroughSubView)
+            {
+                var effectiveSource = Load(effectiveSourceValue);
+                AppendLine($"let {target.Name} = &{effectiveSource.Name}[{offsetExpr}];");
+                return;
+            }
+
             // --- BODY STRUCT VIEW FIELD ACCESS ---
             // When LoadElementAddress is called on a GetField result from a body struct parameter,
             // redirect to the correct per-field binding (e.g. param1_f0[offset]).

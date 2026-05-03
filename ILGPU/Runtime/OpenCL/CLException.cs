@@ -35,7 +35,7 @@ namespace ILGPU.Runtime.OpenCL
         /// </summary>
         /// <param name="errorCode">The OpenCL runtime error.</param>
         public CLException(CLError errorCode)
-            : base()
+            : base($"OpenCL error: {errorCode}")
         {
             Error = errorCode;
         }

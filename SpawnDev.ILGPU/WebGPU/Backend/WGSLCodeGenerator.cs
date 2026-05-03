@@ -930,6 +930,9 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 case global::ILGPU.IR.Values.GetViewLength v:
                     GenerateCode(v);
                     break;
+                case global::ILGPU.IR.Values.SubViewValue v:
+                    GenerateCode(v);
+                    break;
 
                 // Constants
                 case global::ILGPU.IR.Values.PrimitiveValue v:
@@ -1631,6 +1634,56 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             Builder.Append(" = ");
             Builder.Append($"&{source}[{offset}];");
             Builder.AppendLine();
+        }
+
+        /// <summary>
+        /// Generates code for a SubViewValue (`view.SubView(offset, length)`).
+        /// </summary>
+        /// <remarks>
+        /// SubView is a logical alias of its source view: the runtime semantics are
+        /// "same backing buffer, indexes shifted by <c>offset</c>, length capped at
+        /// <c>length</c>." In WGSL we cannot create a sub-buffer pointer with a
+        /// baked-in offset (storage buffers are bound as <c>array&lt;T&gt;</c> at
+        /// fixed bindings; pointer arithmetic only exists via <c>&amp;buf[idx]</c>
+        /// for a SPECIFIC index, not a base-offset reference).
+        ///
+        /// Codegen strategy:
+        /// - Emit a <c>let</c> binding that aliases the SubView variable to the
+        ///   SOURCE view's variable (no separate buffer; no offset baked in).
+        /// - The kernel generator's <c>LoadElementAddress</c> override walks the
+        ///   <c>SubViewValue</c> chain in IR via <c>value.Source.Resolve()</c> and
+        ///   accumulates the SubView offsets into the LEA's index expression at
+        ///   the use site. <c>&amp;subView[idx]</c> becomes
+        ///   <c>&amp;underlyingSource[(svOffset1 + svOffset2 + ... + idx)]</c>.
+        ///
+        /// Result: SubView is "transparent" at codegen — it occupies its own IR
+        /// node so the visitor doesn't throw, but produces no per-SubView buffer.
+        /// All offset arithmetic happens at the LEA / Load / Store sites that
+        /// actually index into the buffer.
+        ///
+        /// Limitation: <c>GetViewLength</c> on a SubView still returns the source
+        /// view's length, not the SubView's. Codecs kernels that motivated this
+        /// fix (Av1 / Vp8 / Vp9 / Flac / Vorbis encoders + decoders) don't call
+        /// <c>.Length</c> on SubView results. Add a <c>SubViewValue</c>-aware
+        /// override of <c>GenerateCode(GetViewLength)</c> if a future kernel does.
+        /// </remarks>
+        public virtual void GenerateCode(global::ILGPU.IR.Values.SubViewValue value)
+        {
+            var target = Load(value);
+            var source = Load(value.Source);
+
+            // Alias the SubView's variable to the source view. The actual offset
+            // is applied at indexing sites by walking value.Source.Resolve() through
+            // the SubView chain. Emit a comment so generated WGSL is self-documenting.
+            declaredVariables.Add(target.Name);
+            if (IsStateMachineActive)
+            {
+                VariableBuilder.AppendLine($"    let {target.Name} = {source}; // subView (offset applied at LEA, hoisted)");
+            }
+            else
+            {
+                AppendLine($"let {target.Name} = {source}; // subView (offset applied at LEA)");
+            }
         }
 
         public virtual void GenerateCode(global::ILGPU.IR.Values.NewView value)
