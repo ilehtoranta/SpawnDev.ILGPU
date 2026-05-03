@@ -2510,14 +2510,29 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                         }
                         else if (is1DView)
                         {
+                            // Flattened ArrayView1D<T, TStride> field layout depends on the
+                            // base ArrayView<T> shape AND the stride. For Stride1D.Dense
+                            // (empty struct) the layout is (Buffer, Length); for strided
+                            // 1D views it can be (Buffer, Index, Length) or (Buffer,
+                            // Length, Stride). The FieldSpan.Index alone does not
+                            // distinguish — case 1 might be either Index (i32) or Length
+                            // (i64). Type-drive the dispatch instead: Length is the only
+                            // i64 leaf in any 1D view layout, so emulated-i64 (`uvec2`)
+                            // type at case 1 OR case 2 means we want lenExpr1D. Plain int
+                            // at the same indices is the Index/stride-offset slot.
                             string glslType1D = TypeGenerator[value.Type];
                             bool needsI64_1D = glslType1D == "uvec2";
                             string zeroExpr1D = needsI64_1D ? "uvec2(0u)" : "0";
                             string lenExpr1D = needsI64_1D ? $"uvec2(uint({totalLen}), 0u)" : totalLen;
                             switch (value.FieldSpan.Index)
                             {
-                                case 1: AppendLine($"{prefix}{target} = {zeroExpr1D};"); return; // Index (stride offset = 0)
-                                case 2: AppendLine($"{prefix}{target} = {lenExpr1D};"); return; // Length
+                                case 1:
+                                    if (needsI64_1D)
+                                        AppendLine($"{prefix}{target} = {lenExpr1D};"); // Length (Dense layout: Buffer, Length)
+                                    else
+                                        AppendLine($"{prefix}{target} = {zeroExpr1D};"); // Index/stride offset (= 0 for non-SubView)
+                                    return;
+                                case 2: AppendLine($"{prefix}{target} = {lenExpr1D};"); return; // Length (post-Index layout)
                             }
                         }
 
@@ -2987,6 +3002,27 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             if (value is global::ILGPU.IR.Values.Load load) return ResolveToParameter(load.Source);
             if (value is LoadElementAddress lea) return ResolveToParameter(lea.Source);
             if (value is LoadFieldAddress lfa) return ResolveToParameter(lfa.Source);
+            // NewView creates a view from a pointer — trace through to the source.
+            // Without this, `view.Length` on an ArrayView1D parameter fails to resolve
+            // to its kernel parameter (since BaseView access lowers through NewView)
+            // and the GLSL codegen falls back to emitting 0 for the length, which
+            // silently breaks every runtime bounds check (`idx < view.Length`) — the
+            // gather/scatter/anything-with-bounds-check then returns the typed default.
+            if (value is NewView nv) return ResolveToParameter(nv.Pointer);
+            // AddressSpaceCast changes address space — trace through.
+            if (value is AddressSpaceCast asc) return ResolveToParameter(asc.Value);
+            // SubViewValue creates a sub-range — trace the source view.
+            if (value is SubViewValue sv) return ResolveToParameter(sv.Source);
+            // ConvertValue (pointer/view casts) — trace through.
+            if (value is ConvertValue cv) return ResolveToParameter(cv.Value);
+            if (value is PhiValue phi)
+            {
+                for (int i = 0; i < phi.Count; i++)
+                {
+                    var result = ResolveToParameter(phi[i]);
+                    if (result != null) return result;
+                }
+            }
             return null;
         }
 

@@ -724,6 +724,29 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
         static void ReductionKernel(Index1D index, ArrayView<int> data, ArrayView<int> sum) { Atomic.Add(ref sum[0], data[index]); }
         static void GatherKernel(Index1D index, ArrayView<int> data, ArrayView<int> indices, ArrayView<int> output) { output[index] = data[indices[index]]; }
 
+        // ML's GatherAxis0FloatImpl pattern (DistilGPT-2 / DistilBERT embedding lookup):
+        //   output[idx] = data[(int)indices[outRow] * innerSize + col]
+        // with bounds-checked srcIdx via data.Length. Exercises:
+        //   - integer divide/modulo of Index1D
+        //   - float->int cast of indices[outRow]
+        //   - `data.Length` (long property) used in bounds check
+        //   - conditional ternary returning data[srcIdx] vs 0f
+        // Repro for the WebGL all-zero output regression Data identified
+        // (data-to-geordi-webgl-gather-is-the-bug-2026-05-03.md, node 002 Gather).
+        static void GatherAxis0FloatLikeMlKernel(Index1D idx,
+            ArrayView1D<float, Stride1D.Dense> data,
+            ArrayView1D<float, Stride1D.Dense> indices,
+            ArrayView1D<float, Stride1D.Dense> output,
+            int innerSize)
+        {
+            int outRow = idx / innerSize;
+            int col = idx % innerSize;
+            int srcRow = (int)indices[outRow];
+            int srcIdx = srcRow * innerSize + col;
+            output[idx] = (srcIdx >= 0 && srcIdx < data.Length)
+                ? data[srcIdx] : 0f;
+        }
+
         static void DeepNestingKernel(Index1D index, ArrayView<int> data)
         {
             int count = 0;

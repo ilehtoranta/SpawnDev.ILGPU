@@ -520,6 +520,61 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             for (int i = 0; i < len; i++) if (result[i] != expected[i]) throw new Exception($"Gather failed at {i}");
         });
 
+        // Mirrors SpawnDev.ILGPU.ML's GatherAxis0FloatImpl pattern (the embedding-lookup
+        // kernel used by DistilGPT-2 / DistilBERT / RMBG transformer pipelines). Data
+        // observed all-zero outputs from this kernel on WebGL only (see
+        // _DevComms\SpawnDev.ILGPU\data-to-geordi-webgl-gather-is-the-bug-2026-05-03.md);
+        // CPU + CUDA + OpenCL produce real values. The kernel exercises:
+        //   - Index1D / and % integer divide-modulo
+        //   - float-buffer-indexed read of an int-valued payload
+        //   - explicit (int) cast of a float index
+        //   - `data.Length` used in a runtime bounds check
+        //   - ternary fallthrough returning data[srcIdx] vs 0f
+        //
+        // Test data: 4 rows × 3 columns of float weights, indexed by
+        // [3, 0, 2, 1] (in float form). Each output row should be the
+        // corresponding source row. If WebGL emits the bounds check or the
+        // gather wrong, the output will be zero rows instead of the expected
+        // permuted rows.
+        [TestMethod]
+        public async Task GatherAxis0FloatLikeMlTest() => await RunTest(async accelerator =>
+        {
+            const int dataRows = 4;
+            const int innerSize = 3;
+            var data = new float[dataRows * innerSize] {
+                10.0f, 11.0f, 12.0f,   // row 0
+                20.0f, 21.0f, 22.0f,   // row 1
+                30.0f, 31.0f, 32.0f,   // row 2
+                40.0f, 41.0f, 42.0f,   // row 3
+            };
+            var indices = new float[] { 3.0f, 0.0f, 2.0f, 1.0f };
+            int numIdx = indices.Length;
+            int total = numIdx * innerSize;
+
+            using var bufData = accelerator.Allocate1D(data);
+            using var bufIndices = accelerator.Allocate1D(indices);
+            using var bufOut = accelerator.Allocate1D<float>(total);
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D,
+                ArrayView1D<float, Stride1D.Dense>,
+                ArrayView1D<float, Stride1D.Dense>,
+                ArrayView1D<float, Stride1D.Dense>,
+                int>(GatherAxis0FloatLikeMlKernel);
+            kernel((Index1D)total, bufData.View, bufIndices.View, bufOut.View, innerSize);
+            await accelerator.SynchronizeAsync();
+            var result = await bufOut.CopyToHostAsync<float>();
+            float[] expected = {
+                40.0f, 41.0f, 42.0f,   // out row 0 ← src row 3
+                10.0f, 11.0f, 12.0f,   // out row 1 ← src row 0
+                30.0f, 31.0f, 32.0f,   // out row 2 ← src row 2
+                20.0f, 21.0f, 22.0f,   // out row 3 ← src row 1
+            };
+            for (int i = 0; i < total; i++)
+            {
+                if (Math.Abs(result[i] - expected[i]) > 1e-5f)
+                    throw new Exception($"GatherAxis0FloatLikeMl failed at i={i}: got {result[i]}, expected {expected[i]}");
+            }
+        });
+
         [TestMethod]
         public async Task DeepNestingTest() => await RunTest(async accelerator =>
         {
