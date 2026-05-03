@@ -563,6 +563,140 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
         // the YOLOv8 pipeline at node 227 'Div' producing shape=[1].
         // Per data-to-geordi-webgpu-tiny-readback-nre-2026-05-03.md the trap
         // only fires after some accumulated dispatch history.
+        // Stress test for OpenCL command-queue invalidation after many dispatches
+        // without intermediate sync — Data's Conv #51 RMBG repro pattern from
+        // `data-to-geordi-opencl-clexception-rmbg-2026-05-03.md`. After 50
+        // Conv2D dispatches the OpenCL queue surfaces CL_INVALID_COMMAND_QUEUE.
+        // This minimal repro fires 100 buffer copy + kernel dispatch pairs in
+        // sequence with NO intermediate sync, then a single SynchronizeAsync at
+        // the end. If the queue invalidates this should trap on OpenCL.
+        //
+        // 2026-05-03 finding: this test SURFACES a Wasm bug where rapid
+        // CopyFromCPU + kernel pairs without intermediate sync don't propagate
+        // the buffer write to the kernel — the kernel sees stale (zeroed)
+        // params buffer contents. Wasm fails with `result[1]=0.5, expected 50`
+        // (kernel ran with p[0]=0 across all 100 iterations). All other
+        // backends pass.
+        [TestMethod]
+        public async Task ManyDispatchesNoIntermediateSyncTest() => await RunTest(async accelerator =>
+        {
+            const int dispatches = 100;
+            const int elements = 4096;
+
+            var paramsHost = new int[8];
+            using var paramsBuf = accelerator.Allocate1D<int>(paramsHost.Length);
+            using var inBuf = accelerator.Allocate1D<float>(elements);
+            using var outBuf = accelerator.Allocate1D<float>(elements);
+
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D,
+                ArrayView<float>, ArrayView<float>, ArrayView<int>, int>(
+                (idx, src, dst, p, scale) => dst[idx] = src[idx] * (float)(p[0] + scale));
+
+            var input = new float[elements];
+            for (int i = 0; i < elements; i++) input[i] = i * 0.5f;
+            inBuf.CopyFromCPU(input);
+
+            for (int d = 0; d < dispatches; d++)
+            {
+                paramsHost[0] = d;
+                paramsBuf.CopyFromCPU(paramsHost);
+                kernel((Index1D)elements, inBuf.View, outBuf.View, paramsBuf.View, 1);
+            }
+
+            await accelerator.SynchronizeAsync();
+            var result = await outBuf.CopyToHostAsync<float>();
+            // Last dispatch wins; result[i] = input[i] * (lastP0 + 1) = input[i] * (99 + 1) = input[i] * 100
+            float expected0 = input[0] * 100f; // = 0
+            float expected1 = input[1] * 100f; // = 50
+            if (Math.Abs(result[0] - expected0) > 1e-3f)
+                throw new Exception($"ManyDispatchesNoIntermediateSync: result[0]={result[0]}, expected {expected0}");
+            if (Math.Abs(result[1] - expected1) > 1e-3f)
+                throw new Exception($"ManyDispatchesNoIntermediateSync: result[1]={result[1]}, expected {expected1}");
+        });
+
+        // Bisection variant — fresh paramsBuf allocation per iteration. If
+        // the no-intermediate-sync failure is the launcher caching the buffer
+        // pointer on first dispatch, this test should pass (each iteration has
+        // a different buffer instance). If it fails the same way, the bug is
+        // deeper than buffer-instance reuse.
+        [TestMethod]
+        public async Task ManyDispatchesFreshBufferPerIterTest() => await RunTest(async accelerator =>
+        {
+            const int dispatches = 100;
+            const int elements = 4096;
+
+            using var inBuf = accelerator.Allocate1D<float>(elements);
+            using var outBuf = accelerator.Allocate1D<float>(elements);
+            var input = new float[elements];
+            for (int i = 0; i < elements; i++) input[i] = i * 0.5f;
+            inBuf.CopyFromCPU(input);
+
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D,
+                ArrayView<float>, ArrayView<float>, ArrayView<int>, int>(
+                (idx, src, dst, p, scale) => dst[idx] = src[idx] * (float)(p[0] + scale));
+
+            var heldBuffers = new System.Collections.Generic.List<global::ILGPU.Runtime.MemoryBuffer1D<int, global::ILGPU.Stride1D.Dense>>();
+            try
+            {
+                for (int d = 0; d < dispatches; d++)
+                {
+                    var paramsBuf = accelerator.Allocate1D<int>(8);
+                    heldBuffers.Add(paramsBuf);
+                    var paramsHost = new int[8];
+                    paramsHost[0] = d;
+                    paramsBuf.CopyFromCPU(paramsHost);
+                    kernel((Index1D)elements, inBuf.View, outBuf.View, paramsBuf.View, 1);
+                }
+
+                await accelerator.SynchronizeAsync();
+                var result = await outBuf.CopyToHostAsync<float>();
+                float expected1 = input[1] * 100f;
+                if (Math.Abs(result[1] - expected1) > 1e-3f)
+                    throw new Exception($"ManyDispatchesFreshBufferPerIter: result[1]={result[1]}, expected {expected1}");
+            }
+            finally
+            {
+                foreach (var b in heldBuffers) b.Dispose();
+            }
+        });
+
+        // Companion to ManyDispatchesNoIntermediateSync — same pattern but with
+        // SynchronizeAsync between every dispatch. Used to bisect whether the
+        // Wasm failure in the no-sync variant is dispatch-ordering related vs
+        // a deeper bug in CopyFromCPU itself.
+        [TestMethod]
+        public async Task ManyDispatchesWithIntermediateSyncTest() => await RunTest(async accelerator =>
+        {
+            const int dispatches = 100;
+            const int elements = 4096;
+
+            var paramsHost = new int[8];
+            using var paramsBuf = accelerator.Allocate1D<int>(paramsHost.Length);
+            using var inBuf = accelerator.Allocate1D<float>(elements);
+            using var outBuf = accelerator.Allocate1D<float>(elements);
+
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D,
+                ArrayView<float>, ArrayView<float>, ArrayView<int>, int>(
+                (idx, src, dst, p, scale) => dst[idx] = src[idx] * (float)(p[0] + scale));
+
+            var input = new float[elements];
+            for (int i = 0; i < elements; i++) input[i] = i * 0.5f;
+            inBuf.CopyFromCPU(input);
+
+            for (int d = 0; d < dispatches; d++)
+            {
+                paramsHost[0] = d;
+                paramsBuf.CopyFromCPU(paramsHost);
+                kernel((Index1D)elements, inBuf.View, outBuf.View, paramsBuf.View, 1);
+                await accelerator.SynchronizeAsync();
+            }
+
+            var result = await outBuf.CopyToHostAsync<float>();
+            float expected1 = input[1] * 100f;
+            if (Math.Abs(result[1] - expected1) > 1e-3f)
+                throw new Exception($"ManyDispatchesWithIntermediateSync: result[1]={result[1]}, expected {expected1}");
+        });
+
         [TestMethod]
         public async Task TinyBufferStressReadbackTest() => await RunTest(async accelerator =>
         {
