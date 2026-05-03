@@ -4,8 +4,8 @@
 		<TargetFramework>net10.0</TargetFramework>
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>enable</Nullable>
-		<Version>4.9.5-rc.3</Version>
-		<PackageReleaseNotes>v4.9.5-rc.3: bundle bump for SpawnDev.WebTorrent 3.2.4-rc.3 (cross-side-stable peer_id tiebreaker on top of the offer-relay dedup). P2P source unchanged. SpawnDev.WebTorrent dep bumped 3.2.4-rc.2 -&gt; 3.2.4-rc.3.</PackageReleaseNotes>
+		<Version>4.9.5-rc.5</Version>
+		<PackageReleaseNotes>v4.9.5-rc.4: bundle bump for SpawnDev.WebTorrent 3.2.4-rc.5 (cross-tracker offer-relay dedup registry). P2P source unchanged. SpawnDev.WebTorrent dep bumped 3.2.4-rc.3 -&gt; 3.2.4-rc.5.</PackageReleaseNotes>
 		<GeneratePackageOnBuild>True</GeneratePackageOnBuild>
 		<GenerateDocumentationFile>true</GenerateDocumentationFile>
 		<EmbedAllSources>true</EmbedAllSources>
@@ -28,7 +28,7 @@
 
 	<ItemGroup>
 		<ProjectReference Include="..\SpawnDev.ILGPU\SpawnDev.ILGPU.csproj" />
-		<PackageReference Include="SpawnDev.WebTorrent" Version="3.2.4-rc.3" />
+		<PackageReference Include="SpawnDev.WebTorrent" Version="3.2.4-rc.5" />
 	</ItemGroup>
 
 </Project>
