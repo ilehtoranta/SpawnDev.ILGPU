@@ -454,6 +454,11 @@ namespace PlaywrightMultiTest
                     {
                         TestFunc = async (page) => await P2PSwarmStabilityTest(page, (TestableBlazorWasm)proj),
                     }).SetName("P2PSwarm.PeerStability_NoCascadeAfterHandshake").SetCategory("P2PSwarm");
+
+                    yield return new TestCaseData(new ProjectTest(proj, "P2PSwarm", "RenderMandelbrot_PaintsCanvas")
+                    {
+                        TestFunc = async (page) => await P2PSwarmRenderMandelbrotTest(page, (TestableBlazorWasm)proj),
+                    }).SetName("P2PSwarm.RenderMandelbrot_PaintsCanvas").SetCategory("P2PSwarm");
                 }
             }
         }
@@ -755,6 +760,132 @@ namespace PlaywrightMultiTest
                 }
 
                 LogStatus("[P2P Stability] PASS: peerCount stayed >= 1 for 60s with no SCTP cascade signatures observed.");
+            }
+            finally
+            {
+                if (page2 != null)
+                {
+                    try { await page2.CloseAsync(); } catch { }
+                }
+                try { await coordPage.CloseAsync(); } catch { }
+            }
+        }
+
+        /// <summary>
+        /// Live-demo regression test for the canvas paint pipeline: opens coord +
+        /// worker through the demo's own swarm-create / swarm-join flow, waits for
+        /// the BT handshake, clicks the Mandelbrot Render button on the coord, and
+        /// asserts the canvas contains real (non-uniform) pixel data after the
+        /// dispatch completes.
+        ///
+        /// Catches the 2026-05-03 blank-canvas regression: dispatch succeeded
+        /// (timer ticked, "Rendered in 908ms" UI text shown) but the canvas stayed
+        /// the dark-blue page background because the manual `PutImageBytes` path
+        /// was wired to an `ElementReference` the JS-side `getElementById` could
+        /// not resolve. The fix replaced that path with the canonical
+        /// `CanvasRendererFactory` pattern; this test guards that flip from
+        /// regressing.
+        ///
+        /// Failure conditions:
+        ///   1. Dispatch never reports a timing (UI never shows "Rendered in").
+        ///   2. The canvas is still uniform (max-min channel range &lt; 8) after
+        ///      the dispatch — the cardinal "blank canvas" symptom.
+        /// </summary>
+        private static async Task P2PSwarmRenderMandelbrotTest(IPage page1, TestableBlazorWasm blazorProj)
+        {
+            var baseUrl = "https://localhost:5451";
+            var coordTestId = $"render-coord-{Guid.NewGuid():N}".Substring(0, 24);
+            var workerTestId = $"render-work-{Guid.NewGuid():N}".Substring(0, 24);
+
+            var coordPage = await blazorProj.BrowserContext.NewPageAsync();
+            coordPage.Console += (_, msg) => LogStatus($"[Render/Coord {msg.Type}] {msg.Text}");
+
+            var coordUrl = $"{baseUrl}/compute?testId={Uri.EscapeDataString(coordTestId)}&autoCreate=true";
+            await coordPage.GotoAsync(coordUrl);
+
+            const string parseStateJs = "(k) => { var v = globalThis[k]; return typeof v === 'string' ? JSON.parse(v) : v; }";
+
+            string? joinLink = await WaitForJsValueAsync(coordPage,
+                $"() => {{ var s = ({parseStateJs})('computeSwarmState_{coordTestId}'); return s ? s.joinLink : null; }}",
+                timeoutSeconds: 60,
+                label: $"coordinator joinLink for {coordTestId}");
+
+            if (string.IsNullOrEmpty(joinLink) || !joinLink.StartsWith("http"))
+                throw new Exception($"Coordinator did not publish a usable joinLink: '{joinLink}'");
+
+            var separator = joinLink.Contains('?') ? "&" : "?";
+            var workerUrl = $"{joinLink}{separator}autojoin=1&testId={Uri.EscapeDataString(workerTestId)}";
+
+            IPage? page2 = await blazorProj.BrowserContext.NewPageAsync();
+            page2.Console += (_, msg) => LogStatus($"[Render/Worker {msg.Type}] {msg.Text}");
+
+            try
+            {
+                await page2.GotoAsync(workerUrl);
+
+                var peerCountJs = $"() => {{ var s = ({parseStateJs})('computeSwarmState_{coordTestId}'); return s ? s.peerCount : null; }}";
+                await WaitForJsValueAsync(coordPage, peerCountJs,
+                    timeoutSeconds: 120,
+                    label: "coordinator.peerCount >= 1 for render dispatch",
+                    predicate: v => { var n = AsInt(v); return n.HasValue && n.Value >= 1; });
+
+                LogStatus("[P2P Render] Peer connected. Clicking Mandelbrot Render button...");
+
+                // The Render button is the one whose handler binds to the
+                // _mandelbrotRunning gating field. There's a single 'Render' button
+                // on /compute scoped to the Mandelbrot panel.
+                await coordPage.GetByText("Render", new() { Exact = true }).First.ClickAsync();
+
+                // Wait up to 60s for the dispatch to finish + UI to publish the
+                // _mandelbrotTimeMs timer. The demo writes timing into the same
+                // computeSwarmState publish hook (extended in the harness flow).
+                var renderedTextLocator = coordPage.Locator("text=Rendered in").First;
+                await renderedTextLocator.WaitForAsync(new() { Timeout = 60_000 });
+                LogStatus("[P2P Render] Dispatch finished, UI shows 'Rendered in ...'. Sampling canvas...");
+
+                // Sample the canvas — assert at least one channel has a meaningful
+                // range across the pixel data. A blank canvas (all background or
+                // all zero) yields range 0; even a faint Mandelbrot has the dark
+                // body + bright outer ring, so range >= 8 is conservative.
+                var sampleJs = @"
+                    () => {
+                        var c = document.querySelector('canvas');
+                        if (!c) return { err: 'no canvas' };
+                        var ctx = c.getContext('2d');
+                        if (!ctx) return { err: 'no 2d ctx' };
+                        var w = c.width, h = c.height;
+                        if (!w || !h) return { err: 'canvas has zero size: ' + w + 'x' + h };
+                        var img = ctx.getImageData(0, 0, w, h);
+                        var d = img.data;
+                        var minR=255,minG=255,minB=255,maxR=0,maxG=0,maxB=0,nonZero=0;
+                        var sampleStride = 64; // sample every 64th pixel
+                        for (var i = 0; i < d.length; i += 4 * sampleStride) {
+                            var r = d[i], g = d[i+1], b = d[i+2];
+                            if (r|g|b) nonZero++;
+                            if (r<minR) minR=r; if (r>maxR) maxR=r;
+                            if (g<minG) minG=g; if (g>maxG) maxG=g;
+                            if (b<minB) minB=b; if (b>maxB) maxB=b;
+                        }
+                        return { w:w, h:h, minR:minR, maxR:maxR, minG:minG, maxG:maxG, minB:minB, maxB:maxB, nonZero:nonZero };
+                    }";
+
+                var sampleResult = await coordPage.EvaluateAsync<JsonElement>(sampleJs);
+                LogStatus($"[P2P Render] Canvas sample: {sampleResult}");
+
+                if (sampleResult.TryGetProperty("err", out var errProp))
+                    throw new Exception($"Canvas sample failed: {errProp.GetString()}");
+
+                int rangeR = sampleResult.GetProperty("maxR").GetInt32() - sampleResult.GetProperty("minR").GetInt32();
+                int rangeG = sampleResult.GetProperty("maxG").GetInt32() - sampleResult.GetProperty("minG").GetInt32();
+                int rangeB = sampleResult.GetProperty("maxB").GetInt32() - sampleResult.GetProperty("minB").GetInt32();
+                int maxRange = Math.Max(rangeR, Math.Max(rangeG, rangeB));
+
+                if (maxRange < 8)
+                    throw new Exception($"Canvas paint regression: blank canvas detected (max channel range={maxRange}). " +
+                                        $"R={rangeR}, G={rangeG}, B={rangeB}. The Mandelbrot dispatch reported a timing " +
+                                        $"but the canvas pixels are uniform — CanvasRendererFactory paint pipeline broken.");
+
+                LogStatus($"[P2P Render] PASS: canvas painted with non-uniform pixels (max channel range={maxRange}).");
             }
             finally
             {
