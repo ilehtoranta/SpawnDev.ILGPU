@@ -2,7 +2,15 @@
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
 
-## 4.9.4-rc.2 (2026-05-03)
+## 4.9.4 (2026-05-03) — stable rollup of rc.1 + rc.2
+
+Stable cut. Configurable Wasm linear-memory ceiling, end-to-end (host + module declared max agree). End-to-end verified by SpawnDev.ILGPU.ML's DA3-Small at `MaxLinearMemoryPages=32768`: op 93 `memory.grow` past 16384 pages succeeds, model runs 2m 28s past the rc.1 instant-instantiate-reject point (Data, 2026-05-03). Default consumers (16384) see byte-identical output vs 4.9.3.
+
+`SpawnDev.ILGPU.P2P 4.9.4` ships in lockstep: closes `P2PSwarm.TwoTab_PeerDiscovery` regression via the new `Wire.SimplePeer.IsTransportDead` accessor in `SpawnDev.WebTorrent 3.2.3` stable. Both bridge filter sites updated. `LargeBuffer_100MB_DispatchedOverRealWebRtc_BitExact` PASS 3m 37s standalone (no regression).
+
+See the rc.1 + rc.2 sections below for the full surface description.
+
+## 4.9.4-rc.2 (2026-05-03) (superseded by 4.9.4 stable)
 
 ### Fixes the rc.1 kernel-module memory import maximum mismatch
 

@@ -4,8 +4,8 @@
 		<TargetFramework>net10.0</TargetFramework>
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>enable</Nullable>
-		<Version>4.9.4-rc.2</Version>
-		<PackageReleaseNotes>v4.9.4-rc.2: bundle bump in lockstep with SpawnDev.ILGPU 4.9.4-rc.2 (kernel-module memory import maximum now matches host's `MaxLinearMemoryPages`, fixing rc.1 instantiate failure when consumer raised the cap above 16384). P2P source unchanged from rc.1: same `P2PWebRtcBridge.wire.OnClose` phantom-alive filter using `Wire.SimplePeer.IsTransportDead`, same SpawnDev.WebTorrent 3.2.3-rc.2 dep.</PackageReleaseNotes>
+		<Version>4.9.4</Version>
+		<PackageReleaseNotes>v4.9.4 stable: closes `P2PSwarm.TwoTab_PeerDiscovery` regression. `P2PWebRtcBridge.wire.OnClose` now filters phantom-alive wires (where `Destroyed=false` but underlying transport is dead) using the new `Wire.SimplePeer.IsTransportDead` accessor in SpawnDev.WebTorrent 3.2.3 stable. Both bridge filter sites updated: the wireSet `RemoveWhere` and the `torrent.Wires` cross-check walk. Catches the Chromium-under-Playwright bug where `connectionstatechange` doesn't propagate to `"failed"` on remote tab close. Verified: TwoTab passes 1m 37s standalone (was failing 90s timeout in 4.9.2-rc.34); LargeBuffer_100MB passes 3m 37s standalone (no regression). Stable rollup of 4.9.4-rc.1 + rc.2. SpawnDev.WebTorrent dep bumped 3.2.2 -&gt; 3.2.3 stable.</PackageReleaseNotes>
 		<GeneratePackageOnBuild>True</GeneratePackageOnBuild>
 		<GenerateDocumentationFile>true</GenerateDocumentationFile>
 		<EmbedAllSources>true</EmbedAllSources>
@@ -28,7 +28,7 @@
 
 	<ItemGroup>
 		<ProjectReference Include="..\SpawnDev.ILGPU\SpawnDev.ILGPU.csproj" />
-		<PackageReference Include="SpawnDev.WebTorrent" Version="3.2.3-rc.2" />
+		<PackageReference Include="SpawnDev.WebTorrent" Version="3.2.3" />
 	</ItemGroup>
 
 </Project>
