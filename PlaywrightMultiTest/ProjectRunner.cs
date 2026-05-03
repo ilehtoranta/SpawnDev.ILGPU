@@ -843,16 +843,27 @@ namespace PlaywrightMultiTest
                 await renderedTextLocator.WaitForAsync(new() { Timeout = 60_000 });
                 LogStatus("[P2P Render] Dispatch finished, UI shows 'Rendered in ...'. Sampling canvas...");
 
-                // Sample the canvas — assert at least one channel has a meaningful
-                // range across the pixel data. A blank canvas (all background or
-                // all zero) yields range 0; even a faint Mandelbrot has the dark
-                // body + bright outer ring, so range >= 8 is conservative.
+                // Sample the Mandelbrot canvas — locate it by its parent containing
+                // 'Distributed Mandelbrot' text rather than querySelector('canvas')
+                // which would return whichever canvas is first in the DOM (n-body /
+                // qr / others). A blank canvas yields range 0; even a faint
+                // Mandelbrot has a dark body + bright outer ring, so range >= 8 is
+                // conservative.
                 var sampleJs = @"
                     () => {
-                        var c = document.querySelector('canvas');
-                        if (!c) return { err: 'no canvas' };
+                        var canvases = Array.from(document.querySelectorAll('canvas'));
+                        var canvasInfo = canvases.map(c => ({ w: c.width, h: c.height, parentText: (c.parentElement && c.parentElement.innerText || '').slice(0,80), display: getComputedStyle(c).display }));
+                        var c = canvases.find(c => {
+                            var p = c.parentElement;
+                            while (p) {
+                                if ((p.innerText || '').includes('Distributed Mandelbrot')) return true;
+                                p = p.parentElement;
+                            }
+                            return false;
+                        });
+                        if (!c) return { err: 'no Mandelbrot canvas found', allCanvases: canvasInfo };
                         var ctx = c.getContext('2d');
-                        if (!ctx) return { err: 'no 2d ctx' };
+                        if (!ctx) return { err: 'no 2d ctx', canvasInfo: canvasInfo };
                         var w = c.width, h = c.height;
                         if (!w || !h) return { err: 'canvas has zero size: ' + w + 'x' + h };
                         var img = ctx.getImageData(0, 0, w, h);
@@ -866,7 +877,7 @@ namespace PlaywrightMultiTest
                             if (g<minG) minG=g; if (g>maxG) maxG=g;
                             if (b<minB) minB=b; if (b>maxB) maxB=b;
                         }
-                        return { w:w, h:h, minR:minR, maxR:maxR, minG:minG, maxG:maxG, minB:minB, maxB:maxB, nonZero:nonZero };
+                        return { w:w, h:h, minR:minR, maxR:maxR, minG:minG, maxG:maxG, minB:minB, maxB:maxB, nonZero:nonZero, canvasCount: canvases.length };
                     }";
 
                 var sampleResult = await coordPage.EvaluateAsync<JsonElement>(sampleJs);

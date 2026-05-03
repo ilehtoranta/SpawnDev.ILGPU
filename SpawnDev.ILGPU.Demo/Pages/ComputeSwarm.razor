@@ -819,8 +819,11 @@
         if (_mandelbrotRenderer == null)
         {
             _mandelbrotRenderer = CanvasRendererFactory.Create(_compute.Accelerator!);
-            using var canvas = new HTMLCanvasElement(_mandelbrotCanvas);
-            _mandelbrotRenderer.AttachCanvas(canvas);
+            // Match the Mandelbrot.razor reference pattern: do NOT dispose the
+            // HTMLCanvasElement wrapper after AttachCanvas — the renderer stores
+            // the canvas's 2d context internally and the wrapper backs the JS-side
+            // canvas reference for the renderer's lifetime.
+            _mandelbrotRenderer.AttachCanvas(new HTMLCanvasElement(_mandelbrotCanvas));
         }
 
         // Each strip's worker delivers display-ready packed RGBA uints (peer tint
@@ -897,6 +900,9 @@
         await Task.WhenAll(tasks);
 
         // Stitch strips into a contiguous full-image uint[] (DenseX = row-major dense).
+        // Each strip already carries display-ready packed RGBA bytes (peer tint baked
+        // in by MandelbrotChunkPacked); the coordinator just lays them into the right
+        // Y-range of the master image.
         var allPixels = new uint[width * height];
         for (int p = 0; p < peerCount; p++)
         {
@@ -909,11 +915,12 @@
             Buffer.BlockCopy(bytes, 0, allPixels, dstOffsetUints * 4, copyUints * 4);
         }
 
-        // Upload the full image into the render buffer and present via the
-        // backend-appropriate ICanvasRenderer (CPUCanvasRenderer for P2P).
+        // Canonical path: ArrayView.CopyFromCPU lands the bytes in the buffer's
+        // storage and PresentAsync reads them back through the same view abstraction.
+        // No direct ShadowData touching from the consumer.
         _mandelbrotBuffer!.View.AsContiguous().CopyFromCPU(allPixels);
         await _compute.Accelerator!.SynchronizeAsync();
-        await _mandelbrotRenderer!.PresentAsync(_mandelbrotBuffer);
+        await _mandelbrotRenderer!.PresentAsync(_mandelbrotBuffer!);
 
         sw.Stop();
         _mandelbrotTimeMs = sw.Elapsed.TotalMilliseconds;
