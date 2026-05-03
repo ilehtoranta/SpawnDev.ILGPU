@@ -239,6 +239,34 @@ public class P2PSwarmCoordinator : IAsyncDisposable
     /// </summary>
     public bool HandlePeerConnected(string peerId, PeerCapabilities capabilities)
     {
+        // Dedup: a single logical remote peer can fire HandlePeerConnected multiple
+        // times in steady state because the BT-layer DUP-OBSERVED branch (rc.1)
+        // intentionally keeps every duplicate wire alive (Torrent.cs:949+), and
+        // each wire's sd_compute extension fires its own capability-response
+        // event. Without this guard, the "Peer joined" UI activity log gets a
+        // burst of N entries (one per duplicate wire) every time a peer connects,
+        // each with potentially-different trust labels because the DHT identity
+        // arrives async relative to the wire's first handshake — early handshakes
+        // see pre-identity capabilities, later ones see post-identity. Symptom on
+        // the coord UI is e.g. 13 "Peer joined" events at the same timestamp
+        // with shifting trust=Anonymous/Identified labels (Captain's 2026-05-03
+        // RenderMandelbrot live repro on rc.7).
+        //
+        // If we already have this peer registered, this is a duplicate-wire
+        // arrival, not a new join. Update the latest capabilities (so trust
+        // labels and TFLOPS converge to the most recent values) and quietly
+        // return success without firing OnPeerJoined a second time. Real
+        // re-joins after disconnect happen via Wire.OnClose -> _peers removal,
+        // so a fresh ContainsKey check after that path naturally fires the
+        // re-join.
+        if (_peers.TryGetValue(peerId, out var existing))
+        {
+            existing.Capabilities = capabilities;
+            existing.MemorySize = capabilities.AvailableMemory;
+            existing.IsConnected = true;
+            return true;
+        }
+
         // Check block list
         if (_blockedPeers.ContainsKey(peerId))
         {

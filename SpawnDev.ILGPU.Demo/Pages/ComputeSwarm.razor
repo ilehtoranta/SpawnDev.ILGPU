@@ -4,9 +4,12 @@
 @using SpawnDev.ILGPU.P2P
 @using SpawnDev.ILGPU.Demo.Shared
 @using SpawnDev.ILGPU.QR
+@using SpawnDev.ILGPU.Rendering
 @using SpawnDev.BlazorJS
 @using SpawnDev.BlazorJS.Cryptography
 @using SpawnDev.BlazorJS.JSObjects
+@using global::ILGPU
+@using global::ILGPU.Runtime
 @inject NavigationManager Nav
 @inject BlazorJSRuntime JS
 @inject IPortableCrypto Crypto
@@ -764,6 +767,21 @@
     private bool _mandelbrotRunning;
     private double _mandelbrotTimeMs;
 
+    // Render buffer + renderer for the canonical SpawnDev.ILGPU CanvasRendererFactory
+    // path. Lazily initialized on first Render click (after the canvas is rendered
+    // and _compute is available). Reused across renders.
+    //
+    // Width/height are the master image size; per-strip dispatch results land in
+    // their Y range of this buffer's contiguous DenseX storage. PresentAsync renders
+    // through the backend-appropriate ICanvasRenderer (CPUCanvasRenderer for
+    // P2PAccelerator — copies ShadowData via putImageData; the cascade-fixed P2P
+    // transport already pushes worker bytes into the buffer's ShadowData via the
+    // dispatch result path).
+    private MemoryBuffer2D<uint, Stride2D.DenseX>? _mandelbrotBuffer;
+    private ICanvasRenderer? _mandelbrotRenderer;
+    private const int MandelbrotWidth = 512;
+    private const int MandelbrotHeight = 512;
+
     // Peer colors for tile tinting (up to 8 peers)
     private static readonly uint[] PeerColors = {
         0xFF44FF44, // green
@@ -783,13 +801,32 @@
         StateHasChanged();
 
         var sw = System.Diagnostics.Stopwatch.StartNew();
-        int width = 512, height = 512;
-        int maxIter = 200;
+        const int width = MandelbrotWidth;
+        const int height = MandelbrotHeight;
+        const int maxIter = 200;
         int peerCount = Math.Max(1, _compute.PeerCount);
         int stripHeight = height / peerCount;
 
-        // Generate coordinate arrays for each strip and dispatch
-        var stripPixels = new int[peerCount][];
+        // Lazy init render buffer + renderer using the canonical CanvasRendererFactory
+        // path. CanvasRendererFactory selects the right renderer per accelerator type
+        // (CPU-canvas for P2P, since P2PAccelerator falls through to the default
+        // CPUCanvasRenderer branch \u2014 it copies ShadowData into the canvas via
+        // putImageData on each PresentAsync).
+        if (_mandelbrotBuffer == null)
+        {
+            _mandelbrotBuffer = _compute.Accelerator!.Allocate2DDenseX<uint>(new Index2D(width, height));
+        }
+        if (_mandelbrotRenderer == null)
+        {
+            _mandelbrotRenderer = CanvasRendererFactory.Create(_compute.Accelerator!);
+            using var canvas = new HTMLCanvasElement(_mandelbrotCanvas);
+            _mandelbrotRenderer.AttachCanvas(canvas);
+        }
+
+        // Each strip's worker delivers display-ready packed RGBA uints (peer tint
+        // baked in by MandelbrotChunkPacked). Coordinator just stitches the strips
+        // into the master image buffer and PresentAsyncs once.
+        var stripBytes = new byte[peerCount][];
         var tasks = new Task[peerCount];
 
         for (int p = 0; p < peerCount; p++)
@@ -798,12 +835,15 @@
             int yStart = peerIdx * stripHeight;
             int yEnd = (peerIdx == peerCount - 1) ? height : yStart + stripHeight;
             int stripPixelCount = width * (yEnd - yStart);
+            uint tint = PeerColors[peerIdx % PeerColors.Length];
+            int tintR = (int)((tint >> 16) & 0xFFu);
+            int tintG = (int)((tint >> 8) & 0xFFu);
+            int tintB = (int)(tint & 0xFFu);
 
             tasks[peerIdx] = Task.Run(async () =>
             {
                 try
                 {
-                    // Generate coordinate data for this strip
                     var realCoords = new float[stripPixelCount];
                     var imagCoords = new float[stripPixelCount];
                     for (int y = yStart; y < yEnd; y++)
@@ -814,95 +854,69 @@
                             imagCoords[idx] = (y / (float)height) * 2.0f - 1.0f;
                         }
 
-                    // Pack coords for dispatch to the swarm
-                    var realBytes = new byte[stripPixelCount * 4];
-                    var imagBytes = new byte[stripPixelCount * 4];
-                    Buffer.BlockCopy(realCoords, 0, realBytes, 0, realBytes.Length);
-                    Buffer.BlockCopy(imagCoords, 0, imagBytes, 0, imagBytes.Length);
+                    var realBytesIn = new byte[stripPixelCount * 4];
+                    var imagBytesIn = new byte[stripPixelCount * 4];
+                    Buffer.BlockCopy(realCoords, 0, realBytesIn, 0, realBytesIn.Length);
+                    Buffer.BlockCopy(imagCoords, 0, imagBytesIn, 0, imagBytesIn.Length);
 
                     var outId = $"mand_out_{peerIdx}";
                     var realId = $"mand_real_{peerIdx}";
                     var imagId = $"mand_imag_{peerIdx}";
 
-                    // Real dispatch: library auto-ships real/imag coord buffers to the
-                    // selected peer, peer computes iteration counts into the output buffer,
-                    // worker pushes the modified output buffer back to the coordinator.
-                    var method = typeof(P2PDemoKernels).GetMethod(nameof(P2PDemoKernels.MandelbrotChunk))!;
+                    // Scalar parameter indices match the kernel signature: param 0 is
+                    // Index1D, params 1-3 are the buffers, params 4-7 are tint + maxIter.
+                    var scalars = new Dictionary<int, object>
+                    {
+                        [4] = tintR,
+                        [5] = tintG,
+                        [6] = tintB,
+                        [7] = maxIter,
+                    };
+
+                    var method = typeof(P2PDemoKernels).GetMethod(nameof(P2PDemoKernels.MandelbrotChunkPacked))!;
                     var dispatchResult = await _compute.Accelerator!.DispatchAsync(
-                        method, stripPixelCount,
-                        (outId, null, 4),     // output-only: worker allocates, fills, pushes back
-                        (realId, realBytes, 4),
-                        (imagId, imagBytes, 4));
+                        method, stripPixelCount, scalars,
+                        (outId, null, 4),               // output: uints, 4 bytes each
+                        (realId, realBytesIn, 4),
+                        (imagId, imagBytesIn, 4));
 
                     if (!dispatchResult.Success)
                         throw new Exception(dispatchResult.Error ?? "Mandelbrot dispatch failed");
 
                     var outBytes = await WaitForResultBufferAsync(outId, timeoutMs: 30_000);
-                    var result = new int[stripPixelCount];
-                    Buffer.BlockCopy(outBytes, 0, result, 0, Math.Min(outBytes.Length, stripPixelCount * 4));
-                    stripPixels[peerIdx] = result;
+                    stripBytes[peerIdx] = outBytes;
                 }
                 catch (Exception ex)
                 {
                     Console.WriteLine($"[Mandelbrot] Strip {peerIdx} failed: {ex.Message}");
-                    stripPixels[peerIdx] = new int[stripPixelCount]; // black on failure
+                    stripBytes[peerIdx] = new byte[stripPixelCount * 4]; // opaque-zero on failure
                 }
             });
         }
 
         await Task.WhenAll(tasks);
+
+        // Stitch strips into a contiguous full-image uint[] (DenseX = row-major dense).
+        var allPixels = new uint[width * height];
+        for (int p = 0; p < peerCount; p++)
+        {
+            int yStart = p * stripHeight;
+            int yEnd = (p == peerCount - 1) ? height : yStart + stripHeight;
+            int stripPixelCount = width * (yEnd - yStart);
+            int dstOffsetUints = yStart * width;
+            var bytes = stripBytes[p];
+            int copyUints = Math.Min(stripPixelCount, bytes.Length / 4);
+            Buffer.BlockCopy(bytes, 0, allPixels, dstOffsetUints * 4, copyUints * 4);
+        }
+
+        // Upload the full image into the render buffer and present via the
+        // backend-appropriate ICanvasRenderer (CPUCanvasRenderer for P2P).
+        _mandelbrotBuffer!.View.AsContiguous().CopyFromCPU(allPixels);
+        await _compute.Accelerator!.SynchronizeAsync();
+        await _mandelbrotRenderer!.PresentAsync(_mandelbrotBuffer);
+
         sw.Stop();
         _mandelbrotTimeMs = sw.Elapsed.TotalMilliseconds;
-
-        // Render to canvas with per-peer color tinting
-        try
-        {
-            using var doc = JS.Get<Document>("document");
-            using var canvas = doc.GetElementById<HTMLCanvasElement>(_mandelbrotCanvas.Id!);
-            if (canvas != null)
-            {
-                using var ctx = canvas.Get2DContext();
-                var pixels = new byte[width * height * 4];
-
-                for (int p = 0; p < peerCount; p++)
-                {
-                    if (stripPixels[p] == null) continue;
-                    int yStart = p * stripHeight;
-                    uint tint = PeerColors[p % PeerColors.Length];
-                    byte tintR = (byte)((tint >> 16) & 0xFF);
-                    byte tintG = (byte)((tint >> 8) & 0xFF);
-                    byte tintB = (byte)(tint & 0xFF);
-
-                    for (int i = 0; i < stripPixels[p].Length; i++)
-                    {
-                        int iter = stripPixels[p][i];
-                        int x = i % width;
-                        int y = yStart + i / width;
-                        int idx = (y * width + x) * 4;
-
-                        if (iter >= maxIter)
-                        {
-                            pixels[idx] = 0; pixels[idx + 1] = 0; pixels[idx + 2] = 0; pixels[idx + 3] = 255;
-                        }
-                        else
-                        {
-                            // Color by iteration with peer tint
-                            float t = iter / (float)maxIter;
-                            pixels[idx] = (byte)(tintR * t);
-                            pixels[idx + 1] = (byte)(tintG * t);
-                            pixels[idx + 2] = (byte)(tintB * t);
-                            pixels[idx + 3] = 255;
-                        }
-                    }
-                }
-
-                ctx.PutImageBytes(pixels, width, height);
-            }
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"[Mandelbrot] Canvas render failed: {ex.Message}");
-        }
 
         _mandelbrotRunning = false;
         LogActivity("\ud83c\udfa8", $"Mandelbrot rendered: {width}x{height} in {_mandelbrotTimeMs:F0}ms across {peerCount} peers", "#a78bfa");
@@ -1854,6 +1868,12 @@
             _cameraStream.Dispose();
             _cameraStream = null;
         }
+
+        // Mandelbrot render resources (lazy-init on first Render click).
+        try { _mandelbrotRenderer?.Dispose(); } catch { }
+        _mandelbrotRenderer = null;
+        try { _mandelbrotBuffer?.Dispose(); } catch { }
+        _mandelbrotBuffer = null;
 
         // Don't clear swarm state on dispose — we want to restore on reload.
         // Only ClearSwarmState() when the user explicitly leaves/destroys the swarm.
