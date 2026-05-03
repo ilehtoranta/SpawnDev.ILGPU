@@ -536,6 +536,53 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
         // corresponding source row. If WebGL emits the bounds check or the
         // gather wrong, the output will be zero rows instead of the expected
         // permuted rows.
+        // 4-byte (single-float) buffer round-trip — Data's WebGPU NRE repro from
+        // _DevComms\SpawnDev.ILGPU\data-to-geordi-webgpu-tiny-readback-nre-2026-05-03.md.
+        // Allocates a 1-element float buffer, dispatches a kernel that writes one
+        // value into it, synchronizes, and reads back via CopyToHostAsync. WebGPU
+        // throws a bare NullReferenceException somewhere in the partial-readback
+        // chain at byteCount == 4. CPU/CUDA/OpenCL/Wasm/WebGL all work.
+        [TestMethod]
+        public async Task TinyBufferOneElementReadbackTest() => await RunTest(async accelerator =>
+        {
+            using var buf = accelerator.Allocate1D<float>(1);
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<float>, float>(
+                (idx, dst, val) => dst[idx] = val);
+            kernel((Index1D)1, buf.View, 42.5f);
+            await accelerator.SynchronizeAsync();
+            var result = await buf.CopyToHostAsync<float>(0, 1);
+            if (result.Length != 1)
+                throw new Exception($"TinyBufferOneElementReadback: expected length 1, got {result.Length}");
+            if (Math.Abs(result[0] - 42.5f) > 1e-5f)
+                throw new Exception($"TinyBufferOneElementReadback: expected 42.5, got {result[0]}");
+        });
+
+        // Stress variant of the 1-element readback — many fresh tiny-buffer
+        // allocate/dispatch/sync/readback cycles to exercise WebGPU's encoder
+        // state and partial-readback path Data observed surfacing NREs in
+        // the YOLOv8 pipeline at node 227 'Div' producing shape=[1].
+        // Per data-to-geordi-webgpu-tiny-readback-nre-2026-05-03.md the trap
+        // only fires after some accumulated dispatch history.
+        [TestMethod]
+        public async Task TinyBufferStressReadbackTest() => await RunTest(async accelerator =>
+        {
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<float>, float>(
+                (idx, dst, val) => dst[idx] = val);
+            const int iterations = 64;
+            for (int i = 0; i < iterations; i++)
+            {
+                using var buf = accelerator.Allocate1D<float>(1);
+                float expected = (float)(i + 0.5);
+                kernel((Index1D)1, buf.View, expected);
+                await accelerator.SynchronizeAsync();
+                var result = await buf.CopyToHostAsync<float>(0, 1);
+                if (result.Length != 1)
+                    throw new Exception($"TinyBufferStressReadback iter {i}: expected length 1, got {result.Length}");
+                if (Math.Abs(result[0] - expected) > 1e-5f)
+                    throw new Exception($"TinyBufferStressReadback iter {i}: expected {expected}, got {result[0]}");
+            }
+        });
+
         [TestMethod]
         public async Task GatherAxis0FloatLikeMlTest() => await RunTest(async accelerator =>
         {
