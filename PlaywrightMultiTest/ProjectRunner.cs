@@ -449,6 +449,11 @@ namespace PlaywrightMultiTest
                     {
                         TestFunc = async (page) => await P2PSwarmTwoTabTest(page, (TestableBlazorWasm)proj),
                     }).SetName("P2PSwarm.TwoTab_PeerDiscovery").SetCategory("P2PSwarm");
+
+                    yield return new TestCaseData(new ProjectTest(proj, "P2PSwarm", "PeerStability_NoCascadeAfterHandshake")
+                    {
+                        TestFunc = async (page) => await P2PSwarmStabilityTest(page, (TestableBlazorWasm)proj),
+                    }).SetName("P2PSwarm.PeerStability_NoCascadeAfterHandshake").SetCategory("P2PSwarm");
                 }
             }
         }
@@ -591,6 +596,165 @@ namespace PlaywrightMultiTest
 
                 LogStatus($"[P2P TwoTab] Coordinator peer count after dropout: {droppedCount}");
                 LogStatus("[P2P TwoTab] Two-tab peer discovery + dropout: COMPLETE ✓");
+            }
+            finally
+            {
+                if (page2 != null)
+                {
+                    try { await page2.CloseAsync(); } catch { }
+                }
+                try { await coordPage.CloseAsync(); } catch { }
+            }
+        }
+
+        /// <summary>
+        /// Live-demo regression test: opens coord + worker tabs through the demo's
+        /// own `P2PCompute.CreateSwarmAsync` / `JoinSwarmAsync` flow (matching what
+        /// the deployed RenderMandelbrot demo does), waits for the BT handshake to
+        /// complete, then keeps both tabs open and asserts the connection STAYS
+        /// alive without an SCTP cascade.
+        ///
+        /// Catches the rc.5 dedup-via-dispose cascade trigger that the original
+        /// `TwoTab_PeerDiscovery` test missed: TwoTab waited for `peerCount &gt;= 1`
+        /// (passes the moment the first peer connects), then immediately closed
+        /// the worker tab and waited for `peerCount = 0`. A cascade-induced drop
+        /// during the open window is indistinguishable from the worker-close drop
+        /// in that flow, so the test passed for the wrong reason.
+        ///
+        /// This test fails on TWO conditions:
+        ///   1. `peerCount` drops below 1 while BOTH tabs are still open (cascade
+        ///      took out the connection without anyone closing).
+        ///   2. Either tab's browser console emits a string matching the cascade
+        ///      signature (`sctp-failure` / `User-Initiated Abort` /
+        ///      `sctpCauseCode=12` / `[CH-ERROR-DIAG]`).
+        ///
+        /// The stability-window length (60s) was chosen because Captain's live repro
+        /// 2026-05-03 fired the cascade within ~5-10s of BT handshake completion.
+        /// 60s gives generous headroom while staying inside PMT's per-test timeout.
+        /// </summary>
+        private static async Task P2PSwarmStabilityTest(IPage page1, TestableBlazorWasm blazorProj)
+        {
+            var baseUrl = "https://localhost:5451";
+            var coordTestId = $"stability-coord-{Guid.NewGuid():N}".Substring(0, 26);
+            var workerTestId = $"stability-work-{Guid.NewGuid():N}".Substring(0, 26);
+
+            // Capture cascade-signature messages from BOTH tabs into a shared list
+            // and assert it's empty at the end. Match against the strings RtcPeer's
+            // CH-ERROR-DIAG handler emits when Chromium fires the cascade.
+            var cascadeMatches = new System.Collections.Concurrent.ConcurrentBag<string>();
+            void ScanForCascade(string source, string text)
+            {
+                if (string.IsNullOrEmpty(text)) return;
+                if (text.Contains("sctp-failure", StringComparison.OrdinalIgnoreCase)
+                    || text.Contains("User-Initiated Abort", StringComparison.OrdinalIgnoreCase)
+                    || text.Contains("sctpCauseCode=12", StringComparison.OrdinalIgnoreCase)
+                    || text.Contains("[CH-ERROR-DIAG]", StringComparison.OrdinalIgnoreCase))
+                {
+                    cascadeMatches.Add($"[{source}] {text}");
+                }
+            }
+
+            var coordPage = await blazorProj.BrowserContext.NewPageAsync();
+            coordPage.Console += (_, msg) =>
+            {
+                LogStatus($"[Stability/Coord {msg.Type}] {msg.Text}");
+                ScanForCascade("Coord", msg.Text);
+            };
+
+            var coordUrl = $"{baseUrl}/compute?testId={Uri.EscapeDataString(coordTestId)}&autoCreate=true";
+            await coordPage.GotoAsync(coordUrl);
+
+            const string parseStateJs = "(k) => { var v = globalThis[k]; return typeof v === 'string' ? JSON.parse(v) : v; }";
+
+            string? joinLink = await WaitForJsValueAsync(coordPage,
+                $"() => {{ var s = ({parseStateJs})('computeSwarmState_{coordTestId}'); return s ? s.joinLink : null; }}",
+                timeoutSeconds: 60,
+                label: $"coordinator joinLink for {coordTestId}");
+
+            if (string.IsNullOrEmpty(joinLink) || !joinLink.StartsWith("http"))
+                throw new Exception($"Coordinator did not publish a usable joinLink: '{joinLink}'");
+            LogStatus($"[P2P Stability] Join URL: {joinLink[..Math.Min(80, joinLink.Length)]}...");
+
+            var separator = joinLink.Contains('?') ? "&" : "?";
+            var workerUrl = $"{joinLink}{separator}autojoin=1&testId={Uri.EscapeDataString(workerTestId)}";
+
+            var page2 = await blazorProj.BrowserContext.NewPageAsync();
+            page2.Console += (_, msg) =>
+            {
+                LogStatus($"[Stability/Worker {msg.Type}] {msg.Text}");
+                ScanForCascade("Worker", msg.Text);
+            };
+
+            try
+            {
+                await page2.GotoAsync(workerUrl);
+                LogStatus("[P2P Stability] Worker tab opened, waiting for peer discovery...");
+
+                var peerCountJs = $"() => {{ var s = ({parseStateJs})('computeSwarmState_{coordTestId}'); return s ? s.peerCount : null; }}";
+                int lastLogged = -1;
+                await WaitForJsValueAsync(coordPage, peerCountJs,
+                    timeoutSeconds: 120,
+                    label: "coordinator.peerCount >= 1 (initial connect)",
+                    predicate: v =>
+                    {
+                        var n = AsInt(v);
+                        if (n.HasValue && n.Value != lastLogged)
+                        {
+                            LogStatus($"[P2P Stability] coord.peerCount={n.Value}");
+                            lastLogged = n.Value;
+                        }
+                        return n.HasValue && n.Value >= 1;
+                    });
+
+                LogStatus("[P2P Stability] Peer connected. Holding both tabs open for 60s, asserting peerCount stays >= 1 with no SCTP cascade...");
+
+                // Stability window: poll every 2s for 60s. peerCount must stay >= 1
+                // the entire time. Closing either tab is FORBIDDEN - this is the
+                // exact "sit there until they threw an error" scenario from Captain's
+                // 2026-05-03 live repro.
+                const int stabilitySeconds = 60;
+                const int pollIntervalMs = 2000;
+                int polls = stabilitySeconds * 1000 / pollIntervalMs;
+                int minPeerCount = int.MaxValue;
+                int firstDropAtPollIndex = -1;
+                for (int i = 0; i < polls; i++)
+                {
+                    await Task.Delay(pollIntervalMs);
+                    var raw = await coordPage.EvaluateAsync<object?>(peerCountJs);
+                    var n = AsInt(raw);
+                    if (n.HasValue)
+                    {
+                        if (n.Value < minPeerCount) minPeerCount = n.Value;
+                        if (n.Value < 1 && firstDropAtPollIndex < 0)
+                        {
+                            firstDropAtPollIndex = i;
+                            LogStatus($"[P2P Stability] FAIL: coord.peerCount dropped to {n.Value} at t+{(i + 1) * pollIntervalMs / 1000}s while both tabs still open");
+                            // Keep polling so we can see what else happens, but the test will fail at the end.
+                        }
+                        if ((i + 1) % 5 == 0)
+                            LogStatus($"[P2P Stability] t+{(i + 1) * pollIntervalMs / 1000}s peerCount={n.Value} (min={minPeerCount})");
+                    }
+                }
+
+                LogStatus($"[P2P Stability] 60s window complete. minPeerCount={minPeerCount} cascadeMatches={cascadeMatches.Count}");
+
+                if (firstDropAtPollIndex >= 0)
+                {
+                    var dropTimeSec = (firstDropAtPollIndex + 1) * pollIntervalMs / 1000;
+                    throw new Exception(
+                        $"P2PSwarm.PeerStability: coord.peerCount dropped below 1 (to {minPeerCount}) at t+{dropTimeSec}s while both tabs were still open. " +
+                        $"This is the cascade-trigger regression. cascadeMatches={cascadeMatches.Count}");
+                }
+
+                if (cascadeMatches.Count > 0)
+                {
+                    var sample = string.Join(" | ", cascadeMatches.Take(3));
+                    throw new Exception(
+                        $"P2PSwarm.PeerStability: detected {cascadeMatches.Count} cascade-signature console message(s) in 60s window even though peerCount stayed >= 1. " +
+                        $"Sample: {sample}");
+                }
+
+                LogStatus("[P2P Stability] PASS: peerCount stayed >= 1 for 60s with no SCTP cascade signatures observed.");
             }
             finally
             {
