@@ -414,11 +414,16 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             // Build the Wasm module
             var moduleBuilder = new WasmModuleBuilder();
 
-            // Import shared memory
-            // Max 2048 pages = 128MB. Larger values (65536=4GB, 16384=1GB) cause RangeError
-            // on some browsers when creating SharedArrayBuffer-backed WebAssembly.Memory.
-            // 128MB provides 60x+ headroom over realistic kernel workloads.
-            moduleBuilder.ImportSharedMemory("env", "memory", 1, 16384);
+            // Import shared memory. The module's declared import maximum MUST match (or
+            // exceed) the host's WebAssembly.Memory `maximum` value, otherwise
+            // WebAssembly.instantiate fails with "memory import has a larger maximum size N
+            // than the module's declared maximum M" - the imported memory's max must be <=
+            // the import's declared max per the spec. Threading the same
+            // WasmBackendOptions.MaxLinearMemoryPages value (default 16384 / 1 GiB,
+            // configurable up to 65536 / 4 GiB) keeps both ends in sync. Default
+            // SharedArrayBuffer reservation budget on Chrome accommodates 16384 pages
+            // without RangeError; consumers that opt into a larger cap accept that risk.
+            moduleBuilder.ImportSharedMemory("env", "memory", 1, (uint)Options.MaxLinearMemoryPages);
 
             // Import math functions from JavaScript Math object
             var mathImports = new Dictionary<string, uint>();

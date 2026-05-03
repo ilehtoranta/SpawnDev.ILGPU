@@ -4,8 +4,8 @@
 		<TargetFramework>net10.0</TargetFramework>
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>enable</Nullable>
-		<Version>4.9.4-rc.1</Version>
-		<PackageReleaseNotes>v4.9.4-rc.1: closes `P2PSwarm.TwoTab_PeerDiscovery` regression. `P2PWebRtcBridge.wire.OnClose` now filters phantom-alive wires (where `Destroyed=false` but underlying transport is dead) using the new `Wire.SimplePeer.IsTransportDead` accessor in SpawnDev.WebTorrent 3.2.3-rc.2. Catches the Chromium-under-Playwright bug where `connectionstatechange` does not propagate to `"failed"` on remote tab close, leaving wire's `Destroyed` flag false and inflating the canonical wireSet count. Both bridge filter sites updated: the wireSet `RemoveWhere` and the `torrent.Wires` cross-check walk. SpawnDev.WebTorrent dep bumped 3.2.2 -&gt; 3.2.3-rc.2 (rc.2 ships synthesis-aware IsTransportDead — reads RtcPeer's `_lastObservedPcState` captured from the OnConnectionStateChange event instead of the JS-native `connectionState` which Chromium-under-Playwright leaves stuck at `"connected"` indefinitely).</PackageReleaseNotes>
+		<Version>4.9.4-rc.2</Version>
+		<PackageReleaseNotes>v4.9.4-rc.2: bundle bump in lockstep with SpawnDev.ILGPU 4.9.4-rc.2 (kernel-module memory import maximum now matches host's `MaxLinearMemoryPages`, fixing rc.1 instantiate failure when consumer raised the cap above 16384). P2P source unchanged from rc.1: same `P2PWebRtcBridge.wire.OnClose` phantom-alive filter using `Wire.SimplePeer.IsTransportDead`, same SpawnDev.WebTorrent 3.2.3-rc.2 dep.</PackageReleaseNotes>
 		<GeneratePackageOnBuild>True</GeneratePackageOnBuild>
 		<GenerateDocumentationFile>true</GenerateDocumentationFile>
 		<EmbedAllSources>true</EmbedAllSources>
