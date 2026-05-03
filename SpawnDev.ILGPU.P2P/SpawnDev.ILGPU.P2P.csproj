@@ -4,8 +4,8 @@
 		<TargetFramework>net10.0</TargetFramework>
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>enable</Nullable>
-		<Version>4.9.5-rc.7</Version>
-		<PackageReleaseNotes>v4.9.5-rc.4: bundle bump for SpawnDev.WebTorrent 3.2.4-rc.7 (cross-tracker offer-relay dedup registry). P2P source unchanged. SpawnDev.WebTorrent dep bumped 3.2.4-rc.3 -&gt; 3.2.4-rc.7.</PackageReleaseNotes>
+		<Version>4.9.5-rc.8</Version>
+		<PackageReleaseNotes>v4.9.5-rc.8: P2PMemoryBuffer.CopyTo/CopyFrom semantics swapped to match the ILGPU contract — CopyTo is the READ path (buffer-&gt;CPU), CopyFrom is the WRITE path (CPU-&gt;buffer + dirty). Without this fix `view.CopyToCPU(...)` against a P2P-allocated buffer silently returned zeros (renderer-side ShadowData read never landed), and `view.CopyFromCPU(...)` left the shadow not-dirty. Unblocks zero-copy SpawnDev.ILGPU.Rendering.CanvasRendererFactory rendering on the P2P backend (ComputeSwarm Mandelbrot demo).</PackageReleaseNotes>
 		<GeneratePackageOnBuild>True</GeneratePackageOnBuild>
 		<GenerateDocumentationFile>true</GenerateDocumentationFile>
 		<EmbedAllSources>true</EmbedAllSources>

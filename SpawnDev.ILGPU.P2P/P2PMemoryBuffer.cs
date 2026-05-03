@@ -66,6 +66,12 @@ public class P2PMemoryBuffer : MemoryBuffer
     }
 
     /// <inheritdoc/>
+    /// <remarks>
+    /// READ path. ILGPU calls this when a CPU-side caller invokes
+    /// <c>view.CopyToCPU(...)</c>: <paramref name="sourceView"/> points into THIS
+    /// buffer's storage (ShadowData) and <paramref name="targetView"/> is the CPU
+    /// destination. Bytes flow OUT of ShadowData into the target.
+    /// </remarks>
     protected override void CopyTo(
         AcceleratorStream stream,
         in ArrayView<byte> sourceView,
@@ -73,24 +79,27 @@ public class P2PMemoryBuffer : MemoryBuffer
     {
         lock (ShadowLock)
         {
-            if (sourceView.Length > 0 && sourceView.Length <= ShadowData.Length)
+            unsafe
             {
-                unsafe
+                var dstPtr = targetView.LoadEffectiveAddressAsPtr();
+                if (targetView.Length > 0 && ShadowData.Length > 0 && dstPtr != IntPtr.Zero)
                 {
-                    var srcPtr = sourceView.LoadEffectiveAddressAsPtr();
-                    if (srcPtr != IntPtr.Zero)
-                    {
-                        System.Runtime.InteropServices.Marshal.Copy(
-                            srcPtr, ShadowData, 0, (int)Math.Min(sourceView.Length, ShadowData.Length));
-                    }
+                    var copyLen = (int)Math.Min(targetView.Length, ShadowData.Length);
+                    var targetSpan = new Span<byte>((void*)dstPtr, copyLen);
+                    ShadowData.AsSpan(0, copyLen).CopyTo(targetSpan);
                 }
-                IsDirty = true;
-                IsLocalCurrent = true;
             }
         }
     }
 
     /// <inheritdoc/>
+    /// <remarks>
+    /// WRITE path. ILGPU calls this when a CPU-side caller invokes
+    /// <c>view.CopyFromCPU(...)</c>: <paramref name="sourceView"/> is the CPU
+    /// source and <paramref name="targetView"/> points into THIS buffer's
+    /// storage. Bytes flow IN from the source to ShadowData; mark the buffer
+    /// dirty so the next dispatch ships fresh data to the resident peer.
+    /// </remarks>
     protected override void CopyFrom(
         AcceleratorStream stream,
         in ArrayView<byte> sourceView,
@@ -98,16 +107,16 @@ public class P2PMemoryBuffer : MemoryBuffer
     {
         lock (ShadowLock)
         {
-            if (targetView.Length > 0 && ShadowData.Length > 0)
+            unsafe
             {
-                unsafe
+                var srcPtr = sourceView.LoadEffectiveAddressAsPtr();
+                if (sourceView.Length > 0 && ShadowData.Length > 0 && srcPtr != IntPtr.Zero)
                 {
-                    var dstPtr = targetView.LoadEffectiveAddressAsPtr();
-                    if (dstPtr != IntPtr.Zero)
-                    {
-                        System.Runtime.InteropServices.Marshal.Copy(
-                            ShadowData, 0, dstPtr, (int)Math.Min(targetView.Length, ShadowData.Length));
-                    }
+                    var copyLen = (int)Math.Min(sourceView.Length, ShadowData.Length);
+                    var sourceSpan = new Span<byte>((void*)srcPtr, copyLen);
+                    sourceSpan.CopyTo(ShadowData.AsSpan(0, copyLen));
+                    IsDirty = true;
+                    IsLocalCurrent = true;
                 }
             }
         }
