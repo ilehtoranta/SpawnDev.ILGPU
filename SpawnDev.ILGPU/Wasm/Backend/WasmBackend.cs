@@ -1179,6 +1179,19 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         /// keeps the descheduling window short.
         /// </summary>
         public int WorkerCount { get; set; } = Math.Max(2, WasmILGPUDevice.GetHardwareConcurrency() - 2);
+
+        /// <summary>
+        /// Maximum SharedArrayBuffer-backed <c>WebAssembly.Memory</c> size in 64 KiB pages.
+        /// Default <c>16384</c> (1 GiB), the conservative ceiling that fits within Chrome's
+        /// per-renderer SharedArrayBuffer reservation budget without contending with other
+        /// tabs. Browsers support up to <c>65536</c> pages (4 GiB) for shared memory; raise
+        /// only when the consumer's working set genuinely exceeds 1 GiB and the host has
+        /// the headroom (large-model ML inference is the canonical case — see
+        /// <c>SpawnDev.ILGPU.ML</c>'s DA3-Small graph executor). Note: the cached memory's
+        /// <c>maximum</c> is fixed at instantiation; raising this option after the
+        /// accelerator has already allocated and reused the cached memory has no effect.
+        /// </summary>
+        public int MaxLinearMemoryPages { get; set; } = 16384;
     }
 
     /// <summary>

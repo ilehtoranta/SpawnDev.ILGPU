@@ -124,8 +124,16 @@ public class P2PWebRtcBridge : IAsyncDisposable
                             wireSet.Remove(wire);
                             beforeFilter = wireSet.Count;
                             wireSetDump = string.Join(",",
-                                wireSet.Select(w => $"d={w.Destroyed}/p={w.PeerId?[..Math.Min(8, w.PeerId.Length)] ?? "null"}"));
-                            wireSet.RemoveWhere(w => w.Destroyed);
+                                wireSet.Select(w => $"d={w.Destroyed}/td={w.SimplePeer?.IsTransportDead ?? false}/p={w.PeerId?[..Math.Min(8, w.PeerId.Length)] ?? "null"}"));
+                            // Filter phantom wires whose Destroyed flag has not yet been set
+                            // (Chromium-under-Playwright: connectionstatechange event chain
+                            // doesn't propagate on remote tab close, so wire.OnClose never
+                            // fires -> Destroyed stays false -> wireSet count stays inflated
+                            // -> isLastWireForCanonical wrongly false -> peer never
+                            // unregisters). IsTransportDead consults the peer's underlying
+                            // transport directly: PC connectionState in {failed,closed} OR
+                            // data channel was once open and is no longer.
+                            wireSet.RemoveWhere(w => w.Destroyed || (w.SimplePeer?.IsTransportDead ?? false));
                             afterFilter = wireSet.Count;
                             if (wireSet.Count == 0)
                                 _wiresByBtPeerId.TryRemove(canonical!, out _);
@@ -207,6 +215,12 @@ public class P2PWebRtcBridge : IAsyncDisposable
                 {
                     if (otherWire == wire) continue;
                     if (otherWire.Destroyed) continue;
+                    // Skip phantom-alive wires whose underlying transport is gone but whose
+                    // Destroyed flag has not yet been set. Same Chromium-under-Playwright
+                    // bug as the wireSet filter above; without this check the foreach would
+                    // see the phantom and wrongly conclude a live replacement exists,
+                    // skipping UnregisterPeer indefinitely.
+                    if (otherWire.SimplePeer?.IsTransportDead == true) continue;
                     if (string.Equals(otherWire.PeerId, canonical, StringComparison.Ordinal))
                         return;
                 }

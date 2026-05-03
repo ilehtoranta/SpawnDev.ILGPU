@@ -4,8 +4,8 @@
 		<TargetFramework>net10.0</TargetFramework>
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>enable</Nullable>
-		<Version>4.9.3</Version>
-		<PackageReleaseNotes>v4.9.3 stable: bundle bump in lockstep with SpawnDev.ILGPU 4.9.3. P2P source unchanged from 4.9.2-rc.35 (same phantom-DESTROYED-wire fix in `P2PWebRtcBridge.wire.OnClose`, same 240s/480s `LargeBuffer_100MB` test budgets, same `SpawnDev.WebTorrent 3.2.2` stable transitive dependency). Bumped to track the SpawnDev.ILGPU 4.9.3 stable release (new `ArrayView&lt;T&gt;.CopyToHostAsync()` partial-readback extension + WebGPU `Half` NaN/Inf codegen fix). Same known issue: `P2PSwarm.TwoTab_PeerDiscovery` still fails (Chromium-under-Playwright phantom-ALIVE wire issue; needs separate active-liveness probe).</PackageReleaseNotes>
+		<Version>4.9.4-rc.1</Version>
+		<PackageReleaseNotes>v4.9.4-rc.1: closes `P2PSwarm.TwoTab_PeerDiscovery` regression. `P2PWebRtcBridge.wire.OnClose` now filters phantom-alive wires (where `Destroyed=false` but underlying transport is dead) using the new `Wire.SimplePeer.IsTransportDead` accessor in SpawnDev.WebTorrent 3.2.3-rc.2. Catches the Chromium-under-Playwright bug where `connectionstatechange` does not propagate to `"failed"` on remote tab close, leaving wire's `Destroyed` flag false and inflating the canonical wireSet count. Both bridge filter sites updated: the wireSet `RemoveWhere` and the `torrent.Wires` cross-check walk. SpawnDev.WebTorrent dep bumped 3.2.2 -&gt; 3.2.3-rc.2 (rc.2 ships synthesis-aware IsTransportDead — reads RtcPeer's `_lastObservedPcState` captured from the OnConnectionStateChange event instead of the JS-native `connectionState` which Chromium-under-Playwright leaves stuck at `"connected"` indefinitely).</PackageReleaseNotes>
 		<GeneratePackageOnBuild>True</GeneratePackageOnBuild>
 		<GenerateDocumentationFile>true</GenerateDocumentationFile>
 		<EmbedAllSources>true</EmbedAllSources>
@@ -28,7 +28,7 @@
 
 	<ItemGroup>
 		<ProjectReference Include="..\SpawnDev.ILGPU\SpawnDev.ILGPU.csproj" />
-		<PackageReference Include="SpawnDev.WebTorrent" Version="3.2.2" />
+		<PackageReference Include="SpawnDev.WebTorrent" Version="3.2.3-rc.2" />
 	</ItemGroup>
 
 </Project>

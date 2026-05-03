@@ -39,6 +39,16 @@ namespace SpawnDev.ILGPU.Wasm
         private int _workerCount = 4;
 
         /// <summary>
+        /// Maximum SharedArrayBuffer-backed WebAssembly.Memory size in 64 KiB pages.
+        /// Set at construction from <see cref="WasmBackendOptions.MaxLinearMemoryPages"/>
+        /// (default 16384 / 1 GiB). Used as the <c>maximum</c> argument when the accelerator
+        /// allocates the cached <c>WebAssembly.Memory</c> on first dispatch — once the cached
+        /// memory exists, <c>memory.grow</c> can extend its <c>initial</c> up to this value
+        /// but cannot raise the <c>maximum</c>. Override before the first dispatch.
+        /// </summary>
+        private int _maxLinearMemoryPages = 16384;
+
+        /// <summary>
         /// Number of Web Workers actually used for parallel kernel dispatch.
         /// Set at construction from <see cref="WasmBackendOptions.WorkerCount"/>
         /// or the default <c>Math.Max(2, navigator.hardwareConcurrency - 2)</c>.
@@ -46,6 +56,12 @@ namespace SpawnDev.ILGPU.Wasm
         /// <see cref="Create"/> to override.
         /// </summary>
         public int WorkerCount => _workerCount;
+
+        /// <summary>
+        /// Maximum SharedArrayBuffer-backed WebAssembly.Memory size in 64 KiB pages,
+        /// configured at <see cref="Create"/> time via <see cref="WasmBackendOptions.MaxLinearMemoryPages"/>.
+        /// </summary>
+        public int MaxLinearMemoryPages => _maxLinearMemoryPages;
 
         /// <summary>
         /// Reusable worker pool — lazily initialized on first dispatch.
@@ -209,6 +225,7 @@ namespace SpawnDev.ILGPU.Wasm
             }
             catch { }
             accelerator._workerCount = options?.WorkerCount ?? Math.Max(2, hwConcurrency - 2);
+            accelerator._maxLinearMemoryPages = options?.MaxLinearMemoryPages ?? 16384;
             var backend = new WasmBackend(context, options ?? new WasmBackendOptions());
             accelerator.Backend = backend;
             accelerator.Init(backend);
@@ -711,7 +728,7 @@ namespace SpawnDev.ILGPU.Wasm
                         _cachedWasmPages = wasmPages;
                         _cachedWasmMemory = js.Call<JSObject>(
                             "eval",
-                            $"new WebAssembly.Memory({{ initial: {wasmPages}, maximum: 16384, shared: true }})");
+                            $"new WebAssembly.Memory({{ initial: {wasmPages}, maximum: {_maxLinearMemoryPages}, shared: true }})");
                         _cachedMemoryBuffer = _cachedWasmMemory.JSRef!.Get<SharedArrayBuffer>("buffer");
                         _initializedWorkers.Clear();
                     }
@@ -746,7 +763,7 @@ namespace SpawnDev.ILGPU.Wasm
                         _cachedWasmPages = wasmPages;
                         _cachedWasmMemory = js.Call<JSObject>(
                             "eval",
-                            $"new WebAssembly.Memory({{ initial: {wasmPages}, maximum: 16384, shared: true }})");
+                            $"new WebAssembly.Memory({{ initial: {wasmPages}, maximum: {_maxLinearMemoryPages}, shared: true }})");
                         _cachedMemoryBuffer = _cachedWasmMemory.JSRef!.Get<SharedArrayBuffer>("buffer");
                         _initializedWorkers.Clear();
                     }
