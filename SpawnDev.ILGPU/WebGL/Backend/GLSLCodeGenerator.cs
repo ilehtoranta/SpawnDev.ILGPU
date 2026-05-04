@@ -973,6 +973,33 @@ namespace SpawnDev.ILGPU.WebGL.Backend
 
             if (value.Kind == BinaryArithmeticKind.PowF)
             {
+                // GLSL `pow(x, y)` is undefined for x < 0; ANGLE typically emits it as
+                // `exp(y * log(x))` and `log(negative_x)` is NaN. For LayerNorm's variance
+                // step `(x - mean)^2`, half the inputs are negative — every NaN cascades
+                // through ReduceMean -> Sqrt -> Mul -> Add to produce NaN logits. Surfaced
+                // 2026-05-04 by Data's DistilBERT WebGL first-divergent-node capture.
+                //
+                // Fix: when the exponent is a constant non-negative integer, expand to
+                // repeated multiplication. `(x - mean)^2` becomes `(x - mean) * (x - mean)`
+                // which is well-defined for negative x. Bound at 8 to avoid bloating WGSL
+                // for large exponents (uncommon in ML); fall through to `pow()` past that.
+                if (value.Right.Resolve() is PrimitiveValue pv)
+                {
+                    float pf = pv.BasicValueType == BasicValueType.Float32 || pv.BasicValueType == BasicValueType.Float16
+                        ? pv.Float32Value
+                        : (pv.BasicValueType == BasicValueType.Float64 ? (float)pv.Float64Value : float.NaN);
+                    if (!float.IsNaN(pf) && pf >= 0f && pf <= 8f && pf == (int)pf)
+                    {
+                        int n = (int)pf;
+                        if (n == 0) { AppendLine($"{target} = 1.0;"); return; }
+                        if (n == 1) { AppendLine($"{target} = {left};"); return; }
+                        var sb = new StringBuilder();
+                        sb.Append(left);
+                        for (int i = 1; i < n; i++) sb.Append(" * ").Append(left);
+                        AppendLine($"{target} = {sb};");
+                        return;
+                    }
+                }
                 AppendLine($"{target} = pow({left}, {right});");
                 return;
             }

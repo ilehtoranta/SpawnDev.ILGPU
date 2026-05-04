@@ -673,6 +673,46 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                 throw new Exception($"D2 should see sharedSrc=200, got {d2[0]}");
         });
 
+        // Test N: WebGL Pow with NEGATIVE BASE + integer exponent. GLSL `pow(x, y)` is
+        // undefined for x < 0; ANGLE emits `exp(y * log(x))` and `log(negative_x)` is NaN.
+        // Surfaced 2026-05-04 by Data's DistilBERT WebGL first-divergent-node capture: at
+        // node 10 'Pow' (LayerNorm's `(x - mean)^2`), elements with negative `x - mean`
+        // returned NaN on WebGL, cascading NaN through every downstream LayerNorm /
+        // ReduceMean / Sqrt and producing 50257/50257 NaN logits in GPT-2.
+        // Fix: when the exponent is a constant non-negative integer, expand pow() to
+        // repeated multiplication which is well-defined for negative bases.
+        static void Tests23_PowNegativeBaseInt2Kernel(
+            Index1D idx,
+            ArrayView<float> input,
+            ArrayView<float> output)
+        {
+            output[idx] = MathF.Pow(input[idx], 2f);
+        }
+
+        [TestMethod]
+        public async Task Tests23_PowNegativeBase_IntExp2_NoNaN() => await RunEmulatedTest(async accelerator =>
+        {
+            var input = new float[] { 0.055f, -0.037f, -1.5f, 2.0f, -0.001f, 3.14f, -3.14f };
+            var expected = input.Select(v => v * v).ToArray();
+            using var inBuf = accelerator.Allocate1D(input);
+            using var outBuf = accelerator.Allocate1D<float>(input.Length);
+            var k = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<float>, ArrayView<float>>(
+                Tests23_PowNegativeBaseInt2Kernel);
+            k((Index1D)input.Length, inBuf.View, outBuf.View);
+            await accelerator.SynchronizeAsync();
+
+            var got = await outBuf.CopyToHostAsync<float>(0, input.Length);
+            for (int i = 0; i < input.Length; i++)
+            {
+                float diff = MathF.Abs(got[i] - expected[i]);
+                if (float.IsNaN(got[i]))
+                    throw new Exception($"pow({input[i]}, 2) returned NaN at idx {i}; expected {expected[i]}. " +
+                        "GLSL pow(x, y) is undefined for x<0; codegen should expand to x*x for integer exponents.");
+                if (diff > 1e-5f)
+                    throw new Exception($"pow({input[i]}, 2): expected {expected[i]} got {got[i]}");
+            }
+        });
+
         // Test G: SAME as F but WITHOUT the compound `iter < 8` safety guard.
         // Tuvok's Tests22 inline has no safety cap — loop runs purely on the
         // `rng <= EC_CODE_BOT` condition. This isolates whether the compound
