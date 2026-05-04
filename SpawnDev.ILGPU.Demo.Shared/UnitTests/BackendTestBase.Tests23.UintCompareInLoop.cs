@@ -284,6 +284,50 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                 throw new Exception($"NormalizeShape_WithBuffer iter expected 3 got {r[4]} (rng=0x{r[0]:X8} offs={r[2]})");
         });
 
+        // Test H: ArrayView<long> kernel param backed by a Cast of an int buffer.
+        // Surfaced 2026-05-04 by Tuvok's `Vp9FrameEntropyKernel` Wasm OOB — the trap
+        // showed `V4=4 bytes wide` for an `ArrayView<long>` param where 8 bytes were
+        // needed. Root cause: WasmAccelerator was using `wasmBuf.ElementSize` (4 for
+        // the int-allocated parent buffer) instead of the view's element size (8 for
+        // long) when computing the view's byte range; the wasm memory copy region
+        // was undersized → kernel reads/writes past the end → OOB.
+        //
+        // This test allocates a buffer as `MemoryBuffer1D<int>`, casts to long view,
+        // writes one long value to the view, and reads it back. Pre-fix: Wasm OOB
+        // because the byte range reserved is `length*4` instead of `length*8`.
+        // Post-fix: passes on every backend.
+        static void Tests23_LongViewOverIntBufferKernel(
+            Index1D _,
+            ArrayView<long> outLen,
+            long valueToStore)
+        {
+            outLen[0] = valueToStore;
+        }
+
+        [TestMethod]
+        public async Task Tests23_LongViewOverIntBuffer() => await RunEmulatedTest(async accelerator =>
+        {
+            // Allocate a MemoryBuffer1D<int> with 2 ints (= 8 bytes).
+            // Cast to ArrayView<long> — gives a 1-element long view backed by the
+            // int allocation. WasmAccelerator must use the VIEW's element size
+            // (8 bytes per long), not the buffer's (4 bytes per int), to size the
+            // wasm memory copy region.
+            using var intBuf = accelerator.Allocate1D<int>(2);
+            var longView = intBuf.View.AsContiguous().Cast<long>();
+            const long testVal = 0x1122334455667788L;
+            var k = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<long>, long>(
+                Tests23_LongViewOverIntBufferKernel);
+            k((Index1D)1, longView, testVal);
+            await accelerator.SynchronizeAsync();
+
+            // Read the parent int buffer back; reinterpret 2 ints as 1 long.
+            var ints = await intBuf.CopyToHostAsync<int>();
+            long got = ((long)(uint)ints[0]) | (((long)ints[1]) << 32);
+            if (got != testVal)
+                throw new Exception($"Cast<long> over int buffer: expected 0x{testVal:X16} got 0x{got:X16} (ints=[0x{ints[0]:X8}, 0x{ints[1]:X8}]). " +
+                    "If only the LOW 32 bits are correct, WasmAccelerator's view-byte-length used buffer.ElementSize (4) instead of view's actual element size (8) — task #16 follow-up fix.");
+        });
+
         // Test G: SAME as F but WITHOUT the compound `iter < 8` safety guard.
         // Tuvok's Tests22 inline has no safety cap — loop runs purely on the
         // `rng <= EC_CODE_BOT` condition. This isolates whether the compound

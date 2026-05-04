@@ -508,13 +508,32 @@ namespace SpawnDev.ILGPU.Wasm
                                 WasmBackend.LastDispatchCopyOutDiag.Add(
                                     $"i={i} paramIdx={paramIdx} irParam={irParamIdx} bufIdx={bufIdx} written={writtenBufferIndices.Contains(bufIdx)}");
 
-                            // Compute SubView byte offset within the buffer
+                            // Compute SubView byte offset within the buffer.
+                            // Capture the view's element size (NOT the buffer's) so we can
+                            // also use it for the byte-length calculation below — required
+                            // when a buffer is Cast (e.g. `int[]` allocation viewed as
+                            // `ArrayView<long>` via `.Cast<long>()`). buffer.ElementSize
+                            // would underreport by 2× and the back half of the view would
+                            // be off the end of the allocated wasm memory range, producing
+                            // an OOB at dispatch time. Surfaced 2026-05-04 by Tuvok's
+                            // Vp9FrameEntropyKernel `ArrayView<long> outLen` trap (V4=4
+                            // bytes wide where it should be 8).
+                            int viewElemSizeForLength = wasmBuf.ElementSize;
                             int subViewByteOffset = 0;
                             try
                             {
                                 var viewType = args[i].GetType();
                                 var baseProp = viewType.GetProperty("BaseView");
                                 object viewObj = baseProp != null ? baseProp.GetValue(args[i])! : args[i];
+                                // Get the actual element size from the view type.
+                                var viewGenericType = viewObj.GetType();
+                                if (viewGenericType.IsGenericType)
+                                {
+                                    var elemType = viewGenericType.GetGenericArguments()[0];
+                                    int actualSize = global::ILGPU.Interop.SizeOf(elemType);
+                                    if (actualSize > 0)
+                                        viewElemSizeForLength = actualSize;
+                                }
                                 var indexProp = viewObj.GetType().GetProperty("Index",
                                     BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
                                 if (indexProp != null)
@@ -522,21 +541,7 @@ namespace SpawnDev.ILGPU.Wasm
                                     var idx = indexProp.GetValue(viewObj);
                                     if (idx is long longIdx)
                                     {
-                                        // Use the VIEW's element size for byte offset, not
-                                        // the buffer's. When a buffer is Cast (e.g., int[]
-                                        // → RadixSortPair[]), buffer.ElementSize differs
-                                        // from the view's element size.
-                                        int viewElemSize = iav.Buffer.ElementSize;
-                                        // Get the actual element size from the view type
-                                        var viewGenericType = viewObj.GetType();
-                                        if (viewGenericType.IsGenericType)
-                                        {
-                                            var elemType = viewGenericType.GetGenericArguments()[0];
-                                            int actualSize = global::ILGPU.Interop.SizeOf(elemType);
-                                            if (actualSize > 0)
-                                                viewElemSize = actualSize;
-                                        }
-                                        subViewByteOffset = (int)(longIdx * viewElemSize);
+                                        subViewByteOffset = (int)(longIdx * viewElemSizeForLength);
                                     }
                                 }
                             }
@@ -550,8 +555,10 @@ namespace SpawnDev.ILGPU.Wasm
                             }
                             viewSubOffsets.Add(subViewByteOffset);
 
-                            // Update the buffer's used byte range to include this SubView
-                            int viewByteLen = (int)iav.Length * wasmBuf.ElementSize;
+                            // Update the buffer's used byte range to include this SubView.
+                            // Use the VIEW's element size (computed above) — NOT the
+                            // buffer's — so Cast views produce the right byte length.
+                            int viewByteLen = (int)iav.Length * viewElemSizeForLength;
                             int viewEnd = subViewByteOffset + viewByteLen;
                             var (curMin, curMax) = bufferRanges[bufIdx];
                             bufferRanges[bufIdx] = (Math.Min(curMin, subViewByteOffset), Math.Max(curMax, viewEnd));

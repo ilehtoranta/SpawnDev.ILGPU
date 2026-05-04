@@ -2,6 +2,47 @@
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
 
+## 4.9.5-rc.9 (2026-05-04) — Wasm cast-view byte-length fix
+
+### Fix: Wasm OOB when an ArrayView's element type differs from its parent buffer's element type
+
+`WasmAccelerator` was computing each kernel-param view's wasm-memory byte range as `iav.Length * wasmBuf.ElementSize` — using the **BUFFER's** element size rather than the **VIEW's**. For a `MemoryBuffer1D<int>` (4-byte element) viewed as `ArrayView<long>` via `.Cast<long>()` (8-byte element), this produced byte length `N*4` instead of `N*8`. Wasm reserved only half the bytes the kernel actually accessed, so reads/writes to the back half of any element landed past the allocated range and triggered an OOB at dispatch time.
+
+Surfaced 2026-05-04 by Tuvok's `Vp9FrameEntropyKernel` Wasm OOB (`V4=4` bytes wide where the kernel signature has `ArrayView<long> outLen`). Same trap pattern: a 1-element `ArrayView<long>` showing as 4 bytes in the dispatcher's view layout diagnostic.
+
+### Fix surface
+
+`SpawnDev.ILGPU/Wasm/WasmAccelerator.cs` ~line 525-554. The SubView byte-offset path already extracted the view's actual element size via reflection on the generic argument; the byte-length path next to it used `wasmBuf.ElementSize` directly. Refactored to compute `viewElemSizeForLength` once (using the view's generic type), then apply it to BOTH the SubView byte-offset AND the byte-length range update.
+
+### Lockdown test
+
+New `Tests23_LongViewOverIntBuffer` in `BackendTestBase.Tests23.UintCompareInLoop.cs`:
+1. Allocate `MemoryBuffer1D<int>(2)` (= 8 bytes total).
+2. View as `ArrayView<long>` via `.Cast<long>()` (= 1 long element).
+3. Kernel writes a known 64-bit value to the view.
+4. Read parent int buffer back; reinterpret 2 ints as 1 long; assert equality.
+
+Pre-fix on Wasm: only the LOW 32 bits of the value land correctly (back half is past the reserved range). Post-fix: full 64-bit round-trip on every backend.
+
+### What this unblocks
+
+- **Tuvok's Vp9 Codecs Wasm path** — `Vp9FrameEntropyKernel.Run` takes `ArrayView<long> outLen`. Pre-fix the dispatch OOB'd at disp=4 with V4=4 bytes wide. Bump SpawnDev.Codecs to rc.9 and lift the Wasm gate on `WasmCodecsTests.GpuTranscodeDemo_Vp9_GradientFrame_RoundTripsViaGpuPair`.
+- **Any kernel signature using `ArrayView<long>` / `ArrayView<double>` / `ArrayView<RadixSortPair<...>>` over a Cast view** — same shape, same fix path.
+
+### Verification
+
+- `Tests23_LongViewOverIntBuffer` 7/7 PASS across all backends.
+- Wasm canary (RadixSort + ManyDispatches) 3 PASS / 1 SKIP, no regressions in the SubView paths that share the now-unified element-size logic.
+
+### Files changed
+
+- `SpawnDev.ILGPU/Wasm/WasmAccelerator.cs` — view-element-size unified across byte-offset + byte-length paths
+- `SpawnDev.ILGPU.Demo.Shared/UnitTests/BackendTestBase.Tests23.UintCompareInLoop.cs` — lockdown test
+
+### Four-package bundle: Fork stays at 2.0.4
+
+No edits to the forked `ILGPU/` tree.
+
 ## 4.9.5-rc.8 (2026-05-04) — Wasm multi-view body-struct kernel param decomp fix
 
 ### Fix: Wasm dispatcher loses N-1 view buffers when kernel takes a multi-ArrayView container struct
