@@ -895,6 +895,407 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                 throw new Exception($"DecodeBitLogP rng expected 0x{expectedRng:X8} got 0x{got[3]:X8}");
         });
 
+        // Test M: WGSL uint-as-i32 division/remainder bitcast. Sister fix to the Shr
+        // signed-shift fix (Test I) — Tuvok's `OpusRangeDecoderGpu_DecodeUint_*` on
+        // WebGPU surfaces this 2026-05-04. After libopus Init, `state.Rng = 0x80000000`.
+        // `state.Rng / ft (= 6)` should produce `0x15555555` (unsigned), but signed div
+        // gives `0xEAAAAAAB`. Fix: WGSL Div/Rem on Int32 with IsUnsigned bitcasts
+        // through u32 (parallel to the Shr bitcast pattern at lines 5063-5089).
+        static void Tests23_UnsignedDivRemHighBitKernel(
+            Index1D _,
+            ArrayView<uint> input,
+            ArrayView<uint> output)
+        {
+            uint a = input[0];
+            uint b = input[1];
+            output[0] = a / b;
+            output[1] = a % b;
+        }
+
+        [TestMethod]
+        public async Task Tests23_UnsignedDivRem_HighBitNoSignDiv() => await RunEmulatedTest(async accelerator =>
+        {
+            // a = 0x80000000 (high bit set, INT_MIN as i32), b = 6
+            var input = new uint[] { 0x80000000u, 6u };
+            using var dIn = accelerator.Allocate1D(input);
+            using var dOut = accelerator.Allocate1D<uint>(2);
+            var k = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<uint>, ArrayView<uint>>(
+                Tests23_UnsignedDivRemHighBitKernel);
+            k((Index1D)1, dIn.View, dOut.View);
+            await accelerator.SynchronizeAsync();
+            var got = await dOut.CopyToHostAsync<uint>();
+            // Unsigned: 0x80000000 / 6 = 0x15555555, 0x80000000 % 6 = 0x2.
+            // Signed (pre-fix WebGPU): -INT_MIN / 6 sign-flipped, gives 0xEAAAAAAB.
+            if (got[0] != 0x15555555u)
+                throw new Exception($"0x80000000u / 6u expected 0x15555555 got 0x{got[0]:X8}");
+            if (got[1] != 0x2u)
+                throw new Exception($"0x80000000u % 6u expected 0x2 got 0x{got[1]:X8}");
+        });
+
+        // Test K: CUDA "too many resources requested for launch" with unit-extent on a
+        // register-heavy multi-ArrayView body-struct kernel. Tuvok's SilkDecodeCoreGpu
+        // (DevComms 2026-05-04) fired this with a 15-ArrayView body struct + LPC-synth
+        // unroll — auto-grouped picked groupSize=64, register pressure × 64 threads
+        // exceeded SM register file, `cudaLaunchKernel` rejected with
+        // CUDA_ERROR_LAUNCH_OUT_OF_RESOURCES.
+        //
+        // Fix: `KernelLauncherBuilder.EmitLoadKernelConfig` now clamps the runtime
+        // groupDim.X to `min(extent.X, customGroupSize)`. For Index1D=1 dispatches,
+        // groupDim.X collapses to 1 — wasted hardware threads disappear, register
+        // budget is freed, launch succeeds.
+        //
+        // This shape gives moderate register pressure: 12 ArrayView fields + per-field
+        // load/multiply/accumulate. Pre-fix on CUDA the launch fails on register-tight
+        // hardware; on register-loose hardware (3060+, lots of regs/SM) it may pass
+        // either way. Post-fix passes universally.
+        public struct Tests23_RegisterHeavyBody
+        {
+            public ArrayView<int> A0;
+            public ArrayView<int> A1;
+            public ArrayView<int> A2;
+            public ArrayView<int> A3;
+            public ArrayView<int> A4;
+            public ArrayView<int> A5;
+            public ArrayView<int> A6;
+            public ArrayView<int> A7;
+            public ArrayView<int> A8;
+            public ArrayView<int> A9;
+            public ArrayView<int> A10;
+            public ArrayView<int> Out;
+        }
+
+        static void Tests23_RegisterHeavyBodyKernel(Index1D _, Tests23_RegisterHeavyBody b)
+        {
+            // Force per-field reads + accumulator chain that survives register
+            // allocator passes. Simulates LPC-style multiply-accumulate.
+            int s = 0;
+            s += b.A0[0] * 7;
+            s += b.A1[0] * 11;
+            s += b.A2[0] * 13;
+            s += b.A3[0] * 17;
+            s += b.A4[0] * 19;
+            s += b.A5[0] * 23;
+            s += b.A6[0] * 29;
+            s += b.A7[0] * 31;
+            s += b.A8[0] * 37;
+            s += b.A9[0] * 41;
+            s += b.A10[0] * 43;
+            b.Out[0] = s;
+        }
+
+        [TestMethod]
+        public async Task Tests23_RegisterHeavyBody_UnitExtent_NoLaunchFailure() =>
+            await RunEmulatedTest(async accelerator =>
+        {
+            using var b0 = accelerator.Allocate1D<int>(1);
+            using var b1 = accelerator.Allocate1D<int>(1);
+            using var b2 = accelerator.Allocate1D<int>(1);
+            using var b3 = accelerator.Allocate1D<int>(1);
+            using var b4 = accelerator.Allocate1D<int>(1);
+            using var b5 = accelerator.Allocate1D<int>(1);
+            using var b6 = accelerator.Allocate1D<int>(1);
+            using var b7 = accelerator.Allocate1D<int>(1);
+            using var b8 = accelerator.Allocate1D<int>(1);
+            using var b9 = accelerator.Allocate1D<int>(1);
+            using var b10 = accelerator.Allocate1D<int>(1);
+            using var bOut = accelerator.Allocate1D<int>(1);
+
+            b0.CopyFromCPU(new[] { 2 });
+            b1.CopyFromCPU(new[] { 3 });
+            b2.CopyFromCPU(new[] { 5 });
+            b3.CopyFromCPU(new[] { 7 });
+            b4.CopyFromCPU(new[] { 11 });
+            b5.CopyFromCPU(new[] { 13 });
+            b6.CopyFromCPU(new[] { 17 });
+            b7.CopyFromCPU(new[] { 19 });
+            b8.CopyFromCPU(new[] { 23 });
+            b9.CopyFromCPU(new[] { 29 });
+            b10.CopyFromCPU(new[] { 31 });
+
+            var body = new Tests23_RegisterHeavyBody
+            {
+                A0 = b0.View, A1 = b1.View, A2 = b2.View, A3 = b3.View, A4 = b4.View,
+                A5 = b5.View, A6 = b6.View, A7 = b7.View, A8 = b8.View, A9 = b9.View,
+                A10 = b10.View, Out = bOut.View
+            };
+
+            var k = accelerator.LoadAutoGroupedStreamKernel<Index1D, Tests23_RegisterHeavyBody>(
+                Tests23_RegisterHeavyBodyKernel);
+            // Index1D=1 is the trigger condition for the register-pressure × groupSize=64 trap.
+            // Post-fix the dispatcher clamps groupDim.X to 1, the launch succeeds.
+            k((Index1D)1, body);
+            await accelerator.SynchronizeAsync();
+
+            int expected = 2 * 7 + 3 * 11 + 5 * 13 + 7 * 17 + 11 * 19 + 13 * 23
+                + 17 * 29 + 19 * 31 + 23 * 37 + 29 * 41 + 31 * 43;
+            var got = await bOut.CopyToHostAsync<int>();
+            if (got[0] != expected)
+                throw new Exception($"RegisterHeavyBody: expected {expected} got {got[0]}");
+        });
+
+        // Test rc.11/rc.12 dispatcher snapshot bug surfaced by Data 2026-05-04: ML
+        // weights uploaded via chunked SubView.CopyFromCPU then read by many kernel
+        // dispatches return zeros. Mimics BlazeFace pattern: large buffer,
+        // chunked upload, multiple read-only dispatches.
+        static void Tests23_ChunkedReadKernel(
+            Index1D idx,
+            ArrayView<int> input,
+            ArrayView<int> output)
+        {
+            output[idx] = input[idx];
+        }
+
+        [TestMethod]
+        public async Task Tests23_ChunkedUpload_ManyReads_NoZeros() => await RunEmulatedTest(async accelerator =>
+        {
+            const int N = 1024;
+            const int CHUNK = 256;
+            using var bigBuf = accelerator.Allocate1D<int>(N);
+            using var outBuf1 = accelerator.Allocate1D<int>(N);
+            using var outBuf2 = accelerator.Allocate1D<int>(N);
+            using var outBuf3 = accelerator.Allocate1D<int>(N);
+
+            // Chunked upload: 4 SubView writes, each bumps HostWriteCounter.
+            for (int c = 0; c < N / CHUNK; c++)
+            {
+                var chunk = new int[CHUNK];
+                for (int i = 0; i < CHUNK; i++) chunk[i] = (c * CHUNK + i) + 1; // 1..N
+                bigBuf.View.SubView(c * CHUNK, CHUNK).CopyFromCPU(chunk);
+            }
+
+            var k = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<int>, ArrayView<int>>(
+                Tests23_ChunkedReadKernel);
+
+            // Three dispatches all read bigBuf — same buffer, multiple reads.
+            // Pre-rc.11 snapshot bug: would return zeros if snapshot was stale.
+            k((Index1D)N, bigBuf.View, outBuf1.View);
+            k((Index1D)N, bigBuf.View, outBuf2.View);
+            k((Index1D)N, bigBuf.View, outBuf3.View);
+            await accelerator.SynchronizeAsync();
+
+            var got1 = await outBuf1.CopyToHostAsync<int>();
+            var got2 = await outBuf2.CopyToHostAsync<int>();
+            var got3 = await outBuf3.CopyToHostAsync<int>();
+            for (int i = 0; i < N; i++)
+            {
+                int expected = i + 1;
+                if (got1[i] != expected || got2[i] != expected || got3[i] != expected)
+                    throw new Exception($"ChunkedUpload_ManyReads idx {i}: expected {expected}, "
+                        + $"got1={got1[i]} got2={got2[i]} got3={got3[i]}");
+            }
+        });
+
+        // The actual BlazeFace pattern: D1 WRITES intermediate buffer, D2 READS it.
+        // Intermediate buffer has HostWriteCounter=0 (only GPU-written). At rc.11/rc.12
+        // the snapshot logic always takes a fresh snapshot on first call (because
+        // _currentSnapshot is null), capturing SharedBuffer at QUEUE time of D2 — which
+        // is BEFORE D1 has finished. Snapshot is stale (zeros). D2 reads zeros.
+        //
+        // Fix: skip snapshot when HostWriteCounter == 0. Output buffers and intermediate
+        // GPU-written buffers fall through to SharedBuffer; by D2's run time, D1's
+        // copy-OUT has populated SharedBuffer and D2 reads correct data.
+        static void Tests23_WriteToBufKernel(Index1D idx, ArrayView<int> input, ArrayView<int> intermediate)
+        {
+            intermediate[idx] = input[idx] * 7 + 13;
+        }
+
+        static void Tests23_ReadFromBufKernel(Index1D idx, ArrayView<int> intermediate, ArrayView<int> output)
+        {
+            output[idx] = intermediate[idx] * 2;
+        }
+
+        [TestMethod]
+        public async Task Tests23_OutputThenInput_NoStaleSnapshot() => await RunEmulatedTest(async accelerator =>
+        {
+            const int N = 64;
+            using var input = accelerator.Allocate1D<int>(N);
+            using var intermediate = accelerator.Allocate1D<int>(N);
+            using var output = accelerator.Allocate1D<int>(N);
+
+            var src = new int[N];
+            for (int i = 0; i < N; i++) src[i] = i + 1;
+            input.CopyFromCPU(src);
+
+            var kWrite = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<int>, ArrayView<int>>(
+                Tests23_WriteToBufKernel);
+            var kRead = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<int>, ArrayView<int>>(
+                Tests23_ReadFromBufKernel);
+
+            // D1: input -> intermediate.  HostWriteCounter for intermediate stays 0.
+            kWrite((Index1D)N, input.View, intermediate.View);
+            // D2: intermediate -> output. Reads intermediate, which was GPU-written by D1.
+            kRead((Index1D)N, intermediate.View, output.View);
+            await accelerator.SynchronizeAsync();
+
+            var got = await output.CopyToHostAsync<int>();
+            for (int i = 0; i < N; i++)
+            {
+                int expected = (src[i] * 7 + 13) * 2;
+                if (got[i] != expected)
+                    throw new Exception($"OutputThenInput idx {i}: expected {expected} got {got[i]} "
+                        + "— D2 likely read a stale snapshot of `intermediate` taken at queue time, "
+                        + "before D1's GPU write completed.");
+            }
+        });
+
+        // Test K-Diag: explicit 1×1 launch for the heavy struct kernel. If THIS fails on
+        // CUDA the bug is purely register pressure independent of block size — meaning
+        // ILGPU's launch validator (`MaxThreadsPerBlock` check) is rejecting the kernel
+        // even at 1 thread. If THIS passes but auto-grouped fails, the problem is the
+        // auto-grouped path's groupDim is still > 1.
+        static void Tests23_RegisterHeavyExplicitLaunchKernel(Tests23_RegisterHeavyBody b)
+        {
+            int s = 0;
+            s += b.A0[0] * 7;
+            s += b.A1[0] * 11;
+            s += b.A2[0] * 13;
+            s += b.A3[0] * 17;
+            s += b.A4[0] * 19;
+            s += b.A5[0] * 23;
+            s += b.A6[0] * 29;
+            s += b.A7[0] * 31;
+            s += b.A8[0] * 37;
+            s += b.A9[0] * 41;
+            s += b.A10[0] * 43;
+            b.Out[0] = s;
+        }
+
+        [TestMethod]
+        public async Task Tests23_RegisterHeavyBody_ExplicitOneByOne_NoLaunchFailure() =>
+            await RunEmulatedTest(async accelerator =>
+        {
+            using var b0 = accelerator.Allocate1D<int>(1); b0.CopyFromCPU(new[] { 2 });
+            using var b1 = accelerator.Allocate1D<int>(1); b1.CopyFromCPU(new[] { 3 });
+            using var b2 = accelerator.Allocate1D<int>(1); b2.CopyFromCPU(new[] { 5 });
+            using var b3 = accelerator.Allocate1D<int>(1); b3.CopyFromCPU(new[] { 7 });
+            using var b4 = accelerator.Allocate1D<int>(1); b4.CopyFromCPU(new[] { 11 });
+            using var b5 = accelerator.Allocate1D<int>(1); b5.CopyFromCPU(new[] { 13 });
+            using var b6 = accelerator.Allocate1D<int>(1); b6.CopyFromCPU(new[] { 17 });
+            using var b7 = accelerator.Allocate1D<int>(1); b7.CopyFromCPU(new[] { 19 });
+            using var b8 = accelerator.Allocate1D<int>(1); b8.CopyFromCPU(new[] { 23 });
+            using var b9 = accelerator.Allocate1D<int>(1); b9.CopyFromCPU(new[] { 29 });
+            using var b10 = accelerator.Allocate1D<int>(1); b10.CopyFromCPU(new[] { 31 });
+            using var bOut = accelerator.Allocate1D<int>(1);
+
+            var body = new Tests23_RegisterHeavyBody
+            {
+                A0 = b0.View, A1 = b1.View, A2 = b2.View, A3 = b3.View, A4 = b4.View,
+                A5 = b5.View, A6 = b6.View, A7 = b7.View, A8 = b8.View, A9 = b9.View,
+                A10 = b10.View, Out = bOut.View
+            };
+
+            // Explicit grouped launch with config (1, 1) — gridDim=(1,1,1), groupDim=(1,1,1).
+            var k = accelerator.LoadStreamKernel<Tests23_RegisterHeavyBody>(
+                Tests23_RegisterHeavyExplicitLaunchKernel);
+            k(new KernelConfig(1, 1), body);
+            await accelerator.SynchronizeAsync();
+
+            int expected = 2 * 7 + 3 * 11 + 5 * 13 + 7 * 17 + 11 * 19 + 13 * 23
+                + 17 * 29 + 19 * 31 + 23 * 37 + 29 * 41 + 31 * 43;
+            var got = await bOut.CopyToHostAsync<int>();
+            if (got[0] != expected)
+                throw new Exception($"RegisterHeavyBody explicit (1,1): expected {expected} got {got[0]}");
+        });
+
+        // Test K': Verifies the runtime groupDim.X clamp fires for Index1D=1 dispatches.
+        // Reads Group.DimX inside the kernel and writes to output. Pre-fix on CUDA the
+        // auto-grouped block size could be 32/64/128/256; post-fix groupDim.X collapses
+        // to min(extent.X, customGroupSize) = 1 for unit dispatches.
+        static void Tests23_GroupDimXProbeKernel(Index1D _, ArrayView<int> output)
+        {
+            if (Group.IdxX == 0)
+                output[0] = Group.DimX;
+        }
+
+        [TestMethod]
+        public async Task Tests23_GroupDimX_Clamps_To_Extent_OnUnitDispatch() =>
+            await RunEmulatedTest(async accelerator =>
+        {
+            using var dOut = accelerator.Allocate1D<int>(1);
+            var k = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<int>>(
+                Tests23_GroupDimXProbeKernel);
+            k((Index1D)1, dOut.View);
+            await accelerator.SynchronizeAsync();
+            var got = await dOut.CopyToHostAsync<int>();
+            // Post-fix: groupDim.X = min(1, customGroupSize) = 1 on every backend that
+            // honors the IL clamp. Pre-fix on CUDA / OpenCL: groupDim.X could be
+            // 32/64/128/256 from cuOccupancyMaxPotentialBlockSize.
+            if (got[0] != 1)
+                throw new Exception($"groupDim.X for unit dispatch expected 1 got {got[0]} — "
+                    + "EmitLoadKernelConfig clamp not firing.");
+        });
+
+        // Test L: Same shape, larger extent. Validates the IL clamp doesn't regress the
+        // normal extent>customGroupSize case — gridDim.X must still cover all elements
+        // and groupDim.X stays at customGroupSize for warp efficiency.
+        static void Tests23_RegisterHeavyBodyParallelKernel(Index1D idx, Tests23_RegisterHeavyBody b)
+        {
+            // Each thread sums one position across all 11 views. Tests the parallel
+            // dispatch path post-clamp (extent > customGroupSize → effective = customGroupSize).
+            int i = idx.X;
+            int s = 0;
+            s += b.A0[i] * 7;
+            s += b.A1[i] * 11;
+            s += b.A2[i] * 13;
+            s += b.A3[i] * 17;
+            s += b.A4[i] * 19;
+            s += b.A5[i] * 23;
+            s += b.A6[i] * 29;
+            s += b.A7[i] * 31;
+            s += b.A8[i] * 37;
+            s += b.A9[i] * 41;
+            s += b.A10[i] * 43;
+            b.Out[i] = s;
+        }
+
+        [TestMethod]
+        public async Task Tests23_RegisterHeavyBody_LargeExtent_Parallel() =>
+            await RunEmulatedTest(async accelerator =>
+        {
+            const int N = 256;
+            var src = new int[11][];
+            int[] muls = { 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43 };
+            for (int j = 0; j < 11; j++)
+            {
+                src[j] = new int[N];
+                for (int i = 0; i < N; i++) src[j][i] = (i + 1) * (j + 1);
+            }
+            var bufs = new MemoryBuffer1D<int, Stride1D.Dense>[12];
+            try
+            {
+                for (int j = 0; j < 11; j++)
+                {
+                    bufs[j] = accelerator.Allocate1D<int>(N);
+                    bufs[j].CopyFromCPU(src[j]);
+                }
+                bufs[11] = accelerator.Allocate1D<int>(N);
+                var body = new Tests23_RegisterHeavyBody
+                {
+                    A0 = bufs[0].View, A1 = bufs[1].View, A2 = bufs[2].View, A3 = bufs[3].View,
+                    A4 = bufs[4].View, A5 = bufs[5].View, A6 = bufs[6].View, A7 = bufs[7].View,
+                    A8 = bufs[8].View, A9 = bufs[9].View, A10 = bufs[10].View,
+                    Out = bufs[11].View
+                };
+                var k = accelerator.LoadAutoGroupedStreamKernel<Index1D, Tests23_RegisterHeavyBody>(
+                    Tests23_RegisterHeavyBodyParallelKernel);
+                k((Index1D)N, body);
+                await accelerator.SynchronizeAsync();
+
+                var got = await bufs[11].CopyToHostAsync<int>();
+                for (int i = 0; i < N; i++)
+                {
+                    int expected = 0;
+                    for (int j = 0; j < 11; j++) expected += src[j][i] * muls[j];
+                    if (got[i] != expected)
+                        throw new Exception($"RegisterHeavyBody parallel: idx {i} expected {expected} got {got[i]}");
+                }
+            }
+            finally
+            {
+                for (int j = 0; j < 12; j++) bufs[j]?.Dispose();
+            }
+        });
+
         #endregion
     }
 }

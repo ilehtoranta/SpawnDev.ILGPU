@@ -89,24 +89,60 @@ namespace SpawnDev.ILGPU.Wasm
         private SharedArrayBuffer? _currentSnapshot;
 
         /// <summary>
-        /// Returns a SAB whose contents reflect <see cref="SharedBuffer"/> at the moment
-        /// of this call (or at the last call if no host writes occurred since). Used by
-        /// the dispatcher's copy-IN path to read buffer state captured at queue time
-        /// even after later host writes overwrote SharedBuffer.
+        /// GPU-write sequence counter — incremented every time the dispatcher's
+        /// copy-OUT path writes back to <see cref="SharedBuffer"/>. Used to invalidate
+        /// the cached snapshot when a buffer is host-written-then-GPU-written-then-read
+        /// (snapshot would be pre-GPU-write contents but SharedBuffer has post-GPU-write
+        /// contents — cached snapshot is stale).
         /// </summary>
-        internal SharedArrayBuffer GetOrCreateSnapshotForDispatch()
+        private int _gpuWriteSeq;
+
+        /// <summary>
+        /// <see cref="_gpuWriteSeq"/> at the most recent snapshot. If the current value
+        /// is higher, the cached snapshot is stale.
+        /// </summary>
+        private int _lastSnapshottedGpuWriteSeq;
+
+        /// <summary>
+        /// Bumps <see cref="_gpuWriteSeq"/>. Called from the dispatcher's copy-OUT path
+        /// after writing kernel output back to <see cref="SharedBuffer"/>.
+        /// </summary>
+        internal void NotifyGpuWrite() => _gpuWriteSeq++;
+
+        /// <summary>
+        /// Returns a SAB whose contents reflect <see cref="SharedBuffer"/> at the moment
+        /// of this call (or at the last call if no host or GPU writes occurred since).
+        /// Returns null when this buffer has never been host-written — in that case the
+        /// caller falls back to <see cref="SharedBuffer"/> directly, which by run-time
+        /// reflects all prior dispatches' copy-OUT (intermediate GPU buffers don't
+        /// participate in the host-write-vs-queued-dispatch race so they don't need a
+        /// snapshot, and snapshotting them at queue time would capture pre-D1-write
+        /// zeros). 2026-05-04 Data BlazeFace zeros regression closure.
+        /// </summary>
+        internal SharedArrayBuffer? GetOrCreateSnapshotForDispatch()
         {
-            if (HostWriteCounter > _lastSnapshottedHostWriteCounter || _currentSnapshot == null)
+            // Buffers that have never been host-written can't be involved in the
+            // host-write-vs-queued-dispatch race — fall back to SharedBuffer.
+            if (HostWriteCounter == 0)
+                return null;
+
+            // Cache the snapshot across dispatches when nothing has changed; invalidate
+            // on either a new host write OR a new GPU write (the latter handles the
+            // host-write -> kernel-write -> kernel-read sequence where the cached
+            // snapshot would otherwise return pre-GPU-write contents).
+            bool needsRefresh =
+                HostWriteCounter > _lastSnapshottedHostWriteCounter
+                || _gpuWriteSeq > _lastSnapshottedGpuWriteSeq
+                || _currentSnapshot == null;
+            if (needsRefresh)
             {
-                // New host write since last snapshot (or first call). Allocate fresh SAB
-                // and copy current SharedBuffer state. Old _currentSnapshot (if any) is
-                // orphaned — still referenced by any in-flight dispatches, GC'd when none.
                 var fresh = new SharedArrayBuffer((int)LengthInBytes);
                 using var dst = new Uint8Array(fresh);
                 using var src = new Uint8Array(SharedBuffer);
                 dst.JSRef!.CallVoid("set", src);
                 _currentSnapshot = fresh;
                 _lastSnapshottedHostWriteCounter = HostWriteCounter;
+                _lastSnapshottedGpuWriteSeq = _gpuWriteSeq;
             }
             return _currentSnapshot;
         }

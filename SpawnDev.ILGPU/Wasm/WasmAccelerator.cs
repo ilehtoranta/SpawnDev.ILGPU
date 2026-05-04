@@ -341,7 +341,9 @@ namespace SpawnDev.ILGPU.Wasm
                 var arg = args[ai];
                 if (arg is IArrayView iav && iav.Buffer is WasmMemoryBuffer wb && !argSnapshots.ContainsKey(wb))
                 {
-                    argSnapshots[wb] = wb.GetOrCreateSnapshotForDispatch();
+                    var snap = wb.GetOrCreateSnapshotForDispatch();
+                    if (snap != null)
+                        argSnapshots[wb] = snap;
                 }
                 else if (arg != null && arg.GetType().IsValueType && !arg.GetType().IsPrimitive)
                 {
@@ -355,7 +357,11 @@ namespace SpawnDev.ILGPU.Wasm
                         {
                             var fv = f.GetValue(arg);
                             if (fv is IArrayView fav && fav.Buffer is WasmMemoryBuffer fwb && !argSnapshots.ContainsKey(fwb))
-                                argSnapshots[fwb] = fwb.GetOrCreateSnapshotForDispatch();
+                            {
+                                var fsnap = fwb.GetOrCreateSnapshotForDispatch();
+                                if (fsnap != null)
+                                    argSnapshots[fwb] = fsnap;
+                            }
                         }
                     }
                     catch { /* defensive — non-fatal */ }
@@ -1554,6 +1560,11 @@ namespace SpawnDev.ILGPU.Wasm
                 using var dstView = new Uint8Array(buf.SharedBuffer, rangeMin, rangeSize);
                 dstView.JSRef!.CallVoid("set", srcView);
                 copyOutCount++;
+                // Bump the GPU-write seq so any cached snapshot for this buffer is
+                // invalidated; subsequent dispatches' GetOrCreateSnapshotForDispatch
+                // will re-snapshot post-GPU-write SharedBuffer instead of returning
+                // pre-GPU-write cached contents (the host-then-GPU-then-read pattern).
+                buf.NotifyGpuWrite();
                 // Read first 4 bytes from Wasm memory at this offset for debugging
                 if (rangeSize >= 4)
                 {

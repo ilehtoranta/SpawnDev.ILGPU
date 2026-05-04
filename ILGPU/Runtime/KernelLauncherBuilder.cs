@@ -132,6 +132,24 @@ namespace ILGPU.Runtime
                 // to the X dimension of the scheduled grid.
                 // This is no limitation of the current PTX backend.
 
+                // Declare a local for the runtime-computed effective group size.
+                // For customGroupSize >= 1: effective = min(extent.X, customGroupSize).
+                // This clamps the group size when the launch extent is smaller than
+                // the auto-grouped block size — the extra threads are wasted hardware
+                // (only one thread does work per work item), and on register-heavy
+                // kernels the wasted threads still consume register budget per-thread,
+                // pushing CUDA past `cuFuncGetAttribute(MaxThreadsPerBlock)` and
+                // triggering CUDA_ERROR_LAUNCH_OUT_OF_RESOURCES at launch time.
+                // Tuvok's SilkDecodeCoreGpu (15-ArrayView body struct + LPC unroll)
+                // surfaced this 2026-05-04 with Index1D=1 dispatch picking groupSize=64.
+                // For customGroupSize < 1 (legacy path): emit constant 1 directly.
+                ILLocal? effectiveGroupSizeLocal = customGroupSize >= 1
+                    ? emitter.DeclareLocal(typeof(int))
+                    : (ILLocal?)null;
+                var mathMinIntInt = typeof(Math).GetMethod(
+                    nameof(Math.Min),
+                    new[] { typeof(int), typeof(int) }).AsNotNull();
+
                 EmitLoadDimensions(
                     entryPoint.KernelIndexType,
                     emitter,
@@ -140,15 +158,27 @@ namespace ILGPU.Runtime
                     {
                         if (dimIdx != 0 || customGroupSize < 1)
                             return;
-                        // Convert requested index range to blocked range
-                        emitter.EmitConstant(customGroupSize - 1);
-                        emitter.Emit(OpCodes.Add);
+                        // Stack: [extent.X]
+                        // Compute effective = min(extent.X, customGroupSize) and store
+                        // to local for re-use as groupDim.X below.
+                        emitter.Emit(OpCodes.Dup);
                         emitter.EmitConstant(customGroupSize);
+                        emitter.EmitCall(mathMinIntInt);
+                        emitter.Emit(LocalOperation.Store, effectiveGroupSizeLocal!.Value);
+                        // gridDim.X = (extent.X + effective - 1) / effective.
+                        emitter.Emit(LocalOperation.Load, effectiveGroupSizeLocal!.Value);
+                        emitter.Emit(OpCodes.Add);
+                        emitter.EmitConstant(1);
+                        emitter.Emit(OpCodes.Sub);
+                        emitter.Emit(LocalOperation.Load, effectiveGroupSizeLocal!.Value);
                         emitter.Emit(OpCodes.Div);
                     });
 
-                // Custom grouping
-                emitter.EmitConstant(Math.Max(customGroupSize, 1));
+                // groupDim.X = effective (clamped) when customGroupSize >= 1; else 1.
+                if (customGroupSize >= 1)
+                    emitter.Emit(LocalOperation.Load, effectiveGroupSizeLocal!.Value);
+                else
+                    emitter.EmitConstant(1);
                 emitter.Emit(OpCodes.Ldc_I4_1);
                 emitter.Emit(OpCodes.Ldc_I4_1);
 

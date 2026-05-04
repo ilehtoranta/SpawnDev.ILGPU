@@ -5084,6 +5084,20 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     AppendLine($"{prefix}{target} = {left} {op} u32({right});");
                 }
             }
+            else if ((value.Kind == BinaryArithmeticKind.Div || value.Kind == BinaryArithmeticKind.Rem)
+                && value.IsUnsigned
+                && value.Left.BasicValueType == BasicValueType.Int32
+                && !leftType.StartsWith("vec") && !rightType.StartsWith("vec"))
+            {
+                // Same bitcast pattern as Shr. WGSL `i32 / i32` and `i32 % i32` are
+                // SIGNED div/rem; for high-bit-set i32-as-uint operands they produce
+                // the wrong result. Tuvok's `OpusRangeDecoderGpu_DecodeUint_*` on
+                // WebGPU 2026-05-04: post-Init `state.Rng = 0x80000000` divided by
+                // `ft = 6u` should give `0x15555555` (unsigned), not `0xEAAAAAAB`
+                // (signed two's complement). Bitcast through u32 fixes both Div and
+                // Rem for any high-bit-set uint operand.
+                AppendLine($"{prefix}{target} = bitcast<i32>(bitcast<u32>({left}) {op} bitcast<u32>({right}));");
+            }
             else
                 AppendLine($"{prefix}{target} = {left} {op} {right};");
         }

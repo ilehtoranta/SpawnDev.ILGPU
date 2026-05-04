@@ -1048,7 +1048,41 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             // Cast operands to match the target type when they differ.
             string leftExpr = CastIfNeeded(left, target.Type);
             string rightExpr = CastIfNeeded(right, target.Type);
-            AppendLine($"{target} = {leftExpr} {op} {rightExpr};");
+
+            // For unsigned int Shl/Shr/Div/Rem on Int32, GLSL ES 3.0's signed-int
+            // operators give wrong results when the high bit is set. ILGPU stores
+            // uint as Int32 with `IsUnsigned` flag on the BinaryArithmeticValue.
+            // Cast through uint and back to int/uint (bit pattern preserved).
+            //
+            // - Shr: i32 >> u32 is arithmetic shift — sign-extends a high-bit-set
+            //   uint operand. Tuvok's libopus `0x80000000u >> 15` gave 0xFFFF0000
+            //   instead of 0x00010000 (parallel WGSL fix landed in rc.12).
+            // - Shl into the sign bit can trigger ANGLE inconsistency; uint shift
+            //   has well-defined wraparound semantics.
+            // - Div / Rem on i32 with high-bit-set operand uses signed div/rem; for
+            //   `0x80000000u / 6u` the signed result is 0xEAAAAAAB (wrong) instead
+            //   of 0x15555555 (unsigned). Tuvok's `OpusRangeDecoderGpu_DecodeUint_*`
+            //   surfaced this on WebGL 2026-05-04.
+            bool isInt32 = value.Left.BasicValueType == BasicValueType.Int32;
+            bool isIntTargetType = target.Type == "int" || target.Type == "uint";
+            bool isShlOrShr = value.Kind == BinaryArithmeticKind.Shl
+                || value.Kind == BinaryArithmeticKind.Shr;
+            bool isDivOrRem = value.Kind == BinaryArithmeticKind.Div
+                || value.Kind == BinaryArithmeticKind.Rem;
+            if (isInt32 && isIntTargetType && (
+                    (value.IsUnsigned && (isShlOrShr || isDivOrRem))
+                    || value.Kind == BinaryArithmeticKind.Shl))
+            {
+                // Wrap to target type; for `int` cast back, for `uint` no cast.
+                if (target.Type == "int")
+                    AppendLine($"{target} = int(uint({leftExpr}) {op} uint({rightExpr}));");
+                else
+                    AppendLine($"{target} = uint({leftExpr}) {op} uint({rightExpr});");
+            }
+            else
+            {
+                AppendLine($"{target} = {leftExpr} {op} {rightExpr};");
+            }
         }
 
         public virtual void GenerateCode(UnaryArithmeticValue value) => GenerateUnOp(value);
