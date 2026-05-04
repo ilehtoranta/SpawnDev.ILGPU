@@ -911,16 +911,28 @@ namespace SpawnDev.ILGPU.Wasm
                     dstView.JSRef!.CallVoid("set", srcView);
                     hostWriteSnapshot[i] = buf.HostWriteCounter;
                 }
-                // Debug: check buf.SharedBuffer and Wasm memory after copy-in
-                if (dispNum >= 1 && dispNum <= 8 && bufferInfos.Count > 0)
+                // Debug: check buf.SharedBuffer and Wasm memory after copy-in.
+                // Gate the entire block behind VerboseLogging — the JS interop calls allocate
+                // typed array views per dispatch even when the log message is suppressed, and
+                // the hardcoded `length=4` throws RangeError for sub-word buffers (1-element
+                // short = 2 bytes < 4). Surfaced 2026-05-04 by Tests23_MinimalShortIntBodyStruct
+                // on Wasm.
+                if (WasmBackend.VerboseLogging
+                    && dispNum >= 1 && dispNum <= 8
+                    && bufferInfos.Count > 0)
                 {
-                    // What's in the buffer's SharedArrayBuffer?
-                    using var sabView = new Uint8Array(bufferInfos[0].buffer.SharedBuffer, 0, 4);
-                    int sabVal = BitConverter.ToInt32(sabView.ReadBytes());
-                    // What's in Wasm memory after copy-in?
-                    using var wmView = new Uint8Array(memoryBuffer, bufferOffsets[0], 4);
-                    int wmVal = BitConverter.ToInt32(wmView.ReadBytes());
-                    if (WasmBackend.VerboseLogging) _dispatchLog += $"|D{dispNum}pre:sab={sabVal},wm={wmVal}";
+                    int sabLen = (int)Math.Min(4, bufferInfos[0].buffer.LengthInBytes);
+                    int wmLen = (int)Math.Min(4, bufferInfos[0].buffer.LengthInBytes);
+                    if (sabLen >= 4 && wmLen >= 4)
+                    {
+                        // What's in the buffer's SharedArrayBuffer?
+                        using var sabView = new Uint8Array(bufferInfos[0].buffer.SharedBuffer, 0, sabLen);
+                        int sabVal = BitConverter.ToInt32(sabView.ReadBytes());
+                        // What's in Wasm memory after copy-in?
+                        using var wmView = new Uint8Array(memoryBuffer, bufferOffsets[0], wmLen);
+                        int wmVal = BitConverter.ToInt32(wmView.ReadBytes());
+                        _dispatchLog += $"|D{dispNum}pre:sab={sabVal},wm={wmVal}";
+                    }
                 }
                 _lastImplicitIndexDebug += $" | bufInfoCnt={bufferInfos.Count} bufOffCnt={bufferOffsets.Count}";
                 // CRITICAL: Set each buffer's NativePtr to its Wasm memory offset.
@@ -1508,20 +1520,24 @@ namespace SpawnDev.ILGPU.Wasm
             // Wait for all workers to complete
             await Task.WhenAll(tasks);
 
-            // Debug: dump first 4 bytes of each buffer in Wasm memory after kernel
-            if (dispNum >= 1 && dispNum <= 6)
+            // Debug: dump first 4 bytes of each buffer in Wasm memory after kernel.
+            // Gate the JS interop loop behind VerboseLogging too — the per-buffer typed
+            // array allocations cost real time even when the log message is suppressed.
+            if (WasmBackend.VerboseLogging
+                && dispNum >= 1 && dispNum <= 6)
             {
                 for (int bi = 0; bi < bufferInfos.Count; bi++)
                 {
                     int off = bufferOffsets[bi];
                     int bufLen = (int)bufferInfos[bi].buffer.LengthInBytes;
                     int dumpLen = Math.Min(bufLen, 16); // first 4 ints
+                    if (dumpLen <= 0) continue;
                     using var rawView = new Uint8Array(memoryBuffer, off, dumpLen);
                     var rawBytes = rawView.ReadBytes();
                     string vals = "";
                     for (int j = 0; j + 3 < rawBytes.Length; j += 4)
                         vals += (j > 0 ? "," : "") + BitConverter.ToInt32(rawBytes, j);
-                    if (WasmBackend.VerboseLogging) _dispatchLog += $"|D{dispNum}B{bi}=[{vals}]";
+                    _dispatchLog += $"|D{dispNum}B{bi}=[{vals}]";
                 }
             }
 
