@@ -4,8 +4,14 @@
 		<TargetFramework>net10.0</TargetFramework>
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>enable</Nullable>
-		<Version>4.9.5-rc.17</Version>
-		<PackageReleaseNotes>v4.9.5-rc.17: WebGPU sub-word body-struct coalesce fix (closes Tuvok's SilkDecodeCoreGpu on WebGPU).
+		<Version>4.9.5-rc.18</Version>
+		<PackageReleaseNotes>v4.9.5-rc.18: WebGPU WGSL IsMultiDim discriminates body struct from single ArrayView wrapper. The heuristic treated any StructureType with ViewType at field 0 as a single ArrayView wrapper based on `NumFields ∈ {3, 4, 6}`. But a body struct containing 2 × ArrayView1D fields ALSO has 6 IR fields (2 × {BaseView, Extent, Stride}) — was misclassified as a 3D ArrayView, and the dispatcher ran the wrong codegen path with both views aliased to the same binding. Tests23_TwoShortBodyStructDense surfaced this 2026-05-04 (returned `S0 + S0 = 14` instead of `S0 + S1 = 107` because both shorts read the first short's data).
+
+Fix: count actual ViewType fields in `WGSLKernelFunctionGenerator.IsMultiDim`. If >1 view, it's a body struct (each view binds separately) — leave `isView=false` and let the body-struct codegen handle each field. If exactly 1 view at field 0, it's a single ArrayView wrapper — preserve the existing 1D/2D/3D dispatch.
+
+Verified: `Tests23_TwoShortBodyStructDense` WebGPU PASS post-fix. `Tests23_TwoShortBodyStruct`, `Tests23_OnlyShortBodyStruct`, `Tests23_SilkBodyStructShape` all PASS on WebGPU. UNBLOCKS any consumer using `ArrayView1D&lt;T, Stride1D.Dense&gt;` body-struct fields on WebGPU (Tuvok's SilkDecodeCoreInputs alternative shape works now).
+
+v4.9.5-rc.17: WebGPU sub-word body-struct coalesce fix (closes Tuvok's SilkDecodeCoreGpu on WebGPU).
 
 `DecideCoalesceGroups` runs at codegen-start (line 251), BEFORE `GenerateHeader` populates `_subWordParams` (line 1350). The existing sub-word eligibility check `if (_subWordParams.ContainsKey(synthIdx)) continue` therefore never matched body-struct sub-word fields — the dictionary was always empty when that check ran. Sub-word fields (like Tuvok's `SilkDecodeCoreInputs` 6-short fields) got bundled into the int-coalesce bucket because `Int16` maps to "i32" in WGSL TypeGenerator (WGSL has no native i16). The coalesced binding emits as `array&lt;i32&gt;` (non-atomic), but sub-word loads need `atomicLoad(&amp;binding[wordIdx])` on `array&lt;atomic&lt;u32&gt;&gt;` for thread-safe RMW. WGSL parser rejected the kernel with "no matching call to atomicLoad(ptr&lt;storage, i32, read_write&gt;)".
 
