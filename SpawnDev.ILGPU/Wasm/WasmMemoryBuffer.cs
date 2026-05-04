@@ -37,6 +37,24 @@ namespace SpawnDev.ILGPU.Wasm
         public int ByteOffset { get; set; } = 0;
 
         /// <summary>
+        /// Monotonic counter bumped on every host-side write to <see cref="SharedBuffer"/>
+        /// (CopyFromHost / CopyFromJS / CopyFrom override). The dispatch's copy-OUT
+        /// phase compares the buffer's current <see cref="HostWriteCounter"/> to the
+        /// snapshot it took at copy-IN time; if they differ, the host has overwritten
+        /// SharedBuffer during the in-flight dispatch and copy-OUT skips that buffer
+        /// to preserve the host's write. Closes the 2026-05-03 Wasm copy-OUT race
+        /// (per `_DevComms/SpawnDev.ILGPU/geordi-to-team-wasm-copy-out-race-2026-05-03.md`).
+        /// </summary>
+        public int HostWriteCounter { get; private set; }
+
+        /// <summary>
+        /// Bumps <see cref="HostWriteCounter"/>. Called from every CopyFromCPU /
+        /// CopyFromJS / CopyFromHost path. Use whenever the host writes to
+        /// SharedBuffer outside a dispatch's copy-IN.
+        /// </summary>
+        internal void NotifyHostWrite() => HostWriteCounter++;
+
+        /// <summary>
         /// Creates a new Wasm memory buffer.
         /// </summary>
         /// <param name="accelerator">The associated accelerator.</param>
@@ -74,6 +92,7 @@ namespace SpawnDev.ILGPU.Wasm
         public void CopyFromHost<T>(T[] data) where T : unmanaged
         {
             TypedArrayView.Write(data);
+            NotifyHostWrite();
         }
 
         /// <inheritdoc/>
@@ -84,6 +103,7 @@ namespace SpawnDev.ILGPU.Wasm
             // Use the typed Set(TypedArray, long) overload - zero .NET copy, JS-to-JS
             using var srcBytes = new Uint8Array(source.Buffer, (int)source.ByteOffset, (int)source.ByteLength);
             TypedArrayView.Set(srcBytes, targetByteOffset);
+            NotifyHostWrite();
         }
 
         /// <inheritdoc/>
@@ -93,6 +113,7 @@ namespace SpawnDev.ILGPU.Wasm
                 throw new ObjectDisposedException(nameof(WasmMemoryBuffer));
             using var srcBytes = new Uint8Array(source);
             TypedArrayView.Set(srcBytes, targetByteOffset);
+            NotifyHostWrite();
         }
 
         /// <summary>
@@ -186,6 +207,7 @@ namespace SpawnDev.ILGPU.Wasm
             int dstOffset = (int)targetView.LoadEffectiveAddressAsPtr();
             using var dstUint8 = new Uint8Array(SharedBuffer, dstOffset, length);
             dstUint8.WriteBytes(data);
+            NotifyHostWrite();
         }
 
         /// <summary>

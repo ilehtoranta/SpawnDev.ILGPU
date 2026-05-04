@@ -3136,8 +3136,53 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         /// to find the underlying kernel Parameter. Returns the parameter index, or -1.
         /// This is needed because ArrayView1D params wrap ArrayView via GetField(BaseView),
         /// so the view doesn't directly resolve to the Parameter.
+        ///
+        /// IMPORTANT: this method is shared with <see cref="GenerateCode(GetViewLength)"/>.
+        /// DO NOT add `LoadElementAddress` / `SubViewValue` / similar pointer-arithmetic
+        /// cases here — they break length-resolution for sub-views. Use
+        /// <see cref="TraceWriteTargetToParameter"/> for tracking Store/Atomic write
+        /// targets where pointer-walking is correct.
         /// </summary>
         private int TraceToParameter(Value source)
+        {
+            var current = source;
+            int depth = 0;
+            while (current != null && depth < 20)
+            {
+                if (current is global::ILGPU.IR.Values.Parameter)
+                {
+                    for (int pi = 0; pi < Method.Parameters.Count; pi++)
+                    {
+                        if (Method.Parameters[pi] == current) return pi;
+                    }
+                    return -1;
+                }
+
+                if (current is GetField gf)
+                    current = gf.ObjectValue.Resolve();
+                else if (current is NewView nv)
+                    current = nv.Pointer.Resolve();
+                else if (current is AddressSpaceCast asc)
+                    current = asc.Value.Resolve();
+                else if (current is PointerCast pc)
+                    current = pc.Value.Resolve();
+                else
+                    break;
+
+                depth++;
+            }
+            return -1;
+        }
+
+        /// <summary>
+        /// Traces a Store/Atomic write target back to its underlying kernel Parameter.
+        /// Handles all the indirections a write target goes through (LoadElementAddress
+        /// for indexed buffer writes, LoadFieldAddress for struct field writes,
+        /// SubViewValue for writes through a sub-view) — strictly more permissive than
+        /// <see cref="TraceToParameter"/>, which is constrained to view-resolution
+        /// patterns where pointer-arithmetic-walking would break length lookups.
+        /// </summary>
+        private int TraceWriteTargetToParameter(Value source)
         {
             var current = source;
             int depth = 0;
@@ -3166,8 +3211,13 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                     current = lfa.Source.Resolve();
                 else if (current is SubViewValue sv)
                     current = sv.Source.Resolve();
-                else if (current is global::ILGPU.IR.Values.Load ld)
-                    current = ld.Source.Resolve();
+                // NOTE: Load (loading a pointer-typed value from memory) intentionally
+                // NOT walked. A Store's target is always an address, never a Loaded
+                // value — and over-walking through Load chains makes the trace resolve
+                // to non-buffer parameters (e.g. the implicit Index1D), polluting
+                // `WrittenParamIndices` with non-buffer indices and causing the
+                // dispatcher's gate to skip-out the wrong buffer (RadixSort100K
+                // regression at index 32).
                 else
                     break;
 
@@ -3197,17 +3247,25 @@ namespace SpawnDev.ILGPU.Wasm.Backend
 
         /// <summary>
         /// Records that the kernel writes to <paramref name="target"/>. If the target
-        /// resolves to a kernel Parameter via <see cref="TraceToParameter"/>, the
-        /// parameter's index is added to <see cref="WrittenParamIndices"/>. Helper
-        /// functions don't contribute — their Method.Parameters are local to the
-        /// helper and don't map back to the dispatch kernel's parameter list.
+        /// resolves to a kernel Parameter via <see cref="TraceWriteTargetToParameter"/>
+        /// (the write-tracking-specific trace that walks LEA / SubViewValue / Load
+        /// indirections in addition to the view-shape cases), the parameter's index
+        /// is added to <see cref="WrittenParamIndices"/>. Helper functions don't
+        /// contribute — their Method.Parameters are local to the helper and don't
+        /// map back to the dispatch kernel's parameter list.
         /// </summary>
         private void TrackParamWrite(Value target, string kind)
         {
             if (_isHelperFunction) return;
-            int paramIdx = TraceToParameter(target);
+            int paramIdx = TraceWriteTargetToParameter(target);
             StoreTargetTrace.Add($"{kind} {target?.GetType().Name ?? "null"} -> param[{paramIdx}]");
-            if (paramIdx >= 0)
+            // IR param 0 is always the implicit Index — kernels never WRITE to it.
+            // If the trace lands there, it walked through too far (a Load chain or
+            // similar that reached a non-buffer parameter). Drop those — feeding
+            // false positives into the dispatcher's gate causes copy-OUT to skip
+            // the WRONG buffer (the user's actual output gets dropped because the
+            // gate thinks the kernel "wrote" to a different param).
+            if (paramIdx > 0)
                 WrittenParamIndices.Add(paramIdx);
         }
 

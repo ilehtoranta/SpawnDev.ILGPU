@@ -404,16 +404,17 @@ namespace SpawnDev.ILGPU.Wasm
                 var viewSubOffsets = new List<int>();   // per-view: SubView byte offset
                 var wasmArgs = new List<(bool isBuffer, WasmMemoryBuffer? buffer, int length, int stride, int stride2, object? value)>();
 
-                // Tracks which entries in `bufferInfos` correspond to a kernel parameter
-                // the kernel writes to. Populated as we iterate args; consumed by the
-                // copy-OUT phase to skip input-only buffers — the unconditional copy-OUT
-                // would clobber any host-side CopyFromCPU writes that landed during the
-                // in-flight dispatch (the 2026-05-03 Wasm copy-OUT race).
-                // SAFETY: the skip-input-only path only activates when the codegen
-                // trace identified writes to AT LEAST ONE buffer-typed kernel parameter.
-                // If the trace's findings don't include any visible buffer write, fall
-                // back to copy-all to preserve correctness — we'd rather waste the
-                // copy-OUT than zero out an output buffer we couldn't classify.
+                // Per-buffer host-write counter snapshots taken at copy-IN time.
+                // The copy-OUT phase compares each buffer's current `HostWriteCounter`
+                // to its snapshot; if they DIFFER, the host wrote to SharedBuffer
+                // during the in-flight dispatch (host's intervening `CopyFromCPU` /
+                // `CopyFromJS` / `CopyFromHost`) and copy-OUT skips that buffer to
+                // preserve the host's write. Closes the 2026-05-03 Wasm copy-OUT
+                // race (per `_DevComms/SpawnDev.ILGPU/geordi-to-team-wasm-copy-out-race-2026-05-03.md`).
+                // Trace-coverage-independent — works for every kernel shape.
+                var hostWriteSnapshot = new int[bufferInfos.Capacity > 0 ? bufferInfos.Capacity : 16];
+                // (Unused) legacy diag snapshot kept for binary-compat with consumers
+                // that read LastDispatchCopyOutDiag.
                 var writtenBufferIndices = new HashSet<int>();
                 if (WasmBackend.VerboseLogging)
                     WasmBackend.LastDispatchCopyOutDiag = new List<string>();
@@ -831,6 +832,12 @@ namespace SpawnDev.ILGPU.Wasm
 
                 // Copy buffer data into the Wasm linear memory at computed offsets.
                 // Only the used SubView range is copied (not the full parent buffer).
+                // Also snapshot each buffer's `HostWriteCounter` — the copy-OUT
+                // phase will compare against the same counter post-dispatch and
+                // skip copy-OUT if the counter changed (host wrote to SharedBuffer
+                // during the dispatch — preserve that write, don't clobber).
+                if (hostWriteSnapshot.Length < bufferInfos.Count)
+                    hostWriteSnapshot = new int[bufferInfos.Count];
                 for (int i = 0; i < bufferInfos.Count; i++)
                 {
                     var (buf, _) = bufferInfos[i];
@@ -842,6 +849,7 @@ namespace SpawnDev.ILGPU.Wasm
                     using var srcView = new Uint8Array(buf.SharedBuffer, rangeMin, rangeSize);
                     using var dstView = new Uint8Array(memoryBuffer, offset, rangeSize);
                     dstView.JSRef!.CallVoid("set", srcView);
+                    hostWriteSnapshot[i] = buf.HostWriteCounter;
                 }
                 // Debug: check buf.SharedBuffer and Wasm memory after copy-in
                 if (dispNum >= 1 && dispNum <= 8 && bufferInfos.Count > 0)
@@ -1154,7 +1162,7 @@ namespace SpawnDev.ILGPU.Wasm
                     groupSize, numGroups,
                     flatArgs, compiledKernel.WasmBinary,
                     wasmMemory, memoryBuffer, bufferOffsets, bufferInfos, bufferRanges,
-                    writtenBufferIndices, traceFoundAnyBufferWrite,
+                    writtenBufferIndices, traceFoundAnyBufferWrite, hostWriteSnapshot,
                     dynamicSharedElements, dispNum);
 
                 // Clean up per-dispatch memory (only created for concurrent dispatches)
@@ -1262,6 +1270,7 @@ namespace SpawnDev.ILGPU.Wasm
             List<(int minByte, int maxByte)> bufferRanges,
             HashSet<int> writtenBufferIndices,
             bool traceFoundAnyBufferWrite,
+            int[] hostWriteSnapshot,
             int dynamicSharedElements = 0,
             int dispNum = 0)
         {
@@ -1460,40 +1469,27 @@ namespace SpawnDev.ILGPU.Wasm
             //
             // FIX for the 2026-05-03 Wasm copy-OUT race
             // (per _DevComms/SpawnDev.ILGPU/geordi-to-team-wasm-copy-out-race-2026-05-03.md):
-            // skip copy-OUT for buffers whose corresponding kernel parameter is NOT
-            // in the codegen's `WrittenParamIndices` set. The trace covers the three
-            // IR write paths the kernel function generator emits (Store, GenericAtomic,
-            // AtomicCAS); kernels that write to a parameter via any of those paths
-            // get their param index recorded at compile time. At dispatch time we
-            // check each buffer-typed arg against the set and only copy back buffers
-            // the kernel actually wrote to. Input-only buffers (paramsBuf in the
-            // regression test) are left alone — preserving any host CopyFromCPU
-            // writes that arrived during the in-flight dispatch.
+            // skip copy-OUT for buffers whose `HostWriteCounter` advanced during the
+            // in-flight dispatch. A counter advance means the host called
+            // CopyFromCPU / CopyFromJS / CopyFromHost on that buffer between copy-IN
+            // and copy-OUT — its SharedBuffer now holds the host's NEW data, and our
+            // copy-OUT (which would write back the kernel's wasmMemory contents from
+            // BEFORE the host write) would clobber it.
             //
-            // GATE — the skip path activates ONLY when:
-            //   1. The kernel has no barriers AND no shared memory (RadixSort and
-            //      similar multi-pass + scratch-using kernels write through paths
-            //      the trace doesn't fully cover; rather than risk under-copying,
-            //      fall back to copy-all for those).
-            //   2. The trace identified writes to at least one buffer-typed param
-            //      (`traceFoundAnyBufferWrite`) — if the trace found no writes
-            //      anywhere, the trace is likely incomplete for this kernel and we
-            //      fall back to copy-all rather than silently drop output.
-            //
-            // Future work: extend `TrackParamWrite` callers to cover every IR write
-            // path used by barrier/shared-memory kernels. Once the trace is
-            // comprehensive enough, this gate can be tightened.
-            bool kernelTraceIsComplete = !compiledKernel.HasBarriers
-                && compiledKernel.SharedMemorySize == 0
-                && traceFoundAnyBufferWrite;
+            // Trace-coverage-independent: works for every kernel shape including
+            // RadixSort multi-pass + barrier kernels. The host-write counter is
+            // bumped on every host-side write path on `WasmMemoryBuffer`, so any
+            // intervening write is detected without per-kernel write tracking.
             int copyOutCount = 0;
             int copyOutSkipped = 0;
             for (int i = 0; i < bufferInfos.Count; i++)
             {
-                bool shouldCopy = !kernelTraceIsComplete || writtenBufferIndices.Contains(i);
-                if (!shouldCopy) { copyOutSkipped++; continue; }
-
                 var (buf, _) = bufferInfos[i];
+                if (i < hostWriteSnapshot.Length && buf.HostWriteCounter != hostWriteSnapshot[i])
+                {
+                    copyOutSkipped++;
+                    continue;
+                }
                 int offset = bufferOffsets[i];
                 var (rangeMin, rangeMax) = bufferRanges[i];
                 if (rangeMin == int.MaxValue) { rangeMin = 0; rangeMax = (int)buf.LengthInBytes; }
