@@ -3678,6 +3678,27 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 // Check if it looks like an ArrayView wrapper (Field 0 is View)
                 if (st.NumFields > 0 && (st.Fields[0] is ViewType || st.Fields[0].ToString().Contains("View")))
                 {
+                    // Discriminate "single ArrayView wrapper" from "body struct with multiple
+                    // ArrayView fields". A 1D ArrayView wrapper has 3 fields with exactly one
+                    // ViewType (field 0); 2D has 4 fields with one ViewType; 3D has 6 fields
+                    // with one ViewType. A body struct with 2 ArrayView1D fields ALSO has 6
+                    // fields (2 × {BaseView, Extent, Stride}) but with TWO ViewType fields.
+                    // Count actual ViewType fields to disambiguate. Surfaced 2026-05-04 by
+                    // Tests23_TwoShortBodyStructDense — was being treated as a 3D ArrayView
+                    // (false isView=true, false is3DView=true) because NumFields==6.
+                    int viewFieldCount = 0;
+                    for (int fi = 0; fi < st.NumFields; fi++)
+                    {
+                        if (st.Fields[fi] is ViewType || st.Fields[fi].ToString().Contains("View"))
+                            viewFieldCount++;
+                    }
+                    if (viewFieldCount > 1)
+                    {
+                        // Multi-view body struct — leave isView=false; the body-struct
+                        // codegen path will handle each field individually.
+                        return;
+                    }
+
                     isView = true;
 
                     if (st.NumFields == 6 || st.NumFields == 4) // 3D (6 fields usually), 2D (4 fields)
