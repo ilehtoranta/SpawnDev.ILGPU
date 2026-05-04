@@ -2640,6 +2640,29 @@ namespace SpawnDev.ILGPU.WebGL.Backend
 
             if (value.Kind == BinaryArithmeticKind.PowF)
             {
+                // GLSL ES 3.0: pow(x, y) is undefined for x < 0; ANGLE typically emits
+                // it as exp(y * log(x)) and log(negative_x) is NaN. Mirror the base
+                // GLSLCodeGenerator fix: when the exponent is a constant non-negative
+                // integer (0..8), expand to repeated multiplication. Otherwise fall
+                // through to native pow(). Surfaced 2026-05-04 by Data's WebGL
+                // DistilBERT/SemanticSearch/GPT-2 LayerNorm `(x - mean)^2`.
+                if (value.Right.Resolve() is PrimitiveValue pv)
+                {
+                    float pf = pv.BasicValueType == BasicValueType.Float32 || pv.BasicValueType == BasicValueType.Float16
+                        ? pv.Float32Value
+                        : (pv.BasicValueType == BasicValueType.Float64 ? (float)pv.Float64Value : float.NaN);
+                    if (!float.IsNaN(pf) && pf >= 0f && pf <= 8f && pf == (int)pf)
+                    {
+                        int n = (int)pf;
+                        if (n == 0) { AppendLine($"{prefix}{target} = 1.0;"); return; }
+                        if (n == 1) { AppendLine($"{prefix}{target} = {left};"); return; }
+                        var sb = new StringBuilder();
+                        sb.Append(left);
+                        for (int i = 1; i < n; i++) sb.Append(" * ").Append(left);
+                        AppendLine($"{prefix}{target} = {sb};");
+                        return;
+                    }
+                }
                 AppendLine($"{prefix}{target} = pow({left}, {right});");
                 return;
             }
@@ -2701,6 +2724,21 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                     AppendLine($"{prefix}{target} = {resultGlslType}(uint({left}) {op} uint({right}));");
                     return;
                 }
+            }
+
+            // Sister fix to the Shl/Shr unsigned cast. GLSL ES 3.0 `int / int` and
+            // `int % int` are signed div/rem; for high-bit-set i32-as-uint operands
+            // the result is wrong. Tuvok's `OpusRangeDecoderGpu_DecodeUint` on WebGL
+            // 2026-05-04: `0x80000000u / 6u` returned `0xEAAAAAAB` instead of
+            // `0x15555555`. Cast through uint when the IR flagged the op as unsigned.
+            // Bit pattern preserved on cast back to int (or stays as uint).
+            if ((value.Kind == BinaryArithmeticKind.Div || value.Kind == BinaryArithmeticKind.Rem)
+                && value.IsUnsigned
+                && (leftType == "int" || leftType == "uint")
+                && (rightType == "int" || rightType == "uint"))
+            {
+                AppendLine($"{prefix}{target} = {resultGlslType}(uint({left}) {op} uint({right}));");
+                return;
             }
 
             AppendLine($"{prefix}{target} = {left} {op} {right};");
