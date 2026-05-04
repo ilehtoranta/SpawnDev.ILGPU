@@ -511,6 +511,100 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                     $"prior dispatch's offset=2 leaked into this read.");
         });
 
+        // Test K: Data's repro for the GPT-2 NaN/Inf weight-corruption bug
+        // surfaced 2026-05-04. `BufferPool.AllocatePermanentChunked` uploads
+        // large weight tensors (>1 MB) in chunks via
+        //   `buffer.View.SubView(offset, n).CopyFromCPU(chunk)`
+        // For GPT-2's lm_head (50257 x 768 = 154 MB float32) this is ~150
+        // chunks each at offset > 0. After the rc.10 cascade closed 11 of 15
+        // WebGL ML failures, GPT-2 still fires "50257/50257 logits are NaN/Inf
+        // — Chunked weight upload may have corrupted weights." DistilBERT +
+        // SemanticSearch (which share the same DistilBERT model with a 23.4 M
+        // float embedding matrix) also still fail with near-zero logits.
+        //
+        // This test reproduces the chunked-upload pattern with a tiny buffer:
+        // two SubView CopyFromCPU calls at non-overlapping offsets, then read
+        // back. Pre-fix on WebGL (if Data's hypothesis holds): chunk B lands
+        // at the wrong place in the texture and chunk A's region is wrong.
+        // Post-fix: full round-trip.
+        [TestMethod]
+        public async Task Tests23_SubView_CopyFromCPU_NonZeroOffset_Roundtrip() => await RunEmulatedTest(async accelerator =>
+        {
+            int total = 1024;
+            using var buf = accelerator.Allocate1D<float>(total);
+            var chunkA = Enumerable.Repeat(1f, 512).ToArray();
+            var chunkB = Enumerable.Repeat(2f, 512).ToArray();
+            buf.View.SubView(0, 512).CopyFromCPU(chunkA);
+            buf.View.SubView(512, 512).CopyFromCPU(chunkB);
+            await accelerator.SynchronizeAsync();
+
+            var got = await buf.CopyToHostAsync<float>(0, total);
+            for (int i = 0; i < 512; i++)
+                if (got[i] != 1f)
+                    throw new Exception($"Chunked upload SubView(0,512): expected 1 at index {i} got {got[i]}");
+            for (int i = 512; i < 1024; i++)
+                if (got[i] != 2f)
+                    throw new Exception($"Chunked upload SubView(512,512): expected 2 at index {i} got {got[i]}");
+        });
+
+        // Test L: GPT-2-scale chunked SubView upload. The 2-chunk repro (Test K)
+        // PASSED on every backend. GPT-2's lm_head is 154 MB float32 → ~150 chunks
+        // of 1 MB each via `BufferPool.AllocatePermanentChunked`. Per Data's triage
+        // 2026-05-04, GPT-2 still fires "50257/50257 logits NaN/Inf" on rc.10 with
+        // the test author flagging chunked-upload as the suspect. This test scales
+        // up the chunk count to mimic GPT-2's actual upload pattern and verifies
+        // every element round-trips correctly. If WebGL fails this, the chunked
+        // path has a bug at scale that the 2-chunk case doesn't surface.
+        [TestMethod]
+        public async Task Tests23_SubView_CopyFromCPU_ManyChunks_GPT2Scale_Roundtrip() => await RunEmulatedTest(async accelerator =>
+        {
+            // Match GPT-2 lm_head pattern: ~150 chunks of 256K floats each (1MB per chunk),
+            // total ~38M floats = ~154MB. Each chunk fills with a unique float pattern
+            // (chunk index encoded in high bits) so corruption is identifiable per chunk.
+            const int CHUNK_FLOATS = 262144; // 1 MB
+            const int NUM_CHUNKS = 150;
+            int total = CHUNK_FLOATS * NUM_CHUNKS;
+
+            using var buf = accelerator.Allocate1D<float>(total);
+
+            // Upload in chunks. Each chunk's value at index i is `chunkIdx * CHUNK_FLOATS + i`
+            // cast to float. So buf[k] should == k after upload.
+            var chunkData = new float[CHUNK_FLOATS];
+            for (int chunkIdx = 0; chunkIdx < NUM_CHUNKS; chunkIdx++)
+            {
+                int baseIdx = chunkIdx * CHUNK_FLOATS;
+                for (int i = 0; i < CHUNK_FLOATS; i++)
+                    chunkData[i] = (float)(baseIdx + i);
+                buf.View.SubView(baseIdx, CHUNK_FLOATS).CopyFromCPU(chunkData);
+            }
+            await accelerator.SynchronizeAsync();
+
+            var got = await buf.CopyToHostAsync<float>(0, total);
+
+            // Verify every chunk round-trips. Spot-check first 10 elements + every chunk
+            // boundary + last 10.
+            int violations = 0;
+            int firstViolationAt = -1;
+            float firstViolationGot = 0;
+            for (int k = 0; k < total; k++)
+            {
+                float expected = (float)k;
+                if (got[k] != expected)
+                {
+                    violations++;
+                    if (firstViolationAt < 0)
+                    {
+                        firstViolationAt = k;
+                        firstViolationGot = got[k];
+                    }
+                }
+            }
+            if (violations > 0)
+                throw new Exception($"GPT-2-scale chunked upload: {violations}/{total} elements wrong. " +
+                    $"First mismatch at index {firstViolationAt}: expected {firstViolationAt}, got {firstViolationGot}. " +
+                    $"chunkIdx={firstViolationAt / CHUNK_FLOATS} offsetInChunk={firstViolationAt % CHUNK_FLOATS}");
+        });
+
         // Test G: SAME as F but WITHOUT the compound `iter < 8` safety guard.
         // Tuvok's Tests22 inline has no safety cap — loop runs purely on the
         // `rng <= EC_CODE_BOT` condition. This isolates whether the compound
