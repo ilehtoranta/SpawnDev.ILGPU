@@ -402,6 +402,7 @@ namespace SpawnDev.ILGPU.Wasm
                 var bufferRanges = new List<(int minByte, int maxByte)>(); // per-buffer: used byte range
                 var viewBufferIdx = new List<int>();   // per-view: which buffer in bufferInfos
                 var viewSubOffsets = new List<int>();   // per-view: SubView byte offset
+                var viewElemSizes = new List<int>();    // per-view: bytes per element (from view's generic arg)
                 var wasmArgs = new List<(bool isBuffer, WasmMemoryBuffer? buffer, int length, int stride, int stride2, object? value)>();
 
                 // Per-buffer host-write counter snapshots taken at copy-IN time.
@@ -554,6 +555,7 @@ namespace SpawnDev.ILGPU.Wasm
                                 if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm-SubView] OFFSET EXTRACTION FAILED for param {i}: {ex.GetType().Name}: {ex.Message}");
                             }
                             viewSubOffsets.Add(subViewByteOffset);
+                            viewElemSizes.Add(viewElemSizeForLength);
 
                             // Update the buffer's used byte range to include this SubView.
                             // Use the VIEW's element size (computed above) — NOT the
@@ -907,7 +909,8 @@ namespace SpawnDev.ILGPU.Wasm
                             var (diagRMin, _) = bufferRanges[bIdx];
                             if (diagRMin == int.MaxValue) diagRMin = 0;
                             int vOff = bufferOffsets[bIdx] + viewSubOffsets[viewCheckIdx] - diagRMin;
-                            int dataEnd = vOff + lenCheck * 4;
+                            int elemSize = viewElemSizes[viewCheckIdx];
+                            int dataEnd = vOff + lenCheck * elemSize;
                             diagSb.Append($" V{viewCheckIdx}:[{vOff}..{dataEnd})/{memorySize}");
                             viewCheckIdx++;
                         }

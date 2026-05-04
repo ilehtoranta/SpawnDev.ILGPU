@@ -328,6 +328,41 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                     "If only the LOW 32 bits are correct, WasmAccelerator's view-byte-length used buffer.ElementSize (4) instead of view's actual element size (8) — task #16 follow-up fix.");
         });
 
+        // Test H: NATIVE long buffer (NOT Cast). Tuvok's Vp9 trap surfaced 2026-05-04
+        // shows V4 (the kernel's `ArrayView<long> outLen` param) reports byteLen=4
+        // even though the underlying buffer is `Allocate1D<long>(1)` directly. Different
+        // path from Test E (Cast<long> over int buffer); this isolates the natively-typed
+        // long allocation. If the wasm view-byte-length compute uses
+        // `wasmBuf.ElementSize` AND that buffer reports 4 bytes per element instead of 8
+        // for native long, OR the reflection-based VIEW-element-size override doesn't
+        // fire for non-Cast top-level params, this test exposes it.
+        static void Tests23_NativeLongBufferKernel(
+            Index1D _,
+            ArrayView<long> outLen,
+            long valueToStore)
+        {
+            outLen[0] = valueToStore;
+        }
+
+        [TestMethod]
+        public async Task Tests23_NativeLongBuffer() => await RunEmulatedTest(async accelerator =>
+        {
+            // Native MemoryBuffer1D<long>(1) - 8 bytes total, kernel param ArrayView<long>.
+            // Pre-fix: only LOW 32 bits round-trip on Wasm if buffer.ElementSize=4 path
+            // is taken. Post-fix: full 64-bit round-trip on every backend.
+            using var longBuf = accelerator.Allocate1D<long>(1);
+            const long testVal = 0x1122334455667788L;
+            var k = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<long>, long>(
+                Tests23_NativeLongBufferKernel);
+            k((Index1D)1, longBuf.View, testVal);
+            await accelerator.SynchronizeAsync();
+
+            var got = await longBuf.CopyToHostAsync<long>();
+            if (got[0] != testVal)
+                throw new Exception($"Native ArrayView<long> over Allocate1D<long>(1): expected 0x{testVal:X16} got 0x{got[0]:X16}. " +
+                    "If only LOW 32 bits are correct, the view-byte-length compute is using a 4-byte element size for the native long buffer.");
+        });
+
         // Test G: SAME as F but WITHOUT the compound `iter < 8` safety guard.
         // Tuvok's Tests22 inline has no safety cap — loop runs purely on the
         // `rng <= EC_CODE_BOT` condition. This isolates whether the compound
