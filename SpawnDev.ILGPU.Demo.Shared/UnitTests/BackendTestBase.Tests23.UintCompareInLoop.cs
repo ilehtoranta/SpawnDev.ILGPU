@@ -460,6 +460,44 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                     "If WebGPU fires Invalid BindGroupLayout, sub-word body-struct fields aren't being coalesced.");
         });
 
+        // Minimal sub-word + int body-struct shape — narrows the rc.5 bug surface for
+        // task #33. If THIS fails on WebGPU, the issue is mixed sub-word + non-sub-word
+        // body-struct codegen at minimum. If only Tests23_SilkBodyStructShape (6+9) fails
+        // but THIS passes, the issue scales with field count.
+        public struct Tests23_MinimalShortIntStruct
+        {
+            public ArrayView<short> S0;
+            public ArrayView<int> I0;
+        }
+
+        static void Tests23_MinimalShortIntKernel(
+            Index1D _,
+            Tests23_MinimalShortIntStruct s,
+            ArrayView<int> output)
+        {
+            int sum = 0;
+            sum += (int)s.S0[0];
+            sum += s.I0[0];
+            output[0] = sum;
+        }
+
+        [TestMethod]
+        public async Task Tests23_MinimalShortIntBodyStruct() => await RunEmulatedTest(async accelerator =>
+        {
+            using var s0 = accelerator.Allocate1D(new short[] { 7 });
+            using var i0 = accelerator.Allocate1D(new int[] { 100 });
+            using var output = accelerator.Allocate1D<int>(1);
+
+            var inputs = new Tests23_MinimalShortIntStruct { S0 = s0.View, I0 = i0.View };
+            var k = accelerator.LoadAutoGroupedStreamKernel<Index1D, Tests23_MinimalShortIntStruct, ArrayView<int>>(
+                Tests23_MinimalShortIntKernel);
+            k((Index1D)1, inputs, output.View);
+            await accelerator.SynchronizeAsync();
+            var got = await output.CopyToHostAsync<int>();
+            if (got[0] != 107)
+                throw new Exception($"Mixed sub-word + int body struct: expected 107 got {got[0]}");
+        });
+
         // Test J: WebGL glWorker.js subview-offset leak across same-program dispatches.
         // Surfaced 2026-05-04 by Data's StyleMosaic node 55 Gather first-divergent
         // capture: WebGL's glWorker.js was conditionally setting the
