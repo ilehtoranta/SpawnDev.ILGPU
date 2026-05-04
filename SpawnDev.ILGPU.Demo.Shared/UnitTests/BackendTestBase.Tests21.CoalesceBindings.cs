@@ -56,6 +56,101 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                         + s.V11[idx];
         }
 
+        // Diagnostic kernel: writes EACH field's [0] value to a separate output slot.
+        // Reveals which field reads return the right buffer's data. If output[f] = refData[f][0]
+        // for every f, the body-struct decomp is fine. If any output[f] is wrong, the kernel's
+        // GetField for that f reads from a wrong offset / wrong buffer pointer.
+        // Used to bisect the Wasm body-struct decomp many-field bug (task #16).
+        static void ManyIntViewsDiagnosticKernel(Index1D _, ArrayView<int> output, ManyIntViewsStruct s)
+        {
+            output[0] = s.V0[0];
+            output[1] = s.V1[0];
+            output[2] = s.V2[0];
+            output[3] = s.V3[0];
+            output[4] = s.V4[0];
+            output[5] = s.V5[0];
+            output[6] = s.V6[0];
+            output[7] = s.V7[0];
+            output[8] = s.V8[0];
+            output[9] = s.V9[0];
+            output[10] = s.V10[0];
+            output[11] = s.V11[0];
+        }
+
+        [TestMethod]
+        public async Task BodyStruct_12ArrayViewInt_PerFieldDiagnostic() => await RunEmulatedTest(async accelerator =>
+        {
+            const int len = 64; // small per-buffer length, only need [0]
+            var refData = new int[12][];
+            var bufs = new MemoryBuffer1D<int, Stride1D.Dense>[12];
+            try
+            {
+                for (int f = 0; f < 12; f++)
+                {
+                    refData[f] = new int[len];
+                    for (int i = 0; i < len; i++)
+                        refData[f][i] = (f + 1) * 100000 + i;
+                    bufs[f] = accelerator.Allocate1D(refData[f]);
+                }
+                var s = new ManyIntViewsStruct
+                {
+                    V0 = bufs[0].View, V1 = bufs[1].View, V2 = bufs[2].View, V3 = bufs[3].View,
+                    V4 = bufs[4].View, V5 = bufs[5].View, V6 = bufs[6].View, V7 = bufs[7].View,
+                    V8 = bufs[8].View, V9 = bufs[9].View, V10 = bufs[10].View, V11 = bufs[11].View,
+                };
+                using var output = accelerator.Allocate1D<int>(12);
+                var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<int>, ManyIntViewsStruct>(ManyIntViewsDiagnosticKernel);
+                kernel((Index1D)1, output.View, s);
+                await accelerator.SynchronizeAsync();
+                var result = await output.CopyToHostAsync<int>();
+
+                // Each output[f] should equal (f+1)*100000.
+                var sb = new System.Text.StringBuilder();
+                bool anyWrong = false;
+                for (int f = 0; f < 12; f++)
+                {
+                    int expected = (f + 1) * 100000;
+                    bool ok = result[f] == expected;
+                    if (!ok) anyWrong = true;
+                    sb.Append($"f{f}:{(ok ? "OK" : $"WRONG got={result[f]} expect={expected}")}; ");
+                }
+                if (anyWrong)
+                {
+                    // Wasm-only: pull the IR-layout-vs-CLR-serialization diagnostic
+                    // accumulator. These strings record exactly what the host wrote
+                    // into struct memory and at what offsets, so a mismatch between
+                    // what the kernel reads and what the host wrote becomes visible.
+                    string wasmDiag = "";
+                    try
+                    {
+                        // Look up WasmAccelerator by name across all loaded assemblies.
+                        // Avoids a project-time reference to SpawnDev.ILGPU.Wasm internals.
+                        System.Type? accelType = null;
+                        foreach (var a in System.AppDomain.CurrentDomain.GetAssemblies())
+                        {
+                            var t = a.GetType("SpawnDev.ILGPU.Wasm.WasmAccelerator");
+                            if (t != null) { accelType = t; break; }
+                        }
+                        if (accelType != null)
+                        {
+                            var idxField = accelType.GetField("_lastImplicitIndexDebug",
+                                System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
+                            var serField = accelType.GetField("_lastStructSerialDebug",
+                                System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
+                            wasmDiag = " | implDbg=" + (idxField?.GetValue(null) ?? "")
+                                     + " | serDbg=" + (serField?.GetValue(null) ?? "");
+                        }
+                    }
+                    catch { /* not Wasm — debug accumulators aren't available */ }
+                    throw new Exception("Per-field diagnostic: " + sb.ToString() + wasmDiag);
+                }
+            }
+            finally
+            {
+                for (int f = 0; f < 12; f++) bufs[f]?.Dispose();
+            }
+        });
+
         [TestMethod]
         public async Task BodyStruct_12ArrayViewInt_CoalesceTest() => await RunEmulatedTest(async accelerator =>
         {

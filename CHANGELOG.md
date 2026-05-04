@@ -2,6 +2,64 @@
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
 
+## 4.9.5-rc.8 (2026-05-04) — Wasm multi-view body-struct kernel param decomp fix
+
+### Fix: Wasm dispatcher loses N-1 view buffers when kernel takes a multi-ArrayView container struct
+
+`WasmKernelFunctionGenerator.IsViewType` was returning `true` for any `StructureType` whose first `DirectField` is `AddressSpaceType`. That's correct for `ArrayView<T>` / `ArrayView1D<T,Stride>` (single view-pointer + metadata fields), but ALSO matched multi-view containers like Tuvok's `VorbisPacketDecodeStaticInputs` (38 ArrayView fields) and any user struct-of-views. The dispatcher then routed the param through the single-view path which only registers the FIRST view's buffer in `uniqueBuffers`; the remaining N-1 view-pointers in the serialized struct memory never got their wasm offsets written, so the kernel read fields 1..N-1 as offset 0 of V0's buffer plus the IR struct's per-field byte offset.
+
+Symptom on `Tests21.BodyStruct_12ArrayViewInt_PerFieldDiagnostic`: `V0[0]=100000 (correct), V1..V11=100004 (= V0[4], because the IR field offset for field 1 was 16 bytes and the kernel divided by 4 to index into V0)`. Tuvok's Vorbis Wasm path was producing silently-wrong PCM for the same reason.
+
+### Fix surface
+
+```csharp
+// Before:
+if (structType.DirectFields.Length > 0
+    && structType.DirectFields[0] is AddressSpaceType)
+    return true; // matches single-view AND multi-view
+
+// After:
+int viewPtrCount = 0;
+foreach (var df in structType.DirectFields)
+    if (df is AddressSpaceType) viewPtrCount++;
+if (viewPtrCount == 1
+    && structType.DirectFields.Length > 0
+    && structType.DirectFields[0] is AddressSpaceType)
+    return true; // only single-view
+```
+
+Multi-view structs (`viewPtrCount > 1`) now flow through the scalar-struct serialization path which already correctly registers each view's buffer via `ExtractBuffersFromStruct` and writes each view-pointer to its own field offset.
+
+### Verification
+
+- `Tests21.BodyStruct_12ArrayViewInt_CoalesceTest` Wasm: 256-element output matches the per-field reference sum across all 12 ArrayView fields. Was wrong on every output index pre-fix.
+- `Tests21.BodyStruct_12ArrayViewInt_PerFieldDiagnostic` Wasm: each output[f] = refData[f][0] correctly. Was 11/12 wrong pre-fix.
+- `Tests21.BodyStruct_MixedIntFloatCoalesceTest` Wasm: PASS.
+- `Tests21.BodyStruct_VariableLengthCoalesceTest` Wasm: PASS.
+- All Tests21 cases pass on every backend except WebGL (still gated with technical reason — task #26).
+
+### What this unblocks
+
+- **SpawnDev.Codecs Vorbis Wasm path** — `VorbisPacketDecodeStaticInputs` (36 `ArrayView<int>` + 2 `ArrayView<double>`) now works on Wasm. Tuvok's dual-path branch in `VorbisAudioDecoderGpu.DecodePacketAsync` can drop the v1 fallback arm entirely.
+- **Opus SILK + CELT Wasm decoder primitives** — same struct-of-ArrayView pattern, browser-clean from day one on Wasm.
+- **Possibly some of Data's Wasm async-mode race cluster** — DDPM / MoveNet / 5 Style transfers / SqueezeNet / ESPCN / DepthAnything. Some of these may have been hitting the multi-view-decomp bug rather than (or in addition to) a true async race. Recommend re-running the ML pipeline + reference suite on Wasm after rc.8 lands.
+
+### Partial WebGL improvement
+
+`GLSLKernelFunctionGenerator.IsMultiDim` got the same multi-view detection fix — only treats a struct as a view when `NumFields` matches a known ArrayView shape (3, 4, or 6). This is necessary for the WebGL fix but not sufficient: the GLSL kernel codegen still needs per-field sampler decomposition + struct-aware GetField + dispatcher binding multiple samplers per param. Tracked as task #26. Tests21 cases remain gated on WebGL with sharp technical reason ("samplers cannot be struct members in GLSL ES 3.0").
+
+### Files changed
+
+- `SpawnDev.ILGPU/Wasm/Backend/WasmKernelFunctionGenerator.cs` — IsViewType multi-view detection
+- `SpawnDev.ILGPU/WebGL/Backend/GLSLKernelFunctionGenerator.cs` — IsMultiDim multi-view detection (partial WebGL fix)
+- `SpawnDev.ILGPU.Demo.Shared/UnitTests/BackendTestBase.Tests21.CoalesceBindings.cs` — added per-field diagnostic test
+- `SpawnDev.ILGPU.Demo/UnitTests/WasmTests.cs` — un-gated Tests21 cases (Wasm fix verified)
+- `SpawnDev.ILGPU.Demo/UnitTests/WebGLTests.cs` — kept Tests21 gated with sharp technical reason for the remaining WebGL infrastructure work
+
+### Four-package bundle: Fork stays at 2.0.4
+
+No edits to the forked `ILGPU/` tree. Only `SpawnDev.ILGPU/Wasm/*` + `SpawnDev.ILGPU/WebGL/*` changed.
+
 ## 4.9.5-rc.7 (2026-05-04) — WebGL GLSL codegen: INT_MIN const + unsigned compare/shift
 
 ### Three GLSL codegen bugs fixed

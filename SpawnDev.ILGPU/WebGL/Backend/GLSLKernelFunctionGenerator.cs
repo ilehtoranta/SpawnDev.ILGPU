@@ -2999,32 +2999,47 @@ namespace SpawnDev.ILGPU.WebGL.Backend
 
             // 2. Structural check: ArrayView2D/3D are StructureType wrappers around a ViewType
             //    Port from the WGSL backend's proven detection logic
+            //
+            // 2026-05-04 fix: ONLY set `isView=true` when the field count matches one of
+            // the known ArrayView shapes (3/4/6 flattened fields). For multi-view container
+            // structs (e.g., ManyIntViewsStruct with 12 ArrayView<int>, Tuvok's
+            // VorbisPacketDecodeStaticInputs with 38), NumFields exceeds those and the
+            // struct is NOT a single view — the dispatcher must treat it as a scalar
+            // and serialize each view-ptr to its own field offset (same as the Wasm
+            // IsViewType fix). Pre-fix, isView=true unconditionally on any struct with
+            // a leading view-typed field, which made the WebGL dispatcher route
+            // multi-view containers through the single-view path and lose 11 of 12
+            // buffer registrations.
             if (type is StructureType st)
             {
                 // Check if first flattened field is a ViewType or its string contains "View"
                 if (st.NumFields > 0 && (st.Fields[0] is ViewType || st.Fields[0] is PointerType || st.Fields[0].ToString().Contains("View")))
                 {
-                    isView = true;
-
                     // Distinguish 1D/2D/3D by flattened field count:
                     //   1D ArrayView<T> = 3 fields (pointer, index, length) but 1D is ViewType not StructureType
                     //   2D ArrayView2D<T> = 4 fields (pointer, index, length, stride)
                     //   3D ArrayView3D<T> = 6 fields (pointer, index, length, strideX, strideY, strideZ)
                     if (st.NumFields == 6)
                     {
+                        isView = true;
                         is3DView = true;
                         isMultiDim = true;
                     }
                     else if (st.NumFields == 4)
                     {
+                        isView = true;
                         is2DView = true;
                         isMultiDim = true;
                     }
                     else if (st.NumFields == 3)
                     {
+                        isView = true;
                         is1DView = true;
                         isMultiDim = false;
                     }
+                    // NumFields outside {3, 4, 6}: NOT a single-view wrapper —
+                    // multi-view container struct. isView stays false; the
+                    // dispatcher routes it through the scalar-struct path.
                 }
             }
 

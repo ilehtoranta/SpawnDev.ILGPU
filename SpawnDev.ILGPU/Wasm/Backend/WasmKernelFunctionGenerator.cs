@@ -4078,16 +4078,32 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 return true;
             if (type is StructureType structType)
             {
-                // A view StructureType (ArrayView1D<T, TStride>) has AddressSpaceType as
-                // its first DirectField. This is the pointer field from ArrayView<T>.
+                // A view StructureType (ArrayView<T>, ArrayView1D<T, TStride>) has
+                // EXACTLY ONE AddressSpaceType DirectField (the pointer). Wrapper
+                // structs like ArrayView1D add primitive metadata fields (Extent,
+                // Stride) but only one pointer.
                 //
-                // WARNING: User structs containing views (ViewSourceSequencer) may also
-                // have AddressSpaceType as first DirectField after IR flattening. These
-                // are INDISTINGUISHABLE from real views at the IR level. The dispatch side
-                // handles this by checking `args[i] is IArrayView` — if the CLR arg isn't
-                // an IArrayView, it falls through to the struct serialization path.
-                // The codegen and dispatch MUST agree on the parameter count.
-                if (structType.DirectFields.Length > 0
+                // Multi-view container structs (ManyIntViewsStruct,
+                // VorbisPacketDecodeStaticInputs, custom user struct-of-views)
+                // have MULTIPLE AddressSpaceType DirectFields — those are NOT
+                // single views; they must go through the scalar-struct
+                // serialization path so each view-ptr lands at its own field
+                // offset in scratch memory and the kernel's GetField reads
+                // each one independently.
+                //
+                // Pre-2026-05-04: this returned `true` for ANY struct whose
+                // first DirectField is AddressSpaceType, which made the
+                // dispatcher treat multi-view structs as single views (only V0's
+                // buffer registered, V1..V11's pointers lost — task #16). Fix:
+                // count AddressSpaceType DirectFields and only return `true`
+                // for the single-AddressSpaceType case.
+                int viewPtrCount = 0;
+                foreach (var df in structType.DirectFields)
+                {
+                    if (df is AddressSpaceType) viewPtrCount++;
+                }
+                if (viewPtrCount == 1
+                    && structType.DirectFields.Length > 0
                     && structType.DirectFields[0] is AddressSpaceType)
                     return true;
             }

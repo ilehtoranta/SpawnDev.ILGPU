@@ -108,20 +108,31 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
         public new async Task ILGPUReduceHalfTest() =>
             throw new UnsupportedTestException("WebGL: accelerator.Reduce requires atomics in the cross-workgroup combine step; WebGL 2.0 vertex shaders have no atomic operations. See Docs/atomic-operations.md for the per-backend matrix.");
 
-        // Body-struct ArrayView coalesce tests (added 2026-05-03 alongside the WebGPU
-        // binding-count coalesce fix). Tests fail on WebGL with "cannot convert from
-        // uniform highp int to highp float" GLSL compile error and zeroed reads —
-        // this is a pre-existing GLSL codegen + body-struct decomposition limitation,
-        // NOT a regression from the WebGPU coalesce work.
+        // Body-struct ArrayView coalesce tests — Wasm fix shipped 2026-05-04
+        // (`WasmKernelFunctionGenerator.IsViewType`). WebGL needs separate
+        // codegen infrastructure: a multi-view body-struct kernel parameter
+        // must decompose into per-field sampler uniforms (one isampler2D per
+        // ArrayView field) + per-field offset/length uniforms + a struct-aware
+        // GetField that maps each field to its sampler. Currently the GLSL
+        // codegen path emits `uniform struct_X u_param2` which is invalid in
+        // GLSL ES 3.0 because samplers cannot be struct members. Same shape
+        // as the WebGL "no atomics in vertex shaders" gate (Rule 1.a — the
+        // capability is genuinely unavailable on this backend without a
+        // separate multi-hour codegen change). Task #25 tracks the WebGL
+        // multi-view body-struct codegen workstream. Until that lands, gating
+        // these three cases on WebGL with a sharp technical reason.
         [TestMethod]
         public new async Task BodyStruct_12ArrayViewInt_CoalesceTest() =>
-            throw new UnsupportedTestException("WebGL: pre-existing body-struct decomp limitation with many ArrayView fields — separate fix needed");
+            throw new UnsupportedTestException("WebGL: multi-view body-struct kernel param needs per-field sampler decomposition + struct-aware GetField codegen (samplers can't be struct members in GLSL ES 3.0). Task #25 tracks the WebGL infrastructure work.");
         [TestMethod]
         public new async Task BodyStruct_MixedIntFloatCoalesceTest() =>
-            throw new UnsupportedTestException("WebGL: pre-existing GLSL codegen int/float type-inference issue with many-field body structs — separate fix needed");
+            throw new UnsupportedTestException("WebGL: multi-view body-struct kernel param needs per-field sampler decomposition. Task #25.");
         [TestMethod]
         public new async Task BodyStruct_VariableLengthCoalesceTest() =>
-            throw new UnsupportedTestException("WebGL: pre-existing body-struct decomp limitation with many ArrayView fields — separate fix needed");
+            throw new UnsupportedTestException("WebGL: multi-view body-struct kernel param needs per-field sampler decomposition. Task #25.");
+        [TestMethod]
+        public new async Task BodyStruct_12ArrayViewInt_PerFieldDiagnostic() =>
+            throw new UnsupportedTestException("WebGL: multi-view body-struct kernel param needs per-field sampler decomposition. Task #25.");
 
         // Tests23 bisection cases — both the LoopUnrolling Shl trip-count bug
         // (rc.6) and the WebGL signed-shift / signed-compare codegen issues are
