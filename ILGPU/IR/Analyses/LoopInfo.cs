@@ -940,8 +940,25 @@ namespace ILGPU.IR.Analyses
 
             // Determine the update value
             int update = intBounds.update.Value;
-            // Adjust the update value by multiplying it by 2
-            if (IsMultiplied2Update(UpdateKind)) update *= 2;
+            // For shift updates (Shl/Shr), the per-iteration multiplier is
+            // 2^shift_count, NOT 2*shift_count. The previous `*= 2` only
+            // produced the correct multiplier for shift_count == 1; for any
+            // other shift amount it under-counted iterations, so the loop
+            // unroller emitted MORE unrolled bodies than the live loop would
+            // run — pushing values past the loop's intended exit point and
+            // producing zeros for `rng <<= 8` patterns when `rng` is uint.
+            // Surfaced 2026-05-04 by Tuvok's libopus Normalize while-loop
+            // pattern (`while (rng <= 0x800000) rng <<= 8`) which failed on
+            // every GPU + Wasm + WebGL backend (CPU bypassed because it
+            // doesn't run this unroller pass). Regression tests:
+            //   BackendTestBase.Tests22.StaticStructReturnRefHelpers
+            //   BackendTestBase.Tests23.UintCompareInLoop
+            if (IsMultiplied2Update(UpdateKind))
+            {
+                if (update < 1 || update >= 32)
+                    return null; // shift count out of valid range — bail
+                update = 1 << update;
+            }
 
             // Compute the number of steps based on the kind of the update operation
             int stepCount = 0;

@@ -2,6 +2,52 @@
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
 
+## 4.9.5-rc.6 (2026-05-04) — LoopUnrolling shift-induction trip-count fix
+
+### Fix: `while (uintRng <= uintConst) rng <<= N` produced wrong output for N != 1 on every backend except CPU
+
+Surfaced 2026-05-04 by Tuvok's libopus-style Normalize while-loop pattern (`while (rng <= 0x800000) rng <<= 8`) which silently produced `Rng=0` instead of `0x80000000` on every GPU + Wasm + WebGL backend. CPU bypassed because it doesn't run the IR-level unroller pass.
+
+### Root cause
+
+`ILGPU/IR/Analyses/LoopInfo.cs:944` (`TryGetTripCount`) computed the per-iteration multiplier for shift updates as:
+
+```csharp
+if (IsMultiplied2Update(UpdateKind)) update *= 2;
+```
+
+That formula only produces the correct multiplier for `<<= 1` (where 2*1 = 2 = 2^1). For `<<= N` with N != 1 the per-iteration multiplier should be `2^N`, not `2*N`. With shift_count=8 (libopus EC_SYM_BITS) the unroller computed update=16 instead of 256, producing trip count 5 instead of 3, so it emitted two extra `rng <<= 8` operations past the loop's intended exit. After the extra iterations rng=0 (high byte shifted off then again).
+
+The bug had been latent since the loop unroller's introduction; it only surfaces when the kernel has a SINGLE induction variable that's a shift. Compound conditions like `while (cond && iter < N)` introduce a second induction variable and force the unroller to bail (`InductionVariables.Length != 1`) — which is why no existing algorithm tests caught it. Tuvok's `OpusRangeDecoderGpu.Init` was the first kernel in the codebase to use a bare-condition shift loop.
+
+### Fix
+
+```csharp
+if (IsMultiplied2Update(UpdateKind))
+{
+    if (update < 1 || update >= 32)
+        return null; // out-of-range shift — bail rather than emit garbage
+    update = 1 << update;
+}
+```
+
+Identical behavior for `<<= 1`. Correct for any other shift amount in 1..31.
+
+### Verification
+
+- `BackendTestBase.Tests22.StaticStructReturnRefHelpers` — Tuvok's regression test for the libopus Init/Normalize pattern. Was 12/14 failing pre-fix (CUDA / OpenCL / WebGPU / WebGPUNoSubgroups / Wasm / WebGL × bug+inline). **PASS 14/14 post-fix.**
+- `BackendTestBase.Tests23.UintCompareInLoop` — 6 new bisection cases that pin down the unroll-path codegen. PASS on every backend except WebGL, which has a SEPARATE pre-existing GLSL signed-shift/compare bug (gated via `UnsupportedTestException`, tracked independently — not caused by this fix).
+- Algorithm regression sweep (Reduce + Initialize + RadixSort + Sequence + Scan + Histogram + Algorithm*): **481 passed / 0 failed / 93 skipped** in 53m48s. Zero regressions.
+
+### What this unblocks
+
+- `SpawnDev.Codecs.OpusRangeDecoderGpu` — was CPU-only verified before; now works bit-exact on every backend.
+- All upcoming Opus SILK / CELT / Vorbis decoder primitives that use libopus-style range-decoder normalize loops.
+
+### Four-package bundle bumped to 2.0.4
+
+Fix is in `ILGPU/IR/Analyses/LoopInfo.cs` (forked tree). Per the four-package bundle protocol, `ILGPU.csproj`, `ILGPU.Algorithms.csproj`, and the two `SpawnDev.ILGPU.Fork*` PackageReference lines in `SpawnDev.ILGPU.csproj` all bumped from 2.0.3 → 2.0.4. `_check-fork-version-sync.bat` passes.
+
 ## 4.9.5-rc.5 (2026-05-03) — WebGPU binding-count coalesce
 
 ### Fix: kernels with > 10 storage-buffer bindings on WebGPU

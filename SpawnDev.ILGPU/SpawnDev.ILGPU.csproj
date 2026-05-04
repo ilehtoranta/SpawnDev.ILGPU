@@ -4,8 +4,8 @@
 		<TargetFramework>net10.0</TargetFramework>
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>enable</Nullable>
-		<Version>4.9.5-rc.5</Version>
-		<PackageReleaseNotes>v4.9.5-rc.5: WebGPU storage-buffer binding-count coalesce. When a kernel's body-struct ArrayView fields would push the total binding count over `maxStorageBuffersPerShaderStage` (Chrome default = 10), the WGSL codegen now groups same-element-type fields into shared storage-buffer bindings and the runtime concatenates each member's GPU buffer data into one coalesced buffer at dispatch time. Tuvok's VorbisPacketDecodeStaticInputs (36 ArrayView&lt;int&gt; + 2 ArrayView&lt;double&gt;) collapses from 38 raw bindings to 2 coalesced + per-field offset slots in `_scalar_params`, fitting comfortably under the 10-binding limit and unblocking the WebGPU browser path for Vorbis v2 / Opus SILK / Opus CELT integration kernels with no Codecs-side restructure required. Trigger: kernel raw bindings &gt; 10. Eligibility: i32/u32/f32/emu_64 element types, non-atomic, non-sub-word, non-packed-struct, flat body struct (no nested struct fields). Existing kernels with body structs of 1-9 view fields keep their current shape (no per-dispatch GPU→GPU copy overhead). New regression tests `BackendTestBase.Tests21.CoalesceBindings.cs` (12-int, mixed-int-float, variable-length) — 15/0/6 across CPU + WebGPU + WebGPUNoSubgroups + CUDA + OpenCL; Wasm + WebGL skipped via UnsupportedTestException for a pre-existing many-field body-struct decomp limitation in those backends (separate fix tracked). Sweep: 332 / 0 / 63 across all algorithm + body-struct kernels (Reduce / Initialize / RadixSort / Sequence) — no regressions. See _DevComms/SpawnDev.ILGPU/geordi-to-tuvok-binding-count-coalesce-shipped-2026-05-03.md.</PackageReleaseNotes>
+		<Version>4.9.5-rc.6</Version>
+		<PackageReleaseNotes>v4.9.5-rc.6: ILGPU LoopUnrolling shift-induction trip-count fix. Surfaced 2026-05-04 by Tuvok's libopus-style Normalize while-loop pattern (`while (rng &lt;= 0x800000) rng &lt;&lt;= 8`) which silently produced wrong output (Rng=0 instead of 0x80000000) on every GPU and Wasm + WebGL backend; CPU bypassed because it doesn't run the unroller. Root cause: `LoopInfo.TryGetTripCount` adjusted the per-iteration multiplier for shift updates by `update *= 2`, which only produces the correct value for `&lt;&lt;= 1`. For `&lt;&lt;= N` with N != 1 the multiplier should be `2^N`, NOT `2*N`. With shift_count=8 the trip count came out as 5 instead of 3, and the unroller emitted two extra `rng &lt;&lt;= 8` operations past the loop's intended exit, leaving rng=0 in the final state. Fix: change to `update = 1 &lt;&lt; update` with bounds check (1 &lt;= shift &lt; 32). Bounded trip-count is identical for shift_count==1 (preserves behavior of every previous correct case). Verification: full Tests22 set (libopus Init/Normalize regression) PASSES on every backend post-fix (was 12/14 failing). Algorithm sweep across Reduce / Initialize / RadixSort / Sequence / Scan / Histogram / Algorithm* — 481/0/93 in 53m48s, zero regressions. Includes also rc.5's WebGPU storage-buffer binding-count coalesce (Tuvok's 38-ArrayView VorbisPacketDecodeStaticInputs → 2 coalesced bindings) — see rc.5 notes for that surface. New bisection regression tests `BackendTestBase.Tests23.UintCompareInLoop.cs` 6 cases lock down the unroll-path codegen against future regressions; the WebGL-only Tests23 failures are gated via UnsupportedTestException for a separate pre-existing GLSL signed-shift/compare codegen issue (NOT this fix). See _DevComms/SpawnDev.ILGPU/geordi-to-tuvok-tests22-fix-found-2026-05-04.md.</PackageReleaseNotes>
 		<GeneratePackageOnBuild>True</GeneratePackageOnBuild>
 		<GenerateDocumentationFile>true</GenerateDocumentationFile>
 		<EmbedAllSources>true</EmbedAllSources>
@@ -59,8 +59,8 @@
 		<ProjectReference Include="..\ILGPU.Algorithms\ILGPU.Algorithms.csproj" />
 	</ItemGroup>
 	<ItemGroup Condition="!Exists('$(MSBuildThisFileDirectory)..\ILGPU\ILGPU.csproj')">
-		<PackageReference Include="SpawnDev.ILGPU.Fork" Version="2.0.3" />
-		<PackageReference Include="SpawnDev.ILGPU.Algorithms.Fork" Version="2.0.3" />
+		<PackageReference Include="SpawnDev.ILGPU.Fork" Version="2.0.4" />
+		<PackageReference Include="SpawnDev.ILGPU.Algorithms.Fork" Version="2.0.4" />
 	</ItemGroup>
 
 	<ItemGroup>

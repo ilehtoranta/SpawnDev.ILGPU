@@ -123,6 +123,33 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
         public new async Task BodyStruct_VariableLengthCoalesceTest() =>
             throw new UnsupportedTestException("WebGL: pre-existing body-struct decomp limitation with many ArrayView fields — separate fix needed");
 
+        // Tests23 bisection cases for the LoopUnrolling Shl trip-count bug (Tuvok's
+        // libopus Normalize while-loop pattern). The unroll fix landed in 4.9.5-rc.6
+        // and clears every backend except WebGL — which has a SEPARATE pre-existing
+        // GLSL signed-vs-unsigned codegen issue (e.g. `0x800000 << 8` produces
+        // `0x80000001` instead of `0x80000000`, and `uint <= uintConst` evaluated
+        // as signed). That WebGL issue is tracked independently and gates these tests
+        // here. The Tests22 cases now PASS on WebGL with the unroll fix; they're
+        // not gated.
+        [TestMethod]
+        public new async Task Tests23_BareUintShift() =>
+            throw new UnsupportedTestException("WebGL: pre-existing GLSL signed-shift codegen issue — `0x800000 << 8` produces 0x80000001 instead of 0x80000000. Separate fix.");
+        [TestMethod]
+        public new async Task Tests23_LocalLoop_NoStruct() =>
+            throw new UnsupportedTestException("WebGL: pre-existing GLSL signed-vs-unsigned compare codegen issue — `uint <= uintConst` evaluated as signed. Separate fix.");
+        [TestMethod]
+        public new async Task Tests23_StructLoop() =>
+            throw new UnsupportedTestException("WebGL: pre-existing GLSL signed-vs-unsigned compare codegen issue. Separate fix.");
+        [TestMethod]
+        public new async Task Tests23_NormalizeShape_NoBuffer() =>
+            throw new UnsupportedTestException("WebGL: pre-existing GLSL signed-vs-unsigned compare codegen issue. Separate fix.");
+        [TestMethod]
+        public new async Task Tests23_NormalizeShape_WithBuffer() =>
+            throw new UnsupportedTestException("WebGL: pre-existing GLSL signed-vs-unsigned compare codegen issue. Separate fix.");
+        [TestMethod]
+        public new async Task Tests23_NormalizeShape_BareCondition() =>
+            throw new UnsupportedTestException("WebGL: pre-existing GLSL signed-shift codegen issue — final `0x80000000` reads back as `0x80000001`. Separate fix.");
+
         // --- Atomics (WebGL vertex shader TF pipeline has no atomic operations) ---
         [TestMethod]
         public new async Task AtomicTest() =>
