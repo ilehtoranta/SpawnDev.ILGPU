@@ -498,6 +498,35 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                 throw new Exception($"Mixed sub-word + int body struct: expected 107 got {got[0]}");
         });
 
+        // Diagnostic: CUDA "illegal memory access" on sub-word body-struct minimal — narrows
+        // whether the bug is sub-word ALONE or sub-word + non-sub-word interaction.
+        public struct Tests23_OnlyShortStruct
+        {
+            public ArrayView<short> S0;
+        }
+
+        static void Tests23_OnlyShortKernel(
+            Index1D _,
+            Tests23_OnlyShortStruct s,
+            ArrayView<int> output)
+        {
+            output[0] = (int)s.S0[0];
+        }
+
+        [TestMethod]
+        public async Task Tests23_OnlyShortBodyStruct() => await RunEmulatedTest(async accelerator =>
+        {
+            using var s0 = accelerator.Allocate1D(new short[] { 42 });
+            using var output = accelerator.Allocate1D<int>(1);
+            var inputs = new Tests23_OnlyShortStruct { S0 = s0.View };
+            var k = accelerator.LoadAutoGroupedStreamKernel<Index1D, Tests23_OnlyShortStruct, ArrayView<int>>(
+                Tests23_OnlyShortKernel);
+            k((Index1D)1, inputs, output.View);
+            await accelerator.SynchronizeAsync();
+            var got = await output.CopyToHostAsync<int>();
+            if (got[0] != 42) throw new Exception($"OnlyShort body struct: expected 42 got {got[0]}");
+        });
+
         // Test J: WebGL glWorker.js subview-offset leak across same-program dispatches.
         // Surfaced 2026-05-04 by Data's StyleMosaic node 55 Gather first-divergent
         // capture: WebGL's glWorker.js was conditionally setting the

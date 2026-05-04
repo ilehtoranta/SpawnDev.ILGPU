@@ -4,8 +4,16 @@
 		<TargetFramework>net10.0</TargetFramework>
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>enable</Nullable>
-		<Version>4.9.5-rc.14</Version>
-		<PackageReleaseNotes>v4.9.5-rc.14: WebGL kernel-main override gets the Div/Rem unsigned cast and Pow negative-base integer-exponent expansion that previously only landed in the GLSLCodeGenerator base. Helper functions (compiled via `GLSLFunctionGenerator → base`) had both fixes from rc.12 and rc.13. The kernel-main override (`GLSLKernelFunctionGenerator`) had its OWN BinaryArithmeticValue emit that emitted raw `pow(x, y)` and bare `int / int` for unsigned div, missing the fixes.
+		<Version>4.9.5-rc.15</Version>
+		<PackageReleaseNotes>v4.9.5-rc.15: Wasm dispatcher diagnostic typed-array allocations gated behind VerboseLogging. Two debug blocks in `WasmAccelerator.RunKernelAsync` were firing on every dispatch 1-8 (and 1-6) regardless of `VerboseLogging` — only the log-message append was gated. The JS interop calls allocated typed array views per dispatch even in production. Worse, line 918 hardcoded `new Uint8Array(bufferInfos[0].buffer.SharedBuffer, 0, 4)` — assumes the first buffer is at least 4 bytes. For sub-word body-struct kernels (Tuvok's `SilkDecodeCoreInputs` whose first ArrayView field is short, or any body struct with a sub-word field as the first ArrayView), the first buffer can be 2 bytes (single-element short). The view construction throws "RangeError: Invalid typed array length: 4" before the kernel ever runs.
+
+Surfaced 2026-05-04 by `Tests23_MinimalShortIntBodyStruct` (1-short + 1-int body struct). Pre-fix Wasm fail; post-fix PASS 7/7 across CPU + CUDA + OpenCL + WebGPU + WebGPUNoSubgroups + Wasm + WebGL (CUDA + WebGL still fail this test for unrelated codegen bugs tracked separately as #26 + the CUDA mixed-type body-struct illegal-memory-access).
+
+Fix: gate both blocks behind `WasmBackend.VerboseLogging`. Add bounds checks. The hardcoded length=4 path is now clamped via `Math.Min(4, buffer.LengthInBytes)` and only runs when the buffer has at least 4 bytes anyway.
+
+UNBLOCKS: Tuvok's `SilkDecodeCoreGpu` on Wasm (was failing with `RangeError: Invalid typed array length: 4` before even reaching the kernel). Any future codec / ML kernel using a body struct with a sub-word ArrayView field as the first field.
+
+v4.9.5-rc.14: WebGL kernel-main override gets the Div/Rem unsigned cast and Pow negative-base integer-exponent expansion that previously only landed in the GLSLCodeGenerator base. Helper functions (compiled via `GLSLFunctionGenerator → base`) had both fixes from rc.12 and rc.13. The kernel-main override (`GLSLKernelFunctionGenerator`) had its OWN BinaryArithmeticValue emit that emitted raw `pow(x, y)` and bare `int / int` for unsigned div, missing the fixes.
 
 (1) WebGL Div/Rem unsigned cast for kernel-main: parallel to rc.13's WGSL fix and the existing kernel-main Shl/Shr cast. For `Div` or `Rem` on `int`/`uint` operands when `value.IsUnsigned`, emit `int(uint(left) op uint(right))`. Closes Tuvok's `OpusRangeDecoderGpu_DecodeUint` shape on WebGL — previously `0x80000000u / 6u` returned `0xEAAAAAAB` (signed two's complement) instead of `0x15555555` (unsigned). Tests23_UnsignedDivRem_HighBitNoSignDiv was WebGL-only FAIL pre-fix; PASS 7/7 post-fix.
 
