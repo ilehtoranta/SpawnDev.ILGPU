@@ -280,11 +280,18 @@ function dispatchKernel(msg) {
                 if (lenLoc !== null) gl.uniform1i(lenLoc, p.elementCount | 0);
             }
 
-            // SubView element offset — added to texelFetch indices when buffer is a SubView
-            if (p.elementOffset !== undefined && p.elementOffset !== 0) {
-                const offsetLoc = getUniformLoc(cached, 'u_param' + p.paramIndex + '_offset');
-                if (offsetLoc !== null) gl.uniform1i(offsetLoc, p.elementOffset | 0);
-            }
+            // SubView element offset — added to texelFetch indices when buffer is a SubView.
+            // Always set the uniform (including 0) so a prior dispatch's non-zero value
+            // doesn't leak across dispatches. WebGL uniforms persist on the program object
+            // across draw calls; if the previous dispatch with the same kernel had
+            // elementOffset=N (non-zero), the next dispatch with elementOffset=0 would
+            // read at offset N. Surfaced 2026-05-04 by Data's StyleMosaic Gather
+            // first-divergent-node trace where node 55 Gather output was 0 on WebGL while
+            // matching WebGPU exactly through node 54 (which read SubView(0, ...) and
+            // set the offset uniform to 0 implicitly via default; subsequent ops that
+            // read SubView(non-zero, ...) leaked their offset back into Gather's read).
+            const offsetLoc = getUniformLoc(cached, 'u_param' + p.paramIndex + '_offset');
+            if (offsetLoc !== null) gl.uniform1i(offsetLoc, (p.elementOffset | 0));
 
             // Stride uniforms for ArrayView2D/3D
             if (strides && strides[p.paramIndex]) {

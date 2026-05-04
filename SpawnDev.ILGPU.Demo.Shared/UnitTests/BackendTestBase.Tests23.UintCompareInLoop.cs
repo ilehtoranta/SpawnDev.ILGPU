@@ -460,6 +460,57 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                     "If WebGPU fires Invalid BindGroupLayout, sub-word body-struct fields aren't being coalesced.");
         });
 
+        // Test J: WebGL glWorker.js subview-offset leak across same-program dispatches.
+        // Surfaced 2026-05-04 by Data's StyleMosaic node 55 Gather first-divergent
+        // capture: WebGL's glWorker.js was conditionally setting the
+        // `u_paramX_offset` uniform only when elementOffset != 0. WebGL uniforms
+        // persist on the program object across draw calls; if dispatch N had
+        // elementOffset=K (non-zero), the uniform was set to K. If dispatch N+1 had
+        // elementOffset=0 with the SAME program, the uniform was NOT reset and
+        // retained K, causing the second dispatch to read at offset K instead of 0.
+        // This test fires that sequence directly: SubView(2, 1) then SubView(0, 1)
+        // on a fresh buffer with the same Scale program. Pre-fix: WebGL returns
+        // bufB[2] (=30) instead of bufB[0] (=10). Post-fix: WebGL returns 10.
+        static void Tests23_SubViewOffsetLeakKernel(
+            Index1D _,
+            ArrayView<int> input,
+            ArrayView<int> output)
+        {
+            output[0] = input[0];
+        }
+
+        [TestMethod]
+        public async Task Tests23_SubViewOffsetLeakAcrossDispatches() => await RunEmulatedTest(async accelerator =>
+        {
+            using var bufA = accelerator.Allocate1D(new int[] { 100, 200, 300, 400 });
+            using var bufB = accelerator.Allocate1D(new int[] { 10, 20, 30, 40 });
+            using var outA = accelerator.Allocate1D<int>(1);
+            using var outB = accelerator.Allocate1D<int>(1);
+
+            var k = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<int>, ArrayView<int>>(
+                Tests23_SubViewOffsetLeakKernel);
+
+            // Dispatch 1: Read bufA[2]=300. Sets the program's u_paramX_offset uniform to 2.
+            k((Index1D)1, bufA.View.SubView(2, 1), outA.View.SubView(0, 1));
+
+            // Dispatch 2: Read bufB[0]=10 with the SAME program. If the offset uniform
+            // leaked from Dispatch 1, the read goes to bufB[2]=30 instead of bufB[0]=10.
+            k((Index1D)1, bufB.View.SubView(0, 1), outB.View.SubView(0, 1));
+
+            await accelerator.SynchronizeAsync();
+
+            var gotA = await outA.CopyToHostAsync<int>();
+            var gotB = await outB.CopyToHostAsync<int>();
+
+            if (gotA[0] != 300)
+                throw new Exception($"Dispatch 1: expected 300 got {gotA[0]}");
+            if (gotB[0] != 10)
+                throw new Exception($"Dispatch 2 (SubView(0,1) after SubView(2,1) on same program): " +
+                    $"expected 10 got {gotB[0]}. " +
+                    $"If WebGL returns 30, glWorker.js skipped setting u_paramX_offset to 0 and the " +
+                    $"prior dispatch's offset=2 leaked into this read.");
+        });
+
         // Test G: SAME as F but WITHOUT the compound `iter < 8` safety guard.
         // Tuvok's Tests22 inline has no safety cap — loop runs purely on the
         // `rng <= EC_CODE_BOT` condition. This isolates whether the compound
