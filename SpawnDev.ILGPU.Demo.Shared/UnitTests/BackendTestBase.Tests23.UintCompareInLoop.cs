@@ -612,6 +612,37 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             if (got[0] != 107) throw new Exception($"TwoShort: expected 107 got {got[0]}");
         });
 
+        // Diagnostic: 2 short ArrayView1D (vs ArrayView). The 1D variant has Extent + Stride
+        // fields, which might trigger a different codegen path on CUDA.
+        public struct Tests23_TwoShortStructDense
+        {
+            public ArrayView1D<short, Stride1D.Dense> S0;
+            public ArrayView1D<short, Stride1D.Dense> S1;
+        }
+
+        static void Tests23_TwoShortDenseKernel(
+            Index1D _,
+            Tests23_TwoShortStructDense s,
+            ArrayView<int> output)
+        {
+            output[0] = (int)s.S0[0] + (int)s.S1[0];
+        }
+
+        [TestMethod]
+        public async Task Tests23_TwoShortBodyStructDense() => await RunEmulatedTest(async accelerator =>
+        {
+            using var s0 = accelerator.Allocate1D(new short[] { 7 });
+            using var s1 = accelerator.Allocate1D(new short[] { 100 });
+            using var output = accelerator.Allocate1D<int>(1);
+            var inputs = new Tests23_TwoShortStructDense { S0 = s0.View, S1 = s1.View };
+            var k = accelerator.LoadAutoGroupedStreamKernel<Index1D, Tests23_TwoShortStructDense, ArrayView<int>>(
+                Tests23_TwoShortDenseKernel);
+            k((Index1D)1, inputs, output.View);
+            await accelerator.SynchronizeAsync();
+            var got = await output.CopyToHostAsync<int>();
+            if (got[0] != 107) throw new Exception($"TwoShortDense: expected 107 got {got[0]}");
+        });
+
         // Test J: WebGL glWorker.js subview-offset leak across same-program dispatches.
         // Surfaced 2026-05-04 by Data's StyleMosaic node 55 Gather first-divergent
         // capture: WebGL's glWorker.js was conditionally setting the

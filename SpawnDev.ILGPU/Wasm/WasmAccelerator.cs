@@ -1576,11 +1576,17 @@ namespace SpawnDev.ILGPU.Wasm
                 using var dstView = new Uint8Array(buf.SharedBuffer, rangeMin, rangeSize);
                 dstView.JSRef!.CallVoid("set", srcView);
                 copyOutCount++;
-                // Bump the GPU-write seq so any cached snapshot for this buffer is
-                // invalidated; subsequent dispatches' GetOrCreateSnapshotForDispatch
-                // will re-snapshot post-GPU-write SharedBuffer instead of returning
-                // pre-GPU-write cached contents (the host-then-GPU-then-read pattern).
-                buf.NotifyGpuWrite();
+                // Bump the GPU-write seq ONLY for buffers the kernel actually wrote
+                // (per the codegen Store-target trace). For input-only buffers, copy-OUT
+                // writes back the same bytes the copy-IN wrote, so the cached snapshot
+                // for that buffer is still valid — bumping `_gpuWriteSeq` here would
+                // force every subsequent dispatch to re-allocate + re-copy a fresh
+                // snapshot of an unchanged buffer, which on ML pipelines (weights
+                // uploaded once, read by 100s of dispatches) blows up to multi-GB of
+                // wasted allocations and can hang StyleMosaic etc. Surfaced 2026-05-04
+                // by Data's StyleMosaic Wasm hang at rc.13.
+                if (writtenBufferIndices.Contains(i))
+                    buf.NotifyGpuWrite();
                 // Read first 4 bytes from Wasm memory at this offset for debugging
                 if (rangeSize >= 4)
                 {
