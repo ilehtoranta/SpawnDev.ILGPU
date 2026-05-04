@@ -327,10 +327,45 @@ namespace SpawnDev.ILGPU.Wasm
 
             if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm-Debug] RunKernel called with {args.Length} args");
 
+            // SNAPSHOT each ArrayView arg's source SharedBuffer NOW (before the task
+            // is queued and any subsequent CopyFromCPU could overwrite SharedBuffer).
+            // The dispatch's copy-IN will read from snapshots instead of SharedBuffer.
+            // Closes the host-write-vs-queued-dispatch race surfaced 2026-05-04 by
+            // Tests23_HostWriteVsQueuedDispatchRace + YOLOv8 Wasm Softmax. Snapshots
+            // are reference-shared across dispatches with the same HostWriteCounter,
+            // so unchanging buffers (ML weights uploaded once, read many times) only
+            // pay the snapshot cost ONCE per host write — not per dispatch.
+            var argSnapshots = new Dictionary<WasmMemoryBuffer, SharedArrayBuffer>();
+            for (int ai = 0; ai < args.Length; ai++)
+            {
+                var arg = args[ai];
+                if (arg is IArrayView iav && iav.Buffer is WasmMemoryBuffer wb && !argSnapshots.ContainsKey(wb))
+                {
+                    argSnapshots[wb] = wb.GetOrCreateSnapshotForDispatch();
+                }
+                else if (arg != null && arg.GetType().IsValueType && !arg.GetType().IsPrimitive)
+                {
+                    // Struct-with-embedded-views (e.g. body-struct kernel params): walk
+                    // fields and snapshot any IArrayView's underlying WasmMemoryBuffer.
+                    try
+                    {
+                        var fields = arg.GetType().GetFields(
+                            BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                        foreach (var f in fields)
+                        {
+                            var fv = f.GetValue(arg);
+                            if (fv is IArrayView fav && fav.Buffer is WasmMemoryBuffer fwb && !argSnapshots.ContainsKey(fwb))
+                                argSnapshots[fwb] = fwb.GetOrCreateSnapshotForDispatch();
+                        }
+                    }
+                    catch { /* defensive — non-fatal */ }
+                }
+            }
+
             // Increment active dispatch count BEFORE starting the async task,
             // so the count is visible during the task's synchronous execution phase.
             wasmAccel._activeDispatchCount++;
-            var task = wasmAccel.RunKernelAsync(compiledKernel, dimension, args, dispNum);
+            var task = wasmAccel.RunKernelAsync(compiledKernel, dimension, args, dispNum, argSnapshots);
             wasmAccel._pendingWork.Add(task);
         }
 
@@ -338,7 +373,8 @@ namespace SpawnDev.ILGPU.Wasm
             WasmCompiledKernel compiledKernel,
             object dimension,
             object[] args,
-            int dispNum = 0)
+            int dispNum = 0,
+            Dictionary<WasmMemoryBuffer, SharedArrayBuffer>? argSnapshots = null)
         {
             if (_disposed)
                 throw new ObjectDisposedException(nameof(WasmAccelerator));
@@ -855,7 +891,16 @@ namespace SpawnDev.ILGPU.Wasm
                     if (rangeMin == int.MaxValue) { rangeMin = 0; rangeMax = (int)buf.LengthInBytes; }
                     int rangeSize = rangeMax - rangeMin;
 
-                    using var srcView = new Uint8Array(buf.SharedBuffer, rangeMin, rangeSize);
+                    // Read from the queue-time snapshot if one was captured for this buffer
+                    // (closes the host-write-vs-copy-IN race). Falls back to SharedBuffer for
+                    // buffers that weren't in args at queue time (e.g. struct-with-view fields
+                    // discovered during the dispatcher's own iav extraction below).
+                    SharedArrayBuffer srcSab = (argSnapshots != null
+                        && argSnapshots.TryGetValue(buf, out var snapSab))
+                        ? snapSab
+                        : buf.SharedBuffer;
+
+                    using var srcView = new Uint8Array(srcSab, rangeMin, rangeSize);
                     using var dstView = new Uint8Array(memoryBuffer, offset, rangeSize);
                     dstView.JSRef!.CallVoid("set", srcView);
                     hostWriteSnapshot[i] = buf.HostWriteCounter;

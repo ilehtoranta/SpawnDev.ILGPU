@@ -54,6 +54,63 @@ namespace SpawnDev.ILGPU.Wasm
         /// </summary>
         internal void NotifyHostWrite() => HostWriteCounter++;
 
+        // ── Queued-dispatch snapshot to close the host-write-vs-copy-IN race ──
+        // Surfaced 2026-05-04 by Tests23_HostWriteVsQueuedDispatchRace and Data's
+        // YOLOv8 Wasm Softmax bug. The race fires when:
+        //   1. CopyFromCPU writes data1 to SharedBuffer.
+        //   2. RunKernel queues dispatch D1 (returns immediately, async task in flight).
+        //   3. CopyFromCPU writes data2 to SharedBuffer.
+        //   4. RunKernel queues dispatch D2.
+        //   5. D1 resumes after awaiting prior tasks. Its copy-IN reads SharedBuffer
+        //      = data2 (already overwritten by step 3). D1 runs with WRONG data.
+        //
+        // Fix: at RunKernel SYNC time (before queueing the task), each arg buffer
+        // calls GetOrCreateSnapshotForDispatch(). If the buffer was host-written
+        // since the last snapshot, a fresh SAB is allocated and SharedBuffer's
+        // current content is copied into it. The dispatch's task captures the
+        // snapshot reference; copy-IN reads from snapshot instead of SharedBuffer.
+        //
+        // For unchanged buffers (e.g. ML weights uploaded once and read many times),
+        // the SAME snapshot is shared across dispatches — no per-dispatch allocation
+        // overhead. Only buffers that get host-written between dispatches (e.g.
+        // TransposeKernel's reused paramsBuf) trigger fresh snapshots.
+
+        /// <summary>
+        /// HostWriteCounter at the most recent <see cref="GetOrCreateSnapshotForDispatch"/> call.
+        /// </summary>
+        private int _lastSnapshottedHostWriteCounter = -1;
+
+        /// <summary>
+        /// Snapshot SAB capturing <see cref="SharedBuffer"/> at counter
+        /// <see cref="_lastSnapshottedHostWriteCounter"/>. Pinned dispatches reference
+        /// this; replaced on next host write. Multiple dispatches with the same
+        /// counter share the same snapshot instance.
+        /// </summary>
+        private SharedArrayBuffer? _currentSnapshot;
+
+        /// <summary>
+        /// Returns a SAB whose contents reflect <see cref="SharedBuffer"/> at the moment
+        /// of this call (or at the last call if no host writes occurred since). Used by
+        /// the dispatcher's copy-IN path to read buffer state captured at queue time
+        /// even after later host writes overwrote SharedBuffer.
+        /// </summary>
+        internal SharedArrayBuffer GetOrCreateSnapshotForDispatch()
+        {
+            if (HostWriteCounter > _lastSnapshottedHostWriteCounter || _currentSnapshot == null)
+            {
+                // New host write since last snapshot (or first call). Allocate fresh SAB
+                // and copy current SharedBuffer state. Old _currentSnapshot (if any) is
+                // orphaned — still referenced by any in-flight dispatches, GC'd when none.
+                var fresh = new SharedArrayBuffer((int)LengthInBytes);
+                using var dst = new Uint8Array(fresh);
+                using var src = new Uint8Array(SharedBuffer);
+                dst.JSRef!.CallVoid("set", src);
+                _currentSnapshot = fresh;
+                _lastSnapshottedHostWriteCounter = HostWriteCounter;
+            }
+            return _currentSnapshot;
+        }
+
         /// <summary>
         /// Creates a new Wasm memory buffer.
         /// </summary>
