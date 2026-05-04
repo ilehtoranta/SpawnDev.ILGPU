@@ -999,7 +999,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 data.DynamicSharedOverrides.Count > 0 ? data.DynamicSharedOverrides : null,
                 data.ScalarPackingManifest.Count > 0 ? data.ScalarPackingManifest : null,
                 data.ExpectedBindingCountHolder.Count > 0 ? data.ExpectedBindingCountHolder[0] : 0,
-                data.I64SpinlockParamIndices.Count > 0 ? data.I64SpinlockParamIndices : null);
+                data.I64SpinlockParamIndices.Count > 0 ? data.I64SpinlockParamIndices : null,
+                data.CoalesceManifest.Count > 0 ? data.CoalesceManifest : null);
         }
 
         #endregion
@@ -1057,6 +1058,18 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         public bool HasI64Spinlocks => I64SpinlockParamIndices.Count > 0;
 
         /// <summary>
+        /// Manifest of body-struct ArrayView fields that share coalesced storage-buffer
+        /// bindings. Empty when the kernel fits within the device's binding limit
+        /// without coalescing. Each entry says "fields F1, F2, ... of body-struct
+        /// param N share binding @binding(K)"; the dispatcher allocates one GPU buffer
+        /// per entry, concatenates each member's data, and binds it once.
+        /// </summary>
+        public IReadOnlyList<CoalesceGroupEntry> CoalesceManifest { get; }
+
+        /// <summary>Returns true if any coalesce group is active for this kernel.</summary>
+        public bool HasCoalesceGroups => CoalesceManifest.Count > 0;
+
+        /// <summary>
         /// Creates a new compiled WebGPU kernel.
         /// </summary>
         public WebGPUCompiledKernel(
@@ -1066,7 +1079,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             IReadOnlyList<DynamicSharedOverrideInfo>? dynamicSharedOverrides = null,
             IReadOnlyList<ScalarPackingEntry>? scalarPackingManifest = null,
             int expectedBindingCount = 0,
-            IReadOnlySet<(int ParamIdx, int FieldIdx)>? i64SpinlockParamIndices = null)
+            IReadOnlySet<(int ParamIdx, int FieldIdx)>? i64SpinlockParamIndices = null,
+            IReadOnlyList<CoalesceGroupEntry>? coalesceManifest = null)
             : base(context, entryPoint, null)
         {
             WGSLSource = wgslSource;
@@ -1074,6 +1088,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             ScalarPackingManifest = scalarPackingManifest ?? Array.Empty<ScalarPackingEntry>();
             ExpectedBindingCount = expectedBindingCount;
             I64SpinlockParamIndices = i64SpinlockParamIndices ?? new HashSet<(int, int)>();
+            CoalesceManifest = coalesceManifest ?? Array.Empty<CoalesceGroupEntry>();
         }
     }
 
@@ -1119,6 +1134,44 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         public WebGPUCapabilityContext() : base()
         {
         }
+    }
+
+    /// <summary>
+    /// Describes a coalesced storage-buffer binding shared by multiple body-struct
+    /// ArrayView fields of the same element type. Produced by
+    /// <c>WGSLKernelFunctionGenerator.DecideCoalesceGroups</c> when a kernel would
+    /// otherwise exceed <c>maxStorageBuffersPerShaderStage</c>; consumed by
+    /// <c>WebGPUAccelerator</c> at dispatch time to allocate one shared GPU buffer
+    /// per group, copy each member's data into it, and bind ONCE instead of N times.
+    /// </summary>
+    public class CoalesceGroupEntry
+    {
+        /// <summary>IR parameter index of the body-struct holding the coalesced fields.</summary>
+        public int BodyStructParamIndex { get; set; }
+
+        /// <summary>
+        /// Element-type key identifying which fields share this binding.
+        /// One of: "i32", "u32", "f32", "u32_emu_i64", "u32_emu_f64".
+        /// </summary>
+        public string ElementTypeKey { get; set; } = "";
+
+        /// <summary>The WGSL identifier for the shared binding, e.g. "param1_i32_coalesced".</summary>
+        public string BindingName { get; set; } = "";
+
+        /// <summary>The @binding(N) slot occupied by this group's coalesced buffer.</summary>
+        public int BindingIndex { get; set; } = -1;
+
+        /// <summary>WGSL element type of the binding (i32/u32/f32 — emu_64 always rides as u32).</summary>
+        public string BindingWgslType { get; set; } = "u32";
+
+        /// <summary>1 for i32/f32/u32; 2 for emu_i64/emu_f64 (each logical element occupies 2 u32 slots).</summary>
+        public int ElementWordsPerSlot { get; set; } = 1;
+
+        /// <summary>
+        /// Body-struct field indices that participate in this group, in concatenation order.
+        /// The runtime appends each field's GPU buffer data into the shared buffer in this order.
+        /// </summary>
+        public List<int> MemberFieldIndices { get; set; } = new();
     }
 
     /// <summary>
@@ -1171,6 +1224,21 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         /// For IsViewCount entries: the binding index of the associated buffer.
         /// </summary>
         public int ViewCountBindingIndex { get; set; } = -1;
+
+        /// <summary>
+        /// True if this entry represents the element offset of a body-struct view field that
+        /// participates in a coalesced storage-buffer binding. Unlike IsViewOffset, the value
+        /// is NOT a sub-view's element offset of its parent buffer — it is the field's offset
+        /// within the SHARED coalesced buffer, computed by the runtime from the running sum
+        /// of preceding member field lengths in the same group.
+        /// </summary>
+        public bool IsCoalesceFieldOffset { get; set; }
+
+        /// <summary>For IsCoalesceFieldOffset entries: the body-struct param index (IR param index).</summary>
+        public int CoalesceBodyStructParamIndex { get; set; } = -1;
+
+        /// <summary>For IsCoalesceFieldOffset entries: the body-struct field index within the struct.</summary>
+        public int CoalesceFieldIndex { get; set; } = -1;
 
         /// <summary>Number of u32 slots this scalar occupies (1 for 4-byte, 2 for 8-byte).</summary>
         public int SlotCount => (ByteSize + 3) / 4;

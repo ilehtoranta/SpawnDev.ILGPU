@@ -176,6 +176,17 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             // Used by the length field generator to read the true element count from the CPU.
             public int ViewCountSlot { get; set; } = -1;
         }
+        // Coalesce-group manifest: one entry per group of body-struct view fields that share a
+        // storage-buffer binding. Exported to the runtime via WebGPUCompiledKernel.
+        // The data type is the PUBLIC CoalesceGroupEntry on SpawnDev.ILGPU.WebGPU.Backend so
+        // it can flow through CompiledKernel to the runtime accelerator.
+        // Maintained as a side-car (not on BodyStructFieldInfo) because GenerateHeader rebuilds
+        // _bodyStructParams; side-car data survives that rebuild.
+        private List<CoalesceGroupEntry> _coalesceGroups = new();
+        // Lookup: (paramIdx, fieldIdx) → which group this field belongs to. Survives _bodyStructParams rebuild.
+        private Dictionary<(int paramIdx, int fieldIdx), CoalesceGroupEntry> _coalesceMembership = new();
+        // Subset: (paramIdx, fieldIdx) keys that are LEADERS — only leaders emit a @binding declaration.
+        private HashSet<(int paramIdx, int fieldIdx)> _coalesceLeaders = new();
         // _bodyStructFieldVars: (paramIndex, fieldIndex) → WGSL variable name
         // Used by GetField code generation to redirect field accesses to the appropriate binding.
         private Dictionary<(int, int), string> _bodyStructFieldVars = new Dictionary<(int, int), string>();
@@ -234,6 +245,10 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             // GenerateHeader runs AFTER body generation, so we cannot rely on GenerateHeader
             // to populate _bodyStructParams.
             ScanBodyStructParams();
+            // After scan, decide whether this kernel exceeds the device's binding limit and
+            // needs coalescing. Mutates BodyStructFieldInfo.BindingName + IsCoalesceMember/Leader
+            // so the rest of the codegen path emits one binding per group instead of one per field.
+            DecideCoalesceGroups();
 
             if (!EntryPoint.IsExplicitlyGrouped && method.Parameters.Count > 0)
             {
@@ -632,6 +647,141 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                             _packedStructLayouts[param.Index] = psLayout;
                     }
                 }
+            }
+        }
+
+        /// <summary>
+        /// Decides whether this kernel exceeds WebGPU's maxStorageBuffersPerShaderStage limit
+        /// and, if so, coalesces eligible body-struct ArrayView fields into shared bindings
+        /// grouped by element type. Sets <see cref="_coalesceGroups"/>, <see cref="_coalesceMembership"/>,
+        /// and <see cref="_coalesceLeaders"/>; mutates <see cref="BodyStructFieldInfo.BindingName"/>
+        /// for every member so downstream codegen sites emit the shared binding identifier.
+        ///
+        /// Eligibility — a field qualifies for coalescing when ALL of:
+        /// 1. It is an ArrayView field of a body struct (IsView).
+        /// 2. It is NOT atomic (atomic bindings need atomic&lt;T&gt; type, can't share with non-atomic).
+        /// 3. It is NOT sub-word (i8/i16/Half emulated with packed atomic&lt;u32&gt; layout).
+        /// 4. It is NOT a packed-struct view (uses CPU-layout u32 packing — different stride per group).
+        /// 5. Element type is i32, u32, f32, emu_i64, emu_u64, or emu_f64 — primitives only.
+        ///
+        /// Trigger threshold: WebGPU spec minimum maxStorageBuffersPerShaderStage = 8; Chrome
+        /// default = 10. We trigger when raw bindings would exceed 10 so kernels under that
+        /// limit keep their current shape (no runtime concat overhead). Coalesces the LARGEST
+        /// candidate groups first so the trigger shuts off as soon as we drop under the limit.
+        /// </summary>
+        private void DecideCoalesceGroups()
+        {
+            if (_bodyStructParams.Count == 0) return;
+
+            const int CoalesceTriggerThreshold = 10;
+
+            // Estimate raw binding count had we NOT coalesced. Mirrors the structure of
+            // GenerateHeader's emit path. Conservative — overcounts is fine, undercount is not.
+            int paramOffset = KernelParamOffset;
+            int rawBindings = 0;
+            foreach (var param in Method.Parameters)
+            {
+                if (param.Index < paramOffset) continue;
+                IsMultiDim(param.ParameterType, out var isMultiDim, out var isView, out _, out var is2D, out var is3D);
+                bool isStruct = param.ParameterType is global::ILGPU.IR.Types.StructureType && !isView;
+                bool isAtomic = _atomicParameters.Contains(param.Index);
+
+                if (_bodyStructParams.TryGetValue(param.Index, out var bsFields))
+                {
+                    foreach (var bf in bsFields)
+                        if (bf.IsView) rawBindings++;
+                }
+                else if (isView || isStruct || isAtomic)
+                {
+                    rawBindings++;
+                    if (is2D || is3D) rawBindings++; // stride buffer
+                }
+            }
+            rawBindings += 1;                       // _scalar_params buffer (assume present once any scalar/view-offset slots exist)
+            rawBindings += _i64SpinlockParams.Count; // i64 spinlock companion buffers
+
+            if (rawBindings <= CoalesceTriggerThreshold) return;
+
+            // Build candidate groups (paramIdx + element-type key) and pick which to coalesce.
+            // Sort candidates by member count descending — coalescing the largest groups first
+            // reduces binding count fastest.
+            var candidates = new List<(int paramIdx, string typeKey, string wgslType, int stride, List<BodyStructFieldInfo> members)>();
+            foreach (var kvp in _bodyStructParams)
+            {
+                int paramIdx = kvp.Key;
+                var bsFields = kvp.Value;
+                var buckets = new Dictionary<string, (string wgslType, int stride, List<BodyStructFieldInfo> members)>();
+                foreach (var bf in bsFields)
+                {
+                    if (!bf.IsView) continue;
+                    if (_bodyStructAtomicFields.Contains((paramIdx, bf.FieldIndex))) continue;
+                    int synthIdx = (paramIdx + 1) * 1000 + bf.FieldIndex;
+                    if (_subWordParams.ContainsKey(synthIdx)) continue;
+                    if (_packedStructBSFieldLayouts.ContainsKey((paramIdx, bf.FieldIndex))) continue;
+
+                    var elemType = GetBufferElementType(bf.FieldType);
+                    var wgslElem = TypeGenerator[elemType];
+                    bool isEmuF64Field = Backend.EnableF64Emulation && wgslElem == "emu_f64";
+                    bool isEmuI64Field = Backend.EnableI64Emulation && (wgslElem == "emu_i64" || wgslElem == "emu_u64");
+                    string typeKey;
+                    string bindingType;
+                    int stride;
+                    if (isEmuF64Field)      { typeKey = "u32_emu_f64"; bindingType = "u32"; stride = 2; }
+                    else if (isEmuI64Field) { typeKey = "u32_emu_i64"; bindingType = "u32"; stride = 2; }
+                    else if (wgslElem == "i32" || wgslElem == "u32" || wgslElem == "f32")
+                    {
+                        typeKey = wgslElem; bindingType = wgslElem; stride = 1;
+                    }
+                    else
+                    {
+                        continue; // unsupported element type for coalesce in v1
+                    }
+
+                    if (!buckets.TryGetValue(typeKey, out var bucket))
+                    {
+                        bucket = (bindingType, stride, new List<BodyStructFieldInfo>());
+                        buckets[typeKey] = bucket;
+                    }
+                    bucket.members.Add(bf);
+                }
+                foreach (var bucketKvp in buckets)
+                {
+                    var bucket = bucketKvp.Value;
+                    if (bucket.members.Count < 2) continue; // only coalesce when 2+ siblings would share
+                    candidates.Add((paramIdx, bucketKvp.Key, bucket.wgslType, bucket.stride, bucket.members));
+                }
+            }
+
+            // Sort candidates by potential savings (member count - 1 = bindings eliminated) descending.
+            candidates.Sort((a, b) => (b.members.Count - 1).CompareTo(a.members.Count - 1));
+
+            int currentBindings = rawBindings;
+            foreach (var cand in candidates)
+            {
+                if (currentBindings <= CoalesceTriggerThreshold) break;
+                string bindingName = $"param{cand.paramIdx}_{cand.typeKey.Replace("_", "")}_coalesced";
+                var group = new CoalesceGroupEntry
+                {
+                    BodyStructParamIndex = cand.paramIdx,
+                    ElementTypeKey = cand.typeKey,
+                    BindingName = bindingName,
+                    ElementWordsPerSlot = cand.stride,
+                    BindingWgslType = cand.wgslType,
+                };
+                bool first = true;
+                foreach (var bf in cand.members)
+                {
+                    bf.BindingName = bindingName;
+                    group.MemberFieldIndices.Add(bf.FieldIndex);
+                    _coalesceMembership[(cand.paramIdx, bf.FieldIndex)] = group;
+                    if (first) { _coalesceLeaders.Add((cand.paramIdx, bf.FieldIndex)); first = false; }
+                }
+                _coalesceGroups.Add(group);
+                // Each coalesced group eliminates (members - 1) bindings.
+                currentBindings -= (cand.members.Count - 1);
+
+                if (WebGPUBackend.VerboseLogging)
+                    WebGPUBackend.Log($"[WGSL-Coalesce] Grouped {cand.members.Count} fields of param{cand.paramIdx} ({cand.typeKey}) into '{bindingName}' — bindings now {currentBindings}");
             }
         }
 
@@ -1158,8 +1308,13 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
                         if (fieldIsView)
                         {
-                            // View field: create a separate buffer binding
-                            string bindingName = $"param{param.Index}_f{fi}";
+                            // View field: create a separate buffer binding (or share a coalesced one).
+                            // If DecideCoalesceGroups marked this field as a coalesce member, use the
+                            // group's shared binding name. Only the LEADER emits a @binding decl;
+                            // non-leaders skip emission and reuse the leader's binding index.
+                            bool isCoalesceMember = _coalesceMembership.TryGetValue((param.Index, fi), out var coalesceGroup);
+                            bool isCoalesceLeader = isCoalesceMember && _coalesceLeaders.Contains((param.Index, fi));
+                            string bindingName = isCoalesceMember ? coalesceGroup!.BindingName : $"param{param.Index}_f{fi}";
                             info.BindingName = bindingName;
                             lastViewBindingName = bindingName;
 
@@ -1232,13 +1387,40 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                                     bindingWgslType = $"atomic<{viewWgslType}>";
                             }
 
-                            builder.AppendLine($"// Body struct field {fi}: {fieldType} (view)");
-                            builder.AppendLine($"@group(0) @binding({bindingIdx}) var<storage, read_write> {bindingName} : array<{bindingWgslType}>;");
-                            // Track this body struct view field for view offset allocation
-                            // Use a synthetic param index: (paramIndex + 1) * 1000 + fieldIndex
+                            // Coalesced binding emission:
+                            //   LEADER (or non-coalesced):   emit @binding decl + advance bindingIdx
+                            //   NON-LEADER coalesce member:  share leader's bindingIdx — DO NOT emit decl + DO NOT advance
+                            // The viewParamBindingIndices entry is recorded for EVERY field (leader and non-leader)
+                            // because each field still needs its own per-field offset slot in _scalar_params.
+                            // Non-leader members map their synthetic param index to the LEADER's binding index.
                             int syntheticViewParamIdx = (param.Index + 1) * 1000 + fi;
-                            viewParamBindingIndices.Add((syntheticViewParamIdx, bindingIdx));
-                            bindingIdx++;
+                            int recordedBindingIdx;
+                            if (isCoalesceMember && !isCoalesceLeader)
+                            {
+                                // Map to the leader's binding index; the group's BindingIndex was set when
+                                // the leader was emitted (always processed first because we walk fields in IR order).
+                                builder.AppendLine($"// Body struct field {fi}: {fieldType} (view, coalesced into {bindingName})");
+                                recordedBindingIdx = coalesceGroup!.BindingIndex;
+                            }
+                            else
+                            {
+                                if (isCoalesceLeader)
+                                {
+                                    builder.AppendLine($"// Body struct field {fi}: {fieldType} (view, COALESCE LEADER for {bindingName})");
+                                    // Coalesce binding type override: use the group's chosen WGSL type so
+                                    // mixed sources (e.g. emu_i64 stored as u32) keep a single declaration.
+                                    bindingWgslType = coalesceGroup!.BindingWgslType;
+                                    coalesceGroup.BindingIndex = bindingIdx;
+                                }
+                                else
+                                {
+                                    builder.AppendLine($"// Body struct field {fi}: {fieldType} (view)");
+                                }
+                                builder.AppendLine($"@group(0) @binding({bindingIdx}) var<storage, read_write> {bindingName} : array<{bindingWgslType}>;");
+                                recordedBindingIdx = bindingIdx;
+                                bindingIdx++;
+                            }
+                            viewParamBindingIndices.Add((syntheticViewParamIdx, recordedBindingIdx));
                         }
                         else if (isViewMetadata)
                         {
@@ -1435,18 +1617,39 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             // and the WGSL reads it from _scalar_params instead of hardcoding offset to 0.
             foreach (var (viewParamIndex, viewBindIdx) in viewParamBindingIndices)
             {
+                // Detect coalesce-member body-struct view fields. For these, the offset
+                // is NOT a sub-view's element offset of the bound buffer — it is the
+                // field's offset within the SHARED coalesced buffer. Runtime computes it
+                // from the running sum of preceding members' lengths.
+                bool isCoalesceMemberOffset = false;
+                int coalesceParamIdx = -1, coalesceFieldIdx = -1;
+                if (viewParamIndex >= 1000)
+                {
+                    int rp = (viewParamIndex / 1000) - 1;
+                    int fi = viewParamIndex % 1000;
+                    if (_coalesceMembership.ContainsKey((rp, fi)))
+                    {
+                        isCoalesceMemberOffset = true;
+                        coalesceParamIdx = rp;
+                        coalesceFieldIdx = fi;
+                    }
+                }
+
                 var viewOffsetEntry = new ScalarPackingEntry
                 {
                     ParamIndex = viewParamIndex,
                     ByteOffset = scalarSlotOffset * 4,
                     ByteSize = 4,
                     WgslType = "i32",
-                    IsViewOffset = true,
+                    IsViewOffset = !isCoalesceMemberOffset,
+                    IsCoalesceFieldOffset = isCoalesceMemberOffset,
                     ViewBindingIndex = viewBindIdx,
+                    CoalesceBodyStructParamIndex = coalesceParamIdx,
+                    CoalesceFieldIndex = coalesceFieldIdx,
                 };
                 scalarManifest.Add(viewOffsetEntry);
                 _viewOffsetScalarSlots[viewParamIndex] = scalarSlotOffset;
-                builder.AppendLine($"// View offset for param{viewParamIndex} at scalar slot {scalarSlotOffset}");
+                builder.AppendLine($"// View offset for param{viewParamIndex} at scalar slot {scalarSlotOffset}{(isCoalesceMemberOffset ? " (coalesce member)" : "")}");
 
                 // If this is a body struct view field (synthetic param index >= 1000),
                 // propagate the slot to BodyStructFieldInfo so LoadElementAddress can use it.
@@ -1547,6 +1750,12 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
             // Record expected binding count for runtime validation (bind group must match WGSL layout)
             _generatorArgs.ExpectedBindingCountHolder[0] = bindingIdx;
+
+            // Export coalesce manifest so the runtime knows which body-struct view fields
+            // share which storage-buffer binding. The dispatcher concatenates each member's
+            // GPU buffer data into the shared binding's GPU buffer at dispatch time.
+            foreach (var grp in _coalesceGroups)
+                _generatorArgs.CoalesceManifest.Add(grp);
 
             // Store manifest locally for SetupParameterBindings()
             _scalarManifest = scalarManifest;

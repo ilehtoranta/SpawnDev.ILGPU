@@ -2,6 +2,58 @@
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
 
+## 4.9.5-rc.5 (2026-05-03) — WebGPU binding-count coalesce
+
+### Fix: kernels with > 10 storage-buffer bindings on WebGPU
+
+WebGPU spec `maxStorageBuffersPerShaderStage` = 10 (Chrome default). Every body-struct ArrayView field gets its own storage-buffer binding under the previous codegen, so a kernel taking a struct with many `ArrayView` fields would push the total over the limit and throw at dispatch time:
+
+```
+[WebGPU] Kernel 'Kernel_Run' requires 44 storage buffer bindings but this device only supports 10
+```
+
+Triggered by `SpawnDev.Codecs.Audio.Vorbis.VorbisPacketDecodeStaticInputs` (36 `ArrayView<int>` + 2 `ArrayView<double>`), which would also recur for the upcoming Opus SILK + CELT integration kernels and Vorbis v3 streaming decoder. Per `_DevComms/SpawnDev.ILGPU/tuvok-to-geordi-vorbis-v2-binding-count-2026-05-03.md`.
+
+### Fix surface
+
+`WGSLKernelFunctionGenerator.DecideCoalesceGroups` runs after `ScanBodyStructParams`. When the kernel's predicted raw binding count exceeds 10, it groups eligible body-struct ArrayView fields by element type and coalesces each multi-member group into a single shared `@binding(N) var<storage, read_write> ... : array<T>` declaration. Per-field accesses route through the existing `_scalar_params[ViewOffsetSlot]` channel (the same machinery sub-views already use for non-zero-offset element offsets); each member's offset within the coalesced buffer is stamped at dispatch time via a new `IsCoalesceFieldOffset` `ScalarPackingEntry` flag.
+
+`WebGPUAccelerator` dispatch path: a coalesce pre-pass allocates one fresh GPU buffer per group, runs `CopyBufferToBuffer` for each member to concat their data at running offsets, binds the coalesced buffer once at the leader's binding slot, and skips non-leader members in Phase 1. The coalesced buffer is destroyed after the batch flushes (no scratch pool — sizes vary widely with kernel parameter shape).
+
+### Eligibility (v1)
+
+A body-struct ArrayView field qualifies for coalescing when ALL of:
+- Element type is `i32`, `u32`, `f32`, `emu_i64`, `emu_u64`, or `emu_f64`
+- Field is NOT atomic (atomic bindings need `atomic<T>` typing — separate path)
+- Field is NOT sub-word (`i8` / `i16` / `Half` packed `atomic<u32>` — separate path)
+- Field is NOT a packed-struct view (CPU-layout u32 packing — different stride per group)
+- Body struct is flat (no nested struct fields with pointer recursion — defensive runtime check throws on unexpected shapes)
+
+Trigger: kernel raw bindings > 10. Existing kernels with body structs of 1-9 view fields keep their current shape (no per-dispatch GPU→GPU copy overhead).
+
+### What this unblocks
+
+- **SpawnDev.Codecs Vorbis v2 browser path** — currently dual-path with `useV2Path = _accelerator.AcceleratorType is CPU or Cuda or OpenCL` in `VorbisAudioDecoderGpu.DecodePacketAsync`; flips to include WebGPU once Codecs bumps to rc.5.
+- **Opus SILK + CELT integration kernels** — designed with the same struct-of-ArrayView pattern, browser-clean from day one.
+- **Future high-parameter codec primitives** — Vorbis v3 streaming decoder, codec ML primitives, etc.
+
+### Test coverage
+
+New `BackendTestBase.Tests21.CoalesceBindings.cs`:
+- `BodyStruct_12ArrayViewInt_CoalesceTest` — 12 independent `ArrayView<int>` fields, kernel sums all at idx, verify CPU reference match.
+- `BodyStruct_MixedIntFloatCoalesceTest` — 11 `ArrayView<int>` + 1 `ArrayView<float>`, two coalesce groups (separate bindings per element type).
+- `BodyStruct_VariableLengthCoalesceTest` — 12 fields with widely-varying lengths (4-768 elements), exercises per-field offset routing.
+
+Result: **15/0/6 across CPU + WebGPU + WebGPUNoSubgroups + CUDA + OpenCL.** Wasm + WebGL are skipped via `UnsupportedTestException` for a pre-existing many-field body-struct decomposition limitation in those backends — NOT a regression from this work; tracked separately for a follow-up fix.
+
+Regression sweep on Reduce + Initialize + RadixSort + Sequence (existing body-struct algorithm kernels, all with ≤ 9 view fields and well under the coalesce trigger): **332 passed, 0 failed, 63 documented skips** across all backends. Coalesce trigger does not fire spuriously on small body structs.
+
+### Public API additions
+
+- `WebGPUCompiledKernel.CoalesceManifest` — `IReadOnlyList<CoalesceGroupEntry>` describing the coalesce groups for this kernel; `HasCoalesceGroups` convenience flag.
+- `CoalesceGroupEntry` (public class in `SpawnDev.ILGPU.WebGPU.Backend`) — `BodyStructParamIndex`, `ElementTypeKey`, `BindingName`, `BindingIndex`, `BindingWgslType`, `ElementWordsPerSlot`, `MemberFieldIndices`.
+- `ScalarPackingEntry.IsCoalesceFieldOffset` + `CoalesceBodyStructParamIndex` + `CoalesceFieldIndex` — manifest entry kind for per-field coalesce-relative offsets.
+
 ## 4.9.4 (2026-05-03) — stable rollup of rc.1 + rc.2
 
 Stable cut. Configurable Wasm linear-memory ceiling, end-to-end (host + module declared max agree). End-to-end verified by SpawnDev.ILGPU.ML's DA3-Small at `MaxLinearMemoryPages=32768`: op 93 `memory.grow` past 16384 pages succeeds, model runs 2m 28s past the rc.1 instant-instantiate-reject point (Data, 2026-05-03). Default consumers (16384) see byte-identical output vs 4.9.3.

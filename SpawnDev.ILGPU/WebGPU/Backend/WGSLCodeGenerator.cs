@@ -148,6 +148,13 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             public HashSet<(int ParamIdx, int FieldIdx)> I64SpinlockParamIndices { get; } = new();
 
             /// <summary>
+            /// Populated by the kernel code generator during GenerateHeader() with the
+            /// coalesce-group manifest (body-struct ArrayView fields that share a binding).
+            /// Empty when no coalescing was needed.
+            /// </summary>
+            public List<CoalesceGroupEntry> CoalesceManifest { get; } = new();
+
+            /// <summary>
             /// Manages shared memory allocation, matching, and WGSL emission.
             /// Replaces the previous SharedMemoryVarNames dictionary with a proper
             /// encapsulation of the two-pass matching logic.

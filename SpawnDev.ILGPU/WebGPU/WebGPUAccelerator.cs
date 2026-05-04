@@ -702,6 +702,10 @@ namespace SpawnDev.ILGPU.WebGPU
             _reusableScalarReturnList.Clear();
             var scalarBuffersToReturn = _reusableScalarReturnList;
 
+            // Coalesced storage buffers allocated this dispatch (one per CoalesceGroup).
+            // Declared at this scope so the catch + finally blocks can clean up on error.
+            List<GPUBuffer>? coalescedBuffersToDestroyAfterDispatch = null;
+
             try
             {
                 int currentBindingIndex = 0;
@@ -825,6 +829,155 @@ namespace SpawnDev.ILGPU.WebGPU
                     foreach (var idx in kvp.Value)
                         allBodyStructScalarEffectiveIdxSet.Add(idx);
 
+                // ── COALESCE PROCESSING ──────────────────────────────────────
+                // For kernels whose raw binding count would exceed maxStorageBuffersPerShaderStage,
+                // the codegen groups same-type body-struct ArrayView fields into shared bindings.
+                // At dispatch time we allocate ONE GPU buffer per group, GPU→GPU copy each member's
+                // data into it at running offsets, and bind the coalesced buffer ONCE to the leader's
+                // binding slot. Non-leader members are skipped in Phase 1; their per-field element
+                // offset is written to _scalar_params via IsCoalesceFieldOffset entries in Phase 2.
+                //
+                // The coalesced buffer is created fresh per dispatch and destroyed after submission.
+                // Caching across dispatches when struct-field identity is stable is a future optimization.
+                Dictionary<int, GPUBuffer>? coalesceLeaderEffArgsToBuffer = null;
+                HashSet<int>? coalesceNonLeaderSkipSet = null;
+                Dictionary<(int paramIdx, int fieldIdx), int>? coalesceFieldElementOffsets = null;
+                if (compiledKernel.HasCoalesceGroups)
+                {
+                    coalesceLeaderEffArgsToBuffer = new Dictionary<int, GPUBuffer>();
+                    coalesceNonLeaderSkipSet = new HashSet<int>();
+                    coalesceFieldElementOffsets = new Dictionary<(int, int), int>();
+                    coalescedBuffersToDestroyAfterDispatch = new List<GPUBuffer>();
+
+                    foreach (var group in compiledKernel.CoalesceManifest)
+                    {
+                        int bsArgsIdx = group.BodyStructParamIndex - kernelParamOffset;
+                        if (bsArgsIdx < 0 || bsArgsIdx >= args.Length)
+                            throw new InvalidOperationException(
+                                $"[WebGPU-Coalesce] Body-struct param index {group.BodyStructParamIndex} (kernelParamOffset={kernelParamOffset}) maps to args[{bsArgsIdx}] which is out of range.");
+                        int baseEffArgsIdx = argsToEffectiveOffset[bsArgsIdx];
+
+                        // Map IR field index → effectiveArgs index. v1 assumes flat body struct
+                        // (no nested struct fields with pointer recursion); FlattenStructFields
+                        // walks fields in declaration order so fieldIdx N ↔ expandedArgs[baseIdx + N]
+                        // for a flat struct. We defensively verify each member is an IArrayView.
+                        var memberInfos = new List<(int fieldIdx, int effArgsIdx, IContiguousArrayView contig, ulong lengthBytes, long elementCount)>();
+                        foreach (int fieldIdx in group.MemberFieldIndices)
+                        {
+                            int effIdx = baseEffArgsIdx + fieldIdx;
+                            if (effIdx < 0 || effIdx >= effectiveArgsCount)
+                                throw new InvalidOperationException(
+                                    $"[WebGPU-Coalesce] Member field {fieldIdx} of body-struct param {group.BodyStructParamIndex} maps to expandedArgs[{effIdx}] which is out of range.");
+                            var memberArg = expandedArgs[effIdx];
+                            IArrayView? memberView = memberArg as IArrayView;
+                            if (memberView == null && memberArg != null)
+                            {
+                                var rc = GetOrCreateReflectionCache(memberArg.GetType());
+                                if (rc.BaseViewProperty != null)
+                                    memberView = rc.BaseViewProperty.GetValue(memberArg) as IArrayView;
+                            }
+                            if (memberView == null)
+                                throw new InvalidOperationException(
+                                    $"[WebGPU-Coalesce] Member field {fieldIdx} of body-struct param {group.BodyStructParamIndex} is not an IArrayView at expandedArgs[{effIdx}] (got {memberArg?.GetType().Name ?? "null"}).");
+                            var contig = memberView as IContiguousArrayView;
+                            if (contig == null)
+                            {
+                                var vc = GetOrCreateReflectionCache(memberView.GetType());
+                                contig = (vc.BaseViewProperty != null ? vc.BaseViewProperty.GetValue(memberView) : memberView) as IContiguousArrayView;
+                            }
+                            if (contig == null)
+                                throw new InvalidOperationException(
+                                    $"[WebGPU-Coalesce] Member field {fieldIdx} is not a contiguous view (group {group.BindingName}).");
+
+                            memberInfos.Add((fieldIdx, effIdx, contig, (ulong)contig.LengthInBytes, contig.Length));
+                        }
+
+                        // Sum total bytes (4-byte aligned). All members share one element type so
+                        // element-stride is uniform within the group.
+                        ulong totalBytes = 0;
+                        foreach (var m in memberInfos) totalBytes += (ulong)WebGPUAlignment.AlignTo4((long)m.lengthBytes);
+                        if (totalBytes == 0) totalBytes = 4; // never bind a zero-size buffer
+
+                        var coalescedBuffer = device.CreateBuffer(new GPUBufferDescriptor
+                        {
+                            Label = $"Coalesce-{group.BindingName}",
+                            Size = totalBytes,
+                            Usage = GPUBufferUsage.Storage | GPUBufferUsage.CopyDst | GPUBufferUsage.CopySrc,
+                            MappedAtCreation = false,
+                        });
+                        coalescedBuffersToDestroyAfterDispatch.Add(coalescedBuffer);
+
+                        // GPU→GPU copy each member's data into the coalesced buffer at running offset.
+                        // Run on a dedicated command encoder + immediate submit so the data is in
+                        // place before the compute pass that follows on the main encoder.
+                        var copyEnc = device.CreateCommandEncoder(new GPUCommandEncoderDescriptor { Label = $"CoalesceCopy-{group.BindingName}" });
+                        ulong runningByteOffset = 0;
+                        // Element offset is per-u32-slot for the WGSL access expression
+                        //   coalesced_binding[scalar_params[ViewOffsetSlot] + idx * stride]
+                        // The codegen's emit applies the stride multiplier inside `_base_idx`, so the
+                        // offset value we send is the raw u32-slot offset for direct (stride=1) bindings
+                        // and the *element* offset for emu_64 (stride=2) bindings — matching the
+                        // _base_idx formula `i32(_scalar_params[voSlot]) + i32(offset) * 2;` in
+                        // LoadElementAddress for emu_64 body-struct fields.
+                        // Both reduce to: u32-slot offset for unitary types, element-count offset for emu_64.
+                        // We compute both via element-count (group.ElementWordsPerSlot already stored).
+                        long runningElementCount = 0; // counted in the group's logical element units
+                        foreach (var m in memberInfos)
+                        {
+                            var srcBuffer = (m.contig.Buffer as WebGPUMemoryBuffer)!.NativeBuffer.NativeBuffer!;
+                            ulong srcByteOffset = (ulong)m.contig.IndexInBytes;
+                            ulong copySize = (ulong)WebGPUAlignment.AlignTo4((long)m.lengthBytes);
+                            // Clamp to actual source buffer length (some buffers are 4-byte padded already).
+                            ulong srcBufferSize = (ulong)WebGPUAlignment.AlignTo4(((WebGPUMemoryBuffer)m.contig.Buffer).LengthInBytes);
+                            if (srcByteOffset + copySize > srcBufferSize)
+                                copySize = srcBufferSize - srcByteOffset;
+
+                            if (copySize > 0)
+                                copyEnc.CopyBufferToBuffer(srcBuffer, srcByteOffset, coalescedBuffer, runningByteOffset, copySize);
+
+                            // Per-field offset within coalesced buffer, expressed in u32 slots.
+                            //
+                            // The codegen's LEA for body-struct view fields emits one of:
+                            //   non-emu (stride=1):  &binding[i32(_scalar_params[voSlot]) + offsetExpr]
+                            //   emu_64  (stride=2):  base_idx = i32(_scalar_params[voSlot]) + i32(offsetExpr) * 2
+                            //                        binding[base_idx], binding[base_idx + 1]
+                            //
+                            // In both cases _scalar_params[voSlot] is the U32 SLOT OFFSET where this
+                            // field's data starts in the coalesced array<u32>/array<i32>/array<f32>.
+                            // So the value we send is simply byteOffset / 4 — the stride multiplier
+                            // is applied inside the WGSL via offsetExpr * stride for emu_64 reads.
+                            int u32SlotOffset = (int)(runningByteOffset / 4UL);
+                            coalesceFieldElementOffsets[(group.BodyStructParamIndex, m.fieldIdx)] = u32SlotOffset;
+
+                            runningByteOffset += copySize;
+                            runningElementCount += m.elementCount;
+                        }
+                        var copyCmd = copyEnc.Finish(new GPUCommandBufferDescriptor());
+                        device.Queue.Submit(new[] { copyCmd });
+                        copyCmd.Dispose();
+                        copyEnc.Dispose();
+
+                        // Mark members for Phase 1 routing: leader emits the coalesced binding;
+                        // non-leaders are skipped entirely.
+                        bool first = true;
+                        foreach (var m in memberInfos)
+                        {
+                            if (first)
+                            {
+                                coalesceLeaderEffArgsToBuffer[m.effArgsIdx] = coalescedBuffer;
+                                first = false;
+                            }
+                            else
+                            {
+                                coalesceNonLeaderSkipSet.Add(m.effArgsIdx);
+                            }
+                        }
+
+                        if (WebGPUBackend.VerboseLogging)
+                            WebGPUBackend.Log($"[WebGPU-Coalesce] Group '{group.BindingName}' bound {memberInfos.Count} fields → 1 binding ({totalBytes} bytes total)");
+                    }
+                }
+
                 _reusablePackedScalarLookup ??= new Dictionary<int, ScalarPackingEntry>();
                 _reusablePackedScalarLookup.Clear();
                 var packedScalarLookup = _reusablePackedScalarLookup;
@@ -934,6 +1087,31 @@ namespace SpawnDev.ILGPU.WebGPU
                     // pack buffer to the wrong binding index.
                     if (allBodyStructScalarEffectiveIdxSet.Contains(i))
                         continue;
+
+                    // Skip coalesce non-leader members entirely — leader emits the shared binding.
+                    if (coalesceNonLeaderSkipSet != null && coalesceNonLeaderSkipSet.Contains(i))
+                        continue;
+
+                    // Coalesce LEADER: bind the COALESCED GPU BUFFER instead of the leader's
+                    // individual buffer. The shared buffer was allocated and populated above.
+                    if (coalesceLeaderEffArgsToBuffer != null && coalesceLeaderEffArgsToBuffer.TryGetValue(i, out var coalescedGpuBuffer))
+                    {
+                        ulong coalescedSize = coalescedGpuBuffer.Size > 0 ? coalescedGpuBuffer.Size : 4UL;
+                        var coalescedResource = new GPUBufferBinding
+                        {
+                            Buffer = coalescedGpuBuffer,
+                            Offset = 0,
+                            Size = coalescedSize,
+                        };
+                        entries.Add(new GPUBindGroupEntry { Binding = (uint)currentBindingIndex, Resource = coalescedResource });
+                        // Record element-offset = 0 for the leader (its data starts at the buffer head).
+                        // Phase 2 IsCoalesceFieldOffset entries override this for non-leaders.
+                        viewElementOffsets[currentBindingIndex] = 0;
+                        currentBindingIndex++;
+                        if (WebGPUBackend.VerboseLogging)
+                            WebGPUBackend.Log($"[WebGPU-Coalesce] Bound coalesced buffer at binding {currentBindingIndex - 1} (size={coalescedSize})");
+                        continue;
+                    }
 
                     var arg = expandedArgs[i];
 
@@ -1273,8 +1451,28 @@ namespace SpawnDev.ILGPU.WebGPU
                     // --- Pack view element offsets and counts ---
                     // For each IsViewOffset entry in the manifest, pack the element offset.
                     // For each IsViewCount entry, pack the true element count for packed-struct views.
+                    // For each IsCoalesceFieldOffset entry, pack the field's u32-slot offset within
+                    // its coalesced shared buffer (computed during coalesce-processing pre-pass).
                     foreach (var entry in manifest)
                     {
+                        if (entry.IsCoalesceFieldOffset)
+                        {
+                            int byteOffset = entry.ByteOffset;
+                            if (byteOffset + 4 > packedData.Length)
+                            {
+                                var newData = new byte[byteOffset + 4];
+                                Array.Copy(packedData, newData, packedData.Length);
+                                packedData = newData;
+                            }
+                            int slotOffset = 0;
+                            if (coalesceFieldElementOffsets != null
+                                && coalesceFieldElementOffsets.TryGetValue((entry.CoalesceBodyStructParamIndex, entry.CoalesceFieldIndex), out int co))
+                                slotOffset = co;
+                            BitConverter.GetBytes(slotOffset).CopyTo(packedData, byteOffset);
+                            if (WebGPUBackend.VerboseLogging)
+                                WebGPUBackend.Log($"[WebGPU-Coalesce] Packed coalesce field offset: param={entry.CoalesceBodyStructParamIndex}, field={entry.CoalesceFieldIndex}, slotOffset={slotOffset}, byteOffset={byteOffset}");
+                            continue;
+                        }
                         if (entry.IsViewOffset)
                         {
                             int byteOffset = entry.ByteOffset;
@@ -1546,10 +1744,29 @@ namespace SpawnDev.ILGPU.WebGPU
                 foreach (var buffer in scalarBuffersToReturn)
                     webGpuStream.DeferScalarReturn(buffer);
                 scalarBuffersToReturn.Clear();
+                // Coalesced buffers are allocated fresh per dispatch (not pooled — sizes vary
+                // widely with kernel parameter shape). Defer destruction until the batch is
+                // flushed so the GPU has finished using them.
+                if (coalescedBuffersToDestroyAfterDispatch != null)
+                {
+                    foreach (var cBuf in coalescedBuffersToDestroyAfterDispatch)
+                        webGpuStream.DeferCoalesceBufferDestroy(cBuf);
+                    coalescedBuffersToDestroyAfterDispatch.Clear();
+                }
             }
             catch (Exception ex)
             {
                 if (WebGPUBackend.VerboseLogging) WebGPUBackend.Log($"[WebGPU] Error running kernel: {ex}");
+                // Error path: destroy coalesced buffers immediately to prevent leaks.
+                if (coalescedBuffersToDestroyAfterDispatch != null)
+                {
+                    foreach (var cBuf in coalescedBuffersToDestroyAfterDispatch)
+                    {
+                        try { cBuf.Destroy(); cBuf.Dispose(); }
+                        catch { /* swallow — already failing */ }
+                    }
+                    coalescedBuffersToDestroyAfterDispatch.Clear();
+                }
                 throw;
             }
             finally
@@ -1643,6 +1860,7 @@ namespace SpawnDev.ILGPU.WebGPU
             private GPUCommandEncoder? _encoder;
             private readonly List<GPUBindGroup> _pendingBindGroups = new();
             private readonly List<GPUBuffer> _pendingScalarBuffers = new();
+            private readonly List<GPUBuffer> _pendingCoalesceBuffers = new();
             private int _pendingPassCount;
 
             public WebGPUStream(Accelerator acc) : base(acc)
@@ -1675,6 +1893,14 @@ namespace SpawnDev.ILGPU.WebGPU
             internal void DeferScalarReturn(GPUBuffer buf) => _pendingScalarBuffers.Add(buf);
 
             /// <summary>
+            /// Defer destruction of a coalesced storage buffer until the batch is flushed.
+            /// Coalesce buffers are allocated fresh per dispatch (size varies with kernel
+            /// parameter shape) and not pooled; we destroy them after the GPU has consumed
+            /// the bind group. Skipping the pool keeps memory usage bounded for varied workloads.
+            /// </summary>
+            internal void DeferCoalesceBufferDestroy(GPUBuffer buf) => _pendingCoalesceBuffers.Add(buf);
+
+            /// <summary>
             /// Flush accumulated compute passes: Finish the command encoder and submit to GPU queue.
             /// After submission, dispose deferred bind groups and return scalar buffers to pool.
             /// </summary>
@@ -1697,6 +1923,12 @@ namespace SpawnDev.ILGPU.WebGPU
                 foreach (var buf in _pendingScalarBuffers)
                     ReturnPooledScalarBuffer(buf);
                 _pendingScalarBuffers.Clear();
+
+                foreach (var buf in _pendingCoalesceBuffers)
+                {
+                    try { buf.Destroy(); buf.Dispose(); } catch { /* swallow on flush */ }
+                }
+                _pendingCoalesceBuffers.Clear();
 
                 _pendingPassCount = 0;
             }
