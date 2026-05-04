@@ -776,6 +776,125 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                 throw new Exception($"NormalizeShape_BareCondition iter expected 3 got {r[4]} (rng=0x{r[0]:X8} offs={r[2]})");
         });
 
+        // Test I: Tuvok's OpusRangeDecoderGpu.DecodeBitLogP first-bit divergence on WebGPU
+        // (DevComms 2026-05-04: tuvok-to-geordi-decodebitlogp-webgpu-2026-05-04.md). The
+        // libopus decoder's Init Normalize loop produces Rng = 0x80000000 (high bit set,
+        // = INT_MIN as i32). Then `s = r >> logp` for unsigned `r` and small `logp` should
+        // shift the high bit off — `0x80000000 >> 15 = 0x10000` (logical / unsigned shift).
+        //
+        // Bug: WGSLKernelFunctionGenerator.GenerateCode(BinaryArithmeticValue) emitted
+        // `target = left >> u32(right)` for both Shl and Shr. WGSL's `i32 >> u32` is
+        // arithmetic (sign-extending) shift — for `0x80000000_i32`, the result is
+        // `0xFFFF0000_i32` (sign bits replicated), NOT `0x00010000`. ILGPU stores uint
+        // as i32 (BasicValueType has no UInt32), so the codegen needs to bitcast through
+        // u32 for unsigned shift right.
+        //
+        // Fix: when `value.IsUnsigned` and Shr on Int32, emit
+        // `target = bitcast<i32>(bitcast<u32>(left) >> u32(right))`. Symmetric Shl fix:
+        // always cast through u32 (Shl bit pattern is identical signed-vs-unsigned, but
+        // i32 << that pushes a 1 into the sign bit triggers WGSL "shift by amount that
+        // would overflow" UB on some validators).
+        //
+        // This test exercises ONLY the Shr code path: a single uint shift right of
+        // 0x80000000 by 15 should equal 0x10000. Pre-fix on WebGPU: returns 0xFFFF0000.
+        // Post-fix: 0x10000 on every backend.
+        static void Tests23_UnsignedShrHighBitKernel(
+            Index1D _,
+            ArrayView<uint> input,
+            ArrayView<uint> output)
+        {
+            uint r = input[0];
+            int logp = (int)input[1];
+            output[0] = r >> logp;
+            output[1] = r >> 1;
+            output[2] = r >> 31;
+        }
+
+        [TestMethod]
+        public async Task Tests23_UnsignedShr_HighBitNoSignExtend() => await RunEmulatedTest(async accelerator =>
+        {
+            var input = new uint[] { 0x80000000u, 15u };
+            using var dIn = accelerator.Allocate1D(input);
+            using var dOut = accelerator.Allocate1D<uint>(3);
+            var k = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<uint>, ArrayView<uint>>(
+                Tests23_UnsignedShrHighBitKernel);
+            k((Index1D)1, dIn.View, dOut.View);
+            await accelerator.SynchronizeAsync();
+            var got = await dOut.CopyToHostAsync<uint>();
+            if (got[0] != 0x00010000u)
+                throw new Exception($"0x80000000u >> 15 expected 0x00010000 got 0x{got[0]:X8} (signed shift would give 0xFFFF0000)");
+            if (got[1] != 0x40000000u)
+                throw new Exception($"0x80000000u >> 1 expected 0x40000000 got 0x{got[1]:X8} (signed shift would give 0xC0000000)");
+            if (got[2] != 0x00000001u)
+                throw new Exception($"0x80000000u >> 31 expected 0x00000001 got 0x{got[2]:X8} (signed shift would give 0xFFFFFFFF)");
+        });
+
+        // Test J: Mimic the actual DecodeBitLogP first-decode shape end-to-end in a
+        // single kernel — same surface that fails Tuvok's
+        // OpusRangeDecoderGpu_DecodeBitLogP_LogP15Mixed test on WebGPU. Mirrors the
+        // shape of `r >> logp; ret = d < s ? 1 : 0; if (ret == 0) val = d - s;`. With
+        // `r = 0x80000000` and `d = 0x40000000` and `logp = 15`, expected:
+        //   s = 0x80000000 >> 15 = 0x10000  (unsigned)
+        //   d (=0x40000000) < s (=0x10000)? FALSE (0x40000000 > 0x10000 unsigned)
+        //   ret = 0
+        //   val = d - s = 0x40000000 - 0x10000 = 0x3FFF0000
+        //
+        // Pre-fix WebGPU: s = 0xFFFF0000 (signed shift), d (=0x40000000) < s (=0xFFFF0000
+        // as i32 = -65536) signed compare: d as i32 is +1073741824, +1073741824 < -65536
+        // is FALSE, so ret=0 — same result by coincidence here BUT val computation
+        // d - s = 0x40000000 - 0xFFFF0000 = 0x40010000 (wraparound) — wrong by exactly
+        // the shift error.
+        //
+        // The IsUnsignedOrUnordered compare bitcast already protects the < check
+        // (rc.7 GLSL fix has a parallel WGSL implementation at line 5548). The Shr
+        // bitcast is what's missing.
+        static void Tests23_DecodeBitLogPShapeKernel(
+            Index1D _,
+            ArrayView<uint> input,
+            ArrayView<uint> output)
+        {
+            uint r = input[0];
+            uint d = input[1];
+            int logp = (int)input[2];
+            uint s = r >> logp;
+            int ret = d < s ? 1 : 0;
+            uint newVal = d;
+            if (ret == 0) newVal = d - s;
+            uint newRng = ret != 0 ? s : r - s;
+            output[0] = s;
+            output[1] = (uint)ret;
+            output[2] = newVal;
+            output[3] = newRng;
+        }
+
+        [TestMethod]
+        public async Task Tests23_DecodeBitLogP_FirstDecodeShape() => await RunEmulatedTest(async accelerator =>
+        {
+            // r = 0x80000000 (post-Init Normalize value), d = 0x40000000 (mid-range val),
+            // logp = 15 (Opus typical for transient/silence/intra flags).
+            var input = new uint[] { 0x80000000u, 0x40000000u, 15u };
+            using var dIn = accelerator.Allocate1D(input);
+            using var dOut = accelerator.Allocate1D<uint>(4);
+            var k = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<uint>, ArrayView<uint>>(
+                Tests23_DecodeBitLogPShapeKernel);
+            k((Index1D)1, dIn.View, dOut.View);
+            await accelerator.SynchronizeAsync();
+            var got = await dOut.CopyToHostAsync<uint>();
+            uint expectedS = 0x80000000u >> 15;
+            uint d_in = 0x40000000u;
+            int expectedRet = d_in < expectedS ? 1 : 0;
+            uint expectedVal = expectedRet == 0 ? d_in - expectedS : d_in;
+            uint expectedRng = expectedRet != 0 ? expectedS : 0x80000000u - expectedS;
+            if (got[0] != expectedS)
+                throw new Exception($"DecodeBitLogP s expected 0x{expectedS:X8} got 0x{got[0]:X8} (signed shift bug)");
+            if ((int)got[1] != expectedRet)
+                throw new Exception($"DecodeBitLogP ret expected {expectedRet} got {got[1]}");
+            if (got[2] != expectedVal)
+                throw new Exception($"DecodeBitLogP val expected 0x{expectedVal:X8} got 0x{got[2]:X8}");
+            if (got[3] != expectedRng)
+                throw new Exception($"DecodeBitLogP rng expected 0x{expectedRng:X8} got 0x{got[3]:X8}");
+        });
+
         #endregion
     }
 }

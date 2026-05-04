@@ -5061,7 +5061,29 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             var op = GetArithmeticOp(value.Kind);
 
             if (value.Kind == BinaryArithmeticKind.Shl || value.Kind == BinaryArithmeticKind.Shr)
-                AppendLine($"{prefix}{target} = {left} {op} u32({right});");
+            {
+                // WGSL `i32 >> u32` is arithmetic (sign-extending) shift; `i32 << u32`
+                // pushing into the sign bit can also trigger validator UB. ILGPU stores
+                // uint as i32 (BasicValueType has no UInt32). For unsigned shift right,
+                // we MUST bitcast through u32 to get logical (zero-fill) shift; otherwise
+                // a high-bit-set uint like 0x80000000 shifts to 0xFFFF0000 instead of
+                // 0x00010000 — silently wrong.
+                //
+                // Tuvok's OpusRangeDecoderGpu_DecodeBitLogP_LogP15Mixed surfaced this on
+                // 2026-05-04: post-Init Normalize, libopus state.Rng = 0x80000000, then
+                // `s = r >> 15` returned 0xFFFF0000, flipping the first-bit decode result.
+                //
+                // For Shl, always cast through u32 to avoid signed-shift UB on high bits.
+                bool isInt32 = value.Left.BasicValueType == BasicValueType.Int32;
+                if (isInt32 && (value.IsUnsigned || value.Kind == BinaryArithmeticKind.Shl))
+                {
+                    AppendLine($"{prefix}{target} = bitcast<i32>(bitcast<u32>({left}) {op} u32({right}));");
+                }
+                else
+                {
+                    AppendLine($"{prefix}{target} = {left} {op} u32({right});");
+                }
+            }
             else
                 AppendLine($"{prefix}{target} = {left} {op} {right};");
         }
