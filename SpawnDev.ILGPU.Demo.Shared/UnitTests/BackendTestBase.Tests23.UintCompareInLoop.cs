@@ -527,6 +527,91 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             if (got[0] != 42) throw new Exception($"OnlyShort body struct: expected 42 got {got[0]}");
         });
 
+        // Diagnostic: separate-args (no body struct) ArrayView<short> + ArrayView<int>.
+        // If THIS passes on CUDA, the bug is body-struct-specific — argument mapping for
+        // mixed sub-word + non-sub-word body-struct fields. Surfaced 2026-05-04 by
+        // Tests23_MinimalShortIntBodyStruct CUDA "illegal memory access".
+        static void Tests23_SeparateShortIntKernel(
+            Index1D _,
+            ArrayView<short> s0,
+            ArrayView<int> i0,
+            ArrayView<int> output)
+        {
+            output[0] = (int)s0[0] + i0[0];
+        }
+
+        [TestMethod]
+        public async Task Tests23_SeparateShortInt_NoBodyStruct() => await RunEmulatedTest(async accelerator =>
+        {
+            using var s0 = accelerator.Allocate1D(new short[] { 7 });
+            using var i0 = accelerator.Allocate1D(new int[] { 100 });
+            using var output = accelerator.Allocate1D<int>(1);
+            var k = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<short>, ArrayView<int>, ArrayView<int>>(
+                Tests23_SeparateShortIntKernel);
+            k((Index1D)1, s0.View, i0.View, output.View);
+            await accelerator.SynchronizeAsync();
+            var got = await output.CopyToHostAsync<int>();
+            if (got[0] != 107) throw new Exception($"SeparateShortInt: expected 107 got {got[0]}");
+        });
+
+        // Diagnostic: same body struct (1 short + 1 int) but kernel only reads the INT field.
+        // Tests whether the bug is reading the short field, OR present from struct serialization
+        // alone.
+        static void Tests23_MinimalShortIntKernelIntOnly(
+            Index1D _,
+            Tests23_MinimalShortIntStruct s,
+            ArrayView<int> output)
+        {
+            output[0] = s.I0[0];
+        }
+
+        [TestMethod]
+        public async Task Tests23_MinimalShortIntBodyStruct_IntOnly() => await RunEmulatedTest(async accelerator =>
+        {
+            using var s0 = accelerator.Allocate1D(new short[] { 7 });
+            using var i0 = accelerator.Allocate1D(new int[] { 100 });
+            using var output = accelerator.Allocate1D<int>(1);
+            var inputs = new Tests23_MinimalShortIntStruct { S0 = s0.View, I0 = i0.View };
+            var k = accelerator.LoadAutoGroupedStreamKernel<Index1D, Tests23_MinimalShortIntStruct, ArrayView<int>>(
+                Tests23_MinimalShortIntKernelIntOnly);
+            k((Index1D)1, inputs, output.View);
+            await accelerator.SynchronizeAsync();
+            var got = await output.CopyToHostAsync<int>();
+            if (got[0] != 100) throw new Exception($"IntOnly: expected 100 got {got[0]}");
+        });
+
+        // Diagnostic: 2 short views (no int). If this PASSES on CUDA, the bug is mixed
+        // sub-word + non-sub-word specifically. If it fails, sub-word + sub-word body
+        // struct is also broken.
+        public struct Tests23_TwoShortStruct
+        {
+            public ArrayView<short> S0;
+            public ArrayView<short> S1;
+        }
+
+        static void Tests23_TwoShortKernel(
+            Index1D _,
+            Tests23_TwoShortStruct s,
+            ArrayView<int> output)
+        {
+            output[0] = (int)s.S0[0] + (int)s.S1[0];
+        }
+
+        [TestMethod]
+        public async Task Tests23_TwoShortBodyStruct() => await RunEmulatedTest(async accelerator =>
+        {
+            using var s0 = accelerator.Allocate1D(new short[] { 7 });
+            using var s1 = accelerator.Allocate1D(new short[] { 100 });
+            using var output = accelerator.Allocate1D<int>(1);
+            var inputs = new Tests23_TwoShortStruct { S0 = s0.View, S1 = s1.View };
+            var k = accelerator.LoadAutoGroupedStreamKernel<Index1D, Tests23_TwoShortStruct, ArrayView<int>>(
+                Tests23_TwoShortKernel);
+            k((Index1D)1, inputs, output.View);
+            await accelerator.SynchronizeAsync();
+            var got = await output.CopyToHostAsync<int>();
+            if (got[0] != 107) throw new Exception($"TwoShort: expected 107 got {got[0]}");
+        });
+
         // Test J: WebGL glWorker.js subview-offset leak across same-program dispatches.
         // Surfaced 2026-05-04 by Data's StyleMosaic node 55 Gather first-divergent
         // capture: WebGL's glWorker.js was conditionally setting the
