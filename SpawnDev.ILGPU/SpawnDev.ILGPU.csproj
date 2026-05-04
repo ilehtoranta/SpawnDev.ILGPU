@@ -4,8 +4,30 @@
 		<TargetFramework>net10.0</TargetFramework>
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>enable</Nullable>
-		<Version>4.9.5-rc.10</Version>
-		<PackageReleaseNotes>v4.9.5-rc.10: WebGL `glWorker.js` subview-offset uniform leak fix + Wasm OOB diagnostic correctness. Two changes:
+		<Version>4.9.5-rc.11</Version>
+		<PackageReleaseNotes>v4.9.5-rc.11: Wasm host-write-vs-queued-dispatch race fix. The Wasm dispatcher had a race between host `CopyFromCPU` calls and the copy-IN of a queued (but not yet running) dispatch:
+
+```
+buf.CopyFromCPU(data1);   // sync: SharedBuffer = data1
+kernel(buf);              // queues D1 (returns immediately, async task in flight)
+buf.CopyFromCPU(data2);   // SharedBuffer = data2 NOW
+kernel(buf);              // queues D2
+await SynchronizeAsync();
+```
+
+D1's `RunKernelAsync` ran sync up to the first `await` on `_pendingWork`. If a prior task was in flight, D1's body PAUSED at the await. The caller continued to the second `CopyFromCPU` which OVERWRITES `SharedBuffer`. When D1 resumed, its copy-IN read `SharedBuffer` (= data2 now) instead of data1. D1 ran with the wrong data.
+
+In production this surfaced as **YOLOv8 Wasm Softmax**: Data's per-node capture pinned the first divergence to node 220 (DFL Softmax). Bisect localized to `Scale + Transpose1 + Transpose2` — `SoftmaxOperator.Execute`'s general-axis branch, which calls `TransposeKernel.Transpose` twice. `TransposeKernel` reuses `_paramsBuf` across calls; each call `CopyFromCPU`s its own params. With Scale+T1 already queued, T2's `CopyFromCPU(perm2)` overwrote `paramsBuf.SharedBuffer` BEFORE T1's copy-IN ran. T1 read perm2 instead of perm1 — wrong transpose, wrong final output.
+
+Fix: capture each ArrayView arg's `SharedBuffer` state at QUEUE time (sync, inside `RunKernel` before the task is queued). The dispatch's copy-IN reads from the snapshot SAB instead of `SharedBuffer`. Snapshots are reference-shared across dispatches with the same `HostWriteCounter`, so unchanging buffers (e.g. ML weights uploaded once) only pay the snapshot cost ONCE per host write — not per dispatch. New host-side write allocates a fresh snapshot SAB; old snapshot remains pinned by any in-flight dispatches and is GC'd when none.
+
+API: `WasmMemoryBuffer.GetOrCreateSnapshotForDispatch()` (internal) returns the current snapshot SAB. `WasmAccelerator.RunKernel` walks args at sync time, calls it per ArrayView arg (and per body-struct embedded view via reflection). `RunKernelAsync` accepts a `Dictionary&lt;WasmMemoryBuffer, SharedArrayBuffer&gt; argSnapshots` and uses it in copy-IN.
+
+Lockdown test `Tests23_HostWriteVsQueuedDispatchRace` (Wasm-only failure pre-fix; PASS 7/7 post-fix). Tests23 broader sweep 94/4 — 4 expected failures all in `Tests23_SilkBodyStructShape` (separate distinct codegen bugs tracked individually for follow-up rcs). No regressions on existing tests.
+
+Cascade closes a class of bugs where any consumer reuses a host-written buffer across back-to-back kernel dispatches. SpawnDev.ILGPU.ML's `SoftmaxOperator` general-axis path was the visible victim, but `TransposeKernel`'s reusable `_paramsBuf` pattern is generic — any ML or Codecs kernel doing `CopyFromCPU; queue kernel; CopyFromCPU same buf; queue kernel` was at risk of this race on Wasm. UNBLOCKS: YOLOv8 Wasm Reference test, any future kernel using the dispatch-then-host-rewrite-then-dispatch pattern.
+
+v4.9.5-rc.10: WebGL `glWorker.js` subview-offset uniform leak fix + Wasm OOB diagnostic correctness. Two changes:
 
 (1) `glWorker.js` was conditionally setting the `u_paramX_offset` uniform only when `elementOffset != 0`. WebGL uniforms persist on the program object across draw calls; if dispatch N had `elementOffset=K` (non-zero) for some param, the uniform was set to K. If dispatch N+1 used the SAME program with `elementOffset=0` for that param, the uniform was NOT reset and retained K. The shader read at texelFetch index `K` instead of `0`, producing zeros (or stale values) when the actual data was at index 0 of a different buffer. Fix: always set the offset uniform (default 0). Surfaced 2026-05-04 by Data's StyleMosaic node 55 Gather first-divergent capture: `Mean error 47.29` on WebGL where Gather output was `0` instead of `56`; nodes 0-54 matched WebGPU exactly. Lockdown test `Tests23_SubViewOffsetLeakAcrossDispatches` reads `bufA[2]=300` via `SubView(2,1)` then `bufB[0]=10` via `SubView(0,1)` on the SAME kernel program. Pre-fix on WebGL: second read returns `bufB[2]=30` (offset leaked). Post-fix: returns `bufB[0]=10`. PASS 7/7 across CPU/CUDA/OpenCL/WebGPU/WebGPUNoSubgroups/Wasm/WebGL. Likely cascade-closes the WebGL ML zero-output cluster (5 Style transfers + TextGeneration + DistilBERT + GPT2 + WhisperEncoder + DepthAnything + ConvReluPool + SemanticSearch + BackgroundRemoval + YOLOv8 Reference — any pipeline with sequential same-program dispatches with mixed-offset SubViews).
 
