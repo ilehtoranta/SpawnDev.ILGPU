@@ -605,6 +605,74 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                     $"chunkIdx={firstViolationAt / CHUNK_FLOATS} offsetInChunk={firstViolationAt % CHUNK_FLOATS}");
         });
 
+        // Test M: ROOT-CAUSE REPRO for the YOLOv8 Wasm Softmax bug. The Wasm dispatcher
+        // has a host-write-vs-queued-dispatch race when:
+        //   1. Dispatch D1 is queued (returns immediately, async task in flight).
+        //   2. Host CopyFromCPU writes buffer B with version V1, queues D2 reading B.
+        //   3. Host CopyFromCPU writes buffer B with version V2, queues D3 reading B.
+        //   4. D2 runs, awaits prior tasks, then copy-IN reads B.SharedBuffer.
+        //   5. By the time D2's copy-IN runs, V2 has already overwritten B. D2 reads V2 data.
+        //
+        // Sequencing on Blazor WASM (single-threaded async):
+        //   - D2's RunKernelAsync runs sync up to the FIRST await (on _pendingWork).
+        //   - If _pendingWork has prior tasks, D2's body PAUSES at the await.
+        //   - Caller continues to D3.Transpose() which CopyFromCPU's B with V2.
+        //   - When D2 resumes after await, its copy-IN reads B.SharedBuffer (= V2).
+        //
+        // SpawnDev.ILGPU.ML's TransposeKernel reuses `_paramsBuf` across calls, so two
+        // back-to-back transpose dispatches with a prior dispatch in flight hit this.
+        //
+        // Repro shape:
+        //   - Buffer X: written by CopyFromCPU with value 100, queued kernel D1 reads X.
+        //   - Buffer X: written by CopyFromCPU with value 200, queued kernel D2 reads X.
+        //   - D1 should see X=100. D2 should see X=200.
+        //   - On Wasm: D1 actually sees X=200 (host already overwrote SharedBuffer).
+        //
+        // Pre-existing dispatch (D0) is needed to force D1's await. Using a no-op kernel.
+        static void Tests23_DispatchRaceNoop(Index1D _, ArrayView<int> dummy) { /* no-op */ }
+        static void Tests23_DispatchRaceReadValue(Index1D _, ArrayView<int> source, ArrayView<int> result)
+        {
+            result[0] = source[0];
+        }
+
+        [TestMethod]
+        public async Task Tests23_HostWriteVsQueuedDispatchRace() => await RunEmulatedTest(async accelerator =>
+        {
+            using var dummyBuf = accelerator.Allocate1D<int>(1);
+            using var sharedSrc = accelerator.Allocate1D<int>(1);  // host-written, read by D1+D2
+            using var d1Result = accelerator.Allocate1D<int>(1);
+            using var d2Result = accelerator.Allocate1D<int>(1);
+
+            var noopK = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<int>>(Tests23_DispatchRaceNoop);
+            var readK = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<int>, ArrayView<int>>(Tests23_DispatchRaceReadValue);
+
+            // D0: prior dispatch (forces D1 to await). Reads dummyBuf, no-op.
+            noopK((Index1D)1, dummyBuf.View);
+
+            // D1: write 100 to sharedSrc, queue D1 to read sharedSrc[0] -> d1Result[0].
+            sharedSrc.View.CopyFromCPU(new[] { 100 });
+            readK((Index1D)1, sharedSrc.View, d1Result.View);
+
+            // D2: write 200 to sharedSrc, queue D2 to read sharedSrc[0] -> d2Result[0].
+            sharedSrc.View.CopyFromCPU(new[] { 200 });
+            readK((Index1D)1, sharedSrc.View, d2Result.View);
+
+            await accelerator.SynchronizeAsync();
+
+            var d1 = await d1Result.CopyToHostAsync<int>();
+            var d2 = await d2Result.CopyToHostAsync<int>();
+
+            // Expected: D1 reads what was set right before its queue (100). D2 reads 200.
+            // BUG ON WASM: D1's copy-IN runs AFTER D2's CopyFromCPU(200) overwrote SharedBuffer,
+            // so D1 reads 200 instead of 100.
+            if (d1[0] != 100)
+                throw new Exception($"D1 should see sharedSrc=100 (set right before D1 was queued), got {d1[0]}. " +
+                    "If d1=200 on Wasm, D1's copy-IN ran AFTER D2's CopyFromCPU overwrote SharedBuffer. " +
+                    "Root cause of YOLOv8 Wasm Softmax: the queued-dispatch-vs-host-write race.");
+            if (d2[0] != 200)
+                throw new Exception($"D2 should see sharedSrc=200, got {d2[0]}");
+        });
+
         // Test G: SAME as F but WITHOUT the compound `iter < 8` safety guard.
         // Tuvok's Tests22 inline has no safety cap — loop runs purely on the
         // `rng <= EC_CODE_BOT` condition. This isolates whether the compound
