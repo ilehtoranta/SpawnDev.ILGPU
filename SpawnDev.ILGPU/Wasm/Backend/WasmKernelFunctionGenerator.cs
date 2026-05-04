@@ -2176,6 +2176,12 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             var target = value.Target.Resolve();
             var storeValue = value.Value.Resolve();
 
+            // Track Stores into kernel parameters so the dispatcher can skip
+            // copy-OUT for input-only buffers (Wasm copy-OUT race fix). Helper
+            // functions don't contribute — their parameter indices are local
+            // and don't map back to the kernel signature.
+            TrackParamWrite(target, "Store");
+
             // Fix B v4: DISABLED — #1's analysis shows barriers already separate Load/Store
             // phases. Each thread writes to a unique position (guaranteed by exclusive scan),
             // and struct Load scratch copies preserve data across barriers. The extra yield
@@ -3154,12 +3160,72 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                     current = asc.Value.Resolve();
                 else if (current is PointerCast pc)
                     current = pc.Value.Resolve();
+                else if (current is LoadElementAddress lea)
+                    current = lea.Source.Resolve();
+                else if (current is LoadFieldAddress lfa)
+                    current = lfa.Source.Resolve();
+                else if (current is SubViewValue sv)
+                    current = sv.Source.Resolve();
+                else if (current is global::ILGPU.IR.Values.Load ld)
+                    current = ld.Source.Resolve();
                 else
                     break;
 
                 depth++;
             }
             return -1;
+        }
+
+        /// <summary>
+        /// Set of kernel-parameter indices the kernel WRITES to. Populated by the
+        /// codegen via <see cref="TrackParamWrite"/> calls from every IR write handler
+        /// (<see cref="GenerateCode(Store)"/>, atomic RMW, atomic CAS). Consumed by
+        /// <see cref="WasmAccelerator"/> to skip copy-OUT for buffers the kernel didn't
+        /// modify — required correctness fix for the 2026-05-03 Wasm copy-OUT race
+        /// where an input-only paramsBuf reused across overlapping dispatches had the
+        /// unconditional copy-OUT clobber host CopyFromCPU writes with stale
+        /// wasmMemory bytes (see _DevComms/SpawnDev.ILGPU/geordi-to-team-wasm-copy-out-race-2026-05-03.md).
+        /// </summary>
+        internal readonly HashSet<int> WrittenParamIndices = new();
+
+        /// <summary>
+        /// Diagnostic record of every write the codegen visits in the kernel body.
+        /// Format per entry: "WriteKind TargetType -> param[N]". Used to confirm the
+        /// trace is catching every write target shape ILGPU emits.
+        /// </summary>
+        internal readonly List<string> StoreTargetTrace = new();
+
+        /// <summary>
+        /// Records that the kernel writes to <paramref name="target"/>. If the target
+        /// resolves to a kernel Parameter via <see cref="TraceToParameter"/>, the
+        /// parameter's index is added to <see cref="WrittenParamIndices"/>. Helper
+        /// functions don't contribute — their Method.Parameters are local to the
+        /// helper and don't map back to the dispatch kernel's parameter list.
+        /// </summary>
+        private void TrackParamWrite(Value target, string kind)
+        {
+            if (_isHelperFunction) return;
+            int paramIdx = TraceToParameter(target);
+            StoreTargetTrace.Add($"{kind} {target?.GetType().Name ?? "null"} -> param[{paramIdx}]");
+            if (paramIdx >= 0)
+                WrittenParamIndices.Add(paramIdx);
+        }
+
+        /// <inheritdoc/>
+        public override void GenerateCode(GenericAtomic value)
+        {
+            // Atomic RMW writes to its Target (LEA, NewView etc.) — same trace path
+            // as Store. Without tracking these, the copy-OUT skip path would mark
+            // RadixSort's histogram buffers as input-only and zero them on copy-OUT.
+            TrackParamWrite(value.Target.Resolve(), "GenericAtomic");
+            base.GenerateCode(value);
+        }
+
+        /// <inheritdoc/>
+        public override void GenerateCode(AtomicCAS value)
+        {
+            TrackParamWrite(value.Target.Resolve(), "AtomicCAS");
+            base.GenerateCode(value);
         }
 
         #endregion

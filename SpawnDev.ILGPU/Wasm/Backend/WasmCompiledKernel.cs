@@ -65,6 +65,23 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         public int PhaseCount { get; }
 
         /// <summary>
+        /// Set of kernel-parameter indices that the kernel STORES to. Populated by the
+        /// codegen via <c>WasmKernelFunctionGenerator.WrittenParamIndices</c> -> here.
+        /// Used by <c>WasmAccelerator.RunKernelAsync</c> to skip copy-OUT for buffers
+        /// whose param is not in this set: those are input-only and copying their
+        /// stale wasmMemory contents back to SharedBuffer would clobber any
+        /// host-side <c>CopyFromCPU</c> writes that landed during the in-flight
+        /// dispatch (the 2026-05-03 Wasm copy-OUT race).
+        /// </summary>
+        public HashSet<int> WrittenParamIndices { get; }
+
+        /// <summary>
+        /// Diagnostic: per-Store trace records captured by codegen. Inspect when
+        /// the copy-OUT skip behavior misclassifies a buffer as input-only.
+        /// </summary>
+        public List<string> StoreTargetTrace { get; }
+
+        /// <summary>
         /// Creates a new compiled Wasm kernel.
         /// </summary>
         public WasmCompiledKernel(
@@ -78,7 +95,9 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             bool hasBarriers = false,
             int dynamicSharedElementSize = 0,
             int scratchPerThread = 0,
-            int phaseCount = 1)
+            int phaseCount = 1,
+            HashSet<int>? writtenParamIndices = null,
+            List<string>? storeTargetTrace = null)
             : base(context, entryPoint, null)
         {
             WasmBinary = wasmBinary;
@@ -90,6 +109,8 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             DynamicSharedElementSize = dynamicSharedElementSize;
             ScratchPerThread = scratchPerThread;
             PhaseCount = phaseCount;
+            WrittenParamIndices = writtenParamIndices ?? new HashSet<int>();
+            StoreTargetTrace = storeTargetTrace ?? new List<string>();
         }
     }
 

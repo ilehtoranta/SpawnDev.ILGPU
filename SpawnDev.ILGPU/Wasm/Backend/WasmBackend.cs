@@ -55,6 +55,28 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         /// <summary>Diagnostic: last compiled Wasm binary (for inspection).</summary>
         public static byte[]? LastWasmBinary { get; set; }
 
+        /// <summary>
+        /// Diagnostic: snapshot of the codegen's per-Store trace results from the LAST
+        /// kernel compile. Used to investigate copy-OUT skip misclassifications. Per
+        /// entry: "TargetIRType -> param[N]" where N is the result of TraceToParameter
+        /// or -1 if the target didn't resolve to a kernel parameter.
+        /// </summary>
+        public static List<string> LastStoreTargetTrace { get; set; } = new();
+
+        /// <summary>
+        /// Diagnostic: snapshot of the kernel-parameter indices that the last compile
+        /// identified as Store targets (i.e., the kernel WRITES to these params).
+        /// Used by the dispatcher to skip copy-OUT for input-only buffers, and by tests
+        /// to verify the trace catches the expected writes.
+        /// </summary>
+        public static HashSet<int> LastWrittenParamIndices { get; set; } = new();
+
+        /// <summary>
+        /// Diagnostic: last dispatch's per-arg copy-OUT classification.
+        /// Format per entry: "i=N kind=View/Scalar bufIdx=M ir-param-match=true/false"
+        /// </summary>
+        public static List<string> LastDispatchCopyOutDiag { get; set; } = new();
+
         /// <summary>Diagnostic: all compiled Wasm binaries (for capturing multi-kernel compilations like RadixSort).</summary>
         public static List<byte[]> AllWasmBinaries = new();
 
@@ -560,6 +582,19 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             LastWasmBinary = wasmBinary;
             try { OnKernelCompiled?.Invoke($"kernel_{AllWasmBinaries.Count}", wasmBinary, info); } catch { }
 
+            // Snapshot the codegen's trace on the static so tests + the dispatcher's
+            // diag string can inspect it. Used to investigate trace gaps where the
+            // codegen's TraceToParameter fails to identify the kernel's actual buffer
+            // write — see _DevComms/SpawnDev.ILGPU/geordi-to-team-wasm-copy-out-race-2026-05-03.md.
+            LastWrittenParamIndices = new HashSet<int>(kernelGen.WrittenParamIndices);
+            LastStoreTargetTrace = new List<string>(kernelGen.StoreTargetTrace);
+            if (VerboseLogging)
+            {
+                Log($"[Wasm-CopyOutTrace] writtenParams=[{string.Join(",", kernelGen.WrittenParamIndices)}] storeCount={kernelGen.StoreTargetTrace.Count}");
+                for (int ti = 0; ti < kernelGen.StoreTargetTrace.Count && ti < 32; ti++)
+                    Log($"[Wasm-CopyOutTrace]   #{ti}: {kernelGen.StoreTargetTrace[ti]}");
+            }
+
             return new WasmCompiledKernel(
                 Context,
                 entryPoint,
@@ -571,7 +606,9 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 data.HasBarriers,
                 data.DynamicSharedElementSize,
                 data.ScratchPerThread,
-                data.PhaseCount);
+                data.PhaseCount,
+                kernelGen.WrittenParamIndices,
+                kernelGen.StoreTargetTrace);
         }
 
         /// <summary>

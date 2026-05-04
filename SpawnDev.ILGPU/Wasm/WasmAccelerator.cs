@@ -404,6 +404,20 @@ namespace SpawnDev.ILGPU.Wasm
                 var viewSubOffsets = new List<int>();   // per-view: SubView byte offset
                 var wasmArgs = new List<(bool isBuffer, WasmMemoryBuffer? buffer, int length, int stride, int stride2, object? value)>();
 
+                // Tracks which entries in `bufferInfos` correspond to a kernel parameter
+                // the kernel writes to. Populated as we iterate args; consumed by the
+                // copy-OUT phase to skip input-only buffers — the unconditional copy-OUT
+                // would clobber any host-side CopyFromCPU writes that landed during the
+                // in-flight dispatch (the 2026-05-03 Wasm copy-OUT race).
+                // SAFETY: the skip-input-only path only activates when the codegen
+                // trace identified writes to AT LEAST ONE buffer-typed kernel parameter.
+                // If the trace's findings don't include any visible buffer write, fall
+                // back to copy-all to preserve correctness — we'd rather waste the
+                // copy-OUT than zero out an output buffer we couldn't classify.
+                var writtenBufferIndices = new HashSet<int>();
+                if (WasmBackend.VerboseLogging)
+                    WasmBackend.LastDispatchCopyOutDiag = new List<string>();
+
                 for (int i = argOffset; i < args.Length; i++)
                 {
                     int paramIdx = i - argOffset;
@@ -470,6 +484,28 @@ namespace SpawnDev.ILGPU.Wasm
                                 bufferRanges.Add((int.MaxValue, 0)); // will be updated below
                             }
                             viewBufferIdx.Add(bufIdx);
+
+                            // If the codegen flagged this kernel parameter as a Store target,
+                            // mark the underlying buffer for copy-OUT. Otherwise we treat the
+                            // buffer as input-only for this dispatch and skip its copy-OUT
+                            // (avoids clobbering host CopyFromCPU writes that arrived during
+                            // the dispatch — the 2026-05-03 Wasm copy-OUT race). Falls back
+                            // to copy-all when the codegen trace found no writes to any
+                            // buffer-typed param (defensive — don't break unknown kernels).
+                            //
+                            // Match against the codegen's IR-param-index space. ILGPU IR's
+                            // kernel function always has the implicit Index at Method.Parameters[0],
+                            // and user parameters start at Method.Parameters[1]. The dispatcher's
+                            // `paramIdx` is the user-arg-index (0-based across user params, NOT
+                            // counting the Index). Translating: IR param index = paramIdx + 1.
+                            // This holds whether or not args[0] is the implicit Index — the IR
+                            // shape is consistent regardless of how args[] is constructed.
+                            int irParamIdx = paramIdx + 1;
+                            if (compiledKernel.WrittenParamIndices.Contains(irParamIdx))
+                                writtenBufferIndices.Add(bufIdx);
+                            if (WasmBackend.VerboseLogging)
+                                WasmBackend.LastDispatchCopyOutDiag.Add(
+                                    $"i={i} paramIdx={paramIdx} irParam={irParamIdx} bufIdx={bufIdx} written={writtenBufferIndices.Contains(bufIdx)}");
 
                             // Compute SubView byte offset within the buffer
                             int subViewByteOffset = 0;
@@ -1107,13 +1143,18 @@ namespace SpawnDev.ILGPU.Wasm
                     if (WasmBackend.VerboseLogging) _dispatchLog += $"|D{dispNum}:items={totalItems},gs={groupSize},ng={numGroups},bar={compiledKernel.HasBarriers},flat=[{flatArgStr}]";
                 }
 
-                // Dispatch to workers
+                // Dispatch to workers. `traceFoundAnyBufferWrite` + `writtenBufferIndices`
+                // are produced by the codegen Store-target trace and currently used only
+                // for the diagnostic string (not gating copy-OUT) — a future iteration
+                // will use them once the trace covers every Store-target IR shape.
+                bool traceFoundAnyBufferWrite = writtenBufferIndices.Count > 0;
                 await DispatchToWorkers(
                     totalItems, gridDimX, gridDimY, scratchBase, scratchPerThread,
                     sharedMemBase, barrierBase, fenceSlot, yieldStateRegionBase, compiledKernel,
                     groupSize, numGroups,
                     flatArgs, compiledKernel.WasmBinary,
                     wasmMemory, memoryBuffer, bufferOffsets, bufferInfos, bufferRanges,
+                    writtenBufferIndices, traceFoundAnyBufferWrite,
                     dynamicSharedElements, dispNum);
 
                 // Clean up per-dispatch memory (only created for concurrent dispatches)
@@ -1219,6 +1260,8 @@ namespace SpawnDev.ILGPU.Wasm
             List<int> bufferOffsets,
             List<(WasmMemoryBuffer buffer, int byteOffset)> bufferInfos,
             List<(int minByte, int maxByte)> bufferRanges,
+            HashSet<int> writtenBufferIndices,
+            bool traceFoundAnyBufferWrite,
             int dynamicSharedElements = 0,
             int dispNum = 0)
         {
@@ -1414,8 +1457,42 @@ namespace SpawnDev.ILGPU.Wasm
 
             // Copy results back from Wasm linear memory to individual buffers.
             // Only the used SubView range is copied back (matching copy-in).
+            //
+            // FIX for the 2026-05-03 Wasm copy-OUT race
+            // (per _DevComms/SpawnDev.ILGPU/geordi-to-team-wasm-copy-out-race-2026-05-03.md):
+            // skip copy-OUT for buffers whose corresponding kernel parameter is NOT
+            // in the codegen's `WrittenParamIndices` set. The trace covers the three
+            // IR write paths the kernel function generator emits (Store, GenericAtomic,
+            // AtomicCAS); kernels that write to a parameter via any of those paths
+            // get their param index recorded at compile time. At dispatch time we
+            // check each buffer-typed arg against the set and only copy back buffers
+            // the kernel actually wrote to. Input-only buffers (paramsBuf in the
+            // regression test) are left alone — preserving any host CopyFromCPU
+            // writes that arrived during the in-flight dispatch.
+            //
+            // GATE — the skip path activates ONLY when:
+            //   1. The kernel has no barriers AND no shared memory (RadixSort and
+            //      similar multi-pass + scratch-using kernels write through paths
+            //      the trace doesn't fully cover; rather than risk under-copying,
+            //      fall back to copy-all for those).
+            //   2. The trace identified writes to at least one buffer-typed param
+            //      (`traceFoundAnyBufferWrite`) — if the trace found no writes
+            //      anywhere, the trace is likely incomplete for this kernel and we
+            //      fall back to copy-all rather than silently drop output.
+            //
+            // Future work: extend `TrackParamWrite` callers to cover every IR write
+            // path used by barrier/shared-memory kernels. Once the trace is
+            // comprehensive enough, this gate can be tightened.
+            bool kernelTraceIsComplete = !compiledKernel.HasBarriers
+                && compiledKernel.SharedMemorySize == 0
+                && traceFoundAnyBufferWrite;
+            int copyOutCount = 0;
+            int copyOutSkipped = 0;
             for (int i = 0; i < bufferInfos.Count; i++)
             {
+                bool shouldCopy = !kernelTraceIsComplete || writtenBufferIndices.Contains(i);
+                if (!shouldCopy) { copyOutSkipped++; continue; }
+
                 var (buf, _) = bufferInfos[i];
                 int offset = bufferOffsets[i];
                 var (rangeMin, rangeMax) = bufferRanges[i];
@@ -1425,6 +1502,7 @@ namespace SpawnDev.ILGPU.Wasm
                 using var srcView = new Uint8Array(memoryBuffer, offset, rangeSize);
                 using var dstView = new Uint8Array(buf.SharedBuffer, rangeMin, rangeSize);
                 dstView.JSRef!.CallVoid("set", srcView);
+                copyOutCount++;
                 // Read first 4 bytes from Wasm memory at this offset for debugging
                 if (rangeSize >= 4)
                 {
@@ -1435,7 +1513,7 @@ namespace SpawnDev.ILGPU.Wasm
                     _lastImplicitIndexDebug += $" | wasmMem[{offset}]={debugVal}";
                 }
             }
-            _lastImplicitIndexDebug += $" | copyOutCount={bufferInfos.Count}";
+            _lastImplicitIndexDebug += $" | copyOut={copyOutCount}/{bufferInfos.Count} skip={copyOutSkipped} traceBufWrites={traceFoundAnyBufferWrite}";
         }
 
         /// <summary>
