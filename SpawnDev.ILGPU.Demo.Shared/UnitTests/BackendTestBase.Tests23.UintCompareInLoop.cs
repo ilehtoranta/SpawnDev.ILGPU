@@ -48,6 +48,12 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
 
         // Test B: uint left-shift bare. No loop, no compare. Produces the same
         // "shift past sign bit" pattern that the Normalize loop exercises.
+        // Output index map (used by both BareUintShift + the constant-write
+        // diagnostic Tests23_HighBitConstWrite below):
+        //   [0]=v0  [1]=v1  [2]=v2  [3]=v3  [4]=v4
+        //   [5]=0x80000000u const-write (NO SHIFT)
+        //   [6]=0xFFFFFFFFu const-write (NO SHIFT, all bits)
+        //   [7]=0x7FFFFFFFu const-write (NO SHIFT, all bits except sign)
         static void Tests23_UintShiftKernel(Index1D _, ArrayView<uint> output)
         {
             uint v0 = 0x80u;
@@ -60,12 +66,18 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             output[2] = v2;
             output[3] = v3;
             output[4] = v4;
+            // Diagnostic: write the same high-bit-set value DIRECTLY, no shift,
+            // so the test isolates whether the failure is in the shift codegen
+            // or in the TF readback / output-write path.
+            output[5] = 0x80000000u;
+            output[6] = 0xFFFFFFFFu;
+            output[7] = 0x7FFFFFFFu;
         }
 
         [TestMethod]
         public async Task Tests23_BareUintShift() => await RunEmulatedTest(async accelerator =>
         {
-            using var dOut = accelerator.Allocate1D<uint>(5);
+            using var dOut = accelerator.Allocate1D<uint>(8);
             var k = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<uint>>(Tests23_UintShiftKernel);
             k((Index1D)1, dOut.View);
             await accelerator.SynchronizeAsync();
@@ -73,8 +85,14 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             if (r[0] != 0x80u) throw new Exception($"v0 expected 0x80 got 0x{r[0]:X8}");
             if (r[1] != 0x8000u) throw new Exception($"v1 expected 0x8000 got 0x{r[1]:X8}");
             if (r[2] != 0x800000u) throw new Exception($"v2 expected 0x800000 got 0x{r[2]:X8}");
-            if (r[3] != 0x80000000u) throw new Exception($"v3 expected 0x80000000 got 0x{r[3]:X8}");
+            if (r[3] != 0x80000000u)
+                throw new Exception($"v3 expected 0x80000000 got 0x{r[3]:X8}. Const-write diagnostic: " +
+                    $"out[5]=0x{r[5]:X8} (expect 0x80000000), out[6]=0x{r[6]:X8} (expect 0xFFFFFFFF), out[7]=0x{r[7]:X8} (expect 0x7FFFFFFF). " +
+                    "If [5] also wrong → TF readback / output-write path is wrong, not the shift. If [5] right → shift codegen is wrong.");
             if (r[4] != 0u) throw new Exception($"v4 expected 0 got 0x{r[4]:X8}");
+            if (r[5] != 0x80000000u) throw new Exception($"const-write [5]: expected 0x80000000 got 0x{r[5]:X8}");
+            if (r[6] != 0xFFFFFFFFu) throw new Exception($"const-write [6]: expected 0xFFFFFFFF got 0x{r[6]:X8}");
+            if (r[7] != 0x7FFFFFFFu) throw new Exception($"const-write [7]: expected 0x7FFFFFFF got 0x{r[7]:X8}");
         });
 
         // Test C: the Normalize-shape loop with a LOCAL uint variable (no struct).

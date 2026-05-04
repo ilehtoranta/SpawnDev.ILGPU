@@ -2679,6 +2679,30 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 op = "||";
             else
                 op = GetArithmeticOp(value.Kind);
+
+            // GLSL ES 3.0: shift-left of a signed int where the result would set
+            // the sign bit is UNDEFINED behavior — Chrome ANGLE produces
+            // 0x80000001 instead of 0x80000000 for `0x800000 << 8`. ILGPU's IL
+            // `shl` opcode is signedness-agnostic and has no `.un` variant, so
+            // the IR can't carry a per-shift IsUnsigned flag. Fix unconditionally:
+            // emit `int(uint(left) << uint(right))` for integer shifts so the GLSL
+            // compiler uses the well-defined unsigned-shift semantics. Bit pattern
+            // is identical to signed shift for every non-overflowing case
+            // (verified in tests). Surfaced 2026-05-04 by Tests23_BareUintShift.
+            if ((value.Kind == BinaryArithmeticKind.Shl || value.Kind == BinaryArithmeticKind.Shr)
+                && (leftType == "int" || leftType == "uint")
+                && (rightType == "int" || rightType == "uint"))
+            {
+                // For Shr, only switch to unsigned when the IR flagged it (`.un` IL).
+                // Signed right-shift is well-defined and we must preserve sign extension.
+                bool useUnsigned = value.Kind == BinaryArithmeticKind.Shl || value.IsUnsigned;
+                if (useUnsigned)
+                {
+                    AppendLine($"{prefix}{target} = {resultGlslType}(uint({left}) {op} uint({right}));");
+                    return;
+                }
+            }
+
             AppendLine($"{prefix}{target} = {left} {op} {right};");
         }
 
@@ -2824,7 +2848,27 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             }
             else
             {
-                AppendLine($"{prefix}{target} = {left} {op} {right};");
+                // For unsigned integer comparisons (`uint <= uintConst` etc.),
+                // cast operands to uint so GLSL ES 3.0 uses unsigned semantics.
+                // ILGPU's IR represents both signed and unsigned ints as
+                // BasicValueType.Int32 with `IsUnsignedOrUnordered` on the
+                // CompareValue node; the GLSLTypeGenerator maps Int32 → "int"
+                // by default. Without this cast, `state.Rng <= 0x800000u`
+                // evaluates as signed and Tuvok's libopus Normalize loop ran
+                // to its safety cap on WebGL (rng=0x80000000 signed = -2147483648
+                // <= 0x800000). Surfaced 2026-05-04 by Tests23.UintCompareInLoop.
+                string rightType = TypeGenerator[value.Right.Type];
+                bool isIntegerType = (leftType == "int" || leftType == "uint")
+                    && (rightType == "int" || rightType == "uint");
+                if (value.IsUnsignedOrUnordered && isIntegerType
+                    && value.Kind != CompareKind.Equal && value.Kind != CompareKind.NotEqual)
+                {
+                    AppendLine($"{prefix}{target} = uint({left}) {op} uint({right});");
+                }
+                else
+                {
+                    AppendLine($"{prefix}{target} = {left} {op} {right};");
+                }
             }
         }
 

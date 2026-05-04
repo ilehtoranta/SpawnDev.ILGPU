@@ -2,6 +2,56 @@
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
 
+## 4.9.5-rc.7 (2026-05-04) — WebGL GLSL codegen: INT_MIN const + unsigned compare/shift
+
+### Three GLSL codegen bugs fixed
+
+Surfaced by the same Tests23 bisection that closed Tuvok's libopus Normalize loop on rc.6, all three issues had been silently corrupting WebGL kernel output for any code path that used `uint` values with the high bit set.
+
+#### Bug 1 — `int.MinValue` constant emit substituted bit pattern 0x80000000 → 0x80000001
+
+`GLSLCodeGenerator.GenerateCode(PrimitiveValue)` had been substituting `int.MinValue` with the literal `-2147483647` as a workaround for an ANGLE/ESSL3 parser issue (`-2147483648` parses as `-(2147483648)` and 2147483648 is not a valid signed-int literal). The substitution preserved sign but corrupted the LOW BIT — every constant that needed the exact 0x80000000 bit pattern silently shipped as 0x80000001. Affected: libopus range-coder constants (`EC_CODE_TOP = 1u << 31`), IEEE -0.0 bitcasts, uint shift overflow results that get constant-folded by ILGPU's IR construction.
+
+Fix: emit as `int(2147483648u)` — uint-to-int bitcast preserves the exact bit pattern with no parser issue and no UB.
+
+#### Bug 2 — `uint <= uintConst` evaluated as signed compare
+
+`GenerateCode(CompareValue)` for unsigned integer comparisons (with `IsUnsignedOrUnordered` flag set) emitted bare `int op int` GLSL. ILGPU's IR uses `BasicValueType.Int32` for both signed and unsigned integers, with the unsigned-ness carried as a flag on the compare operation. The GLSL TypeGenerator maps Int32 → "int", so the operands were declared as `int` in the shader and the compare used signed semantics — values with the high bit set compared as negative. `0x80000000 <= 0x800000` returned TRUE on WebGL because `int(0x80000000) = -2147483648 < 8388608`.
+
+Fix: when `IsUnsignedOrUnordered` is set on a `<= < > >=` comparison and the operand types are integer, emit `uint(left) op uint(right)` so GLSL uses unsigned semantics.
+
+#### Bug 3 — Signed left-shift overflow into the sign bit produces undefined behavior on ANGLE
+
+`GenerateCode(BinaryArithmetic)` for Shl emitted `int << int` directly. GLSL ES 3.0 spec marks left-shift of a signed integer where the result sets the sign bit as **undefined behavior**. ANGLE on Chrome produces inconsistent values (observed 0x80000001 instead of 0x80000000). Same UB applies to Shr when shifting a sign-bit-set value, but ILGPU IR does carry an `IsUnsigned` flag for `shr.un` IL, so signed-Shr's sign extension is preserved.
+
+Fix: emit as `int(uint(left) << uint(right))` for Shl (always — no IR signal for shift signedness because IL `shl` has no `.un` variant). For Shr, only switch to unsigned when `IsUnsigned` is set on the IR node.
+
+#### Bonus — `glWorker.js` TF readback path
+
+Changed the WebGL Transform Feedback readback typed array from `Float32Array` to `Uint8Array`. The byte path is identical — `getBufferSubData` does a raw byte copy regardless of the destination's element type — but explicit `Uint8Array` is clearer documentation of intent and avoids any future driver-side type-conversion paths.
+
+### Verification
+
+- `BackendTestBase.Tests22.StaticStructReturnRefHelpers` — Tuvok's libopus regression: **14/14 PASS** post-fix (already PASSing on rc.6; confirmed unchanged).
+- `BackendTestBase.Tests23.UintCompareInLoop` — 7 bisection cases × 7 backends = **49/49 PASS** including all WebGL cases (was 6 WebGL failing on rc.6).
+- WebGL full test sweep (`FullyQualifiedName~WebGLTests`): **457 passed / 1 failed / 123 skipped**. The 1 failure is `LocalMemoryRepro_Int64_ShortByteViews` (30s timeout) — a preexisting WebGL architectural-varying-count limit, NOT caused by this fix.
+
+### What this likely also fixes
+
+Data's `data-to-captain-ml-sweep-summary-2026-05-04.md` listed 12 WebGL correctness failures across DistilBERT / GPT2 / WhisperEncoder / CLIPVision / DepthAnything / 5 Style transfers / YOLOv8 / TextGeneration. Many of those models use `uint` indexing or bitwise operations that go through the buggy compare/shift paths. Recommend re-running the ML pipeline + reference suite on WebGL after rc.7 lands; expect a meaningful chunk of the 12 failures to clear automatically.
+
+### Files changed
+
+- `SpawnDev.ILGPU/WebGL/Backend/GLSLCodeGenerator.cs` — PrimitiveValue Int32 INT_MIN bitcast + CompareValue unsigned-cast (base class path)
+- `SpawnDev.ILGPU/WebGL/Backend/GLSLKernelFunctionGenerator.cs` — CompareValue unsigned-cast (kernel override) + BinaryArithmetic Shl/Shr unsigned-cast
+- `SpawnDev.ILGPU/wwwroot/glWorker.js` — TF readback typed array (cosmetic)
+- `SpawnDev.ILGPU.Demo.Shared/UnitTests/BackendTestBase.Tests23.UintCompareInLoop.cs` — added const-write diagnostic to Tests23_BareUintShift
+- `SpawnDev.ILGPU.Demo/UnitTests/WebGLTests.cs` — removed all Tests23 gates (every case now passes on WebGL)
+
+### Four-package bundle: Fork unchanged at 2.0.4
+
+Changes are all in the `SpawnDev.ILGPU` wrapper (WebGL/* + wwwroot/glWorker.js); no edits to the forked `ILGPU/` tree. Fork stays at 2.0.4. Only the SpawnDev.ILGPU PackageReference bumps rc.6 → rc.7.
+
 ## 4.9.5-rc.6 (2026-05-04) — LoopUnrolling shift-induction trip-count fix
 
 ### Fix: `while (uintRng <= uintConst) rng <<= N` produced wrong output for N != 1 on every backend except CPU

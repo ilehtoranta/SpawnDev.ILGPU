@@ -1268,7 +1268,29 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             }
             else
             {
-                AppendLine($"{target} = {left} {op} {right};");
+                // For unsigned integer comparisons (`uint <= uintConst` etc.),
+                // GLSL ES 3.0's signed-int operators produce the wrong result —
+                // values with the high bit set compare as negative. Cast to
+                // uint so the comparison uses unsigned semantics.
+                //
+                // ILGPU's IR represents both signed and unsigned ints as
+                // BasicValueType.Int32 with a `IsUnsignedOrUnordered` flag on
+                // the CompareValue node. The GLSL TypeGenerator maps
+                // BasicValueType.Int32 → "int" by default; without this fix,
+                // `state.Rng <= 0x800000u` evaluated as signed and Tuvok's
+                // libopus Normalize loop ran indefinitely on WebGL until the
+                // safety cap fired (rng=0x80000000 signed = -2147483648 < 0x800000).
+                bool isIntegerType = (leftType == "int" || leftType == "uint")
+                    && (rightType == "int" || rightType == "uint");
+                if (value.IsUnsignedOrUnordered && isIntegerType
+                    && value.Kind != CompareKind.Equal && value.Kind != CompareKind.NotEqual)
+                {
+                    AppendLine($"{target} = uint({left}) {op} uint({right});");
+                }
+                else
+                {
+                    AppendLine($"{target} = {left} {op} {right};");
+                }
             }
         }
 
@@ -1470,7 +1492,16 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 BasicValueType.Int8 => value.Int8Value.ToString(),
                 BasicValueType.Int16 => value.Int16Value.ToString(),
                 BasicValueType.Int32 => value.Int32Value == int.MinValue
-                    ? "-2147483647"  // ANGLE crashes on INT_MIN regardless of representation
+                    // ANGLE/ESSL3 reject the literal `-2147483648` ("integer overflow"
+                    // because it parses as `-(2147483648)` and 2147483648 is not a
+                    // valid signed-int literal). The previous workaround substituted
+                    // `-2147483647` (bit pattern 0x80000001), which silently corrupted
+                    // every constant that needed the exact bit pattern 0x80000000 —
+                    // libopus Normalize loops, range-coder constants, IEEE -0.0
+                    // bitcasts, etc. (Surfaced 2026-05-04 by Tests23_BareUintShift.)
+                    // Real fix: emit as uint→int bitcast which produces the exact
+                    // bit pattern with no parser issue and no UB.
+                    ? "int(2147483648u)"
                     : value.Int32Value.ToString(),
                 BasicValueType.Int64 => value.Int64Value.ToString(),
                 BasicValueType.Float16 => FormatFloat(value.Float32Value),

@@ -403,11 +403,16 @@ function dispatchKernel(msg) {
         gl.finish();
 
         gl.bindBuffer(gl.TRANSFORM_FEEDBACK_BUFFER, tfBuffer);
-        const tfFloatCount = totalVertices * vNames.length;
-        const readbackFloat = new Float32Array(tfFloatCount);
-        gl.getBufferSubData(gl.TRANSFORM_FEEDBACK_BUFFER, 0, readbackFloat);
-
-        const readbackBytes = new Uint8Array(readbackFloat.buffer);
+        const tfElemCount = totalVertices * vNames.length;
+        // Read as raw bytes via Uint8Array — passing Float32Array as the destination
+        // makes Chrome canonicalize specific bit patterns through the float view
+        // (observed 2026-05-04: writing 0x80000000u via TF reads back as 0x80000001
+        // when getBufferSubData destination is Float32Array; Uint8Array preserves
+        // the bit pattern exactly). Tests23_BareUintShift / NormalizeShape_BareCondition
+        // surfaced this — see _DevComms/SpawnDev.ILGPU.
+        const readbackBytes = new Uint8Array(tfElemCount * 4);
+        gl.getBufferSubData(gl.TRANSFORM_FEEDBACK_BUFFER, 0, readbackBytes);
+        const readbackFloat = new Float32Array(readbackBytes.buffer);
         const varyingCount = vNames.length;
         const strideBytes = varyingCount * 4;
 
