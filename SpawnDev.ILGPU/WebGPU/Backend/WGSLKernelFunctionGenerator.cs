@@ -720,6 +720,27 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     if (_packedStructBSFieldLayouts.ContainsKey((paramIdx, bf.FieldIndex))) continue;
 
                     var elemType = GetBufferElementType(bf.FieldType);
+
+                    // Sub-word body-struct fields (Int8/Int16/UInt8/UInt16/Half) MUST be
+                    // excluded from coalesce. Their backing storage is `array<atomic<u32>>`
+                    // (packed sub-word — needs RMW semantics for thread-safe stores). The
+                    // coalesce path emits a plain `array<i32>` (non-atomic) binding which
+                    // would mismatch the per-load `atomicLoad(&binding[idx])` emit produced
+                    // for sub-word reads → WGSL "no matching call to atomicLoad(ptr<storage,
+                    // i32, read_write>)". `_subWordParams` is populated during GenerateHeader
+                    // which runs AFTER `DecideCoalesceGroups`, so the dict-based check above
+                    // never matches body-struct sub-word fields. Detect them here directly
+                    // from the IR element type. Surfaced 2026-05-04 by Tuvok's SilkBodyStructShape
+                    // (6 short + 9 int) — the int-coalesce bucket caught the shorts because
+                    // BasicValueType.Int16 maps to "i32" in TypeGenerator (WGSL has no i16).
+                    if (elemType is PrimitiveType subWordCheck)
+                    {
+                        var bvt = subWordCheck.BasicValueType;
+                        if (bvt == BasicValueType.Int8 || bvt == BasicValueType.Int16
+                            || bvt == BasicValueType.Float16)
+                            continue;
+                    }
+
                     var wgslElem = TypeGenerator[elemType];
                     bool isEmuF64Field = Backend.EnableF64Emulation && wgslElem == "emu_f64";
                     bool isEmuI64Field = Backend.EnableI64Emulation && (wgslElem == "emu_i64" || wgslElem == "emu_u64");
