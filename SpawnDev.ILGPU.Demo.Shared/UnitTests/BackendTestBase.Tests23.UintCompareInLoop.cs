@@ -363,6 +363,103 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                     "If only LOW 32 bits are correct, the view-byte-length compute is using a 4-byte element size for the native long buffer.");
         });
 
+        // Test I: SILK body-struct shape (6 short + 9 int ArrayView fields). Tuvok's
+        // `SilkDecodeCoreInputs` body struct from SpawnDev.Codecs hits "Invalid
+        // BindGroupLayout" on WebGPU even after rc.5 same-element-type coalesce
+        // because the coalesce only handles i32/u32/f32 fields. The 6 sub-word
+        // (short) fields stay as 6 separate bindings. Total: 1 coalesced int +
+        // 6 short bindings + 1 _scalar_params = 8 bindings — exactly at the
+        // WebGPU spec minimum for `maxStorageBuffersPerShaderStage`. Fails on
+        // adapters with stricter limits, AND when the binding-count overhead
+        // (per-field length uniforms, view metadata fields) pushes the actual
+        // descriptor count slightly higher.
+        public struct Tests23_SilkShapeStruct
+        {
+            public ArrayView<short> S0;
+            public ArrayView<short> S1;
+            public ArrayView<short> S2;
+            public ArrayView<short> S3;
+            public ArrayView<short> S4;
+            public ArrayView<short> S5;
+            public ArrayView<int> I0;
+            public ArrayView<int> I1;
+            public ArrayView<int> I2;
+            public ArrayView<int> I3;
+            public ArrayView<int> I4;
+            public ArrayView<int> I5;
+            public ArrayView<int> I6;
+            public ArrayView<int> I7;
+            public ArrayView<int> I8;
+        }
+
+        static void Tests23_SilkShapeKernel(
+            Index1D _,
+            Tests23_SilkShapeStruct s,
+            ArrayView<int> output)
+        {
+            // Read one element from each view and sum into output[0]. This forces
+            // every binding to be alive in the bind-group layout.
+            int sum = 0;
+            sum += (int)s.S0[0];
+            sum += (int)s.S1[0];
+            sum += (int)s.S2[0];
+            sum += (int)s.S3[0];
+            sum += (int)s.S4[0];
+            sum += (int)s.S5[0];
+            sum += s.I0[0];
+            sum += s.I1[0];
+            sum += s.I2[0];
+            sum += s.I3[0];
+            sum += s.I4[0];
+            sum += s.I5[0];
+            sum += s.I6[0];
+            sum += s.I7[0];
+            sum += s.I8[0];
+            output[0] = sum;
+        }
+
+        [TestMethod]
+        public async Task Tests23_SilkBodyStructShape() => await RunEmulatedTest(async accelerator =>
+        {
+            // Allocate 6 short buffers + 9 int buffers, set element[0] of each to a
+            // distinct value, dispatch the kernel which sums element[0] of each, and
+            // verify the sum.
+            using var s0 = accelerator.Allocate1D(new short[] { 1 });
+            using var s1 = accelerator.Allocate1D(new short[] { 2 });
+            using var s2 = accelerator.Allocate1D(new short[] { 3 });
+            using var s3 = accelerator.Allocate1D(new short[] { 4 });
+            using var s4 = accelerator.Allocate1D(new short[] { 5 });
+            using var s5 = accelerator.Allocate1D(new short[] { 6 });
+            using var i0 = accelerator.Allocate1D(new int[] { 10 });
+            using var i1 = accelerator.Allocate1D(new int[] { 20 });
+            using var i2 = accelerator.Allocate1D(new int[] { 30 });
+            using var i3 = accelerator.Allocate1D(new int[] { 40 });
+            using var i4 = accelerator.Allocate1D(new int[] { 50 });
+            using var i5 = accelerator.Allocate1D(new int[] { 60 });
+            using var i6 = accelerator.Allocate1D(new int[] { 70 });
+            using var i7 = accelerator.Allocate1D(new int[] { 80 });
+            using var i8 = accelerator.Allocate1D(new int[] { 90 });
+            using var output = accelerator.Allocate1D<int>(1);
+
+            var inputs = new Tests23_SilkShapeStruct
+            {
+                S0 = s0.View, S1 = s1.View, S2 = s2.View, S3 = s3.View, S4 = s4.View, S5 = s5.View,
+                I0 = i0.View, I1 = i1.View, I2 = i2.View, I3 = i3.View, I4 = i4.View, I5 = i5.View,
+                I6 = i6.View, I7 = i7.View, I8 = i8.View,
+            };
+
+            var k = accelerator.LoadAutoGroupedStreamKernel<Index1D, Tests23_SilkShapeStruct, ArrayView<int>>(
+                Tests23_SilkShapeKernel);
+            k((Index1D)1, inputs, output.View);
+            await accelerator.SynchronizeAsync();
+
+            var got = await output.CopyToHostAsync<int>();
+            int expected = 1 + 2 + 3 + 4 + 5 + 6 + 10 + 20 + 30 + 40 + 50 + 60 + 70 + 80 + 90;
+            if (got[0] != expected)
+                throw new Exception($"SILK shape body-struct: expected sum={expected} got {got[0]}. " +
+                    "If WebGPU fires Invalid BindGroupLayout, sub-word body-struct fields aren't being coalesced.");
+        });
+
         // Test G: SAME as F but WITHOUT the compound `iter < 8` safety guard.
         // Tuvok's Tests22 inline has no safety cap — loop runs purely on the
         // `rng <= EC_CODE_BOT` condition. This isolates whether the compound
