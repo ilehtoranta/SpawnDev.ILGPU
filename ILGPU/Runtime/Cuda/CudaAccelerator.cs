@@ -35,6 +35,29 @@ namespace ILGPU.Runtime.Cuda
         /// </summary>
         public static readonly int PitchedAllocationAlignmentInBytes = 128;
 
+        /// <summary>
+        /// Per-thread register cap forwarded to ptxas via
+        /// <c>CU_JIT_MAX_REGISTERS</c> when loading PTX modules. Default 255 — the
+        /// hardware per-thread cap on every sm_50+ device. Capping at the device
+        /// limit prevents register-heavy kernels (deeply unrolled loops, many
+        /// live ArrayView pointers, body structs with 10+ ArrayView fields) from
+        /// JITing to a static requirement that triggers
+        /// <c>CUDA_ERROR_LAUNCH_OUT_OF_RESOURCES</c> at launch even with
+        /// <c>blockDim=1</c>. Set to 0 to disable the cap (pre-rc.24 behavior).
+        /// Set to a smaller value (e.g. 64, 128) to trade per-thread spilling
+        /// for more occupancy on simple kernels.
+        /// </summary>
+        public static int DefaultMaxRegistersPerThread { get; set; } = 255;
+
+        /// <summary>
+        /// When true, ptxas info log output (register count, spilling, occupancy)
+        /// is surfaced via <c>Trace.WriteLine</c> tagged with the kernel name on
+        /// every successful PTX module load. Off by default to keep production
+        /// trace logs quiet; turn on when investigating CUDA register pressure
+        /// or kernel size issues.
+        /// </summary>
+        public static bool VerboseModuleLoad { get; set; }
+
         #endregion
 
         #region Static

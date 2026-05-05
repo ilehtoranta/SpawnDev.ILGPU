@@ -570,37 +570,81 @@ namespace ILGPU.Runtime.Cuda
         /// <param name="moduleData">The module data to load.</param>
         /// <param name="errorLog">The error log.</param>
         /// <returns>The error status.</returns>
+        public CudaError LoadModule(
+            out IntPtr kernelModule,
+            string moduleData,
+            out string? errorLog) =>
+            LoadModule(out kernelModule, moduleData, 0, out errorLog);
+
+        /// <summary>
+        /// Loads the given kernel module into driver memory with an optional
+        /// per-thread register cap forwarded to ptxas as <c>CU_JIT_MAX_REGISTERS</c>.
+        /// </summary>
+        /// <param name="kernelModule">The loaded module.</param>
+        /// <param name="moduleData">The module data to load.</param>
+        /// <param name="maxRegistersPerThread">
+        /// Cap on per-thread register count passed to ptxas. 0 means no cap (use
+        /// ptxas defaults). Modern devices (sm_50+) cap at 255 hardware-wide; setting
+        /// this to 255 prevents register-heavy kernels from JITing to a static
+        /// requirement that would fail with <c>CUDA_ERROR_LAUNCH_OUT_OF_RESOURCES</c>
+        /// even at <c>blockDim=1</c>.
+        /// </param>
+        /// <param name="errorLog">The error log.</param>
+        /// <returns>The error status.</returns>
         public unsafe CudaError LoadModule(
             out IntPtr kernelModule,
             string moduleData,
+            int maxRegistersPerThread,
             out string? errorLog)
         {
-            const int BufferSize = 1024;
-            const int NumOptions = 2;
+            const int BufferSize = 4096;
+            int numOptions = maxRegistersPerThread > 0 ? 6 : 5;
 
             // TODO: add support for debug information
 
-            var options = stackalloc int[NumOptions];
-            options[0] = 5; // CU_JIT_ERROR_LOG_BUFFER
-            options[1] = 6; // CU_JIT_ERROR_LOG_BUFFER_SIZE_BYTES
+            var options = stackalloc int[6];
+            options[0] = 5;   // CU_JIT_ERROR_LOG_BUFFER
+            options[1] = 6;   // CU_JIT_ERROR_LOG_BUFFER_SIZE_BYTES
+            options[2] = 3;   // CU_JIT_INFO_LOG_BUFFER
+            options[3] = 4;   // CU_JIT_INFO_LOG_BUFFER_SIZE_BYTES
+            options[4] = 12;  // CU_JIT_LOG_VERBOSE - forces ptxas to print reg/spill counts
+            options[5] = 0;   // CU_JIT_MAX_REGISTERS
 
             var errorBuffer = stackalloc byte[BufferSize];
+            var infoBuffer = stackalloc byte[BufferSize];
 
-            var optionValues = stackalloc byte[NumOptions * sizeof(void*)];
+            var optionValues = stackalloc byte[6 * sizeof(void*)];
             var values = (void**)optionValues;
             values[0] = errorBuffer;
             values[1] = (void*)BufferSize;
+            values[2] = infoBuffer;
+            values[3] = (void*)BufferSize;
+            values[4] = (void*)(IntPtr)1;  // verbose = on
+            // CU_JIT_MAX_REGISTERS expects the value packed into the void* slot
+            // as an unsigned-int sized integer.
+            values[5] = (void*)(IntPtr)maxRegistersPerThread;
 
             var result = LoadModule(
                 out kernelModule,
                 moduleData,
-                NumOptions,
+                numOptions,
                 new IntPtr(options),
                 new IntPtr(optionValues));
 
-            errorLog = result != CudaError.CUDA_SUCCESS
+            // Surface info log too for diagnostics — concatenate when present.
+            string? infoLog = Encoding.ASCII.GetString(infoBuffer, BufferSize)
+                .TrimEnd('\0', ' ', '\r', '\n');
+            string? errLog = result != CudaError.CUDA_SUCCESS
                 ? Encoding.ASCII.GetString(errorBuffer, BufferSize)
+                    .TrimEnd('\0', ' ', '\r', '\n')
                 : null;
+            errorLog = (errLog, infoLog) switch
+            {
+                (null, null or "") => null,
+                (null, _) => infoLog,
+                (_, null or "") => errLog,
+                _ => errLog + "\n[INFO] " + infoLog,
+            };
             return result;
         }
 

@@ -1435,6 +1435,108 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                 throw new Exception($"RegisterHeavyBody: expected {expected} got {got[0]}");
         });
 
+        // Test rc.24 CUDA register-pressure JIT cap (CU_JIT_MAX_REGISTERS=255).
+        // Tuvok's SilkDecodeCoreGpu (deep LPC unroll over 16+ live variables) JIT'd
+        // to a kernel statically requiring more registers than the per-thread
+        // hardware cap of any sm_50+ device, so `cudaLaunchKernel` rejected with
+        // `CUDA_ERROR_LAUNCH_OUT_OF_RESOURCES` even at blockDim=1. The fix is
+        // structural: ILGPU now passes `CU_JIT_MAX_REGISTERS = 255` to
+        // `cuModuleLoadDataEx`, forcing ptxas to spill instead of producing an
+        // un-launchable kernel. Configurable via
+        // `CudaAccelerator.DefaultMaxRegistersPerThread` (default 255, set 0 to
+        // disable).
+        //
+        // The kernel below is intentionally register-pressure-heavy: a long
+        // mutual-dependency chain of 24 live integers from a single ArrayView
+        // input that must all stay alive through the final reduction, exercising
+        // the deep-unroll pattern that surfaces ptxas' >255 reg/thread choice on
+        // some shapes.
+        static void Tests23_DeepUnrollKernel(
+            Index1D _,
+            ArrayView<int> input,
+            ArrayView<int> output)
+        {
+            int v0 = input[0];
+            int v1 = input[1] * 7 + v0;
+            int v2 = input[2] * 11 + v1;
+            int v3 = input[3] * 13 + v2;
+            int v4 = input[4] * 17 + v3;
+            int v5 = input[5] * 19 + v4;
+            int v6 = input[6] * 23 + v5;
+            int v7 = input[7] * 29 + v6;
+            int v8 = input[8] * 31 + v7;
+            int v9 = input[9] * 37 + v8;
+            int v10 = input[10] * 41 + v9;
+            int v11 = input[11] * 43 + v10;
+            int v12 = input[12] * 47 + v11;
+            int v13 = input[13] * 53 + v12;
+            int v14 = input[14] * 59 + v13;
+            int v15 = input[15] * 61 + v14;
+            int v16 = input[16] * 67 + v15;
+            int v17 = input[17] * 71 + v16;
+            int v18 = input[18] * 73 + v17;
+            int v19 = input[19] * 79 + v18;
+            int v20 = input[20] * 83 + v19;
+            int v21 = input[21] * 89 + v20;
+            int v22 = input[22] * 97 + v21;
+            int v23 = input[23] * 101 + v22;
+            // Final reduction folds every live value back, prevents register
+            // re-use across the chain.
+            output[0] = v0 ^ v1 ^ v2 ^ v3 ^ v4 ^ v5 ^ v6 ^ v7
+                ^ v8 ^ v9 ^ v10 ^ v11 ^ v12 ^ v13 ^ v14 ^ v15
+                ^ v16 ^ v17 ^ v18 ^ v19 ^ v20 ^ v21 ^ v22 ^ v23;
+        }
+
+        [TestMethod]
+        public async Task Tests23_DeepUnroll_NoLaunchFailure() =>
+            await RunEmulatedTest(async accelerator =>
+        {
+            var inputData = new int[24];
+            for (int i = 0; i < 24; i++)
+                inputData[i] = i + 1;
+            using var inBuf = accelerator.Allocate1D<int>(24);
+            using var outBuf = accelerator.Allocate1D<int>(1);
+            inBuf.CopyFromCPU(inputData);
+            var k = accelerator.LoadAutoGroupedStreamKernel<
+                Index1D, ArrayView<int>, ArrayView<int>>(
+                Tests23_DeepUnrollKernel);
+            k((Index1D)1, inBuf.View, outBuf.View);
+            await accelerator.SynchronizeAsync();
+
+            // CPU reference
+            int v0 = inputData[0];
+            int v1 = inputData[1] * 7 + v0;
+            int v2 = inputData[2] * 11 + v1;
+            int v3 = inputData[3] * 13 + v2;
+            int v4 = inputData[4] * 17 + v3;
+            int v5 = inputData[5] * 19 + v4;
+            int v6 = inputData[6] * 23 + v5;
+            int v7 = inputData[7] * 29 + v6;
+            int v8 = inputData[8] * 31 + v7;
+            int v9 = inputData[9] * 37 + v8;
+            int v10 = inputData[10] * 41 + v9;
+            int v11 = inputData[11] * 43 + v10;
+            int v12 = inputData[12] * 47 + v11;
+            int v13 = inputData[13] * 53 + v12;
+            int v14 = inputData[14] * 59 + v13;
+            int v15 = inputData[15] * 61 + v14;
+            int v16 = inputData[16] * 67 + v15;
+            int v17 = inputData[17] * 71 + v16;
+            int v18 = inputData[18] * 73 + v17;
+            int v19 = inputData[19] * 79 + v18;
+            int v20 = inputData[20] * 83 + v19;
+            int v21 = inputData[21] * 89 + v20;
+            int v22 = inputData[22] * 97 + v21;
+            int v23 = inputData[23] * 101 + v22;
+            int expected = v0 ^ v1 ^ v2 ^ v3 ^ v4 ^ v5 ^ v6 ^ v7
+                ^ v8 ^ v9 ^ v10 ^ v11 ^ v12 ^ v13 ^ v14 ^ v15
+                ^ v16 ^ v17 ^ v18 ^ v19 ^ v20 ^ v21 ^ v22 ^ v23;
+
+            var got = await outBuf.CopyToHostAsync<int>();
+            if (got[0] != expected)
+                throw new Exception($"DeepUnroll: expected {expected} got {got[0]}");
+        });
+
         // Test rc.11/rc.12 dispatcher snapshot bug surfaced by Data 2026-05-04: ML
         // weights uploaded via chunked SubView.CopyFromCPU then read by many kernel
         // dispatches return zeros. Mimics BlazeFace pattern: large buffer,

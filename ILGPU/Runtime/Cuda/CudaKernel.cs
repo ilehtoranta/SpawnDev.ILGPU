@@ -51,6 +51,7 @@ namespace ILGPU.Runtime.Cuda
             var kernelLoaded = CurrentAPI.LoadModule(
                 out modulePtr,
                 kernel.PTXAssembly,
+                CudaAccelerator.DefaultMaxRegistersPerThread,
                 out string? errorLog);
             if (kernelLoaded != CudaError.CUDA_SUCCESS)
             {
@@ -60,6 +61,13 @@ namespace ILGPU.Runtime.Cuda
                 else
                     Trace.WriteLine(errorLog);
             }
+            else if (CudaAccelerator.VerboseModuleLoad
+                && !string.IsNullOrWhiteSpace(errorLog))
+            {
+                // Surface ptxas info log when verbose mode is on. Used to diagnose
+                // register pressure / spilling decisions by ptxas.
+                Trace.WriteLine($"[ptxas] {kernel.Name}: {errorLog}");
+            }
             CudaException.ThrowIfFailed(kernelLoaded);
 
             CudaException.ThrowIfFailed(
@@ -67,6 +75,36 @@ namespace ILGPU.Runtime.Cuda
                     out functionPtr,
                     modulePtr,
                     kernel.Name));
+
+            if (CudaAccelerator.VerboseModuleLoad)
+            {
+                Trace.WriteLine($"[cuFuncAttr] {kernel.Name}: {DumpFunctionAttributes(functionPtr)}");
+            }
+        }
+
+        [System.Runtime.InteropServices.DllImport("nvcuda", EntryPoint = "cuFuncGetAttribute")]
+        private static extern int cuFuncGetAttribute(
+            out int pi, int attrib, IntPtr funcHandle);
+
+        private static string DumpFunctionAttributes(IntPtr funcHandle)
+        {
+            string[] names = {
+                "MAX_THREADS_PER_BLOCK",  // 0
+                "SHARED_SIZE_BYTES",       // 1
+                "CONST_SIZE_BYTES",        // 2
+                "LOCAL_SIZE_BYTES",        // 3
+                "NUM_REGS",                // 4
+                "PTX_VERSION",             // 5
+                "BINARY_VERSION",          // 6
+            };
+            var sb = new System.Text.StringBuilder();
+            for (int i = 0; i < names.Length; i++)
+            {
+                int err = cuFuncGetAttribute(out int val, i, funcHandle);
+                if (err == 0) sb.Append($"{names[i]}={val} ");
+                else sb.Append($"{names[i]}=ERR({err}) ");
+            }
+            return sb.ToString().TrimEnd();
         }
 
         #endregion

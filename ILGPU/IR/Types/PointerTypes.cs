@@ -260,7 +260,25 @@ namespace ILGPU.IR.Types
             MemoryAddressSpace addressSpace)
             : base(typeContext, elementType, addressSpace)
         {
-            Size = Alignment = 4;
+            // After LowerViews runs, a ViewType is replaced with a StructureType
+            // containing a pointer + length. The alignment of that lowered struct
+            // is dictated by the pointer alignment (8 on 64-bit, 4 on 32-bit).
+            // Body structs containing ViewType fields propagate field alignment
+            // up to the struct alignment; the PTX emit then writes
+            // `.param .align <struct_alignment> .b8 name[size]` directly. If the
+            // ViewType's reported Alignment is 4 on a 64-bit target, the body
+            // struct gets `.align 4` while the host-side argument buffer is laid
+            // out at 8-byte alignment. CUDA detects the mismatch on launch and
+            // rejects with `CUDA_ERROR_LAUNCH_OUT_OF_RESOURCES`. Mirror PointerType:
+            // alignment must match the host pointer size on the target.
+            if (typeContext.TargetPlatform.Is64Bit())
+            {
+                Size = Alignment = 8;
+            }
+            else
+            {
+                Size = Alignment = 4;
+            }
             AddFlags(TypeFlags.ViewDependent);
         }
 
