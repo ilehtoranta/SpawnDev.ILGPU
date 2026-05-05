@@ -45,16 +45,41 @@ Hypothesis: similar shared-state issue, but the GLSL backend emits `target = typ
 
 **Fix shape:** likely the same scope-snapshot fix as Bug B for `GLSLCodeGenerator.GenerateCode(MethodCall)`'s fn-call branch. Plus possibly a pass that resolves intermediate-value types before emitting any assign.
 
-### Bug D: ArrayView-as-fn-param marshaling (UNSPECIFIED)
+### Bug D: ArrayView-as-fn-param marshaling (NO LONGER DEFERRED — 2026-05-05)
 
 When a NoInlining helper takes `ArrayView<int>` as a parameter, the WGSL fn signature has no clean way to express "pointer to a storage-buffer-bound array slice" as a fn parameter. WGSL fns can take `ptr<storage, ...>` only with strict address-space qualifications. Wasm has the same issue but in a different form (Wasm helpers receive raw memory offsets, not view structs).
 
-**Fix shape (deferred — not blocking Tuvok):**
+**Fix shape:**
 - For WGSL: pass the kernel's `_subWordParams` / storage-buffer var by reference (ptr) along with an offset. Body re-creates a virtual view using offset arithmetic.
 - For GLSL: not feasible cleanly under WebGL 2.0 — Transform Feedback varyings + uniforms don't lend themselves to fn-param passing. Likely stays as a known-not-supported case.
 - For Wasm: pass the view's `_memoryOffset` + `_byteLength` as scalar i32s; body reconstructs.
 
-This is rc.17+ scope. Tuvok's `Idct16Row` does NOT take views as params — only `int` + `ref int` outputs lowering to `ptr<function, i32>` — so Bug D is not on Tuvok's critical path.
+**2026-05-05 status update (Geordi):** Bug D is the active blocker for Tuvok's Codecs `OpusRangeDecoderGpu_DecodeUint_LargeRanges_BitExactVsCpu`. Tuvok currently gates the test with `UnsupportedTestException` for WebGPU after the rc.14 Div/Rem fix unblocked SmallRanges but the long-form path still hits a 30s WGSL cold-compile timeout. Per Rule 2a (Editor Owns Every Bug), no longer deferred — this is active ILGPU lane work.
+
+**Reproducer landed in `BackendTestBase.Tests23.UintCompareInLoop.cs::Tests23_DecodeUint_LongForm_CompileSmoke`** (2026-05-05). Mirrors the OpusRangeDecoderGpu DecodeUint long-form path with a 10-field state struct passed by ref through 5 nested helpers. PASSES on CPU (288ms), CUDA (646ms), OpenCL (716ms), Wasm, WebGL. **FAILS** on WebGPU + WebGPUNoSubgroups (>30s cold-compile, hits PMT timeout).
+
+**Root cause confirmed via WGSL dump diff (2026-05-05 13:17 vs 13:23):**
+- *Without NoInlining attrs* (default Aggressive Inliner): single 600-line `fn main` with 217 var decls + 5 nested loops + heavy bitcast<u32>/<i32> compare patterns. Naga validator cold-compile > 30s.
+- *With NoInlining attrs on every helper*: 11 separate `fn`s emit, ~60 lines each, Naga validator cold-compile drops to ~1s. **But output is wrong** — fn-def path bugs surface:
+  1. `fn Tests23_ReadByte_973(p_1404 : ptr<function, struct_51>, p_1405 : i32, p_1406 : i32, p_1407 : i32) -> i32` — `p_1405` is the ArrayView<byte> packet, emitted as `i32` instead of `ptr<storage, array<atomic<u32>>, read_write>`.
+  2. Inside `Tests23_OpusInit_961` body: `// Call: Tests23_ReadByte_16 (Unmapped)` — helper-to-helper calls fall to "Unmapped fallback" because `WGSLFunctionGenerator` doesn't override `GenerateCode(MethodCall)` (only the kernel generator does).
+  3. Kernel main missing `let v_4 = &param1;` for sub-word ArrayView (`SetupParameterBindings` line ~4036 deliberately skips alias for `_subWordParams`). Call site emits `Tests23_DecodeUint_963(&v_10, v_4, ...)` referencing undeclared `v_4`.
+
+**Concrete fix scope:**
+- `WGSLFunctionGenerator.GenerateHeaderStub` (lines 58-85): when `param.ParameterType is ViewType vt`, emit `p_X : ptr<storage, array<{element_or_atomic_u32}>, read_write>` instead of just `TypeGenerator[param.ParameterType]`. Sub-word ArrayView (Int8/Int16/Float16-emulated) maps to `array<atomic<u32>>`; full-word maps to `array<{TypeGenerator[elemType]}>`.
+- `WGSLFunctionGenerator.GenerateCode` (lines 162-171): the existing `ptr<...>` branch already does `let {variable.Name} = p_{param.Id};` — should work for the new ptr-typed view params.
+- `WGSLFunctionGenerator` needs to override `GenerateCode(MethodCall)` to dispatch to inline-helper / fn-call / intrinsic branches (parallel to `WGSLKernelFunctionGenerator.GenerateCode(MethodCall)` lines 1996-2160). Without this override, helper-to-helper calls fall to "Unmapped fallback".
+- `WGSLKernelFunctionGenerator.SetupParameterBindings` (line 4036): drop the `if (!_subWordParams.ContainsKey(param.Index))` guard around `let {variable.Name} = &param{param.Index};`. Sub-word params are `array<atomic<u32>>` and `&param{N}` IS a valid `ptr<storage, array<atomic<u32>>, read_write>` — emit the alias unconditionally so call sites have the variable available.
+- Body codegen (`GenerateCode(LoadElementAddress)`): when source is a Parameter of ViewType, emit `&(*p_buf)[idx]` syntax (or shorter `&p_buf[idx]` if WGSL allows; verify with Naga). For sub-word, the `(idx)/4` divisor logic needs to route through the deref'd ptr.
+- Sub-word atomic load/store: existing `atomicLoad(&param1[(u32(v_143) / 4u)])` syntax becomes `atomicLoad(&(*v_buf_alias)[(u32(idx) / 4u)])` inside helpers.
+- `EmitNonInlinedMethodCall` (line 2172): when arg type is ViewType, ensure the arg variable is the ptr alias (e.g. `v_4` from the kernel's `let v_4 = &param1;`), not the ArrayView's i32 offset.
+
+**Sub-word vs full-word coverage:**
+- Sub-word ArrayView (byte/sbyte/short/ushort/Half-emulated): array<atomic<u32>> — covered above.
+- Full-word ArrayView (int/uint/float/long/double native): regular array<i32>/u32/f32/etc. — same ptr<storage, ...> mechanism, no atomic deref.
+- Body-struct ArrayView fields (param1_f0, param2_f3 synthetic indices) — defer to a follow-up; rc.27's body-struct OUTPUT fix is orthogonal.
+
+This was previously listed as "rc.17+ scope. Tuvok's `Idct16Row` does NOT take views as params... so Bug D is not on Tuvok's critical path." That assumption was wrong: Tuvok's `OpusRangeDecoderGpu` family DOES pass `ArrayView<byte>` through every helper, and his DecodeUint LargeRanges test surfaces it on every WebGPU run.
 
 ### Bug E: Wasm narrowing fix may be incomplete for iDCT 16x16 (NOT FIXED)
 

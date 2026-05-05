@@ -1801,5 +1801,239 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
         });
 
         #endregion
+
+        #region Test N — DecodeUint long-form (libopus shape) WGSL compile shape
+
+        // Mirrors SpawnDev.Codecs OpusRangeDecoderGpu.DecodeUint long-form path
+        // (ftb > EC_UINT_BITS) with a 10-field state struct passed by ref through
+        // 5 nested helper functions, each containing a `while` loop over an
+        // ArrayView<byte>. Surfaced 2026-05-04 as a 30s WGSL cold-compile timeout
+        // on WebGPU when wgpu's Naga validator processes this kernel shape.
+        // Mirrored here so we can profile the WGSL emit and fix codegen at source.
+        public struct Tests23_OpusRangeState
+        {
+            public uint Offs;
+            public uint EndOffs;
+            public uint EndWindow;
+            public int NEndBits;
+            public int NBitsTotal;
+            public uint Rng;
+            public uint Val;
+            public uint Ext;
+            public int Rem;
+            public int Error;
+        }
+
+        const int Tests23_EC_SYM_BITS = 8;
+        const uint Tests23_EC_SYM_MAX = (1u << 8) - 1u;
+        const uint Tests23_EC_CODE_TOP = 1u << 31;
+        const uint Tests23_EC_CODE_BOT = (1u << 31) >> 8;
+        const int Tests23_EC_CODE_EXTRA = 7;
+
+        static int Tests23_ReadByte(
+            ref Tests23_OpusRangeState state,
+            ArrayView<byte> buf, int bufStart, uint storage)
+        {
+            if (state.Offs < storage)
+            {
+                int b = buf[bufStart + (int)state.Offs];
+                state.Offs++;
+                return b;
+            }
+            return 0;
+        }
+
+        static int Tests23_ReadByteFromEnd(
+            ref Tests23_OpusRangeState state,
+            ArrayView<byte> buf, int bufStart, uint storage)
+        {
+            if (state.EndOffs < storage)
+            {
+                state.EndOffs++;
+                int b = buf[bufStart + (int)(storage - state.EndOffs)];
+                return b;
+            }
+            return 0;
+        }
+
+        static void Tests23_Normalize(
+            ref Tests23_OpusRangeState state,
+            ArrayView<byte> buf, int bufStart, uint storage)
+        {
+            while (state.Rng <= Tests23_EC_CODE_BOT)
+            {
+                state.NBitsTotal += Tests23_EC_SYM_BITS;
+                state.Rng <<= Tests23_EC_SYM_BITS;
+                int sym = state.Rem;
+                state.Rem = Tests23_ReadByte(ref state, buf, bufStart, storage);
+                sym = (sym << Tests23_EC_SYM_BITS | state.Rem) >> (Tests23_EC_SYM_BITS - Tests23_EC_CODE_EXTRA);
+                state.Val = ((state.Val << Tests23_EC_SYM_BITS) + (Tests23_EC_SYM_MAX & (uint)~sym)) & (Tests23_EC_CODE_TOP - 1u);
+            }
+        }
+
+        static uint Tests23_DecodeBits(
+            ref Tests23_OpusRangeState state,
+            ArrayView<byte> buf, int bufStart, uint storage,
+            int bits)
+        {
+            uint window = state.EndWindow;
+            int available = state.NEndBits;
+            if (available < bits)
+            {
+                do
+                {
+                    window |= (uint)Tests23_ReadByteFromEnd(ref state, buf, bufStart, storage) << available;
+                    available += Tests23_EC_SYM_BITS;
+                }
+                while (available <= 32 - Tests23_EC_SYM_BITS);
+            }
+            uint ret = window & ((1u << bits) - 1u);
+            window >>= bits;
+            available -= bits;
+            state.EndWindow = window;
+            state.NEndBits = available;
+            state.NBitsTotal += bits;
+            return ret;
+        }
+
+        static int Tests23_EcIlog(uint v)
+        {
+            int n = 0;
+            while (v != 0u) { v >>= 1; n++; }
+            return n;
+        }
+
+        static uint Tests23_DecodeUint(
+            ref Tests23_OpusRangeState state,
+            ArrayView<byte> buf, int bufStart, uint storage,
+            uint ft)
+        {
+            const int EC_UINT_BITS = 8;
+            if (ft <= 1u) { state.Error = 1; return 0; }
+            uint decoded = ft - 1u;
+            int ftb = Tests23_EcIlog(decoded);
+            if (ftb > EC_UINT_BITS)
+            {
+                ftb -= EC_UINT_BITS;
+                uint scaledFt = (decoded >> ftb) + 1u;
+                state.Ext = state.Rng / scaledFt;
+                uint sd = state.Val / state.Ext;
+                uint s = scaledFt - (sd + 1u < scaledFt ? sd + 1u : scaledFt);
+                uint upd = state.Ext * (scaledFt - (s + 1u));
+                state.Val -= upd;
+                state.Rng = s > 0u ? state.Ext * ((s + 1u) - s) : state.Rng - upd;
+                Tests23_Normalize(ref state, buf, bufStart, storage);
+                uint t = (s << ftb) | Tests23_DecodeBits(ref state, buf, bufStart, storage, ftb);
+                if (t <= decoded) return t;
+                state.Error = 1;
+                return decoded;
+            }
+            else
+            {
+                state.Ext = state.Rng / ft;
+                uint sd = state.Val / state.Ext;
+                uint s = ft - (sd + 1u < ft ? sd + 1u : ft);
+                uint upd = state.Ext * (ft - (s + 1u));
+                state.Val -= upd;
+                state.Rng = s > 0u ? state.Ext * ((s + 1u) - s) : state.Rng - upd;
+                Tests23_Normalize(ref state, buf, bufStart, storage);
+                return s;
+            }
+        }
+
+        static Tests23_OpusRangeState Tests23_OpusInit(
+            ArrayView<byte> buf, int bufStart, uint storage)
+        {
+            var state = new Tests23_OpusRangeState
+            {
+                Offs = 0,
+                EndOffs = 0,
+                EndWindow = 0,
+                NEndBits = 0,
+                NBitsTotal = 9,
+                Rem = -1,
+                Rng = 0,
+                Val = 0,
+                Ext = 0,
+                Error = 0,
+            };
+            state.Rem = Tests23_ReadByte(ref state, buf, bufStart, storage);
+            state.Rng = 1u << (Tests23_EC_SYM_BITS - Tests23_EC_CODE_EXTRA);
+            state.Val = state.Rng - 1u - (uint)(state.Rem >> (Tests23_EC_SYM_BITS - Tests23_EC_CODE_EXTRA));
+            state.Rng <<= Tests23_EC_SYM_BITS;
+            return state;
+        }
+
+        static void Tests23_DecodeUintLongFormKernel(
+            Index1D _,
+            ArrayView<byte> packet, int packetStart, int packetStorage,
+            ArrayView<uint> ftPerSymbol,
+            ArrayView<uint> decodedOut, int symbolCount)
+        {
+            var state = Tests23_OpusInit(packet, packetStart, (uint)packetStorage);
+            for (int i = 0; i < symbolCount; i++)
+            {
+                decodedOut[i] = Tests23_DecodeUint(
+                    ref state, packet, packetStart, (uint)packetStorage,
+                    ftPerSymbol[i]);
+            }
+        }
+
+        // CODEGEN-shape regression: kernel must compile + run on every backend
+        // in well under the PMT 30s/test budget. We don't assert bit-exactness
+        // here — Codecs OpusRangeDecoderGpu_DecodeUint_*_BitExactVsCpu owns
+        // bit-correctness; this test owns "the WGSL Naga validator can compile
+        // this kernel shape inside the PMT 30s/test budget."
+        //
+        // CURRENTLY FAILING on WebGPU + WebGPUNoSubgroups (cold-compile > 30s,
+        // PASS on CPU/CUDA/OpenCL/WebGL/Wasm). Root cause: ILGPU IR Inliner
+        // (Aggressive default) inlines every helper method into the kernel
+        // entry, producing a ~600-line WGSL fn with 217 var declarations + 5
+        // nested loops + heavy bitcast<u32>/<i32> sign-toggle pairs. wgpu's
+        // Naga validator cold-compile of this shape exceeds 30s.
+        //
+        // The fix path is the rc.16 fn-def codegen Bug D
+        // (Plans/rc16-fn-def-codegen-harden.md): ArrayView-as-fn-param
+        // marshaling. With NoInlining attrs on each helper, the WGSL emit
+        // collapses to ~60 lines per fn (11 fns, fast Naga validation), but
+        // ArrayView fn-params currently emit as `i32` instead of
+        // `ptr<storage, array<atomic<u32>>, read_write>` and helper-to-helper
+        // calls show "Unmapped fallback" — bug D in the rc.16 plan.
+        [TestMethod]
+        public async Task Tests23_DecodeUint_LongForm_CompileSmoke() => await RunEmulatedTest(async accelerator =>
+        {
+            // 16-byte synthetic packet with arbitrary bytes — the kernel doesn't
+            // need bit-correct input, just exercise the long-form code path.
+            var packet = new byte[]
+            {
+                0x80, 0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE,
+                0xF0, 0x0F, 0x55, 0xAA, 0x33, 0xCC, 0x77, 0x88,
+            };
+            // ft values > 256 force the long-form path (ftb > EC_UINT_BITS = 8).
+            var fts = new uint[] { 1024u, 65536u, 100000u, 1u << 24, 0xFFFFFFFFu };
+            using var dPacket = accelerator.Allocate1D(packet);
+            using var dFt = accelerator.Allocate1D(fts);
+            using var dOut = accelerator.Allocate1D<uint>(fts.Length);
+
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            var k = accelerator.LoadAutoGroupedStreamKernel<
+                Index1D,
+                ArrayView<byte>, int, int,
+                ArrayView<uint>,
+                ArrayView<uint>, int>(Tests23_DecodeUintLongFormKernel);
+            k((Index1D)1, dPacket.View, 0, packet.Length, dFt.View, dOut.View, fts.Length);
+            await accelerator.SynchronizeAsync();
+            sw.Stop();
+
+            // Sanity: kernel compiled + ran (any crash inside compile / dispatch
+            // would have thrown before reaching here). We don't gate on a wall
+            // time threshold inside the test (that varies per machine) — but
+            // the PMT 30s/test budget is the real gate; any regression that
+            // pushes this kernel past the budget breaks PMT and surfaces the
+            // codegen perf issue immediately.
+            await dOut.CopyToHostAsync<uint>();
+        });
+
+        #endregion
     }
 }
