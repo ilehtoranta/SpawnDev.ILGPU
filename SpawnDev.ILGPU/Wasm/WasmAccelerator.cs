@@ -39,6 +39,19 @@ namespace SpawnDev.ILGPU.Wasm
         private int _workerCount = 4;
 
         /// <summary>
+        /// Per-dispatch watchdog timeout in seconds. If the worker tasks for a single
+        /// dispatch don't all complete within this window, throw a <see cref="TimeoutException"/>
+        /// with diagnostic context (kernel name, dispatch number, completion ratio).
+        ///
+        /// Default 120s — large enough that legitimately-slow Wasm kernels (large Conv2D
+        /// on big tensors) complete in time, small enough that an infinite-loop kernel
+        /// surfaces in 2 minutes instead of hitting the outer harness 10-minute timeout.
+        /// Set to 0 to disable. Surfaced 2026-05-04 by Data's StyleMosaic Wasm hang
+        /// where the kernel didn't error but never posted back.
+        /// </summary>
+        public static int WasmDispatchWatchdogSeconds { get; set; } = 120;
+
+        /// <summary>
         /// Maximum SharedArrayBuffer-backed WebAssembly.Memory size in 64 KiB pages.
         /// Set at construction from <see cref="WasmBackendOptions.MaxLinearMemoryPages"/>
         /// (default 16384 / 1 GiB). Used as the <c>maximum</c> argument when the accelerator
@@ -1548,24 +1561,50 @@ namespace SpawnDev.ILGPU.Wasm
             }
 
             // Wait for all workers to complete — but fast-fault on the FIRST worker
-            // exception. `Task.WhenAll(tasks)` waits for ALL tasks before throwing the
-            // first exception, which means a single worker trap (kernel OOB, divide-by-
-            // zero, etc.) hangs the dispatch waiting for OTHER workers that may also be
-            // blocked or never post back. Instead, drain via WhenAny and surface the
-            // first fault immediately. Other workers' TCSes complete eventually and
-            // their resources clean up via the persistent OnMessage handlers.
+            // exception, AND watchdog timeout to catch infinite-loop kernels.
             //
+            // (1) Fast-fault: `Task.WhenAll(tasks)` waits for ALL tasks before throwing
+            // the first exception, so a single worker trap (kernel OOB, divide-by-zero)
+            // hangs the dispatch waiting for OTHER workers that may also be blocked or
+            // never post back. Drain via WhenAny and surface the first fault immediately.
             // Surfaced 2026-05-04 by Data's StyleMosaic Wasm 10+ minute hang at rc.16:
-            // worker 2 hit a kernel OOB at dispatch 176, but the dispatcher waited
-            // 10 minutes (PMT timeout) instead of the actionable 20-second error path.
-            // PerOpSync diagnostic mode caught it because forced sync after every
-            // dispatch funneled errors through SynchronizeAsync which DID propagate
-            // exceptions. This fix makes the non-PerOpSync path equally responsive.
+            // worker 2 hit a kernel OOB at dispatch 176; dispatcher waited 10 min
+            // (PMT timeout) instead of 20s actionable.
+            //
+            // (2) Watchdog: if a kernel infinite-loops (no error, no post-back), the
+            // worker TCS never resolves and Task.WhenAny blocks forever. Add a per-
+            // dispatch watchdog timeout (default 120s, configurable via
+            // `WasmDispatchWatchdogSeconds`) so the test fails actionably instead of
+            // hitting the outer harness timeout. Default chosen large enough that
+            // legitimately-slow kernels (large Conv2D on Wasm) complete in time, but
+            // small enough that a hang surfaces in 2 min vs 10+ min.
             {
                 var remaining = new List<Task>(tasks);
+                int watchdogMs = WasmDispatchWatchdogSeconds * 1000;
                 while (remaining.Count > 0)
                 {
-                    var done = await Task.WhenAny(remaining);
+                    Task done;
+                    if (watchdogMs > 0)
+                    {
+                        var watchdog = Task.Delay(watchdogMs);
+                        var first = await Task.WhenAny(Task.WhenAny(remaining), watchdog);
+                        if (first == watchdog)
+                        {
+                            // Hit the watchdog. Surface a diagnostic hang error.
+                            string hangDiag = $"[Wasm] Dispatcher hang watchdog fired after {WasmDispatchWatchdogSeconds}s. " +
+                                $"kernel={(compiledKernel.EntryPoint?.Name ?? "<unknown>")} disp={dispNum} " +
+                                $"workersCompleted={tasks.Count - remaining.Count}/{tasks.Count} " +
+                                $"items={totalItems} workerCount={workerCount} hasBarriers={hasBarriers}. " +
+                                $"Likely infinite-loop kernel or worker that never posted back. Set " +
+                                $"WasmAccelerator.WasmDispatchWatchdogSeconds higher if this is a legitimately-slow kernel.";
+                            throw new TimeoutException(hangDiag);
+                        }
+                        done = await ((Task<Task>)first); // unwrap WhenAny's inner task
+                    }
+                    else
+                    {
+                        done = await Task.WhenAny(remaining);
+                    }
                     remaining.Remove(done);
                     if (done.IsFaulted)
                     {
