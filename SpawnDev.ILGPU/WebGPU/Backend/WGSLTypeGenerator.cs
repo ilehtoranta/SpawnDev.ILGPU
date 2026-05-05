@@ -210,32 +210,65 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
         public void GenerateTypeDefinitions(StringBuilder builder)
         {
-            // Emit struct definitions
-            foreach (var kvp in mapping)
+            // Emit struct definitions.
+            //
+            // CONCURRENT-MODIFICATION FIX 2026-05-04: `this[fieldType]` (the indexer)
+            // can REGISTER a new type in `mapping` (see line 207). Iterating `mapping`
+            // directly while the indexer mutates it throws
+            // `InvalidOperationException: InvalidOperation_EnumFailedVersion`.
+            // Surfaced by `Tests23_MinimalShortIntBodyStruct_IntOnly` on WebGPU when
+            // a struct field's type wasn't pre-registered before this method ran.
+            // Snapshot the entries first so subsequent indexer calls can grow the
+            // dictionary without invalidating the enumerator. Outer-loop must also
+            // re-iterate if any new struct types were added by recursive emission;
+            // we drain via a worklist so all transitively-referenced struct types
+            // get definitions emitted.
+            var emitted = new HashSet<TypeNode>();
+            while (true)
             {
-                if (kvp.Key is StructureType structType)
+                var snapshot = mapping.ToList();
+                bool emittedAny = false;
+                foreach (var kvp in snapshot)
                 {
-                    // Skip if mapped to a built-in WGSL type
-                    if (kvp.Value == "i32" ||
-                        kvp.Value == "u32" ||
-                        kvp.Value == "f32" ||
-                        kvp.Value == "f16" ||
-                        kvp.Value == "bool" ||
-                        kvp.Value.StartsWith("vec") ||
-                        kvp.Value.StartsWith("mat") ||
-                        kvp.Value.StartsWith("ptr<"))
-                        continue;
-
-                    builder.AppendLine($"struct {kvp.Value} {{");
-                    int fieldIdx = 0;
-                    foreach (var fieldType in structType.Fields)
+                    if (emitted.Contains(kvp.Key)) continue;
+                    if (kvp.Key is StructureType structType)
                     {
-                        builder.AppendLine($"    field_{fieldIdx} : {this[fieldType]},");
-                        fieldIdx++;
+                        // Skip if mapped to a built-in WGSL type
+                        if (kvp.Value == "i32" ||
+                            kvp.Value == "u32" ||
+                            kvp.Value == "f32" ||
+                            kvp.Value == "f16" ||
+                            kvp.Value == "bool" ||
+                            kvp.Value.StartsWith("vec") ||
+                            kvp.Value.StartsWith("mat") ||
+                            kvp.Value.StartsWith("ptr<"))
+                        {
+                            emitted.Add(kvp.Key);
+                            continue;
+                        }
+
+                        builder.AppendLine($"struct {kvp.Value} {{");
+                        int fieldIdx = 0;
+                        foreach (var fieldType in structType.Fields)
+                        {
+                            // The indexer may add `fieldType` to `mapping` if not present;
+                            // safe under our snapshot+drain pattern.
+                            builder.AppendLine($"    field_{fieldIdx} : {this[fieldType]},");
+                            fieldIdx++;
+                        }
+                        builder.AppendLine("};");
+                        builder.AppendLine();
+                        emitted.Add(kvp.Key);
+                        emittedAny = true;
                     }
-                    builder.AppendLine("};");
-                    builder.AppendLine();
+                    else
+                    {
+                        emitted.Add(kvp.Key);
+                    }
                 }
+                // If the snapshot was complete (no new entries appeared while we emitted),
+                // we're done. Otherwise loop and emit any structs that were lazily added.
+                if (!emittedAny || mapping.Count == snapshot.Count) break;
             }
         }
 
