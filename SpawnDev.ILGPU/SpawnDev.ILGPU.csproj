@@ -4,8 +4,22 @@
 		<TargetFramework>net10.0</TargetFramework>
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>enable</Nullable>
-		<Version>4.9.5-rc.21</Version>
-		<PackageReleaseNotes>v4.9.5-rc.21: Two more Wasm dispatcher fixes for Data's StyleMosaic Wasm scenario.
+		<Version>4.9.5-rc.22</Version>
+		<PackageReleaseNotes>v4.9.5-rc.22: WebGL runtime-safe Pow for negative base when exponent comes from a buffer load (e.g., ONNX initializer ArrayView). Closes Data's DistilBERT WebGL drift per his 2026-05-04 first-divergent capture at node 10 Pow.
+
+The rc.12 GLSL Pow neg-base fix only catches statically-constant integer exponents via `PrimitiveValue` detection. ONNX LayerNorm's `(x - mean)^pow_initializer_2.0` shape has the exponent loaded from an ArrayView buffer; `value.Right.Resolve()` returns a Load node, not PrimitiveValue. The static fix falls through; native `pow(neg, 2.0)` returns NaN on GLSL ES 3.0 because ANGLE expands it as `exp(2.0 * log(neg))` and `log(neg)` is NaN. NaN cascades through ReduceMean → Sqrt → Mul → Add and produces drift through the entire transformer.
+
+Two-tier fix:
+(a) Static-const detection: existing PrimitiveValue + integer-exp check (rc.12). Cheapest path, kept first.
+(b) Runtime-safe wrapper: when (a) doesn't catch, emit `(x >= 0 ? pow(x, y) : pow(abs(x), y) * (mod(y, 2) >= 1 ? -1 : 1))`. Correct for integer y (even/odd handled). For non-integer y with negative base (mathematically undefined): returns finite `pow(abs(x), y)` plus sign correction.
+
+Applied to both `GLSLCodeGenerator` base (helper functions) and `GLSLKernelFunctionGenerator` override (kernel main).
+
+Verified: Tests23_PowNegativeBase_IntExp2_NoNaN (rc.12 lockdown, exponent literal): PASS 7/7. New Tests23_PowNegativeBase_ExponentFromBuffer_NoNaN (DistilBERT shape, exponent loaded from buffer): PASS 7/7 post-fix.
+
+UNBLOCKS Data's DistilBERT WebGL + SemanticSearch WebGL + any WebGL transformer using LayerNorm with a Pow op whose exponent comes from an ONNX initializer tensor.
+
+v4.9.5-rc.21: Two more Wasm dispatcher fixes for Data's StyleMosaic Wasm scenario.
 
 (1) **Fast-fault on first worker error.** `Task.WhenAll(workerTasks)` waits for ALL workers before throwing the first exception. When one worker traps (kernel OOB, divide-by-zero) and others are blocked or never post back, the outer dispatch hangs waiting for the dead workers. Replace with `Task.WhenAny` drain loop that throws on the FIRST faulted task. Surfaced 2026-05-04 by Data: StyleMosaic Wasm hit a kernel OOB at dispatch 176 but the dispatcher waited the full PMT 10-minute timeout instead of surfacing the actionable 20-second error path (PerOpSync mode caught it; non-PerOpSync did not). This makes both modes equally responsive.
 
