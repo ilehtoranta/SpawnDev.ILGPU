@@ -807,12 +807,16 @@ namespace SpawnDev.ILGPU.Wasm
 
                 if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm] Memory layout: buffers={totalMemoryBytes}, scratch={scratchBase}(spt={scratchPerThread}), structRegion={structRegionBase}({totalStructBytes}), sharedMem={sharedMemBase}({sharedMemSize}), barrier={barrierBase}({barrierSize}), hasBarriers={compiledKernel.HasBarriers}, groupSize={groupSize}");
 
-                // Round up to Wasm page size (64KB) with generous safety margin.
-                // Multi-worker dispatch with hardwareConcurrency workers needs extra
-                // headroom for per-worker scratch and alignment padding.
-                int wasmPages = Math.Max(1, (totalWithBarriers + 65535) / 65536);
-                wasmPages = wasmPages * 2; // 100% margin
-                if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm-MEM] total={totalWithBarriers} pages={wasmPages} buf={totalMemoryBytes} scratch={scratchBase}+{scratchSize} struct={structRegionBase}+{totalStructBytes} shared={sharedMemBase}+{sharedMemSize} barrier={barrierBase}+{barrierSize} fence={fenceSlot} spt={scratchPerThread} gs={groupSize} _wc={_workerCount}");
+                // Round up to Wasm page size (64 KB). totalWithBarriers already exactly
+                // accounts for every region (buffers + scratch + struct + shared + barrier
+                // + fence + yield-state); the prior 100% margin was gratuitous and pushed
+                // ML inference workloads past the 2 GiB SharedArrayBuffer cap on Chromium
+                // (Data's StyleMosaic 102-dispatch OOM, 2026-05-05). Replaced with a single
+                // 64 KB safety pad to absorb any single-byte miscalculation without doubling
+                // the linear-memory footprint.
+                int wasmPagesExact = Math.Max(1, (totalWithBarriers + 65535) / 65536);
+                int wasmPages = wasmPagesExact + 1; // 1-page (64 KB) absolute safety pad
+                if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm-MEM] disp={dispNum} totalLayout={totalWithBarriers} exactPages={wasmPagesExact} pages={wasmPages} bytes={wasmPages * 65536} cap={_maxLinearMemoryPages * 65536} buf={totalMemoryBytes} scratch={scratchBase}+{scratchSize} struct={structRegionBase}+{totalStructBytes} shared={sharedMemBase}+{sharedMemSize} barrier={barrierBase}+{barrierSize} fence={fenceSlot} spt={scratchPerThread} gs={groupSize} _wc={_workerCount}");
 
                 // Determine whether we can reuse the cached memory.
                 // If there are other pending kernel dispatches running concurrently,
@@ -829,6 +833,7 @@ namespace SpawnDev.ILGPU.Wasm
                     // Reuse cached memory — fast path for render loops (same kernel, no overlap)
                     wasmMemory = _cachedWasmMemory;
                     memoryBuffer = _cachedMemoryBuffer!;
+                    if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm-MEM-REUSE] disp={dispNum} need={wasmPages} cached={_cachedWasmPages} cap={_maxLinearMemoryPages}");
                 }
                 else if (!hasConcurrentWork)
                 {
@@ -844,6 +849,7 @@ namespace SpawnDev.ILGPU.Wasm
                             $"new WebAssembly.Memory({{ initial: {wasmPages}, maximum: {_maxLinearMemoryPages}, shared: true }})");
                         _cachedMemoryBuffer = _cachedWasmMemory.JSRef!.Get<SharedArrayBuffer>("buffer");
                         _initializedWorkersByKernel.Clear();
+                        if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm-MEM-INIT] disp={dispNum} pages={wasmPages} bytes={wasmPages * 65536} cap={_maxLinearMemoryPages}");
                     }
                     else
                     {
@@ -851,9 +857,10 @@ namespace SpawnDev.ILGPU.Wasm
                         int growBy = wasmPages - _cachedWasmPages;
                         if (growBy > 0)
                         {
+                            if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm-MEM-GROW] disp={dispNum} from={_cachedWasmPages} to={wasmPages} growBy={growBy} cap={_maxLinearMemoryPages}");
                             int growResult = _cachedWasmMemory.JSRef!.Call<int>("grow", growBy);
                             if (growResult == -1)
-                                throw new OutOfMemoryException($"WebAssembly.Memory.grow({growBy} pages) failed. Current: {_cachedWasmPages} pages, requested: {wasmPages} pages ({wasmPages * 64}KB)");
+                                throw new OutOfMemoryException($"WebAssembly.Memory.grow({growBy} pages) failed. Current: {_cachedWasmPages} pages, requested: {wasmPages} pages ({wasmPages * 64}KB), cap: {_maxLinearMemoryPages} pages ({_maxLinearMemoryPages * 64}KB)");
                             _cachedWasmPages = wasmPages;
                             // Re-get buffer reference (same SAB but .buffer accessor may update)
                             _cachedMemoryBuffer?.Dispose();
@@ -879,13 +886,15 @@ namespace SpawnDev.ILGPU.Wasm
                             $"new WebAssembly.Memory({{ initial: {wasmPages}, maximum: {_maxLinearMemoryPages}, shared: true }})");
                         _cachedMemoryBuffer = _cachedWasmMemory.JSRef!.Get<SharedArrayBuffer>("buffer");
                         _initializedWorkersByKernel.Clear();
+                        if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm-MEM-INIT-CC] disp={dispNum} pages={wasmPages} bytes={wasmPages * 65536} cap={_maxLinearMemoryPages}");
                     }
                     else if (wasmPages > _cachedWasmPages)
                     {
                         int growBy = wasmPages - _cachedWasmPages;
+                        if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm-MEM-GROW-CC] disp={dispNum} from={_cachedWasmPages} to={wasmPages} growBy={growBy} cap={_maxLinearMemoryPages}");
                         int growResult = _cachedWasmMemory.JSRef!.Call<int>("grow", growBy);
                         if (growResult == -1)
-                            throw new OutOfMemoryException($"WebAssembly.Memory.grow({growBy} pages) failed. Current: {_cachedWasmPages} pages, requested: {wasmPages} pages ({wasmPages * 64}KB)");
+                            throw new OutOfMemoryException($"WebAssembly.Memory.grow({growBy} pages) failed. Current: {_cachedWasmPages} pages, requested: {wasmPages} pages ({wasmPages * 64}KB), cap: {_maxLinearMemoryPages} pages ({_maxLinearMemoryPages * 64}KB)");
                         _cachedWasmPages = wasmPages;
                         _cachedMemoryBuffer?.Dispose();
                         _cachedMemoryBuffer = _cachedWasmMemory.JSRef!.Get<SharedArrayBuffer>("buffer");

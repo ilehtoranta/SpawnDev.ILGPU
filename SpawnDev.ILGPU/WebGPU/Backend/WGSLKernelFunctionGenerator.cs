@@ -3237,22 +3237,40 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             // emits calls to i64_eq / i64_ge / f64_add / etc. but the corresponding fn
             // definitions are missing and the WGSL validator fails. (Tuvok's 2026-05-05
             // fn-definition path bug; rc.16 Bug D follow-up.)
+            //
+            // The helper scan must mirror ContainsBasicValueType's full coverage:
+            //   (a) helper Method.Parameters — `long` / `double` / `ArrayView<long>`-style
+            //       params are Int64/Float64 in IR but appear ONLY in Method.Parameters,
+            //       not in any block's value list.
+            //   (b) PrimitiveType result types in the helper's blocks (direct hits).
+            //   (c) Pointer<Int64> / View<Int64> / Struct{Int64 ...} types via
+            //       TypeContainsBasicValue, so an Alloca/LEA/SubViewValue whose Type wraps
+            //       Int64 also flips the flag even when the inlined Load was eliminated.
             if (!containsI64 || !containsF64)
             {
                 var bothFound = false;
                 foreach (var helperMethod in EnumerateAllHelperMethods())
                 {
+                    // (a) parameter types
+                    foreach (var param in helperMethod.Parameters)
+                    {
+                        if (!containsI64 && TypeContainsBasicValue(param.ParameterType, BasicValueType.Int64, new HashSet<TypeNode>()))
+                            containsI64 = true;
+                        if (!containsF64 && TypeContainsBasicValue(param.ParameterType, BasicValueType.Float64, new HashSet<TypeNode>()))
+                            containsF64 = true;
+                        if (containsI64 && containsF64) { bothFound = true; break; }
+                    }
+                    if (bothFound) break;
+                    // (b) + (c) value types in blocks
                     foreach (var block in helperMethod.Blocks)
                     {
                         foreach (var valueEntry in block)
                         {
-                            if (valueEntry.Value.Type is PrimitiveType pt)
-                            {
-                                if (!containsI64 && pt.BasicValueType == BasicValueType.Int64)
-                                    containsI64 = true;
-                                if (!containsF64 && pt.BasicValueType == BasicValueType.Float64)
-                                    containsF64 = true;
-                            }
+                            var vt = valueEntry.Value.Type;
+                            if (!containsI64 && TypeContainsBasicValue(vt, BasicValueType.Int64, new HashSet<TypeNode>()))
+                                containsI64 = true;
+                            if (!containsF64 && TypeContainsBasicValue(vt, BasicValueType.Float64, new HashSet<TypeNode>()))
+                                containsF64 = true;
                             if (containsI64 && containsF64) { bothFound = true; break; }
                         }
                         if (bothFound) break;

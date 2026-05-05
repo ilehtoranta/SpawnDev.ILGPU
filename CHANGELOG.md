@@ -2,6 +2,45 @@
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
 
+## 4.9.5-local.2 (2026-05-05) — Wasm linear memory: drop 100% margin, exact + 1-page pad
+
+Local-feed-only build closing Data's StyleMosaic 2 GiB OOM.
+
+### Root cause
+
+`WasmAccelerator.RunKernelAsync` was computing `wasmPages = ceil(totalWithBarriers / 65536) * 2` — doubling every linear-memory request as "100% margin." The exact `totalWithBarriers` arithmetic already accounts for every region (buffers + per-thread/per-worker scratch + struct + shared memory + barriers + fence + per-worker yield state); the doubling was gratuitous defensive padding originally added when worker count grew from a hardcoded 4 to `navigator.hardwareConcurrency` (commit `856d8cb`).
+
+For ML inference workloads with intermediate tensors that push a single dispatch's actual layout past ~1 GiB, the doubled request crossed the browser's 2 GiB SharedArrayBuffer cap and `WebAssembly.Memory.grow()` rejected with `RangeError: Maximum memory size exceeded`. Verified path: Data's `StyleMosaic_DiagnosticPerOpSync` failed at ~17s, Chromium working set at 4.2 GB (SAB component bounded by `MaxLinearMemoryPages * 64 KiB` = 2 GiB).
+
+### Fix
+
+`wasmPages = wasmPagesExact + 1` where `wasmPagesExact = ceil(totalWithBarriers / 65536)`. The 1-page (64 KB) absolute pad absorbs any single-byte miscalculation without doubling the linear-memory footprint. Effective cap usage drops from `~totalLayout / 2` to `~totalLayout - 64 KB`, recovering the lost half of the 2 GiB ceiling.
+
+### Diagnostics added
+
+Per Data's request, a `WasmBackend.VerboseLogging`-gated log fires at every dispatch boundary with the full layout breakdown:
+
+```
+[Wasm-MEM] disp=N totalLayout=B exactPages=P pages=P+1 bytes=... cap=... buf=... scratch=... struct=... shared=... barrier=... fence=... spt=... gs=... _wc=...
+```
+
+Plus dedicated single-line logs on memory init / grow / reuse events:
+
+- `[Wasm-MEM-INIT]` / `[Wasm-MEM-INIT-CC]` — first allocation per accelerator (or concurrent-context init).
+- `[Wasm-MEM-GROW]` / `[Wasm-MEM-GROW-CC]` — explicit growth, with from/to/growBy/cap.
+- `[Wasm-MEM-REUSE]` — cache reuse, with need vs cached.
+
+`OutOfMemoryException` thrown on grow failure now includes the cap value alongside current and requested page counts.
+
+### Verified
+
+- Build clean; existing Wasm tests in the body-struct + sub-word + algorithm areas (Tests23_RegisterHeavyBody, Tests23_OnlyShortBodyStruct, Tests23_TwoShortBodyStruct*, AlgorithmReduceByteTest, AlgorithmGroupReduceHalfTest, LocalMemoryRepro_Int64_ShortByteViews) regression sweep: same green/known-fail status as before this change.
+- Pre-existing Wasm test failures (NOT caused by this change, verified by running the same tests on master before this commit): `WasmTests.AlgorithmRadixSortNonPairsIntTest` + `WasmTests.AlgorithmRadixSortNonPairsFloatTest` (data corruption, "Expected 1, got 32" — separate root cause, tracked as Rule 2a follow-up); `WasmTests.Tests23_RegisterHeavyBody_ExplicitOneByOne_NoLaunchFailure` (`MarshalDirectiveException` on `ILGPU.Util.DisposeBase` — separate root cause, tracked as Rule 2a follow-up).
+
+### What downstream needs to do
+
+Bump `SpawnDev.ILGPU.ML` PackageReference to `4.9.5-local.2` and re-run StyleMosaic_DiagnosticPerOpSync on Wasm. Expected outcome: passes (or fails for a DIFFERENT reason inside the kernel, in which case the new per-dispatch verbose log will pinpoint the offending dispatch).
+
 ## 4.9.5-local.1 (2026-05-05) — WGSL Bug D phases 2/3/5 + Tuvok's i64 emul-lib scan fix
 
 Local-feed-only build for Tuvok to consume the rc.16 fn-definition codegen
