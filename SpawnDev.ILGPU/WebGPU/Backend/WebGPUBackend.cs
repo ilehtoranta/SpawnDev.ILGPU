@@ -1155,8 +1155,20 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
     /// </summary>
     public class CoalesceGroupEntry
     {
-        /// <summary>IR parameter index of the body-struct holding the coalesced fields.</summary>
+        /// <summary>
+        /// IR parameter index of the body-struct holding the coalesced fields when
+        /// <see cref="IsDirectParam"/> is false. -1 (unused) when <see cref="IsDirectParam"/> is true.
+        /// </summary>
         public int BodyStructParamIndex { get; set; }
+
+        /// <summary>
+        /// True when this group coalesces same-typed direct ArrayView kernel parameters
+        /// (rather than body-struct view fields). When true, <see cref="MemberDirectParamIndices"/>
+        /// holds the IR parameter indices of the grouped direct params and
+        /// <see cref="BodyStructParamIndex"/> / <see cref="MemberFieldIndices"/> are unused.
+        /// (rc.16 direct-param coalesce, 2026-05-05.)
+        /// </summary>
+        public bool IsDirectParam { get; set; } = false;
 
         /// <summary>
         /// Element-type key identifying which fields share this binding.
@@ -1179,8 +1191,16 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         /// <summary>
         /// Body-struct field indices that participate in this group, in concatenation order.
         /// The runtime appends each field's GPU buffer data into the shared buffer in this order.
+        /// Used when <see cref="IsDirectParam"/> is false.
         /// </summary>
         public List<int> MemberFieldIndices { get; set; } = new();
+
+        /// <summary>
+        /// Direct ArrayView parameter indices (in IR Method.Parameters space) participating in this
+        /// group, in concatenation order. Used when <see cref="IsDirectParam"/> is true.
+        /// (rc.16 direct-param coalesce, 2026-05-05.)
+        /// </summary>
+        public List<int> MemberDirectParamIndices { get; set; } = new();
     }
 
     /// <summary>

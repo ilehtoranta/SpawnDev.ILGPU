@@ -351,5 +351,160 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
         });
 
         #endregion
+
+        #region Coalesce Direct ArrayView Parameters
+        // Mirror of body-struct coalesce, but for kernels that take many DIRECT
+        // ArrayView<T> parameters (not wrapped in a struct). This is the path
+        // exercised by Tuvok's AV1 walker phase1-walker-debug branch — 10+
+        // direct ArrayView params + _scalar_params overflows
+        // maxStorageBuffersPerShaderStage=10. Coalesce groups same-typed
+        // input-only direct params into one shared binding.
+
+        // 13 direct ArrayView<int> input params + 1 output. Sum each input at
+        // index i into output[i]. Total raw bindings would be 13 + 1 + 1
+        // (_scalar_params) = 15, well over the 10-binding limit; coalesce must
+        // group the 13 inputs into one binding.
+        static void DirectParamSumKernel(
+            Index1D idx,
+            ArrayView<int> output,
+            ArrayView<int> v0, ArrayView<int> v1, ArrayView<int> v2,
+            ArrayView<int> v3, ArrayView<int> v4, ArrayView<int> v5,
+            ArrayView<int> v6, ArrayView<int> v7, ArrayView<int> v8,
+            ArrayView<int> v9, ArrayView<int> v10, ArrayView<int> v11,
+            ArrayView<int> v12)
+        {
+            output[idx] = v0[idx] + v1[idx] + v2[idx] + v3[idx]
+                        + v4[idx] + v5[idx] + v6[idx] + v7[idx]
+                        + v8[idx] + v9[idx] + v10[idx] + v11[idx]
+                        + v12[idx];
+        }
+
+        [TestMethod]
+        public async Task DirectParam_13ArrayViewInt_CoalesceTest() => await RunEmulatedTest(async accelerator =>
+        {
+            const int len = 256;
+            var refData = new int[13][];
+            var bufs = new MemoryBuffer1D<int, Stride1D.Dense>[13];
+            try
+            {
+                for (int f = 0; f < 13; f++)
+                {
+                    refData[f] = new int[len];
+                    for (int i = 0; i < len; i++)
+                        refData[f][i] = (f + 1) * 100000 + i;
+                    bufs[f] = accelerator.Allocate1D(refData[f]);
+                }
+                using var output = accelerator.Allocate1D<int>(len);
+                var kernel = accelerator.LoadAutoGroupedStreamKernel<
+                    Index1D, ArrayView<int>,
+                    ArrayView<int>, ArrayView<int>, ArrayView<int>,
+                    ArrayView<int>, ArrayView<int>, ArrayView<int>,
+                    ArrayView<int>, ArrayView<int>, ArrayView<int>,
+                    ArrayView<int>, ArrayView<int>, ArrayView<int>,
+                    ArrayView<int>>(DirectParamSumKernel);
+
+                kernel((Index1D)len, output.View,
+                    bufs[0].View, bufs[1].View, bufs[2].View,
+                    bufs[3].View, bufs[4].View, bufs[5].View,
+                    bufs[6].View, bufs[7].View, bufs[8].View,
+                    bufs[9].View, bufs[10].View, bufs[11].View,
+                    bufs[12].View);
+                await accelerator.SynchronizeAsync();
+                var result = await output.CopyToHostAsync<int>();
+
+                for (int i = 0; i < len; i++)
+                {
+                    int expected = 0;
+                    for (int f = 0; f < 13; f++) expected += refData[f][i];
+                    if (result[i] != expected)
+                        throw new Exception($"DirectParam coalesce 13-int mismatch at i={i}: expected {expected}, got {result[i]}");
+                }
+            }
+            finally
+            {
+                for (int f = 0; f < 13; f++) bufs[f]?.Dispose();
+            }
+        });
+
+        // Per-param diagnostic: writes EACH input's [0] value to a separate
+        // output slot. Verifies each direct-param coalesce member's runtime
+        // offset slot is filled correctly so each member reads from its OWN
+        // source data after the GPU→GPU concatenate copy.
+        static void DirectParamPerInputDiagnosticKernel(
+            Index1D _,
+            ArrayView<int> output,
+            ArrayView<int> v0, ArrayView<int> v1, ArrayView<int> v2,
+            ArrayView<int> v3, ArrayView<int> v4, ArrayView<int> v5,
+            ArrayView<int> v6, ArrayView<int> v7, ArrayView<int> v8,
+            ArrayView<int> v9, ArrayView<int> v10, ArrayView<int> v11,
+            ArrayView<int> v12)
+        {
+            output[0] = v0[0];
+            output[1] = v1[0];
+            output[2] = v2[0];
+            output[3] = v3[0];
+            output[4] = v4[0];
+            output[5] = v5[0];
+            output[6] = v6[0];
+            output[7] = v7[0];
+            output[8] = v8[0];
+            output[9] = v9[0];
+            output[10] = v10[0];
+            output[11] = v11[0];
+            output[12] = v12[0];
+        }
+
+        [TestMethod]
+        public async Task DirectParam_13ArrayViewInt_PerInputDiagnostic() => await RunEmulatedTest(async accelerator =>
+        {
+            const int len = 64;
+            var refData = new int[13][];
+            var bufs = new MemoryBuffer1D<int, Stride1D.Dense>[13];
+            try
+            {
+                for (int f = 0; f < 13; f++)
+                {
+                    refData[f] = new int[len];
+                    for (int i = 0; i < len; i++)
+                        refData[f][i] = (f + 1) * 100000 + i;
+                    bufs[f] = accelerator.Allocate1D(refData[f]);
+                }
+                using var output = accelerator.Allocate1D<int>(13);
+                var kernel = accelerator.LoadAutoGroupedStreamKernel<
+                    Index1D, ArrayView<int>,
+                    ArrayView<int>, ArrayView<int>, ArrayView<int>,
+                    ArrayView<int>, ArrayView<int>, ArrayView<int>,
+                    ArrayView<int>, ArrayView<int>, ArrayView<int>,
+                    ArrayView<int>, ArrayView<int>, ArrayView<int>,
+                    ArrayView<int>>(DirectParamPerInputDiagnosticKernel);
+
+                kernel((Index1D)1, output.View,
+                    bufs[0].View, bufs[1].View, bufs[2].View,
+                    bufs[3].View, bufs[4].View, bufs[5].View,
+                    bufs[6].View, bufs[7].View, bufs[8].View,
+                    bufs[9].View, bufs[10].View, bufs[11].View,
+                    bufs[12].View);
+                await accelerator.SynchronizeAsync();
+                var result = await output.CopyToHostAsync<int>();
+
+                var sb = new System.Text.StringBuilder();
+                bool anyWrong = false;
+                for (int f = 0; f < 13; f++)
+                {
+                    int expected = (f + 1) * 100000;
+                    bool ok = result[f] == expected;
+                    if (!ok) anyWrong = true;
+                    sb.Append($"v{f}:{(ok ? "OK" : $"WRONG got={result[f]} expect={expected}")}; ");
+                }
+                if (anyWrong)
+                    throw new Exception("DirectParam per-input diagnostic: " + sb.ToString());
+            }
+            finally
+            {
+                for (int f = 0; f < 13; f++) bufs[f]?.Dispose();
+            }
+        });
+
+        #endregion
     }
 }

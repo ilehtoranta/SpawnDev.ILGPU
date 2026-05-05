@@ -182,17 +182,32 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             // Used by the length field generator to read the true element count from the CPU.
             public int ViewCountSlot { get; set; } = -1;
         }
-        // Coalesce-group manifest: one entry per group of body-struct view fields that share a
+        // Coalesce-group manifest: one entry per group of view fields that share a
         // storage-buffer binding. Exported to the runtime via WebGPUCompiledKernel.
         // The data type is the PUBLIC CoalesceGroupEntry on SpawnDev.ILGPU.WebGPU.Backend so
-        // it can flow through CompiledKernel to the runtime accelerator.
+        // it can flow through CompiledKernel to the runtime accelerator. Each entry is either
+        // a body-struct group (IsDirectParam=false; MemberFieldIndices used) or a direct-param
+        // group (IsDirectParam=true; MemberDirectParamIndices used). Same dispatch path
+        // concatenates members and binds once.
         // Maintained as a side-car (not on BodyStructFieldInfo) because GenerateHeader rebuilds
         // _bodyStructParams; side-car data survives that rebuild.
         private List<CoalesceGroupEntry> _coalesceGroups = new();
-        // Lookup: (paramIdx, fieldIdx) → which group this field belongs to. Survives _bodyStructParams rebuild.
+        // Lookup: (paramIdx, fieldIdx) → which group this body-struct field belongs to.
         private Dictionary<(int paramIdx, int fieldIdx), CoalesceGroupEntry> _coalesceMembership = new();
-        // Subset: (paramIdx, fieldIdx) keys that are LEADERS — only leaders emit a @binding declaration.
+        // Subset: (paramIdx, fieldIdx) keys that are body-struct LEADERS — only leaders emit a @binding declaration.
         private HashSet<(int paramIdx, int fieldIdx)> _coalesceLeaders = new();
+
+        // Direct-param coalesce — same pattern keyed by IR parameter index instead of (paramIdx, fieldIdx).
+        // (rc.16 direct-param coalesce, 2026-05-05.)
+        private Dictionary<int, CoalesceGroupEntry> _directParamCoalesceMembership = new();
+        private HashSet<int> _directParamCoalesceLeaders = new();
+        // Direct-param outputs (kernel writes to them); excluded from coalesce.
+        // Populated by ScanForBodyStructOutputs alongside _bodyStructOutputFields.
+        private HashSet<int> _directParamOutputs = new HashSet<int>();
+        // Per-direct-param scalar slot holding the u32-slot offset within the coalesced buffer.
+        // Set during DecideCoalesceGroups → consumed by GenerateHeader (allocates the scalar slot)
+        // and LoadElementAddress emit (which references _scalar_params[slot] in the address expression).
+        private Dictionary<int, int> _directParamCoalesceViewOffsetSlots = new();
         // _bodyStructFieldVars: (paramIndex, fieldIndex) → WGSL variable name
         // Used by GetField code generation to redirect field accesses to the appropriate binding.
         private Dictionary<(int, int), string> _bodyStructFieldVars = new Dictionary<(int, int), string>();
@@ -328,12 +343,25 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     if (target == null) continue;
 
                     if (ResolveToParameterWithFieldChain(target, out var param, out var fieldIdx)
-                        && param != null && fieldIdx >= 0
-                        && _bodyStructParams.TryGetValue(param.Index, out var bsFields)
-                        && fieldIdx < bsFields.Count
-                        && bsFields[fieldIdx].IsView)
+                        && param != null)
                     {
-                        _bodyStructOutputFields.Add((param.Index, fieldIdx));
+                        if (fieldIdx >= 0
+                            && _bodyStructParams.TryGetValue(param.Index, out var bsFields)
+                            && fieldIdx < bsFields.Count
+                            && bsFields[fieldIdx].IsView)
+                        {
+                            _bodyStructOutputFields.Add((param.Index, fieldIdx));
+                        }
+                        else if (fieldIdx < 0)
+                        {
+                            // Direct ArrayView parameter that is the target of a write.
+                            // Excluded from direct-param coalesce by DecideCoalesceGroups
+                            // because the runtime concatenation path doesn't write back to
+                            // each member's individual GPU buffer (mirrors body-struct
+                            // output exclusion, rc.27). (rc.16 direct-param coalesce,
+                            // 2026-05-05.)
+                            _directParamOutputs.Add(param.Index);
+                        }
                     }
                 }
             }
@@ -751,8 +779,9 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         /// </summary>
         private void DecideCoalesceGroups()
         {
-            if (_bodyStructParams.Count == 0) return;
-
+            // Body-struct coalesce + direct-param coalesce share this method. Either
+            // path can fire even when the other has no candidates. (rc.16 direct-param
+            // coalesce, 2026-05-05.)
             const int CoalesceTriggerThreshold = 10;
 
             // Estimate raw binding count had we NOT coalesced. Mirrors the structure of
@@ -886,6 +915,103 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
                 if (WebGPUBackend.VerboseLogging)
                     WebGPUBackend.Log($"[WGSL-Coalesce] Grouped {cand.members.Count} fields of param{cand.paramIdx} ({cand.typeKey}) into '{bindingName}' — bindings now {currentBindings}");
+            }
+
+            // ---------------------- Direct-param coalesce ----------------------
+            // After body-struct coalesce decisions, scan direct ArrayView kernel
+            // parameters and group same-typed input-only params into shared bindings.
+            // Eligibility — a direct param qualifies when ALL of:
+            //   1. It is an ArrayView / View-type param (single AddressSpaceType, not multi-dim).
+            //   2. It is NOT atomic.
+            //   3. It is NOT sub-word (Int8/Int16/Half — those use packed atomic<u32>).
+            //   4. It is NOT emulated 64-bit (Int64/Float64) for v1 — those need stride=2 emit
+            //      that the existing direct-param LEA path doesn't yet thread through.
+            //   5. The kernel does NOT WRITE to it (per _directParamOutputs from
+            //      ScanForBodyStructOutputs).
+            //   6. Its ViewType is not multi-dim (ArrayView2D/3D need stride buffers).
+            //
+            // We trigger only when raw bindings still exceed the threshold after
+            // body-struct coalesce. Mirrors the body-struct path: largest savings first.
+            // (rc.16 Tuvok AV1 walker WebGPU 11/10 fix, 2026-05-05.)
+            if (currentBindings <= CoalesceTriggerThreshold) return;
+
+            var directCandidates = new List<(string typeKey, string wgslType, int stride, List<global::ILGPU.IR.Values.Parameter> members)>();
+            var directBuckets = new Dictionary<string, (string wgslType, int stride, List<global::ILGPU.IR.Values.Parameter> members)>();
+            foreach (var param in Method.Parameters)
+            {
+                if (param.Index < paramOffset) continue;
+                // Skip body-struct params (already handled above).
+                if (_bodyStructParams.ContainsKey(param.Index)) continue;
+                IsMultiDim(param.ParameterType, out var isMultiDim, out var isViewParam, out _, out var is2D, out var is3D);
+                if (!isViewParam || is2D || is3D) continue;
+                if (_atomicParameters.Contains(param.Index)) continue;
+                if (_directParamOutputs.Contains(param.Index)) continue;
+
+                var elemType = GetBufferElementType(param.ParameterType);
+                if (elemType is not PrimitiveType ept) continue;
+                // Sub-word and emu-64 excluded for v1 (need different binding type & stride emit).
+                switch (ept.BasicValueType)
+                {
+                    case BasicValueType.Int8:
+                    case BasicValueType.Int16:
+                    case BasicValueType.Float16:
+                    case BasicValueType.Int64:
+                    case BasicValueType.Float64:
+                        continue;
+                }
+                var wgslElem = TypeGenerator[elemType];
+                string typeKey;
+                string bindingType;
+                int stride;
+                if (wgslElem == "i32" || wgslElem == "u32" || wgslElem == "f32")
+                {
+                    typeKey = wgslElem; bindingType = wgslElem; stride = 1;
+                }
+                else
+                {
+                    continue; // unsupported element type for direct-param coalesce v1
+                }
+
+                if (!directBuckets.TryGetValue(typeKey, out var bucket))
+                {
+                    bucket = (bindingType, stride, new List<global::ILGPU.IR.Values.Parameter>());
+                    directBuckets[typeKey] = bucket;
+                }
+                bucket.members.Add(param);
+            }
+            foreach (var bucketKvp in directBuckets)
+            {
+                var bucket = bucketKvp.Value;
+                if (bucket.members.Count < 2) continue;
+                directCandidates.Add((bucketKvp.Key, bucket.wgslType, bucket.stride, bucket.members));
+            }
+            directCandidates.Sort((a, b) => (b.members.Count - 1).CompareTo(a.members.Count - 1));
+
+            foreach (var cand in directCandidates)
+            {
+                if (currentBindings <= CoalesceTriggerThreshold) break;
+                string bindingName = $"param_direct_{cand.typeKey.Replace("_", "")}_coalesced";
+                var group = new CoalesceGroupEntry
+                {
+                    BodyStructParamIndex = -1,
+                    IsDirectParam = true,
+                    ElementTypeKey = cand.typeKey,
+                    BindingName = bindingName,
+                    ElementWordsPerSlot = cand.stride,
+                    BindingWgslType = cand.wgslType,
+                };
+                bool first = true;
+                foreach (var p in cand.members)
+                {
+                    group.MemberDirectParamIndices.Add(p.Index);
+                    _directParamCoalesceMembership[p.Index] = group;
+                    if (first) { _directParamCoalesceLeaders.Add(p.Index); first = false; }
+                }
+                _coalesceGroups.Add(group);
+                currentBindings -= (cand.members.Count - 1);
+
+                if (WebGPUBackend.VerboseLogging)
+                    WebGPUBackend.Log($"[WGSL-Coalesce] Grouped {cand.members.Count} direct params [{string.Join(",", cand.members.ConvertAll(p => p.Index))}] ({cand.typeKey}) into '{bindingName}' — bindings now {currentBindings}");
             }
         }
 
@@ -1663,6 +1789,41 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                             bindingWgslType = $"atomic<{bindingWgslType}>";
                     }
 
+                    // Direct-param coalesce: same-typed input-only direct ArrayView
+                    // params may share a single binding. The leader emits the @binding
+                    // decl with the group's shared name; non-leaders skip the decl and
+                    // record their viewParamBindingIndices entry pointing to the leader's
+                    // binding index. Each member's own LoadElementAddress emit uses the
+                    // shared binding name (substitution happens in the LEA codegen via
+                    // _directParamCoalesceMembership). (rc.16 direct-param coalesce, 2026-05-05.)
+                    if (_directParamCoalesceMembership.TryGetValue(param.Index, out var dpGroup))
+                    {
+                        bool isDpLeader = _directParamCoalesceLeaders.Contains(param.Index);
+                        if (isDpLeader)
+                        {
+                            // Override binding type to the group's chosen WGSL type.
+                            bindingWgslType = dpGroup.BindingWgslType;
+                            dpGroup.BindingIndex = bindingIdx;
+                            builder.AppendLine($"// Param {param.Index}: direct ArrayView (COALESCE LEADER for {dpGroup.BindingName})");
+                            builder.AppendLine($"@group(0) @binding({bindingIdx}) var<storage, read> {dpGroup.BindingName} : array<{bindingWgslType}>;");
+                            viewParamBindingIndices.Add((param.Index, bindingIdx));
+                            bindingIdx++;
+                        }
+                        else
+                        {
+                            // Non-leader: share the leader's binding index. The leader is
+                            // always processed first (we walk Method.Parameters in IR order
+                            // and DecideCoalesceGroups assigns the lowest-index member as
+                            // leader). Group.BindingIndex is set when the leader emits.
+                            builder.AppendLine($"// Param {param.Index}: direct ArrayView (coalesced into {dpGroup.BindingName})");
+                            viewParamBindingIndices.Add((param.Index, dpGroup.BindingIndex));
+                        }
+                        // Stride buffer for 2D/3D views — direct-param coalesce v1 excludes
+                        // multi-dim views (DecideCoalesceGroups gates on !is2D && !is3D), so
+                        // no stride buffer emission needed here.
+                        continue;
+                    }
+
                     var bindingDecl = $"@group(0) @binding({bindingIdx}) var<storage, {accessMode}> param{param.Index} : array<{bindingWgslType}>;";
                     builder.AppendLine(bindingDecl);
                     viewParamBindingIndices.Add((param.Index, bindingIdx));
@@ -1721,14 +1882,15 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             // and the WGSL reads it from _scalar_params instead of hardcoding offset to 0.
             foreach (var (viewParamIndex, viewBindIdx) in viewParamBindingIndices)
             {
-                // Detect coalesce-member body-struct view fields. For these, the offset
-                // is NOT a sub-view's element offset of the bound buffer — it is the
-                // field's offset within the SHARED coalesced buffer. Runtime computes it
-                // from the running sum of preceding members' lengths.
+                // Detect coalesce-member view fields. For these, the offset is NOT a
+                // sub-view's element offset of the bound buffer — it is the member's
+                // offset within the SHARED coalesced buffer. Runtime computes it from
+                // the running sum of preceding members' lengths.
                 bool isCoalesceMemberOffset = false;
                 int coalesceParamIdx = -1, coalesceFieldIdx = -1;
                 if (viewParamIndex >= 1000)
                 {
+                    // Body-struct member: synthetic param index encoding.
                     int rp = (viewParamIndex / 1000) - 1;
                     int fi = viewParamIndex % 1000;
                     if (_coalesceMembership.ContainsKey((rp, fi)))
@@ -1737,6 +1899,16 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                         coalesceParamIdx = rp;
                         coalesceFieldIdx = fi;
                     }
+                }
+                else if (_directParamCoalesceMembership.ContainsKey(viewParamIndex))
+                {
+                    // Direct-param coalesce member: viewParamIndex IS the IR param index
+                    // directly. Treat the same as body-struct coalesce — the runtime
+                    // fills _scalar_params[slot] with the member's u32-slot offset
+                    // within the shared coalesced buffer. (rc.16 direct-param coalesce.)
+                    isCoalesceMemberOffset = true;
+                    coalesceParamIdx = viewParamIndex; // re-used to mean the direct param index
+                    coalesceFieldIdx = -1;             // sentinel: direct-param mode
                 }
 
                 var viewOffsetEntry = new ScalarPackingEntry
@@ -1806,6 +1978,17 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                         scalarSlotOffset++;
                     }
                 }
+                // (v1) No per-member ViewCount slot for direct-param coalesce members.
+                // Pre-body slot allocation in ScanBodyStructParams reserves 1 slot per direct
+                // view param (the offset slot). Adding a count slot here would advance
+                // GenerateHeader's scalarSlotOffset by 2 per member while pre-body advances
+                // by 1, drifting all subsequent members' slot indices. A correct fix needs
+                // count-slot pre-allocation in ScanBodyStructParams, but DecideCoalesceGroups
+                // runs AFTER ScanBodyStructParams so coalesce membership is unknown there.
+                // For v1, GetViewLength on a coalesce member falls back to arrayLength()
+                // which returns the shared binding's element count (sum across members) —
+                // wrong, but kernels using direct-param coalesce typically don't read
+                // view.Length on the inputs. Tracked for v2.
             }
 
             // Emit the single packed scalar binding (if any scalars were packed)
@@ -4087,7 +4270,23 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     // alias variable available so it can be passed by name to
                     // helpers — emit it for sub-word too. The alias is just a
                     // pointer; if no helper consumes it, the var is harmless.
-                    AppendLine($"let {variable.Name} = &param{param.Index};");
+                    //
+                    // Direct-param coalesce member: there is no `param{N}` binding
+                    // for non-leaders (the leader emitted the shared binding under
+                    // a different name). Alias the leader's binding so the variable
+                    // is at least declared. The LEA path applies the per-member
+                    // offset, so any LEA-based access is correct. Helper calls that
+                    // pass the alias by value would lose the per-member offset; v1
+                    // direct-param coalesce excludes such kernels (NoInlining helpers
+                    // taking ArrayView are handled by separate fn-def codegen).
+                    if (_directParamCoalesceMembership.TryGetValue(param.Index, out var dpAliasGroup))
+                    {
+                        AppendLine($"let {variable.Name} = &{dpAliasGroup.BindingName};");
+                    }
+                    else
+                    {
+                        AppendLine($"let {variable.Name} = &param{param.Index};");
+                    }
 
                     if (isView && isMultiDim && (is2DView || is3DView))
                     {
@@ -4348,6 +4547,26 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 int paramOffset = KernelParamOffset;
                 if (param.Index >= paramOffset)
                 {
+                    // Direct-param coalesce member: redirect LEA to the leader's shared
+                    // binding name. The runtime fills _scalar_params[voSlot] with this
+                    // member's u32-element offset within the shared coalesced buffer.
+                    // (rc.16 direct-param coalesce, 2026-05-05.)
+                    if (_directParamCoalesceMembership.TryGetValue(param.Index, out var dpGroup))
+                    {
+                        _bodyReferencesScalarParams = true;
+                        int dpVoSlot = _viewOffsetScalarSlots[param.Index];
+                        string dpAdjustedOffsetExpr = $"(i32(_scalar_params[{dpVoSlot}]) + {offsetExpr})";
+
+                        if (_crossBlockPointers.Contains(value))
+                        {
+                            _crossBlockPointerExprs[target.Name] = $"{dpGroup.BindingName}[{dpAdjustedOffsetExpr}]";
+                        }
+                        AppendIndent();
+                        Builder.Append($"let {target.Name} = &{dpGroup.BindingName}[{dpAdjustedOffsetExpr}];");
+                        Builder.AppendLine();
+                        return;
+                    }
+
                     // --- View offset adjustment ---
                     // With offset=0 binding, the buffer starts at byte 0 (not sub-view start).
                     // ILGPU IR assumes LoadElementAddress addresses relative to the sub-view.
@@ -6107,9 +6326,19 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                         {
 
 
-                            // Field 0 is always the actual pointer to the data
+                            // Field 0 is always the actual pointer to the data.
+                            // Direct-param coalesce member: redirect to the shared binding +
+                            // per-member offset slot. Field-0 access on a coalesce member
+                            // returns the pointer to THIS member's data within the shared array.
                             if (value.FieldSpan.Index == 0)
                             {
+                                if (_directParamCoalesceMembership.TryGetValue(param.Index, out var dpFld0Group))
+                                {
+                                    int dpFld0VoSlot = _viewOffsetScalarSlots[param.Index];
+                                    _bodyReferencesScalarParams = true;
+                                    AppendLine($"let {target} = &{dpFld0Group.BindingName}[i32(_scalar_params[{dpFld0VoSlot}])];");
+                                    return;
+                                }
                                 AppendLine($"let {target} = &param{param.Index}[0];");
                                 return;
                             }
@@ -6117,7 +6346,11 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                             // Metadata handling (Length and Strides)
                             if (isMultiDim && rawType is StructureType st1)
                             {
-                                var totalLen = $"i32(arrayLength(&param{param.Index}))";
+                                // Direct-param coalesce member: arrayLength on the SHARED binding
+                                // returns the sum of all members' u32 counts (wrong for view.Length
+                                // queries on a coalesce member, but compiles cleanly). v1 doesn't
+                                // allocate a per-member count slot; tracked for v2.
+                                string totalLen = $"i32(arrayLength(&{(_directParamCoalesceMembership.TryGetValue(param.Index, out var dpLenMdGroup) ? dpLenMdGroup.BindingName : $"param{param.Index}")}))";
                                 // For packed struct params, arrayLength() returns u32 count — divide by stride
                                 if (_packedStructLayouts.TryGetValue(param.Index, out var psLenLayout2))
                                 {
@@ -6423,7 +6656,15 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 && param.Index >= KernelParamOffset)
             {
                 string prefix = _hoistedPrimitives.Contains(value) ? "" : "let ";
-                var lengthExpr = $"i32(arrayLength(&param{param.Index}))";
+                string lengthExpr;
+
+                // Direct-param coalesce member: arrayLength() returns the SHARED binding's
+                // u32 count (sum across members), not this member's logical element count.
+                // v1 doesn't allocate per-member count slots — kernels using direct-param
+                // coalesce that read view.Length on coalesced inputs will get the wrong
+                // answer. Tracked for v2; the AV1 walker doesn't read view.Length on its
+                // coalesce-eligible inputs.
+                lengthExpr = $"i32(arrayLength(&{(_directParamCoalesceMembership.TryGetValue(param.Index, out var dpLenGroup) ? dpLenGroup.BindingName : $"param{param.Index}")}))";
 
                 // For packed struct params, arrayLength() returns u32 count — divide by stride to get logical element count
                 if (_packedStructLayouts.TryGetValue(param.Index, out var psLenLayout))

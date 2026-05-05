@@ -851,45 +851,92 @@ namespace SpawnDev.ILGPU.WebGPU
 
                     foreach (var group in compiledKernel.CoalesceManifest)
                     {
-                        int bsArgsIdx = group.BodyStructParamIndex - kernelParamOffset;
-                        if (bsArgsIdx < 0 || bsArgsIdx >= args.Length)
-                            throw new InvalidOperationException(
-                                $"[WebGPU-Coalesce] Body-struct param index {group.BodyStructParamIndex} (kernelParamOffset={kernelParamOffset}) maps to args[{bsArgsIdx}] which is out of range.");
-                        int baseEffArgsIdx = argsToEffectiveOffset[bsArgsIdx];
-
-                        // Map IR field index → effectiveArgs index. v1 assumes flat body struct
-                        // (no nested struct fields with pointer recursion); FlattenStructFields
-                        // walks fields in declaration order so fieldIdx N ↔ expandedArgs[baseIdx + N]
-                        // for a flat struct. We defensively verify each member is an IArrayView.
+                        // Build the per-member effective-args index list. Two paths:
+                        //   A) IsDirectParam=false (body-struct):   IR field index → expandedArgs[baseEff + fieldIdx]
+                        //   B) IsDirectParam=true  (direct-param):  IR param index → expandedArgs[argsToEffectiveOffset[paramIdx - kernelParamOffset]]
+                        // After this prelude both paths flow through the same memberInfos list and
+                        // the same buffer-allocation + GPU→GPU copy + scalar-offset record loop.
                         var memberInfos = new List<(int fieldIdx, int effArgsIdx, IContiguousArrayView contig, ulong lengthBytes, long elementCount)>();
-                        foreach (int fieldIdx in group.MemberFieldIndices)
+                        if (group.IsDirectParam)
                         {
-                            int effIdx = baseEffArgsIdx + fieldIdx;
-                            if (effIdx < 0 || effIdx >= effectiveArgsCount)
-                                throw new InvalidOperationException(
-                                    $"[WebGPU-Coalesce] Member field {fieldIdx} of body-struct param {group.BodyStructParamIndex} maps to expandedArgs[{effIdx}] which is out of range.");
-                            var memberArg = expandedArgs[effIdx];
-                            IArrayView? memberView = memberArg as IArrayView;
-                            if (memberView == null && memberArg != null)
+                            foreach (int paramIdx in group.MemberDirectParamIndices)
                             {
-                                var rc = GetOrCreateReflectionCache(memberArg.GetType());
-                                if (rc.BaseViewProperty != null)
-                                    memberView = rc.BaseViewProperty.GetValue(memberArg) as IArrayView;
-                            }
-                            if (memberView == null)
-                                throw new InvalidOperationException(
-                                    $"[WebGPU-Coalesce] Member field {fieldIdx} of body-struct param {group.BodyStructParamIndex} is not an IArrayView at expandedArgs[{effIdx}] (got {memberArg?.GetType().Name ?? "null"}).");
-                            var contig = memberView as IContiguousArrayView;
-                            if (contig == null)
-                            {
-                                var vc = GetOrCreateReflectionCache(memberView.GetType());
-                                contig = (vc.BaseViewProperty != null ? vc.BaseViewProperty.GetValue(memberView) : memberView) as IContiguousArrayView;
-                            }
-                            if (contig == null)
-                                throw new InvalidOperationException(
-                                    $"[WebGPU-Coalesce] Member field {fieldIdx} is not a contiguous view (group {group.BindingName}).");
+                                int dpArgsIdx = paramIdx - kernelParamOffset;
+                                if (dpArgsIdx < 0 || dpArgsIdx >= args.Length)
+                                    throw new InvalidOperationException(
+                                        $"[WebGPU-Coalesce] Direct-param index {paramIdx} (kernelParamOffset={kernelParamOffset}) maps to args[{dpArgsIdx}] which is out of range.");
+                                int effIdx = argsToEffectiveOffset[dpArgsIdx];
+                                if (effIdx < 0 || effIdx >= effectiveArgsCount)
+                                    throw new InvalidOperationException(
+                                        $"[WebGPU-Coalesce] Direct-param {paramIdx} maps to expandedArgs[{effIdx}] which is out of range.");
+                                var memberArg = expandedArgs[effIdx];
+                                IArrayView? memberView = memberArg as IArrayView;
+                                if (memberView == null && memberArg != null)
+                                {
+                                    var rc = GetOrCreateReflectionCache(memberArg.GetType());
+                                    if (rc.BaseViewProperty != null)
+                                        memberView = rc.BaseViewProperty.GetValue(memberArg) as IArrayView;
+                                }
+                                if (memberView == null)
+                                    throw new InvalidOperationException(
+                                        $"[WebGPU-Coalesce] Direct-param {paramIdx} is not an IArrayView at expandedArgs[{effIdx}] (got {memberArg?.GetType().Name ?? "null"}).");
+                                var contig = memberView as IContiguousArrayView;
+                                if (contig == null)
+                                {
+                                    var vc = GetOrCreateReflectionCache(memberView.GetType());
+                                    contig = (vc.BaseViewProperty != null ? vc.BaseViewProperty.GetValue(memberView) : memberView) as IContiguousArrayView;
+                                }
+                                if (contig == null)
+                                    throw new InvalidOperationException(
+                                        $"[WebGPU-Coalesce] Direct-param {paramIdx} is not a contiguous view (group {group.BindingName}).");
 
-                            memberInfos.Add((fieldIdx, effIdx, contig, (ulong)contig.LengthInBytes, contig.Length));
+                                // For direct-param groups we use the IR param index in the fieldIdx slot
+                                // — IsCoalesceFieldOffset entries with CoalesceFieldIndex=-1 indicate
+                                // direct-param mode, and CoalesceBodyStructParamIndex carries paramIdx.
+                                memberInfos.Add((paramIdx, effIdx, contig, (ulong)contig.LengthInBytes, contig.Length));
+                            }
+                        }
+                        else
+                        {
+                            int bsArgsIdx = group.BodyStructParamIndex - kernelParamOffset;
+                            if (bsArgsIdx < 0 || bsArgsIdx >= args.Length)
+                                throw new InvalidOperationException(
+                                    $"[WebGPU-Coalesce] Body-struct param index {group.BodyStructParamIndex} (kernelParamOffset={kernelParamOffset}) maps to args[{bsArgsIdx}] which is out of range.");
+                            int baseEffArgsIdx = argsToEffectiveOffset[bsArgsIdx];
+
+                            // Map IR field index → effectiveArgs index. v1 assumes flat body struct
+                            // (no nested struct fields with pointer recursion); FlattenStructFields
+                            // walks fields in declaration order so fieldIdx N ↔ expandedArgs[baseIdx + N]
+                            // for a flat struct. We defensively verify each member is an IArrayView.
+                            foreach (int fieldIdx in group.MemberFieldIndices)
+                            {
+                                int effIdx = baseEffArgsIdx + fieldIdx;
+                                if (effIdx < 0 || effIdx >= effectiveArgsCount)
+                                    throw new InvalidOperationException(
+                                        $"[WebGPU-Coalesce] Member field {fieldIdx} of body-struct param {group.BodyStructParamIndex} maps to expandedArgs[{effIdx}] which is out of range.");
+                                var memberArg = expandedArgs[effIdx];
+                                IArrayView? memberView = memberArg as IArrayView;
+                                if (memberView == null && memberArg != null)
+                                {
+                                    var rc = GetOrCreateReflectionCache(memberArg.GetType());
+                                    if (rc.BaseViewProperty != null)
+                                        memberView = rc.BaseViewProperty.GetValue(memberArg) as IArrayView;
+                                }
+                                if (memberView == null)
+                                    throw new InvalidOperationException(
+                                        $"[WebGPU-Coalesce] Member field {fieldIdx} of body-struct param {group.BodyStructParamIndex} is not an IArrayView at expandedArgs[{effIdx}] (got {memberArg?.GetType().Name ?? "null"}).");
+                                var contig = memberView as IContiguousArrayView;
+                                if (contig == null)
+                                {
+                                    var vc = GetOrCreateReflectionCache(memberView.GetType());
+                                    contig = (vc.BaseViewProperty != null ? vc.BaseViewProperty.GetValue(memberView) : memberView) as IContiguousArrayView;
+                                }
+                                if (contig == null)
+                                    throw new InvalidOperationException(
+                                        $"[WebGPU-Coalesce] Member field {fieldIdx} is not a contiguous view (group {group.BindingName}).");
+
+                                memberInfos.Add((fieldIdx, effIdx, contig, (ulong)contig.LengthInBytes, contig.Length));
+                            }
                         }
 
                         // Sum total bytes (4-byte aligned). All members share one element type so
@@ -947,7 +994,14 @@ namespace SpawnDev.ILGPU.WebGPU
                             // So the value we send is simply byteOffset / 4 — the stride multiplier
                             // is applied inside the WGSL via offsetExpr * stride for emu_64 reads.
                             int u32SlotOffset = (int)(runningByteOffset / 4UL);
-                            coalesceFieldElementOffsets[(group.BodyStructParamIndex, m.fieldIdx)] = u32SlotOffset;
+                            // Key the offsets dict to match what the codegen wrote into IsCoalesceFieldOffset
+                            // entries (CoalesceBodyStructParamIndex, CoalesceFieldIndex):
+                            //   body-struct: (BodyStructParamIndex, fieldIdx)  — m.fieldIdx is the IR field index
+                            //   direct-param: (paramIdx, -1)                   — m.fieldIdx slot is reused for paramIdx
+                            var offsetKey = group.IsDirectParam
+                                ? (m.fieldIdx, -1)
+                                : (group.BodyStructParamIndex, m.fieldIdx);
+                            coalesceFieldElementOffsets[offsetKey] = u32SlotOffset;
 
                             runningByteOffset += copySize;
                             runningElementCount += m.elementCount;
@@ -1058,8 +1112,12 @@ namespace SpawnDev.ILGPU.WebGPU
                         else
                         {
                             // Regular param: map IR param index to effectiveArgs index
-                            // Skip IsViewOffset/IsViewCount entries — they're packed separately after the scalar loop
-                            if (entry.IsViewOffset || entry.IsViewCount) continue;
+                            // Skip IsViewOffset / IsViewCount / IsCoalesceFieldOffset entries — they're
+                            // metadata for view bindings (offset/count/coalesced-member-offset), not
+                            // C# scalar args. Adding them to packedScalarLookup would cause Phase 2's
+                            // scalar fill to try to serialize the underlying ArrayView arg as a struct
+                            // (CopyStructToBytes fails: ArrayView has pointer fields).
+                            if (entry.IsViewOffset || entry.IsViewCount || entry.IsCoalesceFieldOffset) continue;
                             int effectiveArgsIdx = entry.ParamIndex - kernelParamOffset;
                             if (effectiveArgsIdx >= 0 && effectiveArgsIdx < effectiveArgsCount)
                                 packedScalarLookup[effectiveArgsIdx] = entry;
