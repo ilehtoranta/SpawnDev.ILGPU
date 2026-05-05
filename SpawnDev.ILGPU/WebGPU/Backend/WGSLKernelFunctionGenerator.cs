@@ -131,6 +131,12 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         // _bodyStructAtomicFields: (paramIndex, fieldIndex) → true if this view field is atomic
         // _bodyStructAtomicFloatFields: (paramIndex, fieldIndex) → true if float atomic
         private Dictionary<int, List<BodyStructFieldInfo>> _bodyStructParams = new Dictionary<int, List<BodyStructFieldInfo>>();
+        // _bodyStructOutputFields: (paramIndex, fieldIndex) → true if this view field
+        // is the target of any Store / GenericAtomic in the kernel or any helper it
+        // calls. Output fields must be excluded from coalesce because the host doesn't
+        // copy back from the coalesced buffer to the original output ArrayView's GPU
+        // storage.
+        private HashSet<(int paramIdx, int fieldIdx)> _bodyStructOutputFields = new HashSet<(int, int)>();
         private HashSet<(int paramIdx, int fieldIdx)> _bodyStructAtomicFields = new HashSet<(int, int)>();
         private HashSet<(int paramIdx, int fieldIdx)> _bodyStructAtomicFloatFields = new HashSet<(int, int)>();
         private HashSet<(int paramIdx, int fieldIdx)> _bodyStructUnsignedAtomicFields = new HashSet<(int, int)>();
@@ -245,6 +251,15 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             // GenerateHeader runs AFTER body generation, so we cannot rely on GenerateHeader
             // to populate _bodyStructParams.
             ScanBodyStructParams();
+            // Identify body-struct view fields that are kernel OUTPUTS (target of any
+            // Store / GenericAtomic in the kernel or any helper it calls). Output
+            // fields must NOT be coalesced — coalesce concatenates input data into a
+            // shared buffer and binds once; output writes within the kernel land in
+            // that shared buffer, NOT in the original output ArrayView's GPU storage.
+            // Without this exclusion, Tests23_RegisterHeavyBody_UnitExtent_NoLaunchFailure
+            // returns 0 instead of 5194 — kernel writes Out[0]=sum into the coalesced
+            // input buffer instead of into bOut's actual storage.
+            ScanForBodyStructOutputs();
             // After scan, decide whether this kernel exceeds the device's binding limit and
             // needs coalescing. Mutates BodyStructFieldInfo.BindingName + IsCoalesceMember/Leader
             // so the rest of the codegen path emits one binding per group instead of one per field.
@@ -276,6 +291,71 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             // Also scan called helper functions recursively
             var visited = new HashSet<global::ILGPU.IR.Method>();
             ScanMethodCallsRecursive(Method, paramIndex => paramIndex, visited);
+        }
+
+        /// <summary>
+        /// Walk all Store / GenericAtomic ops in the kernel (and all helper methods it
+        /// calls) and identify body-struct view fields that are the WRITE TARGET. These
+        /// fields cannot participate in coalesce — the coalesce path concatenates input
+        /// data into a shared buffer at host-time and binds it once; output writes
+        /// within the kernel land in that shared buffer rather than in the original
+        /// output ArrayView's GPU storage. The host doesn't copy back, so the output
+        /// buffer stays at zero. Surfaced 2026-05-05 by Tests23_RegisterHeavyBody —
+        /// 12 ArrayView<int> fields plus an Out field, all coalesced together, kernel
+        /// writes Out[0]=sum into the shared buffer instead of bOut.
+        /// </summary>
+        private void ScanForBodyStructOutputs()
+        {
+            ScanBlocksForBodyStructOutputs(Method.Blocks);
+
+            var visited = new HashSet<global::ILGPU.IR.Method>();
+            ScanMethodCallsForBodyStructOutputs(Method, visited);
+        }
+
+        private void ScanBlocksForBodyStructOutputs(IEnumerable<global::ILGPU.IR.BasicBlock> blocks)
+        {
+            foreach (var block in blocks)
+            {
+                foreach (var entry in block)
+                {
+                    Value? target = null;
+                    if (entry.Value is global::ILGPU.IR.Values.Store store)
+                        target = store.Target;
+                    else if (entry.Value is global::ILGPU.IR.Values.GenericAtomic atomic)
+                        target = atomic.Target;
+                    else if (entry.Value is global::ILGPU.IR.Values.AtomicCAS cas)
+                        target = cas.Target;
+                    if (target == null) continue;
+
+                    if (ResolveToParameterWithFieldChain(target, out var param, out var fieldIdx)
+                        && param != null && fieldIdx >= 0
+                        && _bodyStructParams.TryGetValue(param.Index, out var bsFields)
+                        && fieldIdx < bsFields.Count
+                        && bsFields[fieldIdx].IsView)
+                    {
+                        _bodyStructOutputFields.Add((param.Index, fieldIdx));
+                    }
+                }
+            }
+        }
+
+        private void ScanMethodCallsForBodyStructOutputs(
+            global::ILGPU.IR.Method method,
+            HashSet<global::ILGPU.IR.Method> visited)
+        {
+            if (!visited.Add(method)) return;
+
+            // Scan blocks of this method
+            ScanBlocksForBodyStructOutputs(method.Blocks);
+
+            foreach (var block in method.Blocks)
+            {
+                foreach (var entry in block)
+                {
+                    if (entry.Value is global::ILGPU.IR.Values.MethodCall methodCall)
+                        ScanMethodCallsForBodyStructOutputs(methodCall.Target, visited);
+                }
+            }
         }
 
         /// <summary>
@@ -715,6 +795,9 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 {
                     if (!bf.IsView) continue;
                     if (_bodyStructAtomicFields.Contains((paramIdx, bf.FieldIndex))) continue;
+                    // Output body-struct view fields MUST be excluded from coalesce.
+                    // See ScanForBodyStructOutputs comment.
+                    if (_bodyStructOutputFields.Contains((paramIdx, bf.FieldIndex))) continue;
                     int synthIdx = (paramIdx + 1) * 1000 + bf.FieldIndex;
                     if (_subWordParams.ContainsKey(synthIdx)) continue;
                     if (_packedStructBSFieldLayouts.ContainsKey((paramIdx, bf.FieldIndex))) continue;

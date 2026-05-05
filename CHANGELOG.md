@@ -2,6 +2,31 @@
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
 
+## 4.9.5-rc.27 (2026-05-05) — WebGPU coalesce excludes OUTPUT body-struct view fields
+
+### Fix: Tests23_RegisterHeavyBody on WebGPU was reading 0 instead of 5194
+
+When a body struct contains an OUTPUT view (e.g. `Tests23_RegisterHeavyBody { ArrayView<int> A0..A10; ArrayView<int> Out; }`), pre-rc.27 WGSL coalesce bundled all 12 same-typed views (A0..A10 + Out) into a single shared GPU storage buffer (`param1_i32_coalesced`). The host-side coalesce path in `WebGPUAccelerator.MarshalArguments` concatenates INPUT data into the shared buffer at dispatch time via `CopyBufferToBuffer`, then binds the shared buffer ONCE.
+
+Output writes never copy back. The kernel's `*v_80 = v_20;` (where `v_80 = &param1_i32_coalesced[scalar_params[11] + 0]`) writes the sum into the **shared input buffer** at slot 11, not into `bOut`'s actual GPU storage. Host reads `bOut`'s storage post-dispatch and finds it untouched (zero).
+
+### Fix
+
+New `ScanForBodyStructOutputs` walks every `Store` / `GenericAtomic` / `AtomicCAS` IR op in the kernel + every helper method it calls, resolves the target via `ResolveToParameterWithFieldChain`, and adds `(paramIdx, fieldIdx)` to `_bodyStructOutputFields` whenever the target is a body-struct view field.
+
+`DecideCoalesceGroups` then adds an early-`continue` for any field in `_bodyStructOutputFields` — output fields keep their own per-field binding, so kernel writes hit the actual output ArrayView's GPU storage and the host reads back correctly.
+
+### Verified passing post-rc.27
+
+- `WebGPUTests.Tests23_RegisterHeavyBody_UnitExtent_NoLaunchFailure` (was FAIL, now PASS)
+- `WebGPUNoSubgroupsTests.Tests23_RegisterHeavyBody_UnitExtent_NoLaunchFailure` (was FAIL, now PASS)
+- All other body-struct WebGPU + WebGL + Wasm + CPU + Cuda + OpenCL tests still PASS (42/42 PMT body-struct sweep)
+- 14/14 desktop regression sweep PASS
+
+### Files changed
+
+- `SpawnDev.ILGPU/WebGPU/Backend/WGSLKernelFunctionGenerator.cs` — added `_bodyStructOutputFields` field, `ScanForBodyStructOutputs` method (walks Store/Atomic IR ops in kernel + helpers via `ResolveToParameterWithFieldChain`), early-continue in `DecideCoalesceGroups`. Wired into constructor between `ScanBodyStructParams` and `DecideCoalesceGroups`.
+
 ## 4.9.5-rc.26 (2026-05-05) — WebGL body-struct rc.25 v2 follow-ups CLOSED — all 8 tests PASS
 
 ### What changed
