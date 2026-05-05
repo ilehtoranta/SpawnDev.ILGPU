@@ -124,6 +124,9 @@ namespace SpawnDev.ILGPU.Wasm
             public int TotalItems;
             public int WorkerCount;
             public string ViewLayoutDiag = "";
+            // Kernel name for error reporting — surfaced 2026-05-04 by Data needing
+            // to identify which op trapped at dispatch 176 in StyleMosaic Wasm.
+            public string KernelName = "";
             public Action<MessageEvent>? MsgHandler;
             public Action<Event>? ErrHandler;
         }
@@ -1305,7 +1308,7 @@ namespace SpawnDev.ILGPU.Wasm
                 {
                     var errorMsg = response.error ?? "Unknown worker error";
                     tcs.TrySetException(new Exception(
-                        $"[Wasm] Worker {state.WorkerIdx} error: {errorMsg} | disp={state.DispNum} pages={_cachedWasmPages} mem={_cachedWasmPages * 65536} barriers={state.HasBarriers} scratch={state.ScratchBase} shared={state.SharedMemBase} fence={state.FenceSlot} gs={state.GroupSize} spt={state.ScratchPerThread} items={state.TotalItems} wc={state.WorkerCount} views={state.ViewLayoutDiag}"));
+                        $"[Wasm] Worker {state.WorkerIdx} error: {errorMsg} | kernel={state.KernelName} disp={state.DispNum} pages={_cachedWasmPages} mem={_cachedWasmPages * 65536} barriers={state.HasBarriers} scratch={state.ScratchBase} shared={state.SharedMemBase} fence={state.FenceSlot} gs={state.GroupSize} spt={state.ScratchPerThread} items={state.TotalItems} wc={state.WorkerCount} views={state.ViewLayoutDiag}"));
                     return;
                 }
                 tcs.TrySetResult();
@@ -1318,7 +1321,7 @@ namespace SpawnDev.ILGPU.Wasm
                 state.CurrentTcs = null;
                 _workerPool?.Return(worker);
                 UnregisterTcs(tcs);
-                tcs.TrySetException(new Exception($"[Wasm] Worker {state.WorkerIdx} error during kernel execution"));
+                tcs.TrySetException(new Exception($"[Wasm] Worker {state.WorkerIdx} error during kernel execution | kernel={state.KernelName} disp={state.DispNum}"));
             });
 
             worker.OnMessage += state.MsgHandler;
@@ -1468,6 +1471,7 @@ namespace SpawnDev.ILGPU.Wasm
                     handlerState.TotalItems = totalItems;
                     handlerState.WorkerCount = workerCount;
                     handlerState.ViewLayoutDiag = _lastViewLayoutDiag;
+                    handlerState.KernelName = compiledKernel.EntryPoint?.Name ?? "<unknown>";
 
                     // Send fiber range to worker.
                     // Fiber dispatch: each worker handles a contiguous range of threads.
@@ -1525,6 +1529,7 @@ namespace SpawnDev.ILGPU.Wasm
                     handlerState.TotalItems = totalItems;
                     handlerState.WorkerCount = workerCount;
                     handlerState.ViewLayoutDiag = _lastViewLayoutDiag;
+                    handlerState.KernelName = compiledKernel.EntryPoint?.Name ?? "<unknown>";
 
                     bool firstTimeOnWorker = kernelInitSet.Add(worker);
                     worker.PostMessage(new WasmFlatDispatchMessage
@@ -1542,8 +1547,33 @@ namespace SpawnDev.ILGPU.Wasm
                 }
             }
 
-            // Wait for all workers to complete
-            await Task.WhenAll(tasks);
+            // Wait for all workers to complete — but fast-fault on the FIRST worker
+            // exception. `Task.WhenAll(tasks)` waits for ALL tasks before throwing the
+            // first exception, which means a single worker trap (kernel OOB, divide-by-
+            // zero, etc.) hangs the dispatch waiting for OTHER workers that may also be
+            // blocked or never post back. Instead, drain via WhenAny and surface the
+            // first fault immediately. Other workers' TCSes complete eventually and
+            // their resources clean up via the persistent OnMessage handlers.
+            //
+            // Surfaced 2026-05-04 by Data's StyleMosaic Wasm 10+ minute hang at rc.16:
+            // worker 2 hit a kernel OOB at dispatch 176, but the dispatcher waited
+            // 10 minutes (PMT timeout) instead of the actionable 20-second error path.
+            // PerOpSync diagnostic mode caught it because forced sync after every
+            // dispatch funneled errors through SynchronizeAsync which DID propagate
+            // exceptions. This fix makes the non-PerOpSync path equally responsive.
+            {
+                var remaining = new List<Task>(tasks);
+                while (remaining.Count > 0)
+                {
+                    var done = await Task.WhenAny(remaining);
+                    remaining.Remove(done);
+                    if (done.IsFaulted)
+                    {
+                        var ex = done.Exception?.InnerException ?? done.Exception;
+                        if (ex != null) throw ex;
+                    }
+                }
+            }
 
             // Debug: dump first 4 bytes of each buffer in Wasm memory after kernel.
             // Gate the JS interop loop behind VerboseLogging too — the per-buffer typed
