@@ -2,6 +2,33 @@
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
 
+## 4.9.5-local.1 (2026-05-05) — WGSL Bug D phases 2/3/5 + Tuvok's i64 emul-lib scan fix
+
+Local-feed-only build for Tuvok to consume the rc.16 fn-definition codegen
+fix on his AV1 walker (commit `a203e5e`).
+
+### What landed
+
+- **Phase 2** — sub-word ArrayView fn-params (byte/sbyte/short/ushort/Half) now flow through standalone-fn-def helpers on WebGPU. `WGSLFunctionGenerator` overrides `LoadElementAddress` / `Load` / `Store` to emit the kernel's atomicLoad+shift+mask+sign-extend chain with the helper's local ptr alias as the binding.
+- **Phase 3** — helper-to-helper non-inline calls now emit a real WGSL fn call (was "Unmapped fallback" emitting `v_X = i32(0)`).
+- **Phase 5** — verified `EmitNonInlinedMethodCall` correctly routes the kernel's ptr alias from Phase 4 to NoInlining helpers' ArrayView args.
+- **Cross-block field address** — helper `LoadFieldAddress` registers a dereffed inline expression so `Load` / `Store` in different switch-case blocks substitute `(*src).field` instead of referencing a case-scoped `let`.
+- **AddressSpaceCast on local alloca in helper** — matches kernel behavior of registering `&v_local` as the cast result so ref-style args land as ptrs at call sites.
+- **GLSL function-return fallback** — struct return type now emits a constructor with one zero per field (was rejected with "Number of constructor parameters does not match").
+- **WebGL struct-defs ordering** — top-of-file placeholder set up in `CreateKernelBuilder`; struct definitions now land BEFORE helper functions that use them as parameter types.
+- **Tuvok's i64_ge / i64_eq missing-definition fix** — `SetEmulationFlags()` and `ScanForSubgroupAndBroadcastUsage()` now walk a unified `EnumerateAllHelperMethods()` that includes both Inline-flagged and NoInline-flagged helpers via a new `GeneratorArgs.NonInlineMethods` list. NoInlining helpers with 64-bit ops (e.g. AV1 walker `long cdfBase`, `state.Low` u64) used to leave `KernelUsesI64=false` so the WGSL emit called `i64_ge` / `i64_eq` without their definitions; now they're seen and the emulation library is pulled in.
+
+### Verified passing post-local.1
+
+- `Tests23_DecodeUint_LongForm_CompileSmoke` — 6/7 backends pass (WebGPU 622ms, WebGPUNoSubgroups 213ms, Wasm 272ms, CPU + CUDA + OpenCL pass), WebGL skipped via `UnsupportedTestException` (GLSL ES has no pointer types - ArrayView fn-params can't go through standalone fn defs; tracked as Bug D follow-up).
+- 23 body-struct + sub-word + algorithm regression tests pass (LocalMemoryRepro_Int64_ShortByteViews, Tests23_OnlyShortBodyStruct, Tests23_TwoShortBodyStruct*, Tests23_RegisterHeavyBody_*, AlgorithmGroupReduceHalfTest across WebGPU + WebGPUNoSubgroups + Wasm).
+
+### Known caveats
+
+- WebGL fn-def-with-ArrayView path requires force-inline or signature redesign. Force-skipped via `UnsupportedTestException` for the smoke test.
+- f16 emulation `_kernelReferencesF16Helpers` is per-instance and would still miss a non-inline helper's `Half` use; theoretical until tested.
+- Wasm bitstream divergence on dead-code helpers (Tuvok's symptom 2) — separate bug, not investigated yet.
+
 ## 4.9.5-rc.27 (2026-05-05) — WebGPU coalesce excludes OUTPUT body-struct view fields
 
 ### Fix: Tests23_RegisterHeavyBody on WebGPU was reading 0 instead of 5194
