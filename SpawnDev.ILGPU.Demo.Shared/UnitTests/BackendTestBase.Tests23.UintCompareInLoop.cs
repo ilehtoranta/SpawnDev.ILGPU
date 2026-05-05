@@ -821,6 +821,47 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             }
         });
 
+        // DistilBERT-shape Pow: exponent loaded from ArrayView (NOT a literal PrimitiveValue).
+        // Mimics ONNX LayerNorm's `(x - mean)^pow_initializer_2.0` shape that produced NaN
+        // on WebGL pre-rc.21 (Data's first-divergent at node 10 Pow). The static-const
+        // detection fails when value.Right.Resolve() returns a Load node instead of a
+        // PrimitiveValue; the runtime-safe pow wrapper handles the negative-base case.
+        static void Tests23_PowFromBufferKernel(
+            Index1D idx,
+            ArrayView<float> input,
+            ArrayView<float> exponent,
+            ArrayView<float> output)
+        {
+            output[idx] = MathF.Pow(input[idx], exponent[0]);
+        }
+
+        [TestMethod]
+        public async Task Tests23_PowNegativeBase_ExponentFromBuffer_NoNaN() => await RunEmulatedTest(async accelerator =>
+        {
+            // Same input set as Tests23_PowNegativeBase_IntExp2_NoNaN, but exponent
+            // is loaded from a 1-element buffer (mimics ONNX initializer ArrayView).
+            var input = new float[] { 0.055f, -0.037f, -1.5f, 2.0f, -0.001f, 3.14f, -3.14f };
+            var exp = new float[] { 2.0f };
+            var expected = input.Select(v => v * v).ToArray();
+            using var inBuf = accelerator.Allocate1D(input);
+            using var expBuf = accelerator.Allocate1D(exp);
+            using var outBuf = accelerator.Allocate1D<float>(input.Length);
+            var k = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<float>, ArrayView<float>, ArrayView<float>>(
+                Tests23_PowFromBufferKernel);
+            k((Index1D)input.Length, inBuf.View, expBuf.View, outBuf.View);
+            await accelerator.SynchronizeAsync();
+
+            var got = await outBuf.CopyToHostAsync<float>(0, input.Length);
+            for (int i = 0; i < input.Length; i++)
+            {
+                if (float.IsNaN(got[i]))
+                    throw new Exception($"pow({input[i]}, exp[0]=2) returned NaN at idx {i} - the runtime-safe pow wrapper isn't catching the negative-base case when the exponent is loaded from a buffer.");
+                float diff = MathF.Abs(got[i] - expected[i]);
+                if (diff > MathF.Abs(expected[i]) * 1e-4f + 1e-6f)
+                    throw new Exception($"pow({input[i]}, exp[0]=2): expected {expected[i]} got {got[i]}");
+            }
+        });
+
         // Test J: WebGL glWorker.js subview-offset leak across same-program dispatches.
         // Surfaced 2026-05-04 by Data's StyleMosaic node 55 Gather first-divergent
         // capture: WebGL's glWorker.js was conditionally setting the

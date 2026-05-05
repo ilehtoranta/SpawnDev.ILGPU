@@ -2663,7 +2663,12 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                         return;
                     }
                 }
-                AppendLine($"{prefix}{target} = pow({left}, {right});");
+                // Runtime-safe pow for the case where the exponent isn't a literal
+                // PrimitiveValue (e.g., loaded from an ONNX initializer ArrayView -
+                // DistilBERT LayerNorm `(x - mean)^pow_const_2.0` per Data's
+                // 2026-05-04 first-divergent capture). For x >= 0, native pow.
+                // For x < 0, pow(abs(x), y) with sign correction for odd integer y.
+                AppendLine($"{prefix}{target} = ({left} >= 0.0 ? pow({left}, {right}) : pow(abs({left}), {right}) * (mod({right}, 2.0) >= 1.0 ? -1.0 : 1.0));");
                 return;
             }
 

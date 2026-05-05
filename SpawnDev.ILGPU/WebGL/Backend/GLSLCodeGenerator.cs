@@ -973,16 +973,22 @@ namespace SpawnDev.ILGPU.WebGL.Backend
 
             if (value.Kind == BinaryArithmeticKind.PowF)
             {
-                // GLSL `pow(x, y)` is undefined for x < 0; ANGLE typically emits it as
+                // GLSL `pow(x, y)` is undefined for x < 0; ANGLE emits it as
                 // `exp(y * log(x))` and `log(negative_x)` is NaN. For LayerNorm's variance
                 // step `(x - mean)^2`, half the inputs are negative — every NaN cascades
-                // through ReduceMean -> Sqrt -> Mul -> Add to produce NaN logits. Surfaced
-                // 2026-05-04 by Data's DistilBERT WebGL first-divergent-node capture.
+                // through ReduceMean -> Sqrt -> Mul -> Add to produce NaN logits.
                 //
-                // Fix: when the exponent is a constant non-negative integer, expand to
-                // repeated multiplication. `(x - mean)^2` becomes `(x - mean) * (x - mean)`
-                // which is well-defined for negative x. Bound at 8 to avoid bloating WGSL
-                // for large exponents (uncommon in ML); fall through to `pow()` past that.
+                // Two-tier fix:
+                // (a) Static const detection: if the exponent is a literal PrimitiveValue
+                //     non-negative integer (0..8), expand to repeated multiplication.
+                //     Cheapest path. (rc.12 fix)
+                // (b) Runtime-safe wrapper: when (a) doesn't catch (e.g., exponent loaded
+                //     from an ONNX initializer ArrayView — DistilBERT LayerNorm), emit
+                //     a runtime branch that handles negative base for integer exponents.
+                //     Surfaced 2026-05-04 by Data's WebGL DistilBERT first-divergent at
+                //     node 10 Pow: ONNX exponent comes via Load(initializer_buffer) so
+                //     value.Right.Resolve() is the Load node, not PrimitiveValue, and (a)
+                //     falls through. (rc.21+ fix)
                 if (value.Right.Resolve() is PrimitiveValue pv)
                 {
                     float pf = pv.BasicValueType == BasicValueType.Float32 || pv.BasicValueType == BasicValueType.Float16
@@ -1000,7 +1006,13 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                         return;
                     }
                 }
-                AppendLine($"{target} = pow({left}, {right});");
+                // Runtime-safe Pow: handles negative base for integer-ish exponents
+                // without NaN. For x >= 0, native pow is correct. For x < 0:
+                //   - integer exponent: pow(abs(x), y) with sign correction for odd y
+                //   - non-integer exponent (mathematically undefined for negative base):
+                //     return pow(abs(x), y), at least finite — caller's choice of input
+                //     was already invalid.
+                AppendLine($"{target} = ({left} >= 0.0 ? pow({left}, {right}) : pow(abs({left}), {right}) * (mod({right}, 2.0) >= 1.0 ? -1.0 : 1.0));");
                 return;
             }
 
