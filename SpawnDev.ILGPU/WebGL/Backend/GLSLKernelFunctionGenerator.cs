@@ -303,40 +303,72 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         {
             bodyParamIdx = -1; bodyFieldIdx = -1; info = null!;
 
-            if (src is GetField outerGf)
+            if (src is GetField gf && TryFindBodyStructRoot(gf, out var bsParam, out var rootInfo, out _))
             {
-                // Case 1: GetField(bodyParam, fi)
-                if (outerGf.ObjectValue.Resolve() is global::ILGPU.IR.Values.Parameter bp1
-                    && _bodyStructParamsGL.TryGetValue(bp1.Index, out var bsFields1))
+                if (rootInfo.IsView)
                 {
-                    int fi = outerGf.FieldSpan.Index;
-                    if (fi >= 0 && fi < bsFields1.Count && bsFields1[fi].IsView)
-                    {
-                        bodyParamIdx = bp1.Index;
-                        bodyFieldIdx = fi;
-                        info = bsFields1[fi];
-                        return true;
-                    }
-                }
-                // Case 2: GetField(GetField(bodyParam, fi), inner) — ArrayView1D wrapper
-                // unwrap. Accept any inner field index (BaseView is typically Field 0
-                // but we don't gate on that — the OUTER field's IsView check is what
-                // matters for the body-struct view binding identity).
-                if (outerGf.ObjectValue.Resolve() is GetField middleGf
-                    && middleGf.ObjectValue.Resolve() is global::ILGPU.IR.Values.Parameter bp2
-                    && _bodyStructParamsGL.TryGetValue(bp2.Index, out var bsFields2))
-                {
-                    int fi = middleGf.FieldSpan.Index;
-                    if (fi >= 0 && fi < bsFields2.Count && bsFields2[fi].IsView)
-                    {
-                        bodyParamIdx = bp2.Index;
-                        bodyFieldIdx = fi;
-                        info = bsFields2[fi];
-                        return true;
-                    }
+                    bodyParamIdx = bsParam.Index;
+                    bodyFieldIdx = rootInfo.FieldIndex;
+                    info = rootInfo;
+                    return true;
                 }
             }
             return false;
+        }
+
+        /// <summary>
+        /// Walks a GetField chain back to its root parameter. If the chain terminates
+        /// at a body-struct parameter, returns the body-struct field info for the
+        /// outermost GetField (i.e. the one extracting the user's C# field directly
+        /// from the body struct). chainDepth is the count of GetField links walked
+        /// (1 = direct, 2 = ArrayView1D wrapper, 3+ = deeper unwrap of BaseView etc).
+        /// </summary>
+        private bool TryFindBodyStructRoot(GetField value,
+            out global::ILGPU.IR.Values.Parameter bodyParam,
+            out BodyStructFieldInfoGL rootFieldInfo,
+            out int chainDepth)
+        {
+            bodyParam = null!;
+            rootFieldInfo = null!;
+            chainDepth = 0;
+
+            // Walk up: collect each GetField link, tracking the outermost (closest to
+            // the parameter) field index. The chain looks like:
+            //   value = GetField(x_n, fi_n) [innermost to value]
+            //   x_n = GetField(x_{n-1}, fi_{n-1})
+            //   ...
+            //   x_1 = GetField(parameter, outerFi)  // outerFi is the body-struct field index
+            //   x_1.ObjectValue.Resolve() is Parameter
+            GetField current = value;
+            int outerFi = -1;
+            int depth = 0;
+            while (true)
+            {
+                depth++;
+                outerFi = current.FieldSpan.Index;
+                var resolvedObject = current.ObjectValue.Resolve();
+                if (resolvedObject is global::ILGPU.IR.Values.Parameter param)
+                {
+                    if (_bodyStructParamsGL.TryGetValue(param.Index, out var bsFields))
+                    {
+                        if (outerFi >= 0 && outerFi < bsFields.Count)
+                        {
+                            bodyParam = param;
+                            rootFieldInfo = bsFields[outerFi];
+                            chainDepth = depth;
+                            return true;
+                        }
+                    }
+                    return false;
+                }
+                if (resolvedObject is GetField nextGf)
+                {
+                    current = nextGf;
+                    if (depth > 8) return false; // safety cap
+                    continue;
+                }
+                return false;
+            }
         }
 
         /// <summary>
@@ -749,6 +781,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 // host-side dispatch counts only the user-visible C# fields.
                 int clrFieldCounter = 0;
                 int viewMetadataPhase = 0; // 0=idle, 1=after view ptr, 2=after Int64
+                string lastViewBindingName = "";
                 for (int fi = 0; fi < st.NumFields; fi++)
                 {
                     var fieldType = st.Fields[fi];
@@ -760,9 +793,16 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                     }
                     else if (viewMetadataPhase == 1)
                     {
+                        // ArrayView wrapper expansion: View → Int64 (length) → optional
+                        // Int8 (Dense flag). Mark Int64 as view metadata regardless of
+                        // position. The WGSL backend uses an isLastField heuristic to
+                        // disambiguate Length from a trailing scalar reduce-value, but
+                        // GLSL falls through to a standard 2D-view stride emit on any
+                        // unmatched field, generating undefined `u_param{N}_stride[]`
+                        // references — so we must claim every Int64-after-view as
+                        // metadata to suppress the fallthrough.
                         string typeStr = fieldType.ToString();
-                        bool isLastField = fi == st.NumFields - 1;
-                        if (typeStr.Contains("Int64") && !isLastField)
+                        if (typeStr.Contains("Int64"))
                         {
                             isViewMetadata = true;
                             viewMetadataPhase = 2;
@@ -795,6 +835,13 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                     int clrIdx = (isView || isScalar) ? clrFieldCounter : -1;
                     if (isView || isScalar) clrFieldCounter++;
 
+                    // Metadata fields share the binding name of their associated view —
+                    // their length / Dense-flag value comes from that view's `_length`
+                    // uniform. Without this aliasing, the kernel emit references
+                    // `u_param{N}_f{metadata_fi}_length` which is never declared.
+                    string bindingName = isViewMetadata && !string.IsNullOrEmpty(lastViewBindingName)
+                        ? lastViewBindingName
+                        : $"u_param{param.Index}_f{fi}";
                     var info = new BodyStructFieldInfoGL
                     {
                         FieldIndex = fi,
@@ -804,12 +851,14 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                         IsViewMetadata = isViewMetadata,
                         ClrFieldIndex = clrIdx,
                         SyntheticParamIndex = (param.Index + 1) * 1000 + fi,
-                        BindingName = $"u_param{param.Index}_f{fi}",
+                        BindingName = bindingName,
                         ClrFieldName = (clrFields != null && clrIdx >= 0 && clrIdx < clrFields.Length)
                             ? clrFields[clrIdx].Name : $"field_{fi}",
                         ClrFieldType = (clrFields != null && clrIdx >= 0 && clrIdx < clrFields.Length)
                             ? clrFields[clrIdx].FieldType : null,
                     };
+                    if (isView)
+                        lastViewBindingName = bindingName;
 
                     if (isView)
                     {
@@ -3074,67 +3123,83 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         {
             if (_hoistedIndexFields.Contains(value)) return;
 
-            // Body-struct field access redirect. When ObjectValue resolves to a body-
-            // struct param, the GetField is just a stepping-stone to a LEA or to a
-            // length-style query — the actual buffer access happens in the LEA hook
-            // (full-word + sub-word view fields) or via _bodyStructFieldBindingNames
-            // (length uniform). Suppress the standard struct.field_N emit here so we
-            // don't dereference the body struct as if it were a UBO.
-            if (value.ObjectValue.Resolve() is global::ILGPU.IR.Values.Parameter bsParam
-                && _bodyStructParamsGL.TryGetValue(bsParam.Index, out var bsFields))
+            // Body-struct field access redirect. Walk the GetField chain back to the
+            // root parameter. If the chain ends at a body-struct param AND the
+            // immediate-outermost GetField references a view field, suppress the
+            // standard struct.field_N emit — the LEA hook handles real buffer access,
+            // and intermediate GetFields (extracting BaseView / stride / length from
+            // an ArrayView1D wrapper) are no-ops or trivial uniform references.
+            if (TryFindBodyStructRoot(value, out var bsRootParam, out var rootFieldInfo, out int chainDepth))
             {
                 int fi = value.FieldSpan.Index;
-                if (fi >= 0 && fi < bsFields.Count)
+                var target = Load(value);
+                if (rootFieldInfo.IsViewMetadata)
                 {
-                    var bsfInfo = bsFields[fi];
-                    if (bsfInfo.IsView)
+                    // ArrayView wrapper metadata fields (Length, Dense flag). Emit a
+                    // length-uniform reference for Int64 lengths or a 0 placeholder
+                    // for the Dense flag. Important: must intercept here so the
+                    // standard GenerateCode(GetField) doesn't fall through to a
+                    // 2D-view stride emit and reference an undeclared uniform.
+                    string prefix = _hoistedPrimitives.Contains(value) ? "" : $"{TypeGenerator[value.Type]} ";
+                    declaredVariables.Add(target.Name);
+                    string typeName = TypeGenerator[value.Type];
+                    if (typeName == "uvec2")
                     {
-                        // View field — registered for downstream LEA hook to recognize.
-                        // No GLSL emit; the LEA path consumes the GetField directly.
-                        var target = Load(value);
-                        declaredVariables.Add(target.Name);
-                        AppendLine($"// body-struct view field {bsParam.Index}.{bsfInfo.ClrFieldName} (handled by LEA hook)");
-                        return;
+                        // Int64-encoded length
+                        AppendLine($"{prefix}{target} = i64_from_i32({rootFieldInfo.BindingName}_length);");
                     }
-                    if (bsfInfo.IsScalar)
+                    else if (typeName == "int" || typeName == "uint")
                     {
-                        // Scalar field — emit a direct uniform read using the per-field uniform name.
-                        var target = Load(value);
-                        string prefix = _hoistedPrimitives.Contains(value) ? "" : $"{TypeGenerator[value.Type]} ";
-                        declaredVariables.Add(target.Name);
-                        AppendLine($"{prefix}{target} = {bsfInfo.BindingName};");
-                        return;
+                        AppendLine($"{prefix}{target} = {rootFieldInfo.BindingName}_length;");
                     }
+                    else
+                    {
+                        // Dense flag or other tag — emit a zero placeholder
+                        AppendLine($"{prefix}{target} = {typeName}(0);");
+                    }
+                    return;
                 }
-            }
-            // Body-struct ArrayView1D wrapper inner-field access — when the object
-            // is a GetField on a body-struct param itself returning an ArrayView1D
-            // wrapper, the inner GetField extracts BaseView (Field 0) or Extent/Length
-            // (Field 1+). For Field 0 we treat it as a no-op since the LEA hook walks
-            // through chained GetFields. For Length we'd need to emit
-            // `u_param{N}_f{M}_length`.
-            if (value.ObjectValue.Resolve() is GetField outerBsGf
-                && outerBsGf.ObjectValue.Resolve() is global::ILGPU.IR.Values.Parameter innerBp
-                && _bodyStructParamsGL.TryGetValue(innerBp.Index, out var innerBsFields))
-            {
-                int outerFi = outerBsGf.FieldSpan.Index;
-                if (outerFi >= 0 && outerFi < innerBsFields.Count && innerBsFields[outerFi].IsView)
+                if (rootFieldInfo.IsView)
                 {
-                    int innerFi = value.FieldSpan.Index;
-                    var bsf = innerBsFields[outerFi];
-                    if (innerFi == 0)
+                    // The root field is a view (raw or wrapped). The kernel body's
+                    // LEA hook recognizes the GetField chain via TryResolveBodyStructField.
+                    // No GLSL emit needed for any link in the chain.
+                    declaredVariables.Add(target.Name);
+                    if (chainDepth == 1)
                     {
-                        // BaseView extraction from ArrayView1D wrapper — handled by LEA hook.
-                        var target = Load(value);
-                        declaredVariables.Add(target.Name);
-                        AppendLine($"// body-struct ArrayView1D BaseView {innerBp.Index}.{bsf.ClrFieldName} (handled by LEA hook)");
+                        // Outer GetField: GetField(bodyParam, fi) returning the view (or wrapper)
+                        AppendLine($"// body-struct view field {bsRootParam.Index}.{rootFieldInfo.ClrFieldName} (handled by LEA hook)");
                         return;
                     }
-                    // Length / Extent — emit per-field length uniform reference.
-                    var target2 = Load(value);
-                    string prefix2 = _hoistedPrimitives.Contains(value) ? "" : $"{TypeGenerator[value.Type]} ";
-                    declaredVariables.Add(target2.Name);
-                    AppendLine($"{prefix2}{target2} = {bsf.BindingName}_length;");
+                    // Inner GetField step (e.g. ArrayView1D wrapper unwrap to BaseView,
+                    // or further unwrap of BaseView to its underlying pointer / length).
+                    // Emit either a no-op comment (BaseView pointer extraction — covered
+                    // by LEA hook) or a length-uniform reference for the wrapper's
+                    // outer Length field.
+                    if (chainDepth == 2 && fi == 0)
+                    {
+                        AppendLine($"// body-struct view-chain step {bsRootParam.Index}.{rootFieldInfo.ClrFieldName} (handled by LEA hook)");
+                        return;
+                    }
+                    if (chainDepth == 2 && fi == 1)
+                    {
+                        // ArrayView1D wrapper Length field
+                        string prefix = _hoistedPrimitives.Contains(value) ? "" : $"{TypeGenerator[value.Type]} ";
+                        AppendLine($"{prefix}{target} = {rootFieldInfo.BindingName}_length;");
+                        return;
+                    }
+                    // Anything else in the chain (stride extraction, BaseView's own
+                    // sub-fields like Buffer/Index/Length) — emit a no-op. The actual
+                    // buffer access bypasses these intermediate values via the LEA hook.
+                    AppendLine($"// body-struct view-chain depth-{chainDepth} fi={fi} {bsRootParam.Index}.{rootFieldInfo.ClrFieldName} (no-op; LEA handles)");
+                    return;
+                }
+                if (rootFieldInfo.IsScalar && chainDepth == 1)
+                {
+                    // Direct scalar field of body struct.
+                    string prefix = _hoistedPrimitives.Contains(value) ? "" : $"{TypeGenerator[value.Type]} ";
+                    declaredVariables.Add(target.Name);
+                    AppendLine($"{prefix}{target} = {rootFieldInfo.BindingName};");
                     return;
                 }
             }

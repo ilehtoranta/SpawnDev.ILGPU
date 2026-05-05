@@ -2,6 +2,58 @@
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
 
+## 4.9.5-rc.26 (2026-05-05) — WebGL body-struct rc.25 v2 follow-ups CLOSED — all 8 tests PASS
+
+### What changed
+
+Two fixes that close the two remaining body-struct WebGL tests:
+
+**(1) Single-view body struct unwrap** — `Tests23_OnlyShortBodyStruct` repro:
+```csharp
+public struct Tests23_OnlyShortStruct { public ArrayView<short> S0; }
+static void Tests23_OnlyShortKernel(Index1D _, Tests23_OnlyShortStruct s, ArrayView<int> output)
+{
+    output[0] = (int)s.S0[0];
+}
+```
+
+ILGPU's IR pre-transforms the param: `Tests23_OnlyShortStruct` (struct holding one `ArrayView<T>`) collapses to `ViewType<T>` directly. The kernel parameter ends up at IR position 1 with `param.ParameterType = ViewType<Int16>`, not a `StructureType`. So `ScanBodyStructParams` never matches, the standard view path emits a single `u_param1` sampler — but the host-side `MarshalArguments` doesn't know the IR unwrapped the struct, passes the struct value through `FlattenStructFields` for uniform packing, no buffer ever binds to `u_param1`, texelFetch returns zero, kernel writes 0 to output.
+
+Fix: `WebGLAccelerator.MarshalArguments` now walks struct args with no `BaseView` property. If the struct has exactly **one** IArrayView field, unwrap to that view — mirrors the IR transform host-side.
+
+**(2) ArrayView1D wrapper metadata fields always intercepted** — `Tests23_TwoShortBodyStructDense` repro:
+```csharp
+public struct Tests23_TwoShortStructDense
+{
+    public ArrayView1D<short, Stride1D.Dense> S0;
+    public ArrayView1D<short, Stride1D.Dense> S1;
+}
+```
+
+ArrayView1D wrapper flattens in IR to `(View, Int64-length, optional Int8-Dense-flag)` per wrapper, so the body struct has IR field count 4 (or 6 with Dense flags). The rc.25 state machine used WGSL's `isLastField` heuristic to disambiguate the trailing Int64 (could be length OR a user reduce-value scalar). In GLSL, `GenerateCode(GetField)` falls through to a 2D-view stride emit when a body-struct GetField doesn't match — emitting `u_param{N}_stride[0]` which was never declared and broke compile.
+
+Fix: rc.26 unconditionally marks Int64-after-View as IsViewMetadata. The GetField hook now also intercepts metadata fields, emitting a length-uniform reference (`i64_from_i32({BindingName}_length)`). Critically, metadata fields share the **associated view's binding name** (so `u_param1_f1_length` aliases to `u_param1_f0_length` which is declared) — without this aliasing the metadata fields would reference their own undeclared synthetic uniform name.
+
+### Test status post-fix (WebGL on 2026-05-05)
+
+| Test | Pre-rc.26 | Post-rc.26 |
+|------|-----------|------------|
+| `Tests23_TwoShortBodyStruct` | PASS | **PASS** |
+| `Tests23_SilkBodyStructShape` (Tuvok shape) | PASS | **PASS** |
+| `Tests23_RegisterHeavyBody_UnitExtent_NoLaunchFailure` | PASS | **PASS** |
+| `Tests23_MinimalShortIntBodyStruct` | PASS | **PASS** |
+| `Tests23_MinimalShortIntBodyStruct_IntOnly` | PASS | **PASS** |
+| `Tests23_DeepUnroll_NoLaunchFailure` | PASS | **PASS** |
+| `Tests23_OnlyShortBodyStruct` (single ArrayView<short>) | FAIL | **PASS** |
+| `Tests23_TwoShortBodyStructDense` (ArrayView1D<,Dense>) | FAIL | **PASS** |
+
+8/8 WebGL body-struct tests PASS. 12/12 desktop regression PASS (CUDA + OpenCL + CPU body-struct + invariant tests). No regression to WGSL / Wasm.
+
+### Files changed
+
+- `SpawnDev.ILGPU/WebGL/Backend/GLSLKernelFunctionGenerator.cs` — state machine drops `isLastField` heuristic; metadata fields' `BindingName` aliases to the preceding view's binding; GetField hook intercepts IsViewMetadata fields with length-uniform emit.
+- `SpawnDev.ILGPU/WebGL/WebGLAccelerator.cs` — single-view-struct unwrap in `MarshalArguments` for IR-pre-unwrapped body structs.
+
 ## 4.9.5-rc.25 (2026-05-04) — WebGL multi-view body-struct kernel parameter codegen (#26)
 
 ### Fix: WebGL/GLSL now decomposes body struct kernel parameters into per-field sampler bindings

@@ -712,6 +712,46 @@ namespace SpawnDev.ILGPU.WebGL
                     var refCache = GetOrCreateReflectionCache(arg.GetType());
                     if (refCache.BaseViewProperty != null)
                         arrayView = refCache.BaseViewProperty.GetValue(arg) as IArrayView;
+
+                    // ILGPU's IR unwraps single-field structs whose only field is an
+                    // ArrayView — `struct { ArrayView<T> S0 }` becomes `ArrayView<T>`
+                    // at the IR level. Mirror that here: if the struct has exactly
+                    // one IArrayView field, treat it as that field's view. Without
+                    // this, the host passes the struct value (via FlattenStructFields
+                    // for uniforms) but the GLSL kernel expects a single sampler
+                    // binding for the unwrapped view, leaving the buffer unbound and
+                    // texelFetch returning zero. Surfaced 2026-05-05 by
+                    // Tests23_OnlyShortBodyStruct (single `ArrayView<short>` body field).
+                    if (arrayView == null && arg.GetType().IsValueType && !arg.GetType().IsPrimitive)
+                    {
+                        var fields = arg.GetType().GetFields(
+                            BindingFlags.Public | BindingFlags.Instance);
+                        IArrayView? singleViewField = null;
+                        int viewFieldCount = 0;
+                        foreach (var f in fields)
+                        {
+                            var fv = f.GetValue(arg);
+                            if (fv is IArrayView fva)
+                            {
+                                singleViewField = fva;
+                                viewFieldCount++;
+                                if (viewFieldCount > 1) break;
+                            }
+                            else if (fv != null)
+                            {
+                                var fvRc = GetOrCreateReflectionCache(f.FieldType);
+                                if (fvRc.BaseViewProperty != null
+                                    && fvRc.BaseViewProperty.GetValue(fv) is IArrayView fvbv)
+                                {
+                                    singleViewField = fvbv;
+                                    viewFieldCount++;
+                                    if (viewFieldCount > 1) break;
+                                }
+                            }
+                        }
+                        if (viewFieldCount == 1)
+                            arrayView = singleViewField;
+                    }
                 }
 
                 if (arrayView != null)
