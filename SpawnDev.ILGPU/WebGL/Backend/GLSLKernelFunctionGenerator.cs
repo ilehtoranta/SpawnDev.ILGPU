@@ -98,6 +98,23 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         // Maps LEA variable names to their sub-word param index
         private readonly Dictionary<string, int> _subWordLEAVars = new();
 
+        // === Body-struct parameter support (mirror of WGSL _bodyStructParams pattern) ===
+        // A body struct is a value-type kernel parameter whose fields include 2+ ArrayView<T>.
+        // Each view field becomes its own sampler binding (u_param{N}_f{M}); host-side
+        // dispatch decomposes the body struct into per-field buffer_ref entries with a
+        // synthetic param index = (paramIndex + 1) * 1000 + fieldIdx.
+        // Populated by ScanBodyStructParams in GenerateCode() before the analyzers run.
+        private readonly Dictionary<int, List<BodyStructFieldInfoGL>> _bodyStructParamsGL = new();
+        // (paramIdx, fieldIdx) -> field-local variable name in the kernel body (for GetField redirect)
+        private readonly Dictionary<(int, int), string> _bodyStructFieldVars = new();
+        // synthetic param index -> binding name override for ALL body-struct view fields.
+        // Used by every site that would emit `u_param{N}` for a single-view param so the
+        // body-struct path emits `u_param{realN}_f{M}` instead. Populated by EmitBodyStructDeclarations.
+        private readonly Dictionary<int, string> _bodyStructFieldBindingNames = new();
+        // Type IDs of body struct C# types — GLSLTypeGenerator skips emitting their UBO
+        // struct definitions because the fields don't make sense as UBO scalars.
+        private readonly HashSet<long> _bodyStructTypesToSkip = new();
+
         /// <summary>Kernel parameter offset: 1 for implicit index parameter.</summary>
         private int KernelParamOffset => 1;
 
@@ -181,14 +198,21 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                     if (value.Value is Store store)
                     {
                         var target = store.Target.Resolve();
-                        var param = ResolveToParameterStatic(target);
+                        var (param, fieldIdx) = ResolveToParamAndFieldStatic(target);
                         if (param != null && param.Index >= paramOffset)
                         {
-                            _outputParamIndices.Add(param.Index);
-                            if (!uniqueLeaExprs.TryGetValue(param.Index, out var exprSet))
+                            // Body-struct view-field stores key by synthetic param index
+                            // so per-field output tracking is independent of the parent
+                            // body-struct param's other fields.
+                            int outKey = (fieldIdx >= 0 && _bodyStructParamsGL.TryGetValue(param.Index, out var bsf)
+                                && fieldIdx < bsf.Count && bsf[fieldIdx].IsView)
+                                ? bsf[fieldIdx].SyntheticParamIndex
+                                : param.Index;
+                            _outputParamIndices.Add(outKey);
+                            if (!uniqueLeaExprs.TryGetValue(outKey, out var exprSet))
                             {
                                 exprSet = new HashSet<string>();
-                                uniqueLeaExprs[param.Index] = exprSet;
+                                uniqueLeaExprs[outKey] = exprSet;
                             }
                             // Use the LEA's source expression (array+index) as key.
                             // LEA nodes like lea._1433: output_1408[index_1406] and
@@ -212,11 +236,18 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                         // Atomic operations (Atomic.Add etc.) write to a buffer element.
                         // Mark the target param as an output so it gets an atomic vote TF varying.
                         var atomicTarget = atomic.Target.Resolve();
-                        var param = ResolveToParameterStatic(atomicTarget);
+                        var (param, fieldIdx) = ResolveToParamAndFieldStatic(atomicTarget);
                         if (param != null && param.Index >= paramOffset)
                         {
-                            _atomicParamIndices.Add(param.Index);
-                            _outputParamIndices.Add(param.Index);
+                            // WebGL has no atomics; if an atomic targets a body-struct field
+                            // the kernel will fail capability check upstream. Still key by
+                            // synthetic index for consistency with output tracking.
+                            int outKey = (fieldIdx >= 0 && _bodyStructParamsGL.TryGetValue(param.Index, out var bsfA)
+                                && fieldIdx < bsfA.Count && bsfA[fieldIdx].IsView)
+                                ? bsfA[fieldIdx].SyntheticParamIndex
+                                : param.Index;
+                            _atomicParamIndices.Add(outKey);
+                            _outputParamIndices.Add(outKey);
                         }
                     }
                 }
@@ -242,13 +273,129 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 {
                     if (value.Value is global::ILGPU.IR.Values.Load load)
                     {
-                        // Trace: Load.Source → LEA → ... → Parameter
-                        var param = ResolveToParameterStatic(load.Source.Resolve());
+                        // Trace: Load.Source → LEA → GetField? → ... → Parameter.
+                        // Body-struct view-field loads key by synthetic param index.
+                        var (param, fieldIdx) = ResolveToParamAndFieldStatic(load.Source.Resolve());
                         if (param != null && param.Index >= paramOffset)
-                            _inputParamIndices.Add(param.Index);
+                        {
+                            int inKey = (fieldIdx >= 0 && _bodyStructParamsGL.TryGetValue(param.Index, out var bsf)
+                                && fieldIdx < bsf.Count && bsf[fieldIdx].IsView)
+                                ? bsf[fieldIdx].SyntheticParamIndex
+                                : param.Index;
+                            _inputParamIndices.Add(inKey);
+                        }
                     }
                 }
             }
+        }
+
+        /// <summary>
+        /// Walks chained GetFields starting from <paramref name="src"/> looking for
+        /// a body-struct view field. Handles two shapes:
+        /// 1. Raw ArrayView field: `GetField(bodyStructParam, fi)` (one step)
+        /// 2. ArrayView1D-wrapped field: `GetField(GetField(bodyStructParam, fi), 0)`
+        ///    (two steps — outer extracts the wrapper, inner extracts BaseView)
+        /// Returns true with the body-struct param index, view-field index in the
+        /// outer body struct, and the field info when matched.
+        /// </summary>
+        private bool TryResolveBodyStructField(Value src,
+            out int bodyParamIdx, out int bodyFieldIdx, out BodyStructFieldInfoGL info)
+        {
+            bodyParamIdx = -1; bodyFieldIdx = -1; info = null!;
+
+            if (src is GetField outerGf)
+            {
+                // Case 1: GetField(bodyParam, fi)
+                if (outerGf.ObjectValue.Resolve() is global::ILGPU.IR.Values.Parameter bp1
+                    && _bodyStructParamsGL.TryGetValue(bp1.Index, out var bsFields1))
+                {
+                    int fi = outerGf.FieldSpan.Index;
+                    if (fi >= 0 && fi < bsFields1.Count && bsFields1[fi].IsView)
+                    {
+                        bodyParamIdx = bp1.Index;
+                        bodyFieldIdx = fi;
+                        info = bsFields1[fi];
+                        return true;
+                    }
+                }
+                // Case 2: GetField(GetField(bodyParam, fi), inner) — ArrayView1D wrapper
+                // unwrap. Accept any inner field index (BaseView is typically Field 0
+                // but we don't gate on that — the OUTER field's IsView check is what
+                // matters for the body-struct view binding identity).
+                if (outerGf.ObjectValue.Resolve() is GetField middleGf
+                    && middleGf.ObjectValue.Resolve() is global::ILGPU.IR.Values.Parameter bp2
+                    && _bodyStructParamsGL.TryGetValue(bp2.Index, out var bsFields2))
+                {
+                    int fi = middleGf.FieldSpan.Index;
+                    if (fi >= 0 && fi < bsFields2.Count && bsFields2[fi].IsView)
+                    {
+                        bodyParamIdx = bp2.Index;
+                        bodyFieldIdx = fi;
+                        info = bsFields2[fi];
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }
+
+        /// <summary>
+        /// Returns the GLSL uniform/sampler binding name for a given parameter index.
+        /// For direct view params returns "u_param{idx}". For synthetic body-struct
+        /// view fields (idx >= 1000), returns the per-field name "u_param{realN}_f{fi}"
+        /// from _bodyStructFieldBindingNames. Use this everywhere a texelFetch or
+        /// uniform reference is emitted — concatenating "_offset", "_tileW", "_length"
+        /// onto the result yields the matching companion uniforms.
+        /// </summary>
+        private string GetParamBindingName(int paramIdx)
+        {
+            if (paramIdx >= 1000 && _bodyStructFieldBindingNames.TryGetValue(paramIdx, out var name))
+                return name;
+            return $"u_param{paramIdx}";
+        }
+
+        /// <summary>
+        /// Walks a value tree and returns (parameter, getFieldIndex) where getFieldIndex
+        /// is the field index of the FIRST GetField encountered while walking up to a
+        /// Parameter. Returns -1 when the value resolves directly to a Parameter without
+        /// any GetField in the chain (i.e. direct view-param access, not a body-struct
+        /// field access).
+        ///
+        /// Used by AnalyzeInputBuffers / AnalyzeOutputBuffers to track per-field
+        /// input/output flags via synthetic param index (paramIdx+1)*1000 + fieldIdx
+        /// for body-struct view fields.
+        /// </summary>
+        private static (global::ILGPU.IR.Values.Parameter? Param, int FieldIndex) ResolveToParamAndFieldStatic(Value value)
+        {
+            return ResolveToParamAndFieldStaticInner(value, -1);
+        }
+
+        private static (global::ILGPU.IR.Values.Parameter? Param, int FieldIndex) ResolveToParamAndFieldStaticInner(Value value, int pendingFieldIdx)
+        {
+            if (value is global::ILGPU.IR.Values.Parameter p) return (p, pendingFieldIdx);
+            if (value is GetField gf)
+            {
+                // First GetField encountered captures the field index. Walking through
+                // a body-struct view field is exactly one GetField step above the LEA.
+                int captured = pendingFieldIdx >= 0 ? pendingFieldIdx : gf.FieldSpan.Index;
+                return ResolveToParamAndFieldStaticInner(gf.ObjectValue, captured);
+            }
+            if (value is global::ILGPU.IR.Values.Load load) return ResolveToParamAndFieldStaticInner(load.Source, pendingFieldIdx);
+            if (value is LoadElementAddress lea) return ResolveToParamAndFieldStaticInner(lea.Source, pendingFieldIdx);
+            if (value is LoadFieldAddress lfa) return ResolveToParamAndFieldStaticInner(lfa.Source, pendingFieldIdx);
+            if (value is NewView nv) return ResolveToParamAndFieldStaticInner(nv.Pointer, pendingFieldIdx);
+            if (value is AddressSpaceCast asc) return ResolveToParamAndFieldStaticInner(asc.Value, pendingFieldIdx);
+            if (value is SubViewValue sv) return ResolveToParamAndFieldStaticInner(sv.Source, pendingFieldIdx);
+            if (value is ConvertValue cv) return ResolveToParamAndFieldStaticInner(cv.Value, pendingFieldIdx);
+            if (value is PhiValue phi)
+            {
+                for (int i = 0; i < phi.Count; i++)
+                {
+                    var (paramX, fldX) = ResolveToParamAndFieldStaticInner(phi[i], pendingFieldIdx);
+                    if (paramX != null) return (paramX, fldX);
+                }
+            }
+            return (null, -1);
         }
 
         /// <summary>
@@ -293,6 +440,12 @@ namespace SpawnDev.ILGPU.WebGL.Backend
 
         public override void GenerateCode()
         {
+            // 0. Scan kernel parameters for body structs (struct params with multiple
+            //    ArrayView fields). Must run BEFORE the analyzers so AnalyzeOutputBuffers
+            //    and AnalyzeInputBuffers can route through GetField for body-struct view
+            //    fields via the synthetic param-index encoding.
+            ScanBodyStructParams();
+
             // 1. Detect emulated 64-bit parameters
             DetectEmulatedParameters();
 
@@ -464,6 +617,267 @@ namespace SpawnDev.ILGPU.WebGL.Backend
 
         #endregion
 
+        #region Body Struct Detection
+
+        /// <summary>
+        /// Per-field metadata for a body-struct kernel parameter. Mirrors WGSL's
+        /// BodyStructFieldInfo. Populated by ScanBodyStructParams.
+        /// </summary>
+        private sealed class BodyStructFieldInfoGL
+        {
+            /// <summary>The IR field index within the parent body-struct type.</summary>
+            public int FieldIndex { get; set; }
+            /// <summary>The IR type of this field.</summary>
+            public TypeNode FieldType { get; set; } = null!;
+            /// <summary>True when the field is an ArrayView (raw or wrapped). Maps to a sampler binding.</summary>
+            public bool IsView { get; set; }
+            /// <summary>True when the field is a primitive scalar. Packed into the existing scalar uniform path.</summary>
+            public bool IsScalar { get; set; }
+            /// <summary>True when the field is ArrayView1D wrapper metadata (Length / Dense flag) following a view.
+            /// Suppressed in code emission; the per-field length uniform is the canonical source.</summary>
+            public bool IsViewMetadata { get; set; }
+            /// <summary>The C# field index within the user struct (in declaration order). Different from
+            /// FieldIndex when the IR flattens ArrayView1D wrappers into multiple IR fields.</summary>
+            public int ClrFieldIndex { get; set; }
+            /// <summary>The synthetic param index = (paramIndex + 1) * 1000 + FieldIndex.</summary>
+            public int SyntheticParamIndex { get; set; }
+            /// <summary>The GLSL sampler uniform name (e.g. "u_param2_f0") when IsView.</summary>
+            public string BindingName { get; set; } = "";
+            /// <summary>Element type GLSL name (int / uint / float) for view fields.</summary>
+            public string GlslElementType { get; set; } = "int";
+            /// <summary>1 for byte/sbyte, 2 for short/ushort/Half. 0 for full-word fields.</summary>
+            public int SubWordElemSize { get; set; }
+            /// <summary>True when sub-word and signed (sbyte/short).</summary>
+            public bool IsUnsignedSubWord { get; set; }
+            /// <summary>True when sub-word and Float16-emulated.</summary>
+            public bool IsFloat16 { get; set; }
+            /// <summary>The raw element type (PrimitiveType or StructureType) of the view.</summary>
+            public TypeNode? ViewElementType { get; set; }
+            /// <summary>The C# field type from the user's struct (used by host-side reflection).</summary>
+            public Type? ClrFieldType { get; set; }
+            /// <summary>The C# field name from the user's struct (debug clarity).</summary>
+            public string ClrFieldName { get; set; } = "";
+        }
+
+        /// <summary>
+        /// True when a TypeNode represents an ArrayView (raw ViewType or a struct whose
+        /// first field is a view — i.e. ArrayView1D wrapper).
+        /// Mirror of WGSLKernelFunctionGenerator.IsViewFieldType.
+        /// </summary>
+        private static bool IsViewFieldType(TypeNode type)
+        {
+            if (type is ViewType) return true;
+            if (type is StructureType st)
+            {
+                if (st.NumFields > 0 &&
+                    (st.Fields[0] is ViewType ||
+                     st.Fields[0] is PointerType ||
+                     st.Fields[0].ToString().Contains("View")))
+                    return true;
+            }
+            if (type.ToString().Contains("View")) return true;
+            return false;
+        }
+
+        /// <summary>
+        /// True when a StructureType is a "body struct" — a user-defined struct kernel
+        /// parameter holding at least one ArrayView field, distinct from the
+        /// ArrayView1D/2D/3D wrappers themselves. Discrimination:
+        ///   - 0 view fields → not a body struct (could be a scalar struct UBO, etc.)
+        ///   - 2+ view fields → definitely a body struct
+        ///   - exactly 1 view field → body struct UNLESS the type matches an
+        ///     ArrayView wrapper shape (NumFields ∈ {3,4,6} with Field[0] = View)
+        ///
+        /// Mirror of WGSL's IsBodyStruct check, generalized to also recognize
+        /// single-view body structs like `Tests23_OnlyShortStruct { ArrayView<short> S0 }`.
+        /// </summary>
+        private static bool IsBodyStruct(StructureType st)
+        {
+            int viewFieldCount = 0;
+            for (int i = 0; i < st.NumFields; i++)
+            {
+                if (IsViewFieldType(st.Fields[i]))
+                    viewFieldCount++;
+            }
+            if (viewFieldCount == 0) return false;
+            if (viewFieldCount >= 2) return true;
+
+            // Exactly 1 view field. Distinguish a body struct (e.g. NumFields=1 with
+            // a single ArrayView<T> field) from an ArrayView1D/2D/3D wrapper (NumFields
+            // ∈ {3,4,6} with Field[0] being the view pointer).
+            if (st.NumFields > 0 && IsViewFieldType(st.Fields[0]))
+            {
+                if (st.NumFields == 3) return false; // ArrayView1D wrapper
+                if (st.NumFields == 4) return false; // ArrayView2D wrapper
+                if (st.NumFields == 6) return false; // ArrayView3D wrapper
+            }
+            return true;
+        }
+
+        /// <summary>
+        /// Walks kernel parameters and populates _bodyStructParamsGL for each body-struct
+        /// parameter. Must run BEFORE AnalyzeOutputBuffers/AnalyzeInputBuffers so those
+        /// passes can route through GetField for body-struct view fields.
+        /// </summary>
+        private void ScanBodyStructParams()
+        {
+            foreach (var param in Method.Parameters)
+            {
+                if (param.Index < KernelParamOffset) continue;
+                if (param.ParameterType is not StructureType st) continue;
+                if (!IsBodyStruct(st)) continue;
+
+                var fields = new List<BodyStructFieldInfoGL>(st.NumFields);
+                int userIdx = param.Index - KernelParamOffset;
+                Type? clrParamType = null;
+                System.Reflection.FieldInfo[]? clrFields = null;
+                if (userIdx >= 0 && userIdx < EntryPoint.Parameters.Count)
+                {
+                    clrParamType = EntryPoint.Parameters[userIdx];
+                    if (clrParamType.IsValueType)
+                    {
+                        clrFields = clrParamType.GetFields(
+                            System.Reflection.BindingFlags.Instance |
+                            System.Reflection.BindingFlags.Public);
+                    }
+                }
+
+                // State machine for ArrayView1D-wrapper expanded fields. The IR
+                // flattens `ArrayView1D<T, Stride1D.Dense> S` to multiple sequential
+                // fields: ViewType, Int64 (Length), optional Int8 (Dense flag).
+                // Mark view-following Int64 / Int8 fields as IsViewMetadata so the
+                // host-side dispatch counts only the user-visible C# fields.
+                int clrFieldCounter = 0;
+                int viewMetadataPhase = 0; // 0=idle, 1=after view ptr, 2=after Int64
+                for (int fi = 0; fi < st.NumFields; fi++)
+                {
+                    var fieldType = st.Fields[fi];
+                    bool isView = IsViewFieldType(fieldType);
+                    bool isViewMetadata = false;
+                    if (isView)
+                    {
+                        viewMetadataPhase = 1;
+                    }
+                    else if (viewMetadataPhase == 1)
+                    {
+                        string typeStr = fieldType.ToString();
+                        bool isLastField = fi == st.NumFields - 1;
+                        if (typeStr.Contains("Int64") && !isLastField)
+                        {
+                            isViewMetadata = true;
+                            viewMetadataPhase = 2;
+                        }
+                        else
+                        {
+                            viewMetadataPhase = 0;
+                        }
+                    }
+                    else if (viewMetadataPhase == 2)
+                    {
+                        string typeStr = fieldType.ToString();
+                        if (typeStr.Contains("Int8"))
+                        {
+                            isViewMetadata = true;
+                            viewMetadataPhase = 0;
+                        }
+                        else
+                        {
+                            viewMetadataPhase = 0;
+                        }
+                    }
+
+                    bool isScalar = !isView && !isViewMetadata && fieldType is PrimitiveType;
+
+                    // ClrFieldIndex maps an IR view field to its C# wrapper index.
+                    // Each view-leading position advances the counter; metadata
+                    // doesn't advance; pure scalar fields also advance (they are
+                    // their own C# field).
+                    int clrIdx = (isView || isScalar) ? clrFieldCounter : -1;
+                    if (isView || isScalar) clrFieldCounter++;
+
+                    var info = new BodyStructFieldInfoGL
+                    {
+                        FieldIndex = fi,
+                        FieldType = fieldType,
+                        IsView = isView,
+                        IsScalar = isScalar,
+                        IsViewMetadata = isViewMetadata,
+                        ClrFieldIndex = clrIdx,
+                        SyntheticParamIndex = (param.Index + 1) * 1000 + fi,
+                        BindingName = $"u_param{param.Index}_f{fi}",
+                        ClrFieldName = (clrFields != null && clrIdx >= 0 && clrIdx < clrFields.Length)
+                            ? clrFields[clrIdx].Name : $"field_{fi}",
+                        ClrFieldType = (clrFields != null && clrIdx >= 0 && clrIdx < clrFields.Length)
+                            ? clrFields[clrIdx].FieldType : null,
+                    };
+
+                    if (isView)
+                    {
+                        // Resolve the view element type (matches WebGPU's resolution path).
+                        TypeNode? elemType = null;
+                        if (fieldType is ViewType vt) elemType = vt.ElementType;
+                        else if (fieldType is StructureType wrapSt && wrapSt.NumFields > 0)
+                        {
+                            // ArrayView1D wrapper — Field 0 is the inner ViewType (or PointerType post-LowerViews).
+                            if (wrapSt.Fields[0] is ViewType innerVt) elemType = innerVt.ElementType;
+                            else if (wrapSt.Fields[0] is PointerType innerPt) elemType = innerPt.ElementType;
+                        }
+                        info.ViewElementType = elemType;
+
+                        // Default GLSL element type (mirrors GetBufferElementType but specialized for body-struct fields).
+                        if (elemType is PrimitiveType ept)
+                        {
+                            switch (ept.BasicValueType)
+                            {
+                                case BasicValueType.Int8:
+                                    info.SubWordElemSize = 1;
+                                    info.GlslElementType = "int";
+                                    if (info.ClrFieldType?.IsGenericType == true &&
+                                        info.ClrFieldType.GetGenericArguments()[0] == typeof(byte))
+                                        info.IsUnsignedSubWord = true;
+                                    break;
+                                case BasicValueType.Int16:
+                                    info.SubWordElemSize = 2;
+                                    info.GlslElementType = "int";
+                                    if (info.ClrFieldType?.IsGenericType == true &&
+                                        info.ClrFieldType.GetGenericArguments()[0] == typeof(ushort))
+                                        info.IsUnsignedSubWord = true;
+                                    break;
+                                case BasicValueType.Float16:
+                                    info.SubWordElemSize = 2;
+                                    info.GlslElementType = "int";
+                                    info.IsFloat16 = true;
+                                    break;
+                                case BasicValueType.Float32:
+                                    info.GlslElementType = "float";
+                                    break;
+                                case BasicValueType.Int32:
+                                default:
+                                    info.GlslElementType = "int";
+                                    break;
+                                case BasicValueType.Float64:
+                                case BasicValueType.Int64:
+                                    // V1 throws clean error; v2 follow-up adds emulated 64-bit body-struct fields.
+                                    throw new NotSupportedException(
+                                        $"WebGL body-struct field '{info.ClrFieldName}' is ArrayView<{ept.BasicValueType}> " +
+                                        $"on body-struct param {param.Index}. Emulated 64-bit body-struct view fields " +
+                                        $"are not supported in this rc — use separate ArrayView<long>/ArrayView<double> " +
+                                        $"kernel parameters or wrap them outside the body struct. Tracked as v2 follow-up.");
+                            }
+                        }
+                    }
+
+                    fields.Add(info);
+                }
+
+                _bodyStructParamsGL[param.Index] = fields;
+                _bodyStructTypesToSkip.Add(st.Id);
+                _generatorArgs.BodyStructTypeIdsToSkip.Add(st.Id);
+            }
+        }
+
+        #endregion
+
         #region Parameter Declarations
 
         private void EmitParameterDeclarations()
@@ -487,6 +901,19 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             foreach (var param in Method.Parameters)
             {
                 if (param.Index < paramOffset) continue;
+
+                // === Body struct early-out ===
+                // Body structs (struct param with 2+ ArrayView fields) are decomposed into
+                // one sampler binding per view field. This must run BEFORE IsMultiDim because
+                // the existing NumFields∈{3,4,6} heuristic mis-classifies them as fake 1D/2D/3D
+                // ArrayView wrappers. Single-ArrayView wrappers (3 fields) and ArrayView1D
+                // wrappers continue to flow through the existing single-binding path —
+                // IsBodyStruct only returns true for viewFieldCount >= 2.
+                if (_bodyStructParamsGL.TryGetValue(param.Index, out var bsFields))
+                {
+                    bindingIndex = EmitBodyStructDeclarations(param.Index, bsFields, bindingIndex);
+                    continue;
+                }
 
                 var type = param.ParameterType;
                 IsMultiDim(type, out var isMultiDim, out var isView, out var is1DView, out var is2DView, out var is3DView);
@@ -656,6 +1083,123 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             Builder.AppendLine();
         }
 
+        /// <summary>
+        /// Emits per-field uniform declarations for a body-struct kernel parameter.
+        /// Each ArrayView field gets its own sampler (`u_param{N}_f{M}`) plus the
+        /// standard `_tileW`, `_offset`, `_length` companion uniforms — same shape as
+        /// a single-view param, just keyed by the synthetic param index.
+        /// Scalar fields of a body struct are emitted as primitive uniforms
+        /// (`u_param{N}_f{M}`) using the existing scalar uniform path.
+        /// </summary>
+        private int EmitBodyStructDeclarations(int paramIndex, List<BodyStructFieldInfoGL> fields, int bindingIndex)
+        {
+            // Whether each field is read or written by the kernel; computed by
+            // AnalyzeInputBuffers / AnalyzeOutputBuffers via synthetic param indices.
+            // (Falls back to "input" if not resolved — the existing single-view path
+            // does the same thing for parameters with no detected store target.)
+            foreach (var f in fields)
+            {
+                // Suppress emit for ArrayView1D wrapper metadata (Length / Dense flag).
+                // These are only present in the IR layout — the per-field length
+                // uniform we emit covers the host's needs.
+                if (f.IsViewMetadata) continue;
+
+                int synth = f.SyntheticParamIndex;
+
+                // Add manifest entry for runtime dispatch decomposition.
+                bool isOutputForManifest = _outputParamIndices.Contains(synth);
+                _generatorArgs.BodyStructManifest.Add(new BodyStructBindingEntry
+                {
+                    ParamIndex = paramIndex,
+                    FieldIndex = f.FieldIndex,
+                    ClrFieldIndex = f.ClrFieldIndex,
+                    SyntheticParamIndex = synth,
+                    BindingName = f.BindingName,
+                    GlslElementType = f.GlslElementType,
+                    IsView = f.IsView,
+                    IsScalar = f.IsScalar,
+                    SubWordElemSize = f.SubWordElemSize,
+                    IsUnsignedSubWord = f.IsUnsignedSubWord,
+                    IsFloat16 = f.IsFloat16,
+                    IsOutputBuffer = isOutputForManifest,
+                    ClrFieldName = f.ClrFieldName,
+                });
+
+                if (f.IsView)
+                {
+                    bool isInputBuffer = _inputParamIndices.Contains(synth);
+                    bool isOutputBuffer = _outputParamIndices.Contains(synth);
+
+                    // Default to input if neither analyzer marked it (read-implicit; matches
+                    // the single-view path). Output-only buffers never get a sampler uniform.
+                    if (!isInputBuffer && !isOutputBuffer) isInputBuffer = true;
+
+                    string glslType = f.GlslElementType;
+
+                    // Register binding name override so all texelFetch / TF varying sites
+                    // resolve `u_param{synthIdx}` to the actual `u_param{realN}_f{M}` name.
+                    _bodyStructFieldBindingNames[synth] = f.BindingName;
+                    _bufferGlslTypes[synth] = glslType;
+
+                    // Track sub-word tagging on the synthetic index so the existing
+                    // sub-word texelFetch + shift+mask machinery picks up body-struct
+                    // fields without per-site changes.
+                    if (f.SubWordElemSize > 0)
+                    {
+                        _subWordParams[synth] = f.SubWordElemSize;
+                        if (f.IsUnsignedSubWord) _subWordUnsignedParams.Add(synth);
+                        if (f.IsFloat16) _subWordFloat16Params.Add(synth);
+                    }
+
+                    if (isInputBuffer)
+                    {
+                        string samplerType = glslType switch
+                        {
+                            "int" => "isampler2D",
+                            "uint" => "usampler2D",
+                            _ => "sampler2D"
+                        };
+                        Builder.AppendLine($"uniform highp {samplerType} {f.BindingName}; // body-struct field {paramIndex}.{f.ClrFieldName}");
+                        Builder.AppendLine($"uniform highp int {f.BindingName}_tileW;");
+                        Builder.AppendLine($"uniform highp int {f.BindingName}_offset;");
+                    }
+                    Builder.AppendLine($"uniform highp int {f.BindingName}_length;");
+
+                    var binding = new KernelParameterBinding(
+                        paramIndex: synth,
+                        bindingIndex: bindingIndex++,
+                        kind: KernelParamKind.Buffer,
+                        glslType: glslType,
+                        structFieldCount: 0);
+                    _parameterBindings.Add(binding);
+                    _generatorArgs.ParameterBindings.Add(binding);
+                }
+                else if (f.IsScalar)
+                {
+                    // Body-struct primitive scalar field: standard uniform.
+                    string scalarGlsl = TypeGenerator[f.FieldType];
+                    Builder.AppendLine($"uniform highp {scalarGlsl} {f.BindingName}; // body-struct scalar {paramIndex}.{f.ClrFieldName}");
+                    var binding = new KernelParameterBinding(
+                        paramIndex: synth,
+                        bindingIndex: bindingIndex++,
+                        kind: KernelParamKind.Scalar,
+                        glslType: scalarGlsl);
+                    _parameterBindings.Add(binding);
+                    _generatorArgs.ParameterBindings.Add(binding);
+                }
+                else
+                {
+                    // Body-struct field that's neither view nor primitive scalar.
+                    // E.g. nested struct or unsupported shape. v1 throws clear error.
+                    throw new NotSupportedException(
+                        $"WebGL body-struct field '{f.ClrFieldName}' on param {paramIndex} has unsupported type " +
+                        $"{f.FieldType}. v1 supports ArrayView fields and primitive scalar fields only. " +
+                        $"Tracked as v2 follow-up.");
+                }
+            }
+            return bindingIndex;
+        }
+
         private string GetBufferElementType(TypeNode elementType)
         {
             if (elementType is PrimitiveType pt)
@@ -741,6 +1285,44 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             foreach (var param in Method.Parameters)
             {
                 if (param.Index < paramOffset) continue;
+
+                // Body-struct early-out: emit one TF varying per OUTPUT view field, keyed
+                // by synthetic param index so the Store path's _singleStoreIndex /
+                // _storeSlotIndex lookups find the correct varying.
+                if (_bodyStructParamsGL.TryGetValue(param.Index, out var bsFields))
+                {
+                    foreach (var f in bsFields)
+                    {
+                        if (!f.IsView) continue;
+                        if (!_outputParamIndices.Contains(f.SyntheticParamIndex)) continue;
+
+                        string fieldGlslType = f.GlslElementType;
+                        bool needsFlat = fieldGlslType != "float";
+                        string flatPrefix = needsFlat ? "flat " : "";
+                        string varyingName = $"tf_out_{param.Index}_f{f.FieldIndex}";
+
+                        int storeCount = _outputStoreCount.GetValueOrDefault(f.SyntheticParamIndex, 1);
+                        if (storeCount > 1)
+                        {
+                            for (int slot = 0; slot < storeCount; slot++)
+                            {
+                                string slotName = $"{varyingName}_s{slot}";
+                                Builder.AppendLine($"{flatPrefix}out highp {fieldGlslType} {slotName}; // body-struct TF param[{param.Index}] field {f.FieldIndex} slot {slot}/{storeCount}");
+                                var slotInfo = new OutputVaryingInfo(f.SyntheticParamIndex, outIndex++, slotName, fieldGlslType, storeSlot: slot, storeCount: storeCount);
+                                _outputVaryings.Add(slotInfo);
+                                _generatorArgs.OutputVaryings.Add(slotInfo);
+                            }
+                        }
+                        else
+                        {
+                            Builder.AppendLine($"{flatPrefix}out highp {fieldGlslType} {varyingName}; // body-struct TF param[{param.Index}] field {f.FieldIndex}");
+                            var info = new OutputVaryingInfo(f.SyntheticParamIndex, outIndex++, varyingName, fieldGlslType);
+                            _outputVaryings.Add(info);
+                            _generatorArgs.OutputVaryings.Add(info);
+                        }
+                    }
+                    continue;
+                }
 
                 var type = param.ParameterType;
                 // Use the same detection as EmitParameterDeclarations — ArrayView2D/3D
@@ -931,6 +1513,20 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             foreach (var param in Method.Parameters)
             {
                 if (param.Index < paramOffset) continue;
+
+                // Body struct parameters: each ArrayView field is accessed via the
+                // per-field sampler binding (u_param{N}_f{M}). The body-struct value
+                // itself is never materialized as a local — GetField on the struct param
+                // is intercepted in the standard codegen path (LEA hook in
+                // GenerateCode(LoadElementAddress)) and routed by synthetic param index.
+                // No-op here.
+                if (_bodyStructParamsGL.ContainsKey(param.Index))
+                {
+                    var bsVar = Load(param);
+                    declaredVariables.Add(bsVar.Name);
+                    AppendLine($"// param{param.Index} is body struct (per-field access via u_param{param.Index}_f<N>)");
+                    continue;
+                }
 
                 var type = param.ParameterType;
                 var variable = Load(param);
@@ -1949,6 +2545,30 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             var target = Load(value);
             var offset = Load(value.Offset);
 
+            // Body-struct view-field LEA: when LEA's source resolves (possibly through
+            // an ArrayView1D wrapper's nested GetField extracting BaseView) to
+            // GetField(bodyStructParam, viewFieldIdx), route to the per-field synthetic
+            // param index. Walks chained GetFields to handle both raw ArrayView<T> body
+            // fields (one GetField step) and ArrayView1D<T,Stride> body fields (two
+            // GetField steps: outer extracts wrapper, inner extracts BaseView).
+            if (TryResolveBodyStructField(value.Source.Resolve(),
+                    out var bsParamIdx, out var bsFieldIdx, out var bsViewInfo))
+            {
+                int synth = bsViewInfo.SyntheticParamIndex;
+                string bindingName = bsViewInfo.BindingName;
+
+                if (_crossBlockPointers.Contains(value))
+                    _crossBlockPointerExprs[target.Name] = $"texelFetch({bindingName}, ivec2((int({offset}) + {bindingName}_offset) % {bindingName}_tileW, (int({offset}) + {bindingName}_offset) / {bindingName}_tileW), 0)";
+
+                declaredVariables.Add(target.Name);
+                AppendLine($"int {target.Name} = int({offset}); // body-struct LEA into {bindingName}");
+                Bind(value, new Variable(target.Name, "int"));
+                _leaParamMap[target.Name] = synth;
+                if (_subWordParams.ContainsKey(synth))
+                    _subWordLEAVars[target.Name] = synth;
+                return;
+            }
+
             if (ResolveToParameter(value.Source) is global::ILGPU.IR.Values.Parameter param)
             {
                 int paramOffset = KernelParamOffset;
@@ -1966,7 +2586,10 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                     }
 
                     if (_crossBlockPointers.Contains(value))
-                        _crossBlockPointerExprs[target.Name] = $"texelFetch(u_param{param.Index}, ivec2((int({offset}) + u_param{param.Index}_offset) % u_param{param.Index}_tileW, (int({offset}) + u_param{param.Index}_offset) / u_param{param.Index}_tileW), 0)";
+                    {
+                        string cbBn = GetParamBindingName(param.Index);
+                        _crossBlockPointerExprs[target.Name] = $"texelFetch({cbBn}, ivec2((int({offset}) + {cbBn}_offset) % {cbBn}_tileW, (int({offset}) + {cbBn}_offset) / {cbBn}_tileW), 0)";
+                    }
 
                     declaredVariables.Add(target.Name);
                     AppendLine($"int {target.Name} = int({offset}); // LEA into param{param.Index}");
@@ -1990,12 +2613,17 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             if (_leaParamMap.TryGetValue(sourceVal.ToString(), out var sourceParamIdx))
             {
                 if (_crossBlockPointers.Contains(value))
-                    _crossBlockPointerExprs[target.Name] = $"texelFetch(u_param{sourceParamIdx}, ivec2((int({offset}) + u_param{sourceParamIdx}_offset) % u_param{sourceParamIdx}_tileW, (int({offset}) + u_param{sourceParamIdx}_offset) / u_param{sourceParamIdx}_tileW), 0)";
+                {
+                    string srcBn = GetParamBindingName(sourceParamIdx);
+                    _crossBlockPointerExprs[target.Name] = $"texelFetch({srcBn}, ivec2((int({offset}) + {srcBn}_offset) % {srcBn}_tileW, (int({offset}) + {srcBn}_offset) / {srcBn}_tileW), 0)";
+                }
 
                 declaredVariables.Add(target.Name);
                 AppendLine($"int {target.Name} = int({offset}); // LEA into param{sourceParamIdx} (via alias)");
                 Bind(value, new Variable(target.Name, "int"));
                 _leaParamMap[target.Name] = sourceParamIdx;
+                if (_subWordParams.ContainsKey(sourceParamIdx))
+                    _subWordLEAVars[target.Name] = sourceParamIdx;
                 return;
             }
 
@@ -2058,8 +2686,9 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 // Check if this sampler is already integer-typed
                 bool emuSamplerIsInt = _bufferGlslTypes.TryGetValue(emulInfo.ParamIndex, out var emuSamplerType)
                     && (emuSamplerType == "int" || emuSamplerType == "uint");
-                string emuFetchLo = $"texelFetch(u_param{emulInfo.ParamIndex}, ivec2(({baseIdxVar} + u_param{emulInfo.ParamIndex}_offset) % u_param{emulInfo.ParamIndex}_tileW, ({baseIdxVar} + u_param{emulInfo.ParamIndex}_offset) / u_param{emulInfo.ParamIndex}_tileW), 0).r";
-                string emuFetchHi = $"texelFetch(u_param{emulInfo.ParamIndex}, ivec2(({baseIdxVar} + 1 + u_param{emulInfo.ParamIndex}_offset) % u_param{emulInfo.ParamIndex}_tileW, ({baseIdxVar} + 1 + u_param{emulInfo.ParamIndex}_offset) / u_param{emulInfo.ParamIndex}_tileW), 0).r";
+                string emuBn = GetParamBindingName(emulInfo.ParamIndex);
+                string emuFetchLo = $"texelFetch({emuBn}, ivec2(({baseIdxVar} + {emuBn}_offset) % {emuBn}_tileW, ({baseIdxVar} + {emuBn}_offset) / {emuBn}_tileW), 0).r";
+                string emuFetchHi = $"texelFetch({emuBn}, ivec2(({baseIdxVar} + 1 + {emuBn}_offset) % {emuBn}_tileW, ({baseIdxVar} + 1 + {emuBn}_offset) / {emuBn}_tileW), 0).r";
                 // Integer samplers already return int/uint; float samplers need floatBitsToUint
                 string emuValLo = emuSamplerIsInt ? $"uint({emuFetchLo})" : $"floatBitsToUint({emuFetchLo})";
                 string emuValHi = emuSamplerIsInt ? $"uint({emuFetchHi})" : $"floatBitsToUint({emuFetchHi})";
@@ -2103,13 +2732,14 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             {
                 var idx = source.ToString();
                 var elemSize = _subWordParams[subWordParamIdx];
+                string swBn = GetParamBindingName(subWordParamIdx);
                 string extractExpr;
                 if (elemSize == 1)
                 {
                     // Byte extraction: 4 bytes per texel
-                    var texelIdx = $"(({idx}) / 4 + u_param{subWordParamIdx}_offset)";
+                    var texelIdx = $"(({idx}) / 4 + {swBn}_offset)";
                     var shift = $"(({idx}) % 4) * 8";
-                    var fetch = $"texelFetch(u_param{subWordParamIdx}, ivec2({texelIdx} % u_param{subWordParamIdx}_tileW, {texelIdx} / u_param{subWordParamIdx}_tileW), 0).r";
+                    var fetch = $"texelFetch({swBn}, ivec2({texelIdx} % {swBn}_tileW, {texelIdx} / {swBn}_tileW), 0).r";
                     var rawByte = $"(({fetch}) >> ({shift})) & 0xFF";
                     if (_subWordUnsignedParams.Contains(subWordParamIdx))
                         extractExpr = rawByte; // byte: zero-extend (0-255)
@@ -2122,26 +2752,26 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                     // Helper from GLSLEmulationLibrary.F16Functions handles all cases:
                     // signed zero, denormals (flushed), normal, Inf, NaN. Previous
                     // inline code mishandled exp==0 denormals and exp==31 Inf/NaN.
-                    var texelIdx = $"({idx} / 2 + u_param{subWordParamIdx}_offset)";
+                    var texelIdx = $"({idx} / 2 + {swBn}_offset)";
                     var shift = $"(({idx}) % 2) * 16";
-                    var fetch = $"texelFetch(u_param{subWordParamIdx}, ivec2({texelIdx} % u_param{subWordParamIdx}_tileW, {texelIdx} / u_param{subWordParamIdx}_tileW), 0).r";
+                    var fetch = $"texelFetch({swBn}, ivec2({texelIdx} % {swBn}_tileW, {texelIdx} / {swBn}_tileW), 0).r";
                     var rawExpr = $"uint((({fetch}) >> ({shift})) & 0xFFFF)";
                     extractExpr = $"_f16_to_f32({rawExpr})";
                 }
                 else if (_subWordUnsignedParams.Contains(subWordParamIdx))
                 {
                     // UInt16 extraction: 2 ushorts per texel, zero-extension
-                    var texelIdx = $"({idx} / 2 + u_param{subWordParamIdx}_offset)";
+                    var texelIdx = $"({idx} / 2 + {swBn}_offset)";
                     var shift = $"(({idx}) % 2) * 16";
-                    var fetch = $"texelFetch(u_param{subWordParamIdx}, ivec2({texelIdx} % u_param{subWordParamIdx}_tileW, {texelIdx} / u_param{subWordParamIdx}_tileW), 0).r";
+                    var fetch = $"texelFetch({swBn}, ivec2({texelIdx} % {swBn}_tileW, {texelIdx} / {swBn}_tileW), 0).r";
                     extractExpr = $"(({fetch}) >> ({shift})) & 0xFFFF"; // zero-extend: & 0xFFFF gives 0-65535
                 }
                 else // elemSize == 2, Int16
                 {
                     // Int16 extraction: 2 shorts per texel, with sign extension
-                    var texelIdx = $"({idx} / 2 + u_param{subWordParamIdx}_offset)";
+                    var texelIdx = $"({idx} / 2 + {swBn}_offset)";
                     var shift = $"(({idx}) % 2) * 16";
-                    var fetch = $"texelFetch(u_param{subWordParamIdx}, ivec2({texelIdx} % u_param{subWordParamIdx}_tileW, {texelIdx} / u_param{subWordParamIdx}_tileW), 0).r";
+                    var fetch = $"texelFetch({swBn}, ivec2({texelIdx} % {swBn}_tileW, {texelIdx} / {swBn}_tileW), 0).r";
                     var rawExpr = $"(({fetch}) >> ({shift})) & 0xFFFF";
                     // Sign-extend: if bit 15 set, extend to full int negative
                     extractExpr = $"(({rawExpr}) >= 32768 ? ({rawExpr}) - 65536 : ({rawExpr}))";
@@ -2159,6 +2789,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             // LEA-based buffer read via texelFetch
             if (_leaParamMap.TryGetValue(source.ToString(), out var leaParamIdx))
             {
+                string leaBn = GetParamBindingName(leaParamIdx);
                 // Check if this is a struct buffer load
                 if (_structFieldCounts.TryGetValue(leaParamIdx, out var structFieldCount) && structFieldCount > 0)
                 {
@@ -2174,7 +2805,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                         // Use intBitsToFloat for float fields since texture is R32I
                         for (int fi = 0; fi < fieldPaths.Count; fi++)
                         {
-                            string fetchExpr = $"texelFetch(u_param{leaParamIdx}, ivec2((int({source}) * {structFieldCount} + {fi} + u_param{leaParamIdx}_offset) % u_param{leaParamIdx}_tileW, (int({source}) * {structFieldCount} + {fi} + u_param{leaParamIdx}_offset) / u_param{leaParamIdx}_tileW), 0).r";
+                            string fetchExpr = $"texelFetch({leaBn}, ivec2((int({source}) * {structFieldCount} + {fi} + {leaBn}_offset) % {leaBn}_tileW, (int({source}) * {structFieldCount} + {fi} + {leaBn}_offset) / {leaBn}_tileW), 0).r";
                             string valExpr = fieldPaths[fi].GlslType == "float"
                                 ? $"intBitsToFloat({fetchExpr})"
                                 : fetchExpr;
@@ -2185,7 +2816,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 }
 
                 // Non-struct: standard single-texel load
-                string fetchExprStd = $"texelFetch(u_param{leaParamIdx}, ivec2((int({source}) + u_param{leaParamIdx}_offset) % u_param{leaParamIdx}_tileW, (int({source}) + u_param{leaParamIdx}_offset) / u_param{leaParamIdx}_tileW), 0).r";
+                string fetchExprStd = $"texelFetch({leaBn}, ivec2((int({source}) + {leaBn}_offset) % {leaBn}_tileW, (int({source}) + {leaBn}_offset) / {leaBn}_tileW), 0).r";
                 // For integer samplers (isampler2D/usampler2D), texelFetch already returns int/uint.
                 // For float samplers, texelFetch returns float; we may need floatBitsToInt/floatBitsToUint.
                 bool samplerIsInt = _bufferGlslTypes.TryGetValue(leaParamIdx, out var samplerGlslType)
@@ -2417,9 +3048,96 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             }
         }
 
+        /// <summary>
+        /// SetField on a body-struct param — suppress the emit. ILGPU's IR sometimes
+        /// produces field-by-field SetFields when a struct value flows through PHI
+        /// or partial-update paths; for body structs we don't materialize a GLSL
+        /// struct (its fields are accessed via per-field samplers / scalar uniforms),
+        /// so emitting `v_0.field_N = ...` would reference an undeclared identifier.
+        /// All real consumption of body-struct fields goes through GetField + LEA hooks.
+        /// </summary>
+        public override void GenerateCode(SetField value)
+        {
+            // Suppress writes targeting a body-struct param's value or a chain rooted at one.
+            var rootParam = ResolveToParameter(value.ObjectValue);
+            if (rootParam != null && _bodyStructParamsGL.ContainsKey(rootParam.Index))
+            {
+                var target = Load(value);
+                declaredVariables.Add(target.Name);
+                AppendLine($"// SetField on body-struct param {rootParam.Index} field {value.FieldSpan.Index} (suppressed; per-field samplers handle access)");
+                return;
+            }
+            base.GenerateCode(value);
+        }
+
         public override void GenerateCode(GetField value)
         {
             if (_hoistedIndexFields.Contains(value)) return;
+
+            // Body-struct field access redirect. When ObjectValue resolves to a body-
+            // struct param, the GetField is just a stepping-stone to a LEA or to a
+            // length-style query — the actual buffer access happens in the LEA hook
+            // (full-word + sub-word view fields) or via _bodyStructFieldBindingNames
+            // (length uniform). Suppress the standard struct.field_N emit here so we
+            // don't dereference the body struct as if it were a UBO.
+            if (value.ObjectValue.Resolve() is global::ILGPU.IR.Values.Parameter bsParam
+                && _bodyStructParamsGL.TryGetValue(bsParam.Index, out var bsFields))
+            {
+                int fi = value.FieldSpan.Index;
+                if (fi >= 0 && fi < bsFields.Count)
+                {
+                    var bsfInfo = bsFields[fi];
+                    if (bsfInfo.IsView)
+                    {
+                        // View field — registered for downstream LEA hook to recognize.
+                        // No GLSL emit; the LEA path consumes the GetField directly.
+                        var target = Load(value);
+                        declaredVariables.Add(target.Name);
+                        AppendLine($"// body-struct view field {bsParam.Index}.{bsfInfo.ClrFieldName} (handled by LEA hook)");
+                        return;
+                    }
+                    if (bsfInfo.IsScalar)
+                    {
+                        // Scalar field — emit a direct uniform read using the per-field uniform name.
+                        var target = Load(value);
+                        string prefix = _hoistedPrimitives.Contains(value) ? "" : $"{TypeGenerator[value.Type]} ";
+                        declaredVariables.Add(target.Name);
+                        AppendLine($"{prefix}{target} = {bsfInfo.BindingName};");
+                        return;
+                    }
+                }
+            }
+            // Body-struct ArrayView1D wrapper inner-field access — when the object
+            // is a GetField on a body-struct param itself returning an ArrayView1D
+            // wrapper, the inner GetField extracts BaseView (Field 0) or Extent/Length
+            // (Field 1+). For Field 0 we treat it as a no-op since the LEA hook walks
+            // through chained GetFields. For Length we'd need to emit
+            // `u_param{N}_f{M}_length`.
+            if (value.ObjectValue.Resolve() is GetField outerBsGf
+                && outerBsGf.ObjectValue.Resolve() is global::ILGPU.IR.Values.Parameter innerBp
+                && _bodyStructParamsGL.TryGetValue(innerBp.Index, out var innerBsFields))
+            {
+                int outerFi = outerBsGf.FieldSpan.Index;
+                if (outerFi >= 0 && outerFi < innerBsFields.Count && innerBsFields[outerFi].IsView)
+                {
+                    int innerFi = value.FieldSpan.Index;
+                    var bsf = innerBsFields[outerFi];
+                    if (innerFi == 0)
+                    {
+                        // BaseView extraction from ArrayView1D wrapper — handled by LEA hook.
+                        var target = Load(value);
+                        declaredVariables.Add(target.Name);
+                        AppendLine($"// body-struct ArrayView1D BaseView {innerBp.Index}.{bsf.ClrFieldName} (handled by LEA hook)");
+                        return;
+                    }
+                    // Length / Extent — emit per-field length uniform reference.
+                    var target2 = Load(value);
+                    string prefix2 = _hoistedPrimitives.Contains(value) ? "" : $"{TypeGenerator[value.Type]} ";
+                    declaredVariables.Add(target2.Name);
+                    AppendLine($"{prefix2}{target2} = {bsf.BindingName}_length;");
+                    return;
+                }
+            }
 
             // Check if this is a kernel parameter (View) field access
             // Guard: when the object is a struct loaded from a struct buffer, we must use
@@ -3195,6 +3913,45 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         Stride,
         EmulatedF64,
         EmulatedI64
+    }
+
+    /// <summary>
+    /// Per-field metadata for a body-struct kernel parameter. Produced by the
+    /// codegen pass for every ArrayView field of a body struct; consumed by
+    /// WebGLAccelerator at dispatch time to decompose the user's body-struct arg
+    /// into per-field buffer_ref dispatch entries.
+    /// </summary>
+    public class BodyStructBindingEntry
+    {
+        /// <summary>The IR parameter index of the body struct itself (e.g. 1).</summary>
+        public int ParamIndex { get; set; }
+        /// <summary>The IR field index within the body-struct type. May not match the
+        /// C# field index when the IR flattens ArrayView1D wrappers into multiple
+        /// IR fields. Use ClrFieldIndex for host-side reflection lookup.</summary>
+        public int FieldIndex { get; set; }
+        /// <summary>The C# field index within the user struct (in declaration order).
+        /// Used by host-side WebGLAccelerator to walk reflection.GetFields() in order.</summary>
+        public int ClrFieldIndex { get; set; }
+        /// <summary>The synthetic param index = (ParamIndex + 1) * 1000 + FieldIndex.</summary>
+        public int SyntheticParamIndex { get; set; }
+        /// <summary>The GLSL sampler uniform name (e.g. "u_param2_f0") when IsView.</summary>
+        public string BindingName { get; set; } = "";
+        /// <summary>The GLSL element type (int / uint / float).</summary>
+        public string GlslElementType { get; set; } = "int";
+        /// <summary>True when this field is an ArrayView (gets its own sampler binding).</summary>
+        public bool IsView { get; set; }
+        /// <summary>True when this field is a primitive scalar (passed via uniform).</summary>
+        public bool IsScalar { get; set; }
+        /// <summary>1 for byte, 2 for short/Half, 0 for full-word.</summary>
+        public int SubWordElemSize { get; set; }
+        /// <summary>True when the sub-word field is unsigned (byte/ushort).</summary>
+        public bool IsUnsignedSubWord { get; set; }
+        /// <summary>True when the sub-word field is Float16-emulated.</summary>
+        public bool IsFloat16 { get; set; }
+        /// <summary>True when the kernel writes to this field (needs TF varying).</summary>
+        public bool IsOutputBuffer { get; set; }
+        /// <summary>The C# field name from the user's body struct (debug clarity).</summary>
+        public string ClrFieldName { get; set; } = "";
     }
 
     public readonly struct KernelParameterBinding

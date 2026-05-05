@@ -194,6 +194,20 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         /// </summary>
         public void GenerateTypeDefinitions(StringBuilder builder)
         {
+            GenerateTypeDefinitions(builder, null);
+        }
+
+        /// <summary>
+        /// Skip emitting GLSL struct definitions for the given set of IR type IDs —
+        /// used for body-struct kernel parameters whose fields are decomposed into
+        /// per-field samplers. Emitting the body struct as a plain GLSL struct would
+        /// create a definition that contains "int" placeholders for ArrayView fields
+        /// (since ViewType lowers to its element type) — which doesn't match anything
+        /// the kernel actually references and would produce dead declarations or
+        /// type-name collisions.
+        /// </summary>
+        public void GenerateTypeDefinitions(StringBuilder builder, HashSet<long>? skipTypeIds)
+        {
             foreach (var kvp in mapping)
             {
                 if (kvp.Key is StructureType structType)
@@ -207,6 +221,9 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                         kvp.Value.StartsWith("ivec") ||
                         kvp.Value.StartsWith("uvec") ||
                         kvp.Value.StartsWith("mat"))
+                        continue;
+
+                    if (skipTypeIds != null && skipTypeIds.Contains(structType.Id))
                         continue;
 
                     builder.AppendLine($"struct {kvp.Value} {{");

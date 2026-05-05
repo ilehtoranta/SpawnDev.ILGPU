@@ -416,7 +416,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             // Types are discovered lazily during code generation, so we collect them
             // here and replace the placeholder that was inserted by the kernel generator.
             var structDefs = new StringBuilder();
-            data.TypeGenerator.GenerateTypeDefinitions(structDefs);
+            data.TypeGenerator.GenerateTypeDefinitions(structDefs, data.BodyStructTypeIdsToSkip);
             var glslSource = builder.ToString()
                 .Replace("// __STRUCT_DEFS_PLACEHOLDER__\r\n", structDefs.ToString())
                 .Replace("// __STRUCT_DEFS_PLACEHOLDER__\n", structDefs.ToString())
@@ -436,7 +436,8 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 entryPoint,
                 glslSource,
                 parameterBindings: data.ParameterBindings,
-                outputVaryings: data.OutputVaryings);
+                outputVaryings: data.OutputVaryings,
+                bodyStructManifest: data.BodyStructManifest);
         }
 
         #endregion
@@ -470,17 +471,26 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         /// </summary>
         public IReadOnlyList<OutputVaryingInfo> OutputVaryings { get; }
 
+        /// <summary>
+        /// Per-field metadata for body-struct kernel parameters. Empty when no body
+        /// struct is present. Consumed by WebGLAccelerator.MarshalArguments to
+        /// decompose each body-struct arg into per-field buffer_ref dispatch entries.
+        /// </summary>
+        public IReadOnlyList<BodyStructBindingEntry> BodyStructManifest { get; }
+
         public WebGLCompiledKernel(
             Context context,
             EntryPoint entryPoint,
             string glslSource,
             IReadOnlyList<KernelParameterBinding>? parameterBindings = null,
-            IReadOnlyList<OutputVaryingInfo>? outputVaryings = null)
+            IReadOnlyList<OutputVaryingInfo>? outputVaryings = null,
+            IReadOnlyList<BodyStructBindingEntry>? bodyStructManifest = null)
             : base(context, entryPoint, null)
         {
             GLSLSource = glslSource;
             ParameterBindings = parameterBindings ?? Array.Empty<KernelParameterBinding>();
             OutputVaryings = outputVaryings ?? Array.Empty<OutputVaryingInfo>();
+            BodyStructManifest = bodyStructManifest ?? Array.Empty<BodyStructBindingEntry>();
         }
     }
 

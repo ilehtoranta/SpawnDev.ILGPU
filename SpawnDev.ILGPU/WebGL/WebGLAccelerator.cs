@@ -691,6 +691,20 @@ namespace SpawnDev.ILGPU.WebGL
             {
                 int glslParamIndex = pIdx + glslParamOffset;
                 var arg = args[pIdx];
+
+                // Body struct argument — decompose into per-field buffer_ref entries.
+                // Detected by checking the compiled kernel's BodyStructManifest for the
+                // current GLSL param index. Walks the user struct's fields via
+                // reflection in IR-field order (which matches C# declaration order for
+                // value types) and emits one buffer_ref per ArrayView field with a
+                // synthetic paramIndex = (glslParamIndex + 1) * 1000 + fieldIdx.
+                if (arg != null && compiledKernel.BodyStructManifest.Count > 0
+                    && compiledKernel.BodyStructManifest.Any(e => e.ParamIndex == glslParamIndex))
+                {
+                    EmitBodyStructDispatch(arg, glslParamIndex, compiledKernel, webGlAccel, jsParams);
+                    continue;
+                }
+
                 IArrayView? arrayView = arg as IArrayView;
 
                 if (arrayView == null && arg != null)
@@ -923,18 +937,52 @@ namespace SpawnDev.ILGPU.WebGL
                 }
             }
 
-            // Build output varying descriptors — reference bufferIds instead of argIndex
+            // Build output varying descriptors — reference bufferIds instead of argIndex.
+            // For body-struct output view fields, the OutputVaryingInfo's ParamIndex is
+            // a synthetic encoding (paramIdx+1)*1000 + irFieldIdx — look up the manifest
+            // entry to get the C# field index for reflection (IR + C# indices diverge
+            // when ArrayView1D wrappers expand into multiple IR fields).
             var outputs = new List<object>();
             var outputVaryings = compiledKernel.OutputVaryings;
+            var manifest = compiledKernel.BodyStructManifest;
             for (int outIdx = 0; outIdx < outputVaryings.Count; outIdx++)
             {
                 var outputInfo = outputVaryings[outIdx];
-                var argsIdx = outputInfo.ParamIndex - glslParamOffset;
+                int paramIndexEffective = outputInfo.ParamIndex;
+                int bodyStructClrFieldIdx = -1;
+                if (paramIndexEffective >= 1000)
+                {
+                    var manifestEntry = manifest.FirstOrDefault(e => e.SyntheticParamIndex == paramIndexEffective);
+                    if (manifestEntry != null)
+                    {
+                        bodyStructClrFieldIdx = manifestEntry.ClrFieldIndex;
+                        paramIndexEffective = manifestEntry.ParamIndex;
+                    }
+                }
+                var argsIdx = paramIndexEffective - glslParamOffset;
 
                 if (argsIdx >= 0 && argsIdx < args.Length)
                 {
                     var arg = args[argsIdx];
                     IArrayView? arrView = arg as IArrayView;
+                    if (arrView == null && arg != null && bodyStructClrFieldIdx >= 0)
+                    {
+                        // Body-struct output view field — extract via reflection on
+                        // the user's struct value using the C# field index.
+                        var bsFields = arg.GetType().GetFields(
+                            BindingFlags.Public | BindingFlags.Instance);
+                        if (bodyStructClrFieldIdx < bsFields.Length)
+                        {
+                            var fieldValue = bsFields[bodyStructClrFieldIdx].GetValue(arg);
+                            arrView = fieldValue as IArrayView;
+                            if (arrView == null && fieldValue != null)
+                            {
+                                var rc = GetOrCreateReflectionCache(bsFields[bodyStructClrFieldIdx].FieldType);
+                                if (rc.BaseViewProperty != null)
+                                    arrView = rc.BaseViewProperty.GetValue(fieldValue) as IArrayView;
+                            }
+                        }
+                    }
                     if (arrView == null && arg != null)
                     {
                         var refCache = GetOrCreateReflectionCache(arg.GetType());
@@ -1167,6 +1215,126 @@ namespace SpawnDev.ILGPU.WebGL
                     };
                     results.Add(new { path, scalarType, value });
                     fieldCounter++;
+                }
+            }
+        }
+
+        /// <summary>
+        /// Decomposes a body-struct kernel argument into per-field buffer_ref dispatch
+        /// entries. For each ArrayView field of the user struct, emits a buffer_ref
+        /// with synthetic paramIndex = (glslParamIndex + 1) * 1000 + fieldIdx so the
+        /// GLSL kernel's per-field samplers (u_param{N}_f{M}) can be located by
+        /// glWorker.js. Scalar (primitive) fields are emitted as standard scalar
+        /// uniforms with the same synthetic param index encoding.
+        /// </summary>
+        private static void EmitBodyStructDispatch(
+            object structArg,
+            int glslParamIndex,
+            WebGLCompiledKernel compiledKernel,
+            WebGLAccelerator webGlAccel,
+            List<object> jsParams)
+        {
+            var manifestEntries = compiledKernel.BodyStructManifest
+                .Where(e => e.ParamIndex == glslParamIndex)
+                .OrderBy(e => e.FieldIndex)
+                .ToList();
+            var clrFields = structArg.GetType().GetFields(
+                BindingFlags.Public | BindingFlags.Instance);
+
+            foreach (var entry in manifestEntries)
+            {
+                if (entry.ClrFieldIndex < 0 || entry.ClrFieldIndex >= clrFields.Length)
+                    throw new Exception(
+                        $"Body struct on param {glslParamIndex} has manifest C# field index " +
+                        $"{entry.ClrFieldIndex} (IR field index {entry.FieldIndex}) but the C# struct " +
+                        $"has {clrFields.Length} fields.");
+                var clrField = clrFields[entry.ClrFieldIndex];
+                var fieldValue = clrField.GetValue(structArg);
+
+                if (entry.IsView)
+                {
+                    var view = fieldValue as IArrayView;
+                    if (view == null)
+                    {
+                        var rc = GetOrCreateReflectionCache(clrField.FieldType);
+                        if (rc.BaseViewProperty != null && fieldValue != null)
+                            view = rc.BaseViewProperty.GetValue(fieldValue) as IArrayView;
+                    }
+                    if (view == null)
+                        throw new Exception(
+                            $"Body struct field '{clrField.Name}' on param {glslParamIndex} " +
+                            $"is declared as a view but the runtime value is not an IArrayView.");
+
+                    var contiguous = view as IContiguousArrayView;
+                    if (contiguous == null)
+                    {
+                        var rc2 = GetOrCreateReflectionCache(view.GetType());
+                        contiguous = (rc2.BaseViewProperty != null
+                            ? rc2.BaseViewProperty.GetValue(view)
+                            : view) as IContiguousArrayView;
+                    }
+                    if (contiguous == null)
+                        throw new Exception(
+                            $"Body struct field '{clrField.Name}' on param {glslParamIndex} " +
+                            $"is not a contiguous buffer.");
+
+                    var memBuffer = contiguous.Buffer as WebGLMemoryBuffer;
+                    if (memBuffer == null)
+                        throw new Exception(
+                            $"Body struct field '{clrField.Name}' has no WebGL memory buffer.");
+
+                    int length = (int)contiguous.Length;
+                    int elementOffset = (int)contiguous.Index;
+
+                    webGlAccel.EnsureBufferInWorker(memBuffer, entry.GlslElementType);
+
+                    jsParams.Add(new
+                    {
+                        kind = "buffer_ref",
+                        bufferId = memBuffer.WorkerBufferId,
+                        paramIndex = entry.SyntheticParamIndex,
+                        elementCount = length,
+                        elementOffset
+                    });
+                }
+                else if (entry.IsScalar)
+                {
+                    // Scalar field of body struct — emit as standard scalar uniform
+                    // with the synthetic param index. glWorker.js will resolve the
+                    // u_param{realN}_f{M} uniform name from the synthetic encoding.
+                    string scalarType = fieldValue switch
+                    {
+                        int => "int",
+                        uint => "uint",
+                        float => "float",
+                        double => "float",
+                        bool => "bool",
+                        byte or sbyte or short or ushort or long => "int",
+                        ulong => "uint",
+                        _ => "float"
+                    };
+                    object scalarValue = fieldValue switch
+                    {
+                        int iv => iv,
+                        uint uv => uv,
+                        float fv => fv,
+                        double dv => (float)dv,
+                        bool bv => bv ? 1 : 0,
+                        byte bv => (int)bv,
+                        sbyte sbv => (int)sbv,
+                        short sv => (int)sv,
+                        ushort usv => (int)usv,
+                        long lv => (int)lv,
+                        ulong ulv => (uint)ulv,
+                        _ => fieldValue ?? 0
+                    };
+                    jsParams.Add(new
+                    {
+                        kind = "scalar",
+                        paramIndex = entry.SyntheticParamIndex,
+                        scalarType,
+                        value = scalarValue
+                    });
                 }
             }
         }

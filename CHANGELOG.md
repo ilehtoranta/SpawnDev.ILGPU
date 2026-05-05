@@ -2,6 +2,77 @@
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
 
+## 4.9.5-rc.25 (2026-05-04) — WebGL multi-view body-struct kernel parameter codegen (#26)
+
+### Fix: WebGL/GLSL now decomposes body struct kernel parameters into per-field sampler bindings
+
+When a kernel takes a struct parameter whose fields include 2 or more `ArrayView<T>` (a "body struct" — e.g. Tuvok's `SilkDecodeCoreInputs` with 6 short + 9 int views, or `Tests23_RegisterHeavyBody` with 12 ArrayView<int> + 1 output), WebGL was misclassifying the param via `IsMultiDim` (line 3056-3098): NumFields ∈ {3,4,6} got routed as fake 1D/2D/3D ArrayView wrappers (so every field aliased the same single sampler), and NumFields outside {3,4,6} fell into a UBO struct path (where uniform field references received meaningless ArrayView pointer values). Both paths produced silent-wrong output.
+
+WebGPU (WGSL) shipped this body-struct codegen support in rc.17 + rc.18 today; this rc ports the working WGSL pattern to GLSL.
+
+### Approach (mirror of WGSL pattern)
+
+1. **Synthetic param-index encoding** `(paramIdx + 1) * 1000 + fieldIdx` — every body-struct view field gets a virtual param-index ≥ 1000 that threads through `_leaParamMap`, `_subWordLEAVars`, `_inputParamIndices`, `_outputParamIndices`, and `_outputVaryings` like a regular param. Same encoding as WGSL.
+2. **`_bodyStructParamsGL` infrastructure** — `BodyStructFieldInfoGL` per-field metadata, populated by `ScanBodyStructParams` in the constructor flow before the analyzers run.
+3. **`IsBodyStruct` + `IsViewFieldType` helpers** — discriminate "body struct (≥2 view fields)" from single ArrayView wrappers; body-struct early-out in `EmitParameterDeclarations` runs BEFORE the `IsMultiDim` cascade.
+4. **`EmitBodyStructDeclarations`** — one `uniform highp isampler2D u_param{N}_f{M}` (+ `_tileW`, `_offset`, `_length` companions) per ArrayView field. Sub-word fields (Int8/Int16/Half) register the synthetic index in `_subWordParams` so the existing texelFetch + shift+mask machinery picks them up.
+5. **`GetParamBindingName(int paramIdx)` helper** — every `texelFetch(u_param{N}, ...)` emit site now calls this helper, which returns `u_param{N}` for direct params or `u_param{realN}_f{M}` for synthetic body-struct field indices via `_bodyStructFieldBindingNames`. Single source of truth.
+6. **GetField + LoadElementAddress redirect** — when LEA's source is `GetField(bodyStructParam, fi)` with view field, the code path uses the synthetic param idx and emits `texelFetch(u_param{N}_f{M}, ...)` via the helper.
+7. **TF varyings per body-struct OUTPUT view field** — `tf_out_param{N}_f{M}` keyed by synthetic param idx in `_outputVaryings`. Existing Store path's `_singleStoreIndex` / `_storeSlotIndex` / `_emulatedIndex` lookups already consult ParamIndex, so they find body-struct output varyings automatically.
+8. **Host-side `EmitBodyStructDispatch` in `WebGLAccelerator.MarshalArguments`** — walks the user's body struct via reflection in IR-field order, emits one `kind = "buffer_ref"` per ArrayView field with synthetic param idx. Scalar fields go through `kind = "scalar"` with the same encoding. Output readback decodes `outputInfo.ParamIndex >= 1000` to extract the right ArrayView field for buffer-ID lookup.
+9. **glWorker.js synthetic-index decoder** — new `resolveParamPrefix(paramIndex)` returns `u_param{N}` or `u_param{realN}_f{M}` based on `paramIndex >= 1000`. All sampler/scalar/emu64 bind sites consult it.
+10. **Manifest** — new public `BodyStructBindingEntry` class on `WebGLBackend.cs` (parallel to WGSL's `CoalesceGroupEntry`) + `WebGLCompiledKernel.BodyStructManifest` flows from codegen to runtime for dispatch decomposition.
+
+### What v1 supports
+
+- `ArrayView<T>` and `ArrayView1D<T, Stride1D.Dense>` body-struct view fields
+- Sub-word fields: Int8/Int16/UInt8/UInt16/Float16-emulated
+- Mixed view + scalar field body structs (scalars packed via existing scalar uniform path with synthetic indices)
+- Body-struct **output** view fields (Transform Feedback varying emission per field, demuxed to per-buffer at readback)
+
+### What v1 throws on (deferred to v2)
+
+- Emulated 64-bit body-struct view fields (`ArrayView<long>` / `ArrayView<double>` inside a body struct) — clear `NotSupportedException` directing to use separate kernel params
+- Coalesce groups — WebGL's `MAX_TEXTURE_IMAGE_UNITS` is typically 16 (vs WebGPU's 8-10), more headroom; defer until needed by a real kernel
+- Atomics on body-struct view fields (WebGL has no atomics anywhere; existing capability check already gates this)
+- Packed-struct view fields inside body structs
+
+### Test status post-fix (WebGL on 2026-05-04)
+
+| Test | Pre-rc.25 | Post-rc.25 |
+|------|-----------|------------|
+| `Tests23_TwoShortBodyStruct` (2 × ArrayView<short>) | FAIL | **PASS** |
+| `Tests23_SilkBodyStructShape` (Tuvok's actual: 6 × ArrayView<short> + 9 × ArrayView<int>) | FAIL | **PASS** |
+| `Tests23_RegisterHeavyBody_UnitExtent_NoLaunchFailure` (12 × ArrayView<int>) | FAIL | **PASS** |
+| `Tests23_MinimalShortIntBodyStruct` (ArrayView<short> + ArrayView<int>) | FAIL | **PASS** |
+| `Tests23_MinimalShortIntBodyStruct_IntOnly` | FAIL | **PASS** |
+| `Tests23_DeepUnroll_NoLaunchFailure` (single-view regression) | PASS | **PASS** |
+| `Tests23_OnlyShortBodyStruct` (single ArrayView<short>) | FAIL | FAIL (v2 follow-up) |
+| `Tests23_TwoShortBodyStructDense` (ArrayView1D<,Dense>) | FAIL | FAIL (v2 follow-up) |
+
+Desktop regression: 10/10 sample sweep PASS (CUDA + OpenCL + CPU Tests23). No regression in WGSL / WebGPU / Wasm paths from this rc — those backends remain fully working.
+
+### What this unblocks
+
+- **Tuvok's `SilkDecodeCoreGpu` WebGL path** — bump `SpawnDev.Codecs` to `SpawnDev.ILGPU 4.9.5-rc.25`. The shipped tests cover Tuvok's actual `Tests23_SilkBodyStructShape` (6 short + 9 int) shape end-to-end.
+- **Any consumer kernel** using a struct param with multiple ArrayView fields — gets WebGL support automatically when the struct holds raw `ArrayView<T>` fields and isn't sized like an ArrayView wrapper.
+
+### Known limitations (v2 follow-ups)
+
+- **Single-view body struct** (`struct { ArrayView<short> S0 }`): kernel runs without GLSL compile error but reads zero. Likely a buffer-bind path issue specific to NumFields=1 body structs. Workaround: pass the ArrayView as a direct kernel parameter instead of wrapping it in a struct.
+- **`ArrayView1D<T, Stride1D.Dense>` body fields**: GLSL compile error referencing missing `u_param_stride` uniform — the IR emits a multi-dim view access path for the wrapped struct that conflicts with the body-struct decomposition. Workaround: use raw `ArrayView<T>` body fields instead of the Dense wrapper.
+
+Both v2 items have crisp repro tests (`Tests23_OnlyShortBodyStruct` and `Tests23_TwoShortBodyStructDense`) so they'll be the next gate.
+
+### Files changed
+
+- `SpawnDev.ILGPU/WebGL/Backend/GLSLKernelFunctionGenerator.cs` — body-struct infrastructure, EmitBodyStructDeclarations, LEA hook, GetParamBindingName helper, output varying emission per field
+- `SpawnDev.ILGPU/WebGL/Backend/GLSLTypeGenerator.cs` — `GenerateTypeDefinitions(builder, skipTypeIds)` overload skips body-struct UBO emit
+- `SpawnDev.ILGPU/WebGL/Backend/GLSLCodeGenerator.cs` — `GeneratorArgs.BodyStructTypeIdsToSkip` + `BodyStructManifest` plumbing
+- `SpawnDev.ILGPU/WebGL/Backend/WebGLBackend.cs` — `BodyStructBindingEntry` class + `WebGLCompiledKernel.BodyStructManifest`
+- `SpawnDev.ILGPU/WebGL/WebGLAccelerator.cs` — `EmitBodyStructDispatch` host-side decomposition + output-readback synthetic-index decoding
+- `SpawnDev.ILGPU/wwwroot/glWorker.js` — `resolveParamPrefix` synthetic-index decoder
+
 ## 4.9.5-rc.24 (2026-05-04) — CUDA body-struct ArrayView-field alignment ROOT-CAUSE FIX (#32)
 
 ### Fix: ViewType.Alignment was hardcoded 4, should be 8 on 64-bit targets

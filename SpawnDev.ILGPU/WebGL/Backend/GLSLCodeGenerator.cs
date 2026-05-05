@@ -48,6 +48,8 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 DynamicSharedAllocations = dynamicSharedAllocations;
                 OutputVaryings = new List<OutputVaryingInfo>();
                 ParameterBindings = new List<KernelParameterBinding>();
+                BodyStructTypeIdsToSkip = new HashSet<long>();
+                BodyStructManifest = new List<BodyStructBindingEntry>();
             }
 
             /// <summary>The parent backend.</summary>
@@ -64,6 +66,14 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             public List<OutputVaryingInfo> OutputVaryings { get; }
             /// <summary>Parameter binding metadata populated by the kernel code generator.</summary>
             public List<KernelParameterBinding> ParameterBindings { get; }
+            /// <summary>StructureType.Id values for body-struct kernel parameters whose
+            /// GLSL struct definitions should NOT be emitted (their fields are
+            /// decomposed into per-field samplers).</summary>
+            public HashSet<long> BodyStructTypeIdsToSkip { get; }
+            /// <summary>Per-field metadata for body-struct kernel parameters. Consumed
+            /// at dispatch time by WebGLAccelerator to decompose body-struct args into
+            /// per-field buffer_ref entries.</summary>
+            public List<BodyStructBindingEntry> BodyStructManifest { get; }
         }
 
         /// <summary>
