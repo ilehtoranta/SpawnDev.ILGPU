@@ -4715,14 +4715,40 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     if (elemSize > 0)
                     {
                         _subWordLEAVars[target.Name] = param.Index;
-                        AppendIndent();
                         // SUB-WORD LEA STORES AN i32 OFFSET, NOT A POINTER.
-                        // We emit 'var : i32' (not 'let') so the var-hoist post-processing
-                        // picks it up as i32. Using 'let' would trigger the let→var converter
-                        // which inspects valueVariables.Type (ptr<...> for a LEA target) and
-                        // then skips the var declaration (ptr types aren't constructible),
-                        // leaving v_N used without any declaration.
-                        Builder.Append($"var {target.Name} : i32 = {adjustedOffsetExpr};");
+                        //
+                        // Cross-block fix (Tuvok local.8 PMT, 2026-05-05):
+                        // when the LEA result is used in a different basic block from
+                        // where it's defined (added to _crossBlockPointers by
+                        // HoistCrossBlockVariables), the block-local `var v_X : i32 = ...`
+                        // declaration is out of scope at the use site — Naga rejects with
+                        // "unresolved value 'v_X'". Hoist the var declaration to function
+                        // scope (deferred-decl list) so it's visible everywhere, and emit
+                        // only the assignment in the current block.
+                        bool isCrossBlockSubWord = _crossBlockPointers.Contains(value)
+                            && _useDeferredDeclarations;
+                        AppendIndent();
+                        if (isCrossBlockSubWord && declaredVariables.Add(target.Name))
+                        {
+                            // Pre-declare at function scope; emit assignment locally.
+                            _deferredVarDeclarations.Add($"    var {target.Name} : i32;");
+                            Builder.Append($"{target.Name} = {adjustedOffsetExpr};");
+                        }
+                        else if (isCrossBlockSubWord)
+                        {
+                            // Already in declaredVariables (pre-declared). Just assign.
+                            Builder.Append($"{target.Name} = {adjustedOffsetExpr};");
+                        }
+                        else
+                        {
+                            // Single-block use: combined declaration + assignment.
+                            // 'var : i32' (not 'let') lets the post-processing pick it up
+                            // as i32 — `let` would trigger the let→var converter which
+                            // inspects valueVariables.Type (ptr<...> for a LEA target) and
+                            // skips the var declaration (ptr types aren't constructible),
+                            // leaving v_N used without any declaration.
+                            Builder.Append($"var {target.Name} : i32 = {adjustedOffsetExpr};");
+                        }
                         Builder.AppendLine();
                         if (_crossBlockPointers.Contains(value))
                         {
@@ -4730,12 +4756,15 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                             // identifier. For sub-word direct-param coalesce members,
                             // _subWordBodyStructBindingNames maps to the leader's BindingName;
                             // fall back to `param{N}` only when no coalesce membership exists.
+                            // Defense-in-depth alongside the pre-decl above; some code paths
+                            // (e.g. Load via _crossBlockPointerExprs) substitute the inline
+                            // expression directly without referencing the var name.
                             string swBindRef = _subWordBodyStructBindingNames.TryGetValue(param.Index, out var swCoalBindName)
                                 ? swCoalBindName : $"param{param.Index}";
                             if (elemSize == 1) // byte
-                                _crossBlockPointerExprs[target.Name] = $"((u32(atomicLoad(&{swBindRef}[(u32({adjustedOffsetExpr}) / 4u)])) >> ((u32({adjustedOffsetExpr}) % 4u) * 8u)) & 0xFFu)";
+                                _crossBlockPointerExprs[target.Name] = $"((u32(atomicLoad(&{swBindRef}[(u32({target.Name}) / 4u)])) >> ((u32({target.Name}) % 4u) * 8u)) & 0xFFu)";
                             else // short (2 bytes)
-                                _crossBlockPointerExprs[target.Name] = $"((u32(atomicLoad(&{swBindRef}[(u32({adjustedOffsetExpr}) / 2u)])) >> ((u32({adjustedOffsetExpr}) % 2u) * 16u)) & 0xFFFFu)";
+                                _crossBlockPointerExprs[target.Name] = $"((u32(atomicLoad(&{swBindRef}[(u32({target.Name}) / 2u)])) >> ((u32({target.Name}) % 2u) * 16u)) & 0xFFFFu)";
                         }
                         return;
                     }
