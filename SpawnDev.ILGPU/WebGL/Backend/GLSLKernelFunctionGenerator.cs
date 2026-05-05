@@ -115,8 +115,40 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         // struct definitions because the fields don't make sense as UBO scalars.
         private readonly HashSet<long> _bodyStructTypesToSkip = new();
 
-        /// <summary>Kernel parameter offset: 1 for implicit index parameter.</summary>
-        private int KernelParamOffset => 1;
+        /// <summary>
+        /// Kernel parameter offset: number of leading IR parameters that are NOT user buffers.
+        ///
+        /// For auto-grouped stream kernels (LoadAutoGroupedStreamKernel&lt;Index1D, ...&gt;),
+        /// Method.Parameters[0] is the implicit thread index — skip it.
+        ///
+        /// For explicitly-launched kernels (LoadStreamKernel&lt;TParam&gt;) and grid-stride
+        /// (LongIndex1D-first) kernels, Method.Parameters[0] is a user param — do NOT skip.
+        ///
+        /// Mirrors `WGSLKernelFunctionGenerator.KernelParamOffset` so explicit-launch +
+        /// body-struct kernels (e.g. Tests23_RegisterHeavyBody_ExplicitOneByOne) bind the
+        /// body struct param correctly instead of treating it as the implicit index.
+        /// </summary>
+        private int KernelParamOffset
+        {
+            get
+            {
+                if (EntryPoint.IndexType == IndexType.None) return 0;
+
+                // Auto-grouped kernels: first param is always the thread index — skip it.
+                if (EntryPoint.IndexType != IndexType.KernelConfig) return 1;
+
+                // KernelConfig (explicit-launch / grid-stride): inspect the first param type.
+                // Index1D/2D/3D → stream-kernel index, skip. LongIndex1D/2D/3D or any user
+                // type (struct, ArrayView) → don't skip.
+                if (EntryPoint.Parameters.Count > 0)
+                {
+                    var firstParamType = EntryPoint.Parameters[0];
+                    if (firstParamType == typeof(Index1D) || firstParamType == typeof(Index2D) || firstParamType == typeof(Index3D))
+                        return 1;
+                }
+                return 0;
+            }
+        }
 
         #endregion
 

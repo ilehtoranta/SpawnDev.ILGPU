@@ -685,7 +685,33 @@ namespace SpawnDev.ILGPU.WebGL
         {
             var jsParams = new List<object>();
             var strideMap = new Dictionary<int, int[]>();
-            const int glslParamOffset = 1;
+
+            // glslParamOffset must mirror GLSLKernelFunctionGenerator.KernelParamOffset:
+            //   - Auto-grouped (Index1D/2D/3D + ...): 1 — IR param 0 is the implicit thread index
+            //   - Explicit-launch (LoadStreamKernel<TParam>) with non-Index first arg: 0
+            //   - Explicit-launch with Index1D/2D/3D first arg: 1
+            //   - IndexType.None: 0
+            // Without this alignment, the host's args[0] maps to a different GLSL binding than
+            // the kernel expects, leaving body-struct field bindings unfilled (texelFetch returns
+            // zero) — Tests23_RegisterHeavyBody_ExplicitOneByOne_NoLaunchFailure regression.
+            int glslParamOffset = 1;
+            var ep = compiledKernel.EntryPoint;
+            if (ep.IndexType == IndexType.None)
+            {
+                glslParamOffset = 0;
+            }
+            else if (ep.IndexType == IndexType.KernelConfig)
+            {
+                if (ep.Parameters.Count > 0)
+                {
+                    var first = ep.Parameters[0];
+                    glslParamOffset = (first == typeof(Index1D) || first == typeof(Index2D) || first == typeof(Index3D)) ? 1 : 0;
+                }
+                else
+                {
+                    glslParamOffset = 0;
+                }
+            }
 
             for (int pIdx = 0; pIdx < args.Length; pIdx++)
             {

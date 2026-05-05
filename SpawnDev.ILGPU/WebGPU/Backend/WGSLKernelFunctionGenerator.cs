@@ -3916,6 +3916,35 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         }
 
         /// <summary>
+        /// Group.DimX override that clamps X-dim to min(workgroup_size.x, _ilgpu_user_dim)
+        /// for auto-grouped kernels with an extent override constant. Closes
+        /// `Tests23_GroupDimX_Clamps_To_Extent_OnUnitDispatch` — the IL emits a clamp
+        /// pre-fix on CUDA / OpenCL, and WebGPU should honor the same semantic. The
+        /// WGSL @workgroup_size attribute is fixed at compile time (= customGroupSize),
+        /// so we can't change the actual workgroup size per-dispatch; we instead expose
+        /// the clamped value to user code via Group.DimX. The OOB range check at the
+        /// top of main() already prevents excess threads from running, so this just
+        /// makes the user-visible Group.DimX consistent with the IL clamp.
+        ///
+        /// Y / Z dims and explicitly-grouped kernels fall through to the base behavior.
+        /// </summary>
+        public override void GenerateCode(GroupDimensionValue value)
+        {
+            // Only override the X dim, and only for auto-grouped kernels where
+            // `_ilgpu_user_dim` is declared (matches the condition in GenerateHeader).
+            if (value.Dimension == DeviceConstantDimension3D.X
+                && !EntryPoint.IsExplicitlyGrouped
+                && KernelParamOffset > 0)
+            {
+                var target = Load(value);
+                Declare(target);
+                AppendLine($"{target} = i32(min(workgroup_size.x, _ilgpu_user_dim));");
+                return;
+            }
+            base.GenerateCode(value);
+        }
+
+        /// <summary>
         /// Pre-scans parameters to identify which buffers use emulated 64-bit types.
         /// This MUST run before HoistCrossBlockVariables and body generation so that
         /// LoadElementAddress and Load/Store can check if a param needs emulation.
