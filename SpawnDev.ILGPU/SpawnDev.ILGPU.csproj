@@ -4,8 +4,18 @@
 		<TargetFramework>net10.0</TargetFramework>
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>enable</Nullable>
-		<Version>4.9.5-rc.20</Version>
-		<PackageReleaseNotes>v4.9.5-rc.20: Wasm per-kernel worker module cache — likely candidate fix for Data's StyleMosaic Wasm 10+ minute hang at rc.16. Multi-kernel pipelines (ML inference: Conv2D / InstanceNorm / ReLU / Add / Pad alternating across ~100 dispatches) used to invalidate the worker-side `_cachedModule` on EVERY kernel switch. With ~100 dispatches × 6+ alternating kernel types × 8 workers = ~4800 worker-side Wasm module re-compiles. Each compile of a non-trivial kernel takes 50-100ms+; product = several minutes of pure Wasm compile time before the actual kernel work runs.
+		<Version>4.9.5-rc.21</Version>
+		<PackageReleaseNotes>v4.9.5-rc.21: Two more Wasm dispatcher fixes for Data's StyleMosaic Wasm scenario.
+
+(1) **Fast-fault on first worker error.** `Task.WhenAll(workerTasks)` waits for ALL workers before throwing the first exception. When one worker traps (kernel OOB, divide-by-zero) and others are blocked or never post back, the outer dispatch hangs waiting for the dead workers. Replace with `Task.WhenAny` drain loop that throws on the FIRST faulted task. Surfaced 2026-05-04 by Data: StyleMosaic Wasm hit a kernel OOB at dispatch 176 but the dispatcher waited the full PMT 10-minute timeout instead of surfacing the actionable 20-second error path (PerOpSync mode caught it; non-PerOpSync did not). This makes both modes equally responsive.
+
+(2) **Kernel name in error message.** `WorkerDispatchState.KernelName = compiledKernel.EntryPoint?.Name`. Both the worker `done: false` path and the OnError path include the kernel name in the thrown exception. Lets crew identify which op trapped without enabling per-dispatch diagnostic logging.
+
+Verified: Tests23 race + scaling lockdowns 28/28 PASS post-fix. No regression.
+
+UNBLOCKS: Data's StyleMosaic root-cause investigation. Whatever kernel is OOB-ing at disp=176 now surfaces with kernel name + view layout + buffer ranges, immediately rather than after a 10-minute timeout.
+
+v4.9.5-rc.20: Wasm per-kernel worker module cache — likely candidate fix for Data's StyleMosaic Wasm 10+ minute hang at rc.16. Multi-kernel pipelines (ML inference: Conv2D / InstanceNorm / ReLU / Add / Pad alternating across ~100 dispatches) used to invalidate the worker-side `_cachedModule` on EVERY kernel switch. With ~100 dispatches × 6+ alternating kernel types × 8 workers = ~4800 worker-side Wasm module re-compiles. Each compile of a non-trivial kernel takes 50-100ms+; product = several minutes of pure Wasm compile time before the actual kernel work runs.
 
 Fix: per-kernel module + instance cache on the worker. Each `(worker, kernel)` pair compiles ONCE and reuses for the lifetime of the worker. Subsequent dispatches of the same kernel just look it up by `kernelId` and re-instantiate (cheap) only when memory changes.
 
