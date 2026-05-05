@@ -4,8 +4,21 @@
 		<TargetFramework>net10.0</TargetFramework>
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>enable</Nullable>
-		<Version>4.9.5-rc.19</Version>
-		<PackageReleaseNotes>v4.9.5-rc.19: WebGPU `WGSLTypeGenerator.GenerateTypeDefinitions` concurrent-modification fix. The method iterated `mapping` (a Dictionary&lt;TypeNode, string&gt;) directly while emitting struct definitions; the inner field-type emission used `this[fieldType]` (the indexer) which could LAZILY register a new type in `mapping`. The outer enumerator threw `InvalidOperationException: InvalidOperation_EnumFailedVersion` ("Collection was modified; enumeration may not execute"). Surfaced 2026-05-04 by `Tests23_MinimalShortIntBodyStruct_IntOnly` on WebGPU — the body struct's int field type was lazily registered during field emission. Fix: snapshot+drain pattern. Snapshot mapping entries before iterating; re-iterate if the indexer added new struct types during emission. Verified Tests23_MinimalShortIntBodyStruct_IntOnly WebGPU + NoSub PASS post-fix; no regressions on existing tests.
+		<Version>4.9.5-rc.20</Version>
+		<PackageReleaseNotes>v4.9.5-rc.20: Wasm per-kernel worker module cache — likely candidate fix for Data's StyleMosaic Wasm 10+ minute hang at rc.16. Multi-kernel pipelines (ML inference: Conv2D / InstanceNorm / ReLU / Add / Pad alternating across ~100 dispatches) used to invalidate the worker-side `_cachedModule` on EVERY kernel switch. With ~100 dispatches × 6+ alternating kernel types × 8 workers = ~4800 worker-side Wasm module re-compiles. Each compile of a non-trivial kernel takes 50-100ms+; product = several minutes of pure Wasm compile time before the actual kernel work runs.
+
+Fix: per-kernel module + instance cache on the worker. Each `(worker, kernel)` pair compiles ONCE and reuses for the lifetime of the worker. Subsequent dispatches of the same kernel just look it up by `kernelId` and re-instantiate (cheap) only when memory changes.
+
+Pieces:
+- `WorkerPool.WasmBootstrapScript`: replace `_cachedModule`/`_cachedInstance` globals with `_modulesById`/`_instancesById` dicts keyed on kernelId. Memory swap invalidates ALL instances (per-kernel they're all tied to the SAB); module compile happens only when wasmBytes is sent.
+- `WasmDispatchMessages`: add `kernelId` field to barrier + flat dispatch messages. Sent on every dispatch.
+- `WasmAccelerator`: replace single `_initializedWorkers` HashSet with `Dictionary&lt;byte[], HashSet&lt;Worker&gt;&gt;` keyed by wasmBytes reference. kernelId = `RuntimeHelpers.GetHashCode(wasmBytes)`. Each (worker, kernel) combo: send wasmBytes only once.
+
+Verified: Tests23 snapshot/race/scaling lockdowns 35/35 PASS post-fix. Broader Tests23 sweep 200/24 — 24 fails are all pre-existing body-struct codegen bugs + register-pressure diagnostics (no new regressions). Single-kernel canary tests (BlazeFace, DDPM, MoveNet, YOLOv8) should be unaffected since they use the same kernels repeatedly.
+
+UNBLOCKS Data's StyleMosaic Wasm (pending verification). Generic Wasm dispatcher perf for any multi-kernel pipeline.
+
+v4.9.5-rc.19: WebGPU `WGSLTypeGenerator.GenerateTypeDefinitions` concurrent-modification fix. The method iterated `mapping` (a Dictionary&lt;TypeNode, string&gt;) directly while emitting struct definitions; the inner field-type emission used `this[fieldType]` (the indexer) which could LAZILY register a new type in `mapping`. The outer enumerator threw `InvalidOperationException: InvalidOperation_EnumFailedVersion` ("Collection was modified; enumeration may not execute"). Surfaced 2026-05-04 by `Tests23_MinimalShortIntBodyStruct_IntOnly` on WebGPU — the body struct's int field type was lazily registered during field emission. Fix: snapshot+drain pattern. Snapshot mapping entries before iterating; re-iterate if the indexer added new struct types during emission. Verified Tests23_MinimalShortIntBodyStruct_IntOnly WebGPU + NoSub PASS post-fix; no regressions on existing tests.
 
 v4.9.5-rc.18: WebGPU WGSL IsMultiDim discriminates body struct from single ArrayView wrapper. The heuristic treated any StructureType with ViewType at field 0 as a single ArrayView wrapper based on `NumFields ∈ {3, 4, 6}`. But a body struct containing 2 × ArrayView1D fields ALSO has 6 IR fields (2 × {BaseView, Extent, Stride}) — was misclassified as a 3D ArrayView, and the dispatcher ran the wrong codegen path with both views aliased to the same binding. Tests23_TwoShortBodyStructDense surfaced this 2026-05-04 (returned `S0 + S0 = 14` instead of `S0 + S1 = 107` because both shorts read the first short's data).
 
