@@ -363,6 +363,14 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             builder.AppendLine("precision highp int;");
             builder.AppendLine();
 
+            // Struct definitions land here so helper functions (emitted next, with
+            // struct-typed params) can see the type. The original placeholder in
+            // GLSLKernelFunctionGenerator.GenerateHeader still emits, but lands
+            // AFTER helpers - removed (replaced with empty) by CreateKernel.
+            // (rc.16 fn-def-codegen Bug D, WebGL ordering fix, 2026-05-05.)
+            builder.AppendLine("// __STRUCT_DEFS_TOP_PLACEHOLDER__");
+            builder.AppendLine();
+
             // Grid dimension uniforms (needed for 2D/3D index decomposition)
             if (entryPoint.IndexType == IndexType.Index2D || entryPoint.IndexType == IndexType.Index3D)
             {
@@ -414,12 +422,24 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         {
             // All code generation is complete — now emit struct type definitions.
             // Types are discovered lazily during code generation, so we collect them
-            // here and replace the placeholder that was inserted by the kernel generator.
+            // here and replace the top-of-file placeholder (set up in
+            // CreateKernelBuilder) BEFORE helper fn definitions, which need the
+            // struct types in scope. The kernel-header placeholder in
+            // GLSLKernelFunctionGenerator.GenerateHeader is no longer needed for
+            // ordering and gets stripped to empty here.
             var structDefs = new StringBuilder();
             data.TypeGenerator.GenerateTypeDefinitions(structDefs, data.BodyStructTypeIdsToSkip);
             var glslSource = builder.ToString()
-                .Replace("// __STRUCT_DEFS_PLACEHOLDER__\r\n", structDefs.ToString())
-                .Replace("// __STRUCT_DEFS_PLACEHOLDER__\n", structDefs.ToString())
+                .Replace("// __STRUCT_DEFS_TOP_PLACEHOLDER__\r\n", structDefs.ToString())
+                .Replace("// __STRUCT_DEFS_TOP_PLACEHOLDER__\n", structDefs.ToString())
+                // The original kernel-header placeholder. Helpers physically appear
+                // before this line in the file (helpers Merge before the kernel's
+                // GenerateHeader runs), so replacing this one with struct defs would
+                // place them AFTER the helpers that use them - GLSL parse error.
+                // Strip it to empty; the top-of-file placeholder above carries the
+                // real struct defs.
+                .Replace("// __STRUCT_DEFS_PLACEHOLDER__\r\n", "")
+                .Replace("// __STRUCT_DEFS_PLACEHOLDER__\n", "")
                 // GLSL ES 3.0: ANGLE crashes on INT_MIN (-2147483648) regardless
                 // of representation (even constant-folded expressions). Replace with
                 // -2147483647 which is semantically equivalent for bounds checks.

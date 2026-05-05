@@ -89,7 +89,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 DynamicSharedOverrides = new List<DynamicSharedOverrideInfo>();
                 ScalarPackingManifest = new List<ScalarPackingEntry>();
                 HelperMethods = new Dictionary<Method, Allocas>();
-                
+                NonInlineMethods = new List<Method>();
+
                 // Create SharedMemoryResolver with deterministic names from backend context.
                 // This MUST happen before helper function generators run (which is
                 // before the kernel generator), so both can use the same names.
@@ -171,9 +172,22 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
             /// <summary>
             /// Maps helper methods to their allocas for inlining at call sites.
-            /// Populated by WebGPUBackend.CreateFunctionCodeGenerator().
+            /// Populated by WebGPUBackend.CreateFunctionCodeGenerator() for methods
+            /// flagged Inline. Methods without Inline (e.g. NoInlining) go into
+            /// NonInlineMethods instead.
             /// </summary>
             public Dictionary<Method, Allocas> HelperMethods { get; }
+
+            /// <summary>
+            /// Methods emitted as standalone WGSL `fn` definitions (NoInlining or
+            /// Inliner-rejected). Populated by WebGPUBackend.CreateFunctionCodeGenerator().
+            /// Used by SetEmulationFlags / ScanForSubgroupAndBroadcastUsage so they see
+            /// 64-bit ops, barriers, and broadcasts that live in non-inlined helpers
+            /// (otherwise their emulation library / subgroup feature flags miss them
+            /// and the emitted WGSL calls i64_ge / i64_eq with no definitions —
+            /// rc.16 fn-def codegen Bug D follow-up, 2026-05-05).
+            /// </summary>
+            public List<Method> NonInlineMethods { get; }
 
             /// <summary>
             /// Tracks emulated i64/u64 constant values used during body generation.

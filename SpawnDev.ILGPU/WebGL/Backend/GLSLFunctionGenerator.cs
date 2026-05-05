@@ -37,12 +37,34 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             // GLSL ES 3.0 requires all code paths to return a value.
             // Add a fallback return for non-void functions in case the IR
             // ends with a throw (which we translate to a comment/noop)
-            // or other unreachable terminator.
+            // or other unreachable terminator. For struct return types we
+            // must emit a constructor with one zero-arg per field; the
+            // single-arg form `struct_N(0)` is rejected by GLSL ES with
+            // "Number of constructor parameters does not match the number
+            // of structure fields" (rc.16 fn-def codegen Bug D, 2026-05-05).
             string returnType = TypeGenerator[Method.ReturnType];
             if (returnType != "void")
             {
+                string init;
+                if (Method.ReturnType is global::ILGPU.IR.Types.StructureType structType
+                    && returnType.StartsWith("struct_"))
+                {
+                    var sb = new StringBuilder();
+                    sb.Append($"{returnType}(");
+                    for (int i = 0; i < structType.NumFields; i++)
+                    {
+                        if (i > 0) sb.Append(", ");
+                        sb.Append(GetDefaultValue(TypeGenerator[structType.Fields[i]]));
+                    }
+                    sb.Append(")");
+                    init = sb.ToString();
+                }
+                else
+                {
+                    init = GetDefaultValue(returnType);
+                }
                 Builder.Append("    ");
-                Builder.AppendLine($"return {GetDefaultValue(returnType)};");
+                Builder.AppendLine($"return {init};");
             }
 
             IndentLevel = 0;

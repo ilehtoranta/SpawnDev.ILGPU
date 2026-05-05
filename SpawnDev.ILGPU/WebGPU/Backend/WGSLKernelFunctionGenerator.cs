@@ -1943,12 +1943,17 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             _usesSubgroups = false;
             _usesBarriers = false;
 
-            // Scan the kernel method and all inlined helper methods for subgroup/barrier usage.
-            // Helper methods are inlined at WGSL emission time, so their IR nodes affect
-            // uniformity requirements of the final shader.
+            // Scan the kernel method, all inlined helper methods, AND all non-inlined
+            // (standalone fn def) helpers for subgroup/barrier usage. Inlined helpers
+            // become part of the main shader so their IR affects uniformity directly;
+            // non-inlined helpers also affect feature flags because the kernel still
+            // calls them and any subgroup/broadcast use inside them must be visible
+            // to enable-subgroups + uniformity decisions. (rc.16 Bug D follow-up.)
             var methodsToScan = new List<Method> { Method };
             foreach (var (helperMethod, _) in _generatorArgs.HelperMethods)
                 methodsToScan.Add(helperMethod);
+            foreach (var nonInlineMethod in _generatorArgs.NonInlineMethods)
+                methodsToScan.Add(nonInlineMethod);
 
             foreach (var method in methodsToScan)
             {
@@ -3200,6 +3205,20 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         }
 
         /// <summary>
+        /// Enumerates every helper method that contributes IR to the final WGSL
+        /// module: inline helpers (HelperMethods) and standalone-fn helpers
+        /// (NonInlineMethods). Used by all scan passes that need to see the
+        /// full call-graph IR. (rc.16 Bug D follow-up, 2026-05-05.)
+        /// </summary>
+        private IEnumerable<Method> EnumerateAllHelperMethods()
+        {
+            foreach (var (helperMethod, _) in _generatorArgs.HelperMethods)
+                yield return helperMethod;
+            foreach (var nonInlineMethod in _generatorArgs.NonInlineMethods)
+                yield return nonInlineMethod;
+        }
+
+        /// <summary>
         /// Sets TypeGenerator.KernelUsesI64 and KernelUsesF64 by scanning the kernel's
         /// IR AND all helper methods' IR for Int64/Float64 types.
         /// Must be called at the start of GenerateCode() (before body generation) so that
@@ -3212,10 +3231,16 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
             // Also scan helper methods' IR — inlined helpers (e.g., ExclusiveScan) may
             // introduce Int64/Float64 operations (like Index3D.Size overflow checks) that
-            // are invisible to the kernel's own IR scan.
+            // are invisible to the kernel's own IR scan. Non-inlined helpers (standalone
+            // fn defs) emit their bodies into the same WGSL module, so any 64-bit op in
+            // those bodies also requires the emulation library — without this, the kernel
+            // emits calls to i64_eq / i64_ge / f64_add / etc. but the corresponding fn
+            // definitions are missing and the WGSL validator fails. (Tuvok's 2026-05-05
+            // fn-definition path bug; rc.16 Bug D follow-up.)
             if (!containsI64 || !containsF64)
             {
-                foreach (var (helperMethod, _) in _generatorArgs.HelperMethods)
+                var bothFound = false;
+                foreach (var helperMethod in EnumerateAllHelperMethods())
                 {
                     foreach (var block in helperMethod.Blocks)
                     {
@@ -3228,11 +3253,11 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                                 if (!containsF64 && pt.BasicValueType == BasicValueType.Float64)
                                     containsF64 = true;
                             }
-                            if (containsI64 && containsF64) break;
+                            if (containsI64 && containsF64) { bothFound = true; break; }
                         }
-                        if (containsI64 && containsF64) break;
+                        if (bothFound) break;
                     }
-                    if (containsI64 && containsF64) break;
+                    if (bothFound) break;
                 }
             }
 

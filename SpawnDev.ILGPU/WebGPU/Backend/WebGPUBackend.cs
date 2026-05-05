@@ -842,6 +842,15 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             // Tracks `Plans/rc16-fn-def-codegen-harden.md`.
             if (method.HasFlags(MethodFlags.Inline))
                 data.HelperMethods[method] = allocas;
+            else
+                // Track non-Inline methods so the kernel's IR-scan passes
+                // (SetEmulationFlags, ScanForSubgroupAndBroadcastUsage) see
+                // 64-bit ops / barriers / broadcasts that live in their bodies.
+                // Without this, the kernel emits calls to i64_eq / i64_ge etc.
+                // but the emulation library isn't pulled in -> WGSL validator
+                // fails with "function called but not defined" (Tuvok's
+                // 2026-05-05 fn-definition path bug). rc.16 Bug D follow-up.
+                data.NonInlineMethods.Add(method);
             return new WGSLFunctionGenerator(data, method, allocas);
         }
 

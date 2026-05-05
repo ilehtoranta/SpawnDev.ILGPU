@@ -1,6 +1,7 @@
 using ILGPU;
 using ILGPU.Runtime;
 using SpawnDev.UnitTesting;
+using System.Runtime.CompilerServices;
 
 namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
 {
@@ -1830,6 +1831,7 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
         const uint Tests23_EC_CODE_BOT = (1u << 31) >> 8;
         const int Tests23_EC_CODE_EXTRA = 7;
 
+        [MethodImpl(MethodImplOptions.NoInlining)]
         static int Tests23_ReadByte(
             ref Tests23_OpusRangeState state,
             ArrayView<byte> buf, int bufStart, uint storage)
@@ -1843,6 +1845,7 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             return 0;
         }
 
+        [MethodImpl(MethodImplOptions.NoInlining)]
         static int Tests23_ReadByteFromEnd(
             ref Tests23_OpusRangeState state,
             ArrayView<byte> buf, int bufStart, uint storage)
@@ -1856,6 +1859,7 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             return 0;
         }
 
+        [MethodImpl(MethodImplOptions.NoInlining)]
         static void Tests23_Normalize(
             ref Tests23_OpusRangeState state,
             ArrayView<byte> buf, int bufStart, uint storage)
@@ -1871,6 +1875,7 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             }
         }
 
+        [MethodImpl(MethodImplOptions.NoInlining)]
         static uint Tests23_DecodeBits(
             ref Tests23_OpusRangeState state,
             ArrayView<byte> buf, int bufStart, uint storage,
@@ -1896,6 +1901,7 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             return ret;
         }
 
+        [MethodImpl(MethodImplOptions.NoInlining)]
         static int Tests23_EcIlog(uint v)
         {
             int n = 0;
@@ -1903,6 +1909,7 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             return n;
         }
 
+        [MethodImpl(MethodImplOptions.NoInlining)]
         static uint Tests23_DecodeUint(
             ref Tests23_OpusRangeState state,
             ArrayView<byte> buf, int bufStart, uint storage,
@@ -1941,6 +1948,7 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             }
         }
 
+        [MethodImpl(MethodImplOptions.NoInlining)]
         static Tests23_OpusRangeState Tests23_OpusInit(
             ArrayView<byte> buf, int bufStart, uint storage)
         {
