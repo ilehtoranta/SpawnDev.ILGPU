@@ -1241,7 +1241,25 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 // the helper fn-def emission path (which uses this base
                 // handler unmodified). Triggered by `i * 2` (Tuvok's iDCT
                 // 16x16 helper has dozens of shifts in the butterfly).
-                AppendLine($"{target} = {left} {op} u32({right});");
+                //
+                // For emu_i64/emu_u64 LHS, WGSL has no `vec2<u32> >> u32` overload —
+                // WGSL only supports `T >> u32` where T is i32/u32, or `vecN<T> >> vecN<u32>`.
+                // Use the i64/u64 emulation library helpers instead.
+                // Surfaced 2026-05-05 by Tuvok's AV1 walker on local.7: helper
+                // `cdfBase >> 1` (where cdfBase is `long`) emitted
+                // `vec2<u32> >> u32(...)` which Naga rejected. (Bug D follow-up.)
+                string leftShType = TypeGenerator[value.Left.Type];
+                if (Backend.EnableI64Emulation && (leftShType == "emu_i64" || leftShType == "emu_u64"))
+                {
+                    string shHelper = value.Kind == BinaryArithmeticKind.Shl
+                        ? "i64_shl"
+                        : (leftShType == "emu_u64" || value.IsUnsigned ? "u64_shr" : "i64_shr");
+                    AppendLine($"{target} = {shHelper}({left}, u32({right}));");
+                }
+                else
+                {
+                    AppendLine($"{target} = {left} {op} u32({right});");
+                }
             }
             else
             {

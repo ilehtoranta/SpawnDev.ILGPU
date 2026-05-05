@@ -2089,6 +2089,39 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                 throw new System.Exception($"LongOffset sub-word: expected {expected}, got {got[0]}");
         });
 
+        // Tuvok's local.7 PMT exposed `vec2<u32> >> u32` Naga error in helper
+        // arithmetic. Mirrors the shape via a NoInlining helper that does
+        // `long bits = ...; long shifted = bits >> n;`. Without the i64-aware
+        // shift codegen, helper emits raw `>>` on vec2<u32> + u32 — Naga rejects.
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        static long Tests23_I64ShiftHelper(long input, int amount)
+        {
+            return input >> amount;
+        }
+
+        static void Tests23_I64ShiftKernel(
+            Index1D _,
+            ArrayView<int> output)
+        {
+            long input = 0x1234567890ABCDEFL;
+            long shifted = Tests23_I64ShiftHelper(input, 8);
+            output[0] = (int)shifted;
+        }
+
+        [TestMethod]
+        public async Task Tests23_I64Shift_InHelper_NoCodegenError() => await RunEmulatedTest(async accelerator =>
+        {
+            using var output = accelerator.Allocate1D<int>(1);
+            var k = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<int>>(Tests23_I64ShiftKernel);
+            k((Index1D)1, output.View);
+            await accelerator.SynchronizeAsync();
+            var got = await output.CopyToHostAsync<int>();
+            // 0x1234567890ABCDEF >> 8 = 0x001234567890ABCD; (int)low = 0x7890ABCD
+            int expected = unchecked((int)(0x1234567890ABCDEFL >> 8));
+            if (got[0] != expected)
+                throw new System.Exception($"I64Shift in helper: expected {expected:X}, got {got[0]:X}");
+        });
+
         #endregion
     }
 }
