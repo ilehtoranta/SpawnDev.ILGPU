@@ -726,6 +726,101 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             }
         });
 
+        // Closer mimic of ML's InstanceNorm 2-pass shape: 6 ArrayView1D params on Pass2
+        // (input, output, scale, bias, inMeans, inInvStds). Repeated 32 iterations with
+        // fresh per-call inMeans/inInvStds buffers - matches Data's StyleMosaic pattern
+        // exactly except for using compute that's lighter than real InstanceNorm.
+        static void Tests23_InstanceNormShape_Pass1Kernel(
+            Index1D sliceIdx,
+            ArrayView1D<float, Stride1D.Dense> input,
+            ArrayView1D<float, Stride1D.Dense> outMeans,
+            ArrayView1D<float, Stride1D.Dense> outInvStds,
+            int spatial,
+            float eps)
+        {
+            int s = sliceIdx.X;
+            int baseOff = s * spatial;
+            float sum = 0f;
+            for (int i = 0; i < spatial; i++) sum += input[baseOff + i];
+            float mean = sum / spatial;
+            float varSum = 0f;
+            for (int i = 0; i < spatial; i++) { var d = input[baseOff + i] - mean; varSum += d * d; }
+            float var_ = varSum / spatial;
+            outMeans[s] = mean;
+            outInvStds[s] = 1f / MathF.Sqrt(var_ + eps);
+        }
+        static void Tests23_InstanceNormShape_Pass2Kernel(
+            Index1D idx,
+            ArrayView1D<float, Stride1D.Dense> input,
+            ArrayView1D<float, Stride1D.Dense> output,
+            ArrayView1D<float, Stride1D.Dense> scale,
+            ArrayView1D<float, Stride1D.Dense> bias,
+            ArrayView1D<float, Stride1D.Dense> inMeans,
+            ArrayView1D<float, Stride1D.Dense> inInvStds,
+            int N, int C, int spatial)
+        {
+            int i = idx.X;
+            int sliceIdx = i / spatial;
+            output[i] = (input[i] - inMeans[sliceIdx]) * inInvStds[sliceIdx] * scale[sliceIdx % C] + bias[sliceIdx % C];
+        }
+
+        [TestMethod]
+        public async Task Tests23_InstanceNormShape_24Iterations() => await RunEmulatedTest(async accelerator =>
+        {
+            const int N = 1, C = 32, Spatial = 256 * 256;
+            const int Iter = 24;
+            int total = N * C * Spatial;
+
+            using var input = accelerator.Allocate1D<float>(total);
+            using var output = accelerator.Allocate1D<float>(total);
+            using var scale = accelerator.Allocate1D<float>(C);
+            using var bias = accelerator.Allocate1D<float>(C);
+
+            var inputData = new float[total];
+            for (int i = 0; i < total; i++) inputData[i] = (i % 100) * 0.01f;
+            input.CopyFromCPU(inputData);
+            var scaleData = new float[C]; var biasData = new float[C];
+            for (int i = 0; i < C; i++) { scaleData[i] = 1.0f; biasData[i] = 0.0f; }
+            scale.CopyFromCPU(scaleData);
+            bias.CopyFromCPU(biasData);
+
+            var k1 = accelerator.LoadAutoGroupedStreamKernel<
+                Index1D, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>,
+                ArrayView1D<float, Stride1D.Dense>, int, float>(Tests23_InstanceNormShape_Pass1Kernel);
+            var k2 = accelerator.LoadAutoGroupedStreamKernel<
+                Index1D, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>,
+                ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>,
+                ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>,
+                int, int, int>(Tests23_InstanceNormShape_Pass2Kernel);
+
+            var perCallBufs = new System.Collections.Generic.List<MemoryBuffer1D<float, Stride1D.Dense>>();
+            try
+            {
+                var prevOut = input;
+                for (int p = 0; p < Iter; p++)
+                {
+                    var inMeans = accelerator.Allocate1D<float>(N * C);
+                    var inInvStds = accelerator.Allocate1D<float>(N * C);
+                    perCallBufs.Add(inMeans); perCallBufs.Add(inInvStds);
+                    k1((Index1D)(N * C), prevOut.View.AsContiguous(), inMeans.View, inInvStds.View, Spatial, 1e-5f);
+                    var nextOut = accelerator.Allocate1D<float>(total);
+                    perCallBufs.Add(nextOut);
+                    k2((Index1D)total, prevOut.View.AsContiguous(), nextOut.View, scale.View, bias.View, inMeans.View, inInvStds.View, N, C, Spatial);
+                    prevOut = nextOut;
+                }
+                await accelerator.SynchronizeAsync();
+
+                // Sanity: read back output element 0 to confirm no kernel error.
+                var got = await prevOut.CopyToHostAsync<float>(0, 4);
+                if (float.IsNaN(got[0]))
+                    throw new Exception($"InstanceNormShape iter 24: got NaN at [0]");
+            }
+            finally
+            {
+                foreach (var b in perCallBufs) b.Dispose();
+            }
+        });
+
         // Test J: WebGL glWorker.js subview-offset leak across same-program dispatches.
         // Surfaced 2026-05-04 by Data's StyleMosaic node 55 Gather first-divergent
         // capture: WebGL's glWorker.js was conditionally setting the
