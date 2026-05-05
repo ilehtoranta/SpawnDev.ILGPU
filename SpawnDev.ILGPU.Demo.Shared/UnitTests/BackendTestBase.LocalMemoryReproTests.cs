@@ -51,6 +51,19 @@ public abstract partial class BackendTestBase
     [TestMethod]
     public async Task LocalMemoryRepro_Int64_ShortByteViews() => await RunTest(async accelerator =>
     {
+        // WebGL: same architectural varying-count ceiling as the Int256 / Int1024
+        // siblings — 4 threads × 64 byte outputs = 256 components, exceeding the
+        // typical `MAX_TRANSFORM_FEEDBACK_INTERLEAVED_COMPONENTS = 64` limit.
+        // Pre-fix WebGL hit a 30s Playwright timeout (shader compile / dispatch
+        // hang). Skip cleanly with the same UnsupportedTestException pattern;
+        // matches Tuvok's `Is8x8KernelSupported` gate in Codecs.
+        if (accelerator.AcceleratorType == AcceleratorType.WebGL)
+            throw new UnsupportedTestException(
+                "WebGL varying-count limit rejects 64 outputs-per-thread × 4 threads " +
+                "(= 256 interleaved components, exceeds MAX_TRANSFORM_FEEDBACK_INTERLEAVED_COMPONENTS). " +
+                "Use AcceleratorRequirements { RequiresAtomics = true } to filter WebGL up-front. " +
+                "Same root cause as LocalMemoryRepro_Int256/Int1024.");
+
         const int blocks = 4;
         const int elemsPerBlock = 64;
         const int total = blocks * elemsPerBlock;

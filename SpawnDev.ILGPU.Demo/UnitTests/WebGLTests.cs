@@ -1519,12 +1519,12 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
                 "the standalone-fn-def path. Same root cause as Tests23_DecodeUint_LongForm_CompileSmoke. " +
                 "Tracked as rc.16 Bug D follow-up.");
 
-        [TestMethod]
-        public new Task Tests23_I64Shift_InHelper_NoCodegenError() =>
-            throw new UnsupportedTestException(
-                "WebGL: GLSL ES 3.0 has no pointer types — ArrayView fn-params can't go through " +
-                "the standalone-fn-def path. Same root cause as Tests23_DecodeUint_LongForm_CompileSmoke. " +
-                "Tracked as rc.16 Bug D follow-up.");
+        // Tests23_I64Shift_InHelper_NoCodegenError: NO override here — kernel + helper
+        // have no ArrayView params (just `long, int -> long`), so the fn-def-with-pointer
+        // GLSL gap doesn't apply. The WebGL failure is a SEPARATE i64-shift-in-fn-def
+        // codegen bug (got 0x0090ABCD, expected 0x7890ABCD — top byte lost). Tracked as
+        // a real WebGL codegen bug to investigate, not a structural skip. Letting it
+        // fail honestly until root-cause is identified.
 
         [TestMethod]
         public new Task Tests23_I64ArrayView_InHelper_NoCodegenError() =>
