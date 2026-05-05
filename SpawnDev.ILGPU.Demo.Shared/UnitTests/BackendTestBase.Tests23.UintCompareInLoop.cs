@@ -2042,6 +2042,53 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             await dOut.CopyToHostAsync<uint>();
         });
 
+        // Tuvok's AV1 walker `EncodeFrameKernel` reads `constsUshort[cdfBase + N]` where
+        // `cdfBase` is `long` (so the offset arithmetic widens to i64). On WebGPU this
+        // surfaces as `var v_X : i32 = v_Y;` where v_Y is `vec2<u32>` (emu_i64) — i64 →
+        // i32 implicit truncation rejected by Naga. The fix is to ensure i64 IR values
+        // feeding into a non-LEA i32 sink get wrapped with `i64_to_i32(...)`.
+        // Repro shape mirrors Tuvok's helper without sub-word coalesce dependency.
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        static int Tests23_LongOffsetReadHelper(
+            ArrayView<ushort> consts,
+            int ctx)
+        {
+            // i64 widening: int * int + int → int, but then stored to long.
+            long cdfBase = ctx * 11 + 7;
+            // Indexer takes `long`. The IR carries cdfBase + N as i64.
+            ushort c0 = consts[cdfBase + 0];
+            ushort c1 = consts[cdfBase + 1];
+            ushort c2 = consts[cdfBase + 2];
+            return (int)c0 + (int)c1 + (int)c2;
+        }
+
+        static void Tests23_LongOffsetReadKernel(
+            Index1D _,
+            ArrayView<ushort> consts,
+            int ctx,
+            ArrayView<int> output)
+        {
+            output[0] = Tests23_LongOffsetReadHelper(consts, ctx);
+        }
+
+        [TestMethod]
+        public async Task Tests23_LongOffset_OnSubWordView_NoCodegenError() => await RunEmulatedTest(async accelerator =>
+        {
+            var data = new ushort[64];
+            for (int i = 0; i < data.Length; i++) data[i] = (ushort)(i * 5);
+            using var consts = accelerator.Allocate1D(data);
+            using var output = accelerator.Allocate1D<int>(1);
+            int ctx = 1; // cdfBase = 11 + 7 = 18, reads consts[18..20]
+            var k = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<ushort>, int, ArrayView<int>>(Tests23_LongOffsetReadKernel);
+            k((Index1D)1, consts.View, ctx, output.View);
+            await accelerator.SynchronizeAsync();
+            var got = await output.CopyToHostAsync<int>();
+            // consts[18] + consts[19] + consts[20] = 90 + 95 + 100 = 285
+            int expected = data[18] + data[19] + data[20];
+            if (got[0] != expected)
+                throw new System.Exception($"LongOffset sub-word: expected {expected}, got {got[0]}");
+        });
+
         #endregion
     }
 }

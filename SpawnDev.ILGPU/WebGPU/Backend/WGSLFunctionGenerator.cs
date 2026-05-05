@@ -374,19 +374,32 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 var target = Load(value);
                 var offset = Load(value.Offset);
 
+                // When i64 emulation is active, Int64 indices become emu_i64 (vec2<u32>)
+                // which cannot be used as WGSL array indices NOR assigned to `var i32`.
+                // Wrap with i64_to_i32() — mirrors the kernel-side LEA path
+                // (WGSLKernelFunctionGenerator.GenerateCode(LoadElementAddress) line 4445).
+                // Surfaced 2026-05-05 by Tuvok's AV1 walker on local.6: helper read
+                // `consts[cdfBase + N]` where `cdfBase` is `long`, so the offset arrived
+                // as emu_i64. The unwrapped `var v_X : i32 = v_Y;` emit failed Naga
+                // validation with "cannot initialize 'var' of type 'i32' with value of
+                // type 'vec2<u32>'".
+                bool offsetIsEmulatedI64 = Backend.EnableI64Emulation
+                    && value.Offset.Resolve().BasicValueType == BasicValueType.Int64;
+                string offsetExpr = offsetIsEmulatedI64 ? $"i64_to_i32({offset})" : $"{offset}";
+
                 if (_subWordParams.ContainsKey(param.Index))
                 {
                     // Sub-word: store the element offset; Load / Store will compute
                     // word index + bit shift from this i32 at the use site.
                     _subWordLEAVars[target.Name] = param.Index;
-                    AppendLine($"var {target.Name} : i32 = {offset};");
+                    AppendLine($"var {target.Name} : i32 = {offsetExpr};");
                     return;
                 }
 
                 // Full-word: helper's local source is a ptr, so we must deref before
                 // indexing. WGSL: `&((*ptr)[idx])` produces ptr<storage, T>.
                 var sourceVar = Load(value.Source);
-                AppendLine($"let {target.Name} = &(*{sourceVar})[{offset}];");
+                AppendLine($"let {target.Name} = &(*{sourceVar})[{offsetExpr}];");
                 return;
             }
 
