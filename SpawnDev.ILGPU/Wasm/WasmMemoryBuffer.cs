@@ -48,15 +48,59 @@ namespace SpawnDev.ILGPU.Wasm
         public int HostWriteCounter { get; private set; }
 
         /// <summary>
-        /// Bumps <see cref="HostWriteCounter"/>. Called from every CopyFromCPU /
-        /// CopyFromJS / CopyFromHost path. Use whenever the host writes to
-        /// SharedBuffer outside a dispatch's copy-IN.
+        /// Snapshot-capture hook. MUST be called BEFORE any host-side mutation of
+        /// <see cref="SharedBuffer"/> (i.e. before <c>TypedArrayView.Write</c> /
+        /// <c>Set</c> / <c>WriteBytes</c>). If at least one in-flight dispatch
+        /// has a pending intent on this buffer, this materializes the lazy
+        /// snapshot from the CURRENT (pre-write) SharedBuffer contents so that
+        /// dispatches whose queue-time <see cref="HostWriteCounter"/> matches the
+        /// current value can still see their pre-write data when they run.
+        ///
+        /// For unchanged buffers (e.g. ML weights uploaded once with no follow-on
+        /// host write) this is a no-op: <c>_pendingSnapshotIntents</c> may be
+        /// non-zero but no second write triggers materialization. Multi-pass
+        /// kernels with no host writes between dispatches similarly never
+        /// materialize a snapshot — zero allocation overhead in the common case.
+        /// (rc.16 RadixSort multi-pass regression fix + StyleMosaic ML reuse
+        /// perf, 2026-05-05.)
+        /// </summary>
+        internal void PrepareHostWrite()
+        {
+            if (_pendingSnapshotIntents <= 0)
+                return;
+
+            // Snapshot the CURRENT SharedBuffer (pre-write contents) under a
+            // tier keyed by the current HostWriteCounter. Every dispatch
+            // currently pending whose queue-time HWC equals this value will
+            // resolve to this snapshot at copy-IN time. If a tier already
+            // exists at this HWC (multiple host writes happen back-to-back
+            // with no intervening dispatch queue), keep the FIRST tier — its
+            // snapshot still represents the pre-FIRST-write data the pending
+            // intents wanted; the additional writes don't change what those
+            // intents need.
+            int hwcKey = HostWriteCounter;
+            _snapshotsByHWC ??= new Dictionary<int, SharedArrayBuffer>();
+            _snapshotRefCounts ??= new Dictionary<int, int>();
+            if (_snapshotsByHWC.ContainsKey(hwcKey))
+                return;
+            var fresh = new SharedArrayBuffer((int)LengthInBytes);
+            using var dst = new Uint8Array(fresh);
+            using var src = new Uint8Array(SharedBuffer);
+            dst.JSRef!.CallVoid("set", src);
+            _snapshotsByHWC[hwcKey] = fresh;
+            _snapshotRefCounts[hwcKey] = _pendingSnapshotIntents; // every pending intent shares this tier
+        }
+
+        /// <summary>
+        /// Bumps <see cref="HostWriteCounter"/>. MUST be called AFTER the host
+        /// finishes writing <see cref="SharedBuffer"/>. Pair with
+        /// <see cref="PrepareHostWrite"/> at the start of every host-write path.
         /// </summary>
         internal void NotifyHostWrite() => HostWriteCounter++;
 
-        // ── Queued-dispatch snapshot to close the host-write-vs-copy-IN race ──
-        // Surfaced 2026-05-04 by Tests23_HostWriteVsQueuedDispatchRace and Data's
-        // YOLOv8 Wasm Softmax bug. The race fires when:
+        // ── Lazy queued-dispatch snapshot — host-write race defense + perf ──
+        //
+        // The original race that motivates this mechanism:
         //   1. CopyFromCPU writes data1 to SharedBuffer.
         //   2. RunKernel queues dispatch D1 (returns immediately, async task in flight).
         //   3. CopyFromCPU writes data2 to SharedBuffer.
@@ -64,87 +108,130 @@ namespace SpawnDev.ILGPU.Wasm
         //   5. D1 resumes after awaiting prior tasks. Its copy-IN reads SharedBuffer
         //      = data2 (already overwritten by step 3). D1 runs with WRONG data.
         //
-        // Fix: at RunKernel SYNC time (before queueing the task), each arg buffer
-        // calls GetOrCreateSnapshotForDispatch(). If the buffer was host-written
-        // since the last snapshot, a fresh SAB is allocated and SharedBuffer's
-        // current content is copied into it. The dispatch's task captures the
-        // snapshot reference; copy-IN reads from snapshot instead of SharedBuffer.
+        // The previous implementation eagerly snapshotted SharedBuffer at every queue
+        // time, which closed the race but allocated MB-sized SABs for every dispatch
+        // even when no race ever fires. Multi-pass kernels (RadixSort) that sort
+        // in-place hit a separate failure mode: the cached snapshot pinned pre-pass-1
+        // data; pass-2 read it via the cache and silently re-sorted the original input
+        // (TJ regression report 2026-05-05). And ML pipelines with reused weight
+        // buffers paid 5GB+ of wasted allocations across 100+ dispatches.
         //
-        // For unchanged buffers (e.g. ML weights uploaded once and read many times),
-        // the SAME snapshot is shared across dispatches — no per-dispatch allocation
-        // overhead. Only buffers that get host-written between dispatches (e.g.
-        // TransposeKernel's reused paramsBuf) trigger fresh snapshots.
+        // The lazy approach below fixes both:
+        //   - Each dispatch registers a queue-time HostWriteCounter intent.
+        //   - The snapshot is allocated ONLY on the first NotifyHostWrite that fires
+        //     while at least one intent is pending — i.e. only when the race actually
+        //     occurs. For multi-pass GPU kernels with no host writes, no allocation.
+        //     For ML weight reuse, no allocation.
+        //   - At dispatch start, copy-IN uses the snapshot iff HostWriteCounter has
+        //     advanced past the dispatch's queue-time value (host wrote during our
+        //     wait). Otherwise it reads SharedBuffer directly — which by then carries
+        //     all prior dispatches' copy-OUT data, exactly what multi-pass needs.
+        //   - The pinned snapshot is released when the LAST pending intent completes
+        //     (no in-flight dispatch can still need it).
 
         /// <summary>
-        /// HostWriteCounter at the most recent <see cref="GetOrCreateSnapshotForDispatch"/> call.
+        /// Active dispatch-snapshot intent count. Incremented at RunKernel queue
+        /// time, decremented when the dispatch's task completes (success or fault).
+        /// Read by <see cref="PrepareHostWrite"/> to know whether to materialize a
+        /// snapshot before mutating SharedBuffer.
         /// </summary>
-        private int _lastSnapshottedHostWriteCounter = -1;
+        private int _pendingSnapshotIntents;
 
         /// <summary>
-        /// Snapshot SAB capturing <see cref="SharedBuffer"/> at counter
-        /// <see cref="_lastSnapshottedHostWriteCounter"/>. Pinned dispatches reference
-        /// this; replaced on next host write. Multiple dispatches with the same
-        /// counter share the same snapshot instance.
+        /// Per-HWC pinned snapshots. Key = HostWriteCounter value AT WHICH the
+        /// snapshot was captured (i.e. AT the moment of the host write that
+        /// triggered the materialization, equivalent to the queue-time HWC of all
+        /// dispatches that registered their intent before that host write).
+        /// Each snapshot is reference-shared across every pending dispatch whose
+        /// queue-time HWC equals the key. Released when the last referencing
+        /// intent completes (tracked separately via <see cref="_snapshotRefCounts"/>).
+        ///
+        /// Null until the first host write fires while intents are pending (so the
+        /// common case — ML weight reuse with no follow-on host writes, or
+        /// multi-pass GPU kernels with no host writes between dispatches — never
+        /// allocates this dictionary either).
         /// </summary>
-        private SharedArrayBuffer? _currentSnapshot;
+        private Dictionary<int, SharedArrayBuffer>? _snapshotsByHWC;
 
         /// <summary>
-        /// GPU-write sequence counter — incremented every time the dispatcher's
-        /// copy-OUT path writes back to <see cref="SharedBuffer"/>. Used to invalidate
-        /// the cached snapshot when a buffer is host-written-then-GPU-written-then-read
-        /// (snapshot would be pre-GPU-write contents but SharedBuffer has post-GPU-write
-        /// contents — cached snapshot is stale).
+        /// Reference counts per snapshot tier. Aligned with <see cref="_snapshotsByHWC"/>.
+        /// When a tier's count drops to zero, both entries are removed and the
+        /// SAB becomes eligible for JS GC.
         /// </summary>
-        private int _gpuWriteSeq;
+        private Dictionary<int, int>? _snapshotRefCounts;
 
         /// <summary>
-        /// <see cref="_gpuWriteSeq"/> at the most recent snapshot. If the current value
-        /// is higher, the cached snapshot is stale.
+        /// Registers a dispatch-snapshot intent for this buffer. Returns the
+        /// queue-time HostWriteCounter — pass it back to
+        /// <see cref="GetSnapshotForDispatch"/> at copy-IN time. Always pair with
+        /// a corresponding <see cref="CompleteDispatchIntent"/> in finally.
+        ///
+        /// If a snapshot already exists at the current HostWriteCounter (because
+        /// a previous host-write tier captured it), this dispatch joins that
+        /// tier — no new allocation. Otherwise, no snapshot is created here; the
+        /// next host write (if any) materializes one for all currently-pending
+        /// intents at the current HWC.
         /// </summary>
-        private int _lastSnapshottedGpuWriteSeq;
-
-        /// <summary>
-        /// Bumps <see cref="_gpuWriteSeq"/>. Called from the dispatcher's copy-OUT path
-        /// after writing kernel output back to <see cref="SharedBuffer"/>.
-        /// </summary>
-        internal void NotifyGpuWrite() => _gpuWriteSeq++;
-
-        /// <summary>
-        /// Returns a SAB whose contents reflect <see cref="SharedBuffer"/> at the moment
-        /// of this call (or at the last call if no host or GPU writes occurred since).
-        /// Returns null when this buffer has never been host-written — in that case the
-        /// caller falls back to <see cref="SharedBuffer"/> directly, which by run-time
-        /// reflects all prior dispatches' copy-OUT (intermediate GPU buffers don't
-        /// participate in the host-write-vs-queued-dispatch race so they don't need a
-        /// snapshot, and snapshotting them at queue time would capture pre-D1-write
-        /// zeros). 2026-05-04 Data BlazeFace zeros regression closure.
-        /// </summary>
-        internal SharedArrayBuffer? GetOrCreateSnapshotForDispatch()
+        internal int RegisterDispatchIntent()
         {
-            // Buffers that have never been host-written can't be involved in the
-            // host-write-vs-queued-dispatch race — fall back to SharedBuffer.
-            if (HostWriteCounter == 0)
+            _pendingSnapshotIntents++;
+            int qhwc = HostWriteCounter;
+            // Bump ref count if there's already a snapshot at our HWC tier (we
+            // share it with any earlier intents queued in the same window).
+            if (_snapshotRefCounts != null && _snapshotRefCounts.TryGetValue(qhwc, out var rc))
+                _snapshotRefCounts[qhwc] = rc + 1;
+            return qhwc;
+        }
+
+        /// <summary>
+        /// Releases a dispatch-snapshot intent. When the last referencer of any
+        /// snapshot tier completes, that tier's SAB is freed.
+        /// </summary>
+        internal void CompleteDispatchIntent(int queueTimeHostWriteCounter)
+        {
+            if (_pendingSnapshotIntents > 0) _pendingSnapshotIntents--;
+            if (_snapshotRefCounts != null
+                && _snapshotRefCounts.TryGetValue(queueTimeHostWriteCounter, out var rc))
+            {
+                rc--;
+                if (rc <= 0)
+                {
+                    _snapshotRefCounts.Remove(queueTimeHostWriteCounter);
+                    _snapshotsByHWC?.Remove(queueTimeHostWriteCounter);
+                }
+                else
+                {
+                    _snapshotRefCounts[queueTimeHostWriteCounter] = rc;
+                }
+            }
+            if (_pendingSnapshotIntents == 0)
+            {
+                _snapshotsByHWC = null;
+                _snapshotRefCounts = null;
+            }
+        }
+
+        /// <summary>
+        /// Returns the snapshot tier matching the dispatch's queue-time HWC, or
+        /// null if no host write has clobbered SharedBuffer since the dispatch
+        /// was queued — in which case caller reads SharedBuffer directly.
+        /// </summary>
+        internal SharedArrayBuffer? GetSnapshotForDispatch(int queueTimeHostWriteCounter)
+        {
+            // No host write has clobbered our queue-time data — SharedBuffer is
+            // exactly what we want.
+            if (HostWriteCounter == queueTimeHostWriteCounter)
                 return null;
 
-            // Cache the snapshot across dispatches when nothing has changed; invalidate
-            // on either a new host write OR a new GPU write (the latter handles the
-            // host-write -> kernel-write -> kernel-read sequence where the cached
-            // snapshot would otherwise return pre-GPU-write contents).
-            bool needsRefresh =
-                HostWriteCounter > _lastSnapshottedHostWriteCounter
-                || _gpuWriteSeq > _lastSnapshottedGpuWriteSeq
-                || _currentSnapshot == null;
-            if (needsRefresh)
+            // A host write happened. We need the snapshot from our queue-time
+            // HWC tier — captured by PrepareHostWrite right before the host
+            // overwrote SharedBuffer.
+            if (_snapshotsByHWC != null
+                && _snapshotsByHWC.TryGetValue(queueTimeHostWriteCounter, out var snap))
             {
-                var fresh = new SharedArrayBuffer((int)LengthInBytes);
-                using var dst = new Uint8Array(fresh);
-                using var src = new Uint8Array(SharedBuffer);
-                dst.JSRef!.CallVoid("set", src);
-                _currentSnapshot = fresh;
-                _lastSnapshottedHostWriteCounter = HostWriteCounter;
-                _lastSnapshottedGpuWriteSeq = _gpuWriteSeq;
+                return snap;
             }
-            return _currentSnapshot;
+            return null;
         }
 
         /// <summary>
@@ -184,6 +271,7 @@ namespace SpawnDev.ILGPU.Wasm
         /// </summary>
         public void CopyFromHost<T>(T[] data) where T : unmanaged
         {
+            PrepareHostWrite();
             TypedArrayView.Write(data);
             NotifyHostWrite();
         }
@@ -193,6 +281,7 @@ namespace SpawnDev.ILGPU.Wasm
         {
             if (TypedArrayView == null)
                 throw new ObjectDisposedException(nameof(WasmMemoryBuffer));
+            PrepareHostWrite();
             // Use the typed Set(TypedArray, long) overload - zero .NET copy, JS-to-JS
             using var srcBytes = new Uint8Array(source.Buffer, (int)source.ByteOffset, (int)source.ByteLength);
             TypedArrayView.Set(srcBytes, targetByteOffset);
@@ -204,6 +293,7 @@ namespace SpawnDev.ILGPU.Wasm
         {
             if (TypedArrayView == null)
                 throw new ObjectDisposedException(nameof(WasmMemoryBuffer));
+            PrepareHostWrite();
             using var srcBytes = new Uint8Array(source);
             TypedArrayView.Set(srcBytes, targetByteOffset);
             NotifyHostWrite();
@@ -297,6 +387,7 @@ namespace SpawnDev.ILGPU.Wasm
             }
 
             // Write to SharedArrayBuffer
+            PrepareHostWrite();
             int dstOffset = (int)targetView.LoadEffectiveAddressAsPtr();
             using var dstUint8 = new Uint8Array(SharedBuffer, dstOffset, length);
             dstUint8.WriteBytes(data);

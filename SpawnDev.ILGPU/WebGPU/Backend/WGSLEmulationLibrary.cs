@@ -1200,23 +1200,54 @@ fn _f32_to_f16(f: f32) -> u32 {
         {
             var sb = new System.Text.StringBuilder();
 
+            // Per-family decision: minimal-trim by kernelBody text-scan only when
+            // the family's call sites are guaranteed to appear in `kernelBody`. F64
+            // and I64 emulation function calls (`i64_ge`, `i64_eq`, `f64_add` etc.)
+            // can be emitted by HELPER fn bodies — and at GenerateHeader time the
+            // kernel main `Builder` does NOT yet contain the helper fn bodies (those
+            // get Merge()d in AFTER GenerateHeader runs). The text-scan would miss
+            // those calls and skip the corresponding fn defs, producing the WGSL
+            // validator's "called but not defined" error (Tuvok's 2026-05-05 AV1
+            // walker `i64_ge` / `i64_eq` symptom). For correctness, include ALL
+            // funcs in those families when the flag is on. The total size is tiny
+            // (~50 lines of i64 + ~30 of f64) compared to the kernel itself, and
+            // the validator-reject hazard outweighs the minor binary-size win from
+            // trimming.
             if (includeF64)
             {
                 var funcs = useOzakiF64 ? _ozakiF64Funcs : _dekkerF64Funcs;
-                var deps = useOzakiF64 ? _ozakiF64Deps : _dekkerF64Deps;
                 sb.AppendLine(useOzakiF64 ? OzakiF64TypeAlias : F64TypeAlias);
-                AppendUsedFunctions(sb, funcs, deps, kernelBody);
+                foreach (var func in funcs)
+                {
+                    sb.AppendLine(func.Code);
+                    sb.AppendLine();
+                }
             }
 
             if (includeI64)
             {
                 sb.AppendLine(I64TypeAlias);
                 sb.AppendLine(U64TypeAlias);
-                AppendUsedFunctions(sb, _i64Funcs, _i64Deps, kernelBody);
+                foreach (var func in _i64Funcs)
+                {
+                    sb.AppendLine(func.Code);
+                    sb.AppendLine();
+                }
             }
 
             if (includeF16)
             {
+                // F16 helpers stay on the minimal-trim path because:
+                //   - The set is small (3 funcs) and dependency-shallow.
+                //   - F16 calls in helpers appear at LEA / Load / Store of sub-word
+                //     ArrayView<Half> params — those are OWNED by the helper-side
+                //     codegen path I added in WGSLFunctionGenerator (rc.16 Bug D
+                //     phase 2), which sets `_kernelReferencesF16Helpers` on the
+                //     SHARED instance flag accessor used by needsF16Emulation
+                //     determination upstream (lines 1218-1220 of
+                //     WGSLKernelFunctionGenerator). So the includeF16 flag
+                //     itself is correctly raised; trimming the unused subset
+                //     stays safe.
                 AppendUsedFunctions(sb, _f16Funcs, _f16Deps, kernelBody);
             }
 

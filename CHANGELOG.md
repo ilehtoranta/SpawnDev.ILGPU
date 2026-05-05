@@ -2,6 +2,88 @@
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
 
+## 4.9.5-local.3 (2026-05-05) — Wasm: lazy per-HWC snapshot fixes RadixSort regression + perf
+
+Local-feed-only build. Fixes the RadixSort multi-pass data-corruption regression
+(TJ report 2026-05-05; tests `WasmTests.AlgorithmRadixSortNonPairs{Int,Float}Test`
+"got 32 expected 1" — input order returned unchanged) AND the StyleMosaic ML-weight
+5GB-allocation perf regression in ONE coherent mechanism.
+
+### Root cause
+
+The eager queue-time snapshot path introduced in `4222bef`/`fab13fd` (rc.11) and
+extended in `2fa321f` (rc.13) had two interacting failures:
+
+1. **Cached pre-write data pinned across GPU writes.** Multi-pass kernels that sort
+   in-place (RadixSort) queue back-to-back dispatches with no host writes between.
+   The cache check `_lastSnapshottedGpuWriteSeq` in `GetOrCreateSnapshotForDispatch`
+   ran AT QUEUE TIME, before the previous dispatch's task had executed and bumped
+   `_gpuWriteSeq`. So pass-2's snapshot capture happened with `_gpuWriteSeq` still
+   at the pre-pass-1 value and returned the cached pre-pass-1 snapshot. Pass-2's
+   copy-IN replayed the original input. Final read returned input order unchanged.
+
+2. **Eager allocation for read-only buffers.** Every dispatch's queue-time scan
+   allocated a fresh SharedArrayBuffer the first time a buffer was referenced
+   (and re-allocated whenever `HostWriteCounter` advanced). For ML pipelines
+   uploading weights once and reading 100+ times, the 50MB weight buffer was
+   re-snapshotted 100 times × no perf benefit since weights never change. Data's
+   StyleMosaic 11+ minute hang at rc.13 was 5GB of wasted SAB allocations.
+
+### Fix: lazy per-HWC snapshot tier
+
+`WasmMemoryBuffer` now tracks dispatch intents instead of taking eager snapshots:
+
+- **At RunKernel queue time (sync):** each ArrayView arg's underlying buffer
+  registers a dispatch intent. The intent records the current
+  `HostWriteCounter` value (qhwc). NO bytes are copied at this point.
+- **At any host-write path (CopyFromHost / CopyFromJS / CopyFrom):** `PrepareHostWrite`
+  is called BEFORE the SharedBuffer is mutated. If at least one dispatch intent is
+  pending and no snapshot exists at the current HWC tier, the CURRENT (pre-write)
+  SharedBuffer is captured into a fresh SAB keyed by HWC. Refcount = number of
+  pending intents at that moment (every pre-write intent shares this tier).
+- **At dispatch start (copy-IN):** if the buffer has a snapshot tier matching the
+  dispatch's qhwc AND `HostWriteCounter > qhwc`, copy-IN reads from the snapshot.
+  Otherwise reads SharedBuffer directly (which carries every prior dispatch's
+  copy-OUT data — exactly what multi-pass RadixSort needs).
+- **At dispatch end (copy-OUT):** buffers whose copy-IN read from a snapshot have
+  their copy-OUT skipped (writing the snapshot data back to SharedBuffer would
+  clobber the host write that subsequent dispatches need). All other buffers
+  copy-OUT normally.
+- **At dispatch completion:** `CompleteDispatchIntent(qhwc)` decrements the tier's
+  refcount; the SAB is released when the last referencer completes. All tiers are
+  released when the buffer's pending-intent count returns to zero.
+
+### Perf characterization
+
+- **ML weight reuse (StyleMosaic 102-dispatch pipeline):** `CopyFromCPU(weights)`
+  fires once with no pending intents → no snapshot. 102 subsequent dispatches
+  register and complete intents at the same HWC → no host writes → no snapshot
+  ever materialized → ZERO snapshot allocations. (Was 5GB pre-fix.)
+- **Multi-pass RadixSort:** all passes register intents at qhwc=initial-HWC.
+  No host writes during sort → no snapshot. Each pass's copy-IN reads SharedBuffer
+  carrying the prior pass's copy-OUT data. Each pass's copy-OUT writes back.
+- **Host-write race (Tests23_HostWriteVsQueuedDispatchRace):** D1 queued at HWC=1.
+  CopyFromCPU triggers `PrepareHostWrite` → tier @ HWC=1 captured. HWC bumps to 2.
+  D2 queued at HWC=2 — no tier @ HWC=2. D1 reads tier[1] (pre-write data). D1's
+  copy-OUT skipped for the snapshot-sourced buffer (preserves SharedBuffer = 200).
+  D2 reads SharedBuffer = 200. Both dispatches see the data they queued with intent for.
+
+### Verified
+
+- `WasmTests.AlgorithmRadixSortNonPairsIntTest`: PASS (was FAIL "got 32 expected 1").
+- `WasmTests.AlgorithmRadixSortNonPairsFloatTest`: PASS (was FAIL "got 128 expected 2").
+- `WasmTests.AlgorithmRadixSortPairsIntTest`: PASS.
+- `WasmTests.Tests23_HostWriteVsQueuedDispatchRace`: PASS (snapshot defense + copy-OUT skip both wired).
+- (Plus broader RadixSort + body-struct + sub-word sweep — see DevComms publish-log row.)
+
+### Files
+
+- `SpawnDev.ILGPU/Wasm/WasmMemoryBuffer.cs` — lazy snapshot mechanism replacing the
+  eager `GetOrCreateSnapshotForDispatch` / `_gpuWriteSeq` / `NotifyGpuWrite` API.
+- `SpawnDev.ILGPU/Wasm/WasmAccelerator.cs` — RunKernel registers intents (was: eager
+  snapshots); copy-IN tracks per-buffer "read from snapshot" set; copy-OUT skips
+  those at write-back; finally-block completes intents.
+
 ## 4.9.5-local.2 (2026-05-05) — Wasm linear memory: drop 100% margin, exact + 1-page pad
 
 Local-feed-only build closing Data's StyleMosaic 2 GiB OOM.

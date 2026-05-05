@@ -352,28 +352,35 @@ namespace SpawnDev.ILGPU.Wasm
 
             if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm-Debug] RunKernel called with {args.Length} args");
 
-            // SNAPSHOT each ArrayView arg's source SharedBuffer NOW (before the task
-            // is queued and any subsequent CopyFromCPU could overwrite SharedBuffer).
-            // The dispatch's copy-IN will read from snapshots instead of SharedBuffer.
-            // Closes the host-write-vs-queued-dispatch race surfaced 2026-05-04 by
-            // Tests23_HostWriteVsQueuedDispatchRace + YOLOv8 Wasm Softmax. Snapshots
-            // are reference-shared across dispatches with the same HostWriteCounter,
-            // so unchanging buffers (ML weights uploaded once, read many times) only
-            // pay the snapshot cost ONCE per host write — not per dispatch.
-            var argSnapshots = new Dictionary<WasmMemoryBuffer, SharedArrayBuffer>();
+            // Register a queue-time snapshot intent on each unique WasmMemoryBuffer
+            // referenced by this dispatch. The intent is a lightweight counter
+            // bump + capture of the buffer's current HostWriteCounter — NO bytes
+            // are copied here. A real snapshot SAB is allocated lazily, only IF a
+            // host write fires (CopyFromHost / CopyFromJS / CopyFrom override)
+            // while at least one intent is pending. Multi-pass kernels with no
+            // intervening host writes never trigger materialization (RadixSort
+            // reads its prior dispatch's copy-OUT data via SharedBuffer); ML
+            // pipelines with reused weight buffers similarly skip the allocation.
+            //
+            // Closes the host-write-vs-queued-dispatch race (Tests23_HostWriteVs-
+            // QueuedDispatchRace, 2026-05-04 YOLOv8 Wasm Softmax) AND the rc.13-
+            // lazily-cached-snapshot regression that pinned pre-pass-1 data
+            // across multi-pass RadixSort dispatches (TJ regression report
+            // 2026-05-05). Replaces the previous eager snapshot path that ate
+            // 5GB of SAB allocations on Data's StyleMosaic 102-dispatch
+            // pipeline. (rc.16 RadixSort multi-pass + StyleMosaic perf, 2026-05-05.)
+            var argDispatchIntents = new Dictionary<WasmMemoryBuffer, int>();
             for (int ai = 0; ai < args.Length; ai++)
             {
                 var arg = args[ai];
-                if (arg is IArrayView iav && iav.Buffer is WasmMemoryBuffer wb && !argSnapshots.ContainsKey(wb))
+                if (arg is IArrayView iav && iav.Buffer is WasmMemoryBuffer wb && !argDispatchIntents.ContainsKey(wb))
                 {
-                    var snap = wb.GetOrCreateSnapshotForDispatch();
-                    if (snap != null)
-                        argSnapshots[wb] = snap;
+                    argDispatchIntents[wb] = wb.RegisterDispatchIntent();
                 }
                 else if (arg != null && arg.GetType().IsValueType && !arg.GetType().IsPrimitive)
                 {
                     // Struct-with-embedded-views (e.g. body-struct kernel params): walk
-                    // fields and snapshot any IArrayView's underlying WasmMemoryBuffer.
+                    // fields and register intent on any IArrayView's underlying buffer.
                     try
                     {
                         var fields = arg.GetType().GetFields(
@@ -381,11 +388,9 @@ namespace SpawnDev.ILGPU.Wasm
                         foreach (var f in fields)
                         {
                             var fv = f.GetValue(arg);
-                            if (fv is IArrayView fav && fav.Buffer is WasmMemoryBuffer fwb && !argSnapshots.ContainsKey(fwb))
+                            if (fv is IArrayView fav && fav.Buffer is WasmMemoryBuffer fwb && !argDispatchIntents.ContainsKey(fwb))
                             {
-                                var fsnap = fwb.GetOrCreateSnapshotForDispatch();
-                                if (fsnap != null)
-                                    argSnapshots[fwb] = fsnap;
+                                argDispatchIntents[fwb] = fwb.RegisterDispatchIntent();
                             }
                         }
                     }
@@ -396,7 +401,7 @@ namespace SpawnDev.ILGPU.Wasm
             // Increment active dispatch count BEFORE starting the async task,
             // so the count is visible during the task's synchronous execution phase.
             wasmAccel._activeDispatchCount++;
-            var task = wasmAccel.RunKernelAsync(compiledKernel, dimension, args, dispNum, argSnapshots);
+            var task = wasmAccel.RunKernelAsync(compiledKernel, dimension, args, dispNum, argDispatchIntents);
             wasmAccel._pendingWork.Add(task);
         }
 
@@ -405,7 +410,7 @@ namespace SpawnDev.ILGPU.Wasm
             object dimension,
             object[] args,
             int dispNum = 0,
-            Dictionary<WasmMemoryBuffer, SharedArrayBuffer>? argSnapshots = null)
+            Dictionary<WasmMemoryBuffer, int>? argDispatchIntents = null)
         {
             if (_disposed)
                 throw new ObjectDisposedException(nameof(WasmAccelerator));
@@ -923,6 +928,11 @@ namespace SpawnDev.ILGPU.Wasm
                 // during the dispatch — preserve that write, don't clobber).
                 if (hostWriteSnapshot.Length < bufferInfos.Count)
                     hostWriteSnapshot = new int[bufferInfos.Count];
+                // Track per-bufferIndex whether copy-IN read from a queue-time
+                // snapshot (vs direct SharedBuffer). copy-OUT below uses this to
+                // skip writing back stale snapshot data for inputs whose
+                // SharedBuffer has been overwritten by a host write since queue.
+                var bufIndicesReadFromSnapshot = new HashSet<int>();
                 for (int i = 0; i < bufferInfos.Count; i++)
                 {
                     var (buf, _) = bufferInfos[i];
@@ -931,14 +941,26 @@ namespace SpawnDev.ILGPU.Wasm
                     if (rangeMin == int.MaxValue) { rangeMin = 0; rangeMax = (int)buf.LengthInBytes; }
                     int rangeSize = rangeMax - rangeMin;
 
-                    // Read from the queue-time snapshot if one was captured for this buffer
-                    // (closes the host-write-vs-copy-IN race). Falls back to SharedBuffer for
-                    // buffers that weren't in args at queue time (e.g. struct-with-view fields
-                    // discovered during the dispatcher's own iav extraction below).
-                    SharedArrayBuffer srcSab = (argSnapshots != null
-                        && argSnapshots.TryGetValue(buf, out var snapSab))
-                        ? snapSab
-                        : buf.SharedBuffer;
+                    // Read from the lazy-materialized snapshot iff a host write fired
+                    // between this dispatch's queue time and now (i.e. the buffer's
+                    // HostWriteCounter has advanced past the queue-time value AND a
+                    // pinned snapshot exists). Otherwise read SharedBuffer directly,
+                    // which by here carries every prior dispatch's copy-OUT data
+                    // (correct for in-place multi-pass kernels like RadixSort).
+                    // Falls back to SharedBuffer for buffers that weren't in args at
+                    // queue time (e.g. struct-with-view fields discovered during the
+                    // dispatcher's own iav extraction below).
+                    SharedArrayBuffer srcSab = buf.SharedBuffer;
+                    if (argDispatchIntents != null
+                        && argDispatchIntents.TryGetValue(buf, out var qhwc))
+                    {
+                        var pinned = buf.GetSnapshotForDispatch(qhwc);
+                        if (pinned != null)
+                        {
+                            srcSab = pinned;
+                            bufIndicesReadFromSnapshot.Add(i);
+                        }
+                    }
 
                     using var srcView = new Uint8Array(srcSab, rangeMin, rangeSize);
                     using var dstView = new Uint8Array(memoryBuffer, offset, rangeSize);
@@ -1270,6 +1292,7 @@ namespace SpawnDev.ILGPU.Wasm
                     flatArgs, compiledKernel.WasmBinary,
                     wasmMemory, memoryBuffer, bufferOffsets, bufferInfos, bufferRanges,
                     writtenBufferIndices, traceFoundAnyBufferWrite, hostWriteSnapshot,
+                    bufIndicesReadFromSnapshot,
                     dynamicSharedElements, dispNum);
 
                 // Clean up per-dispatch memory (only created for concurrent dispatches)
@@ -1286,6 +1309,15 @@ namespace SpawnDev.ILGPU.Wasm
             {
                 // Always decrement active dispatch count
                 _activeDispatchCount--;
+                // Release the lazy-snapshot intent for every buffer this dispatch
+                // registered at queue time. When the last in-flight intent on a
+                // buffer completes, the buffer drops its pinned snapshot (if one
+                // was materialized) so memory is released eagerly.
+                if (argDispatchIntents != null)
+                {
+                    foreach (var kv in argDispatchIntents)
+                        kv.Key.CompleteDispatchIntent(kv.Value);
+                }
             }
         }
 
@@ -1378,6 +1410,7 @@ namespace SpawnDev.ILGPU.Wasm
             HashSet<int> writtenBufferIndices,
             bool traceFoundAnyBufferWrite,
             int[] hostWriteSnapshot,
+            HashSet<int> bufIndicesReadFromSnapshot,
             int dynamicSharedElements = 0,
             int dispNum = 0)
         {
@@ -1670,6 +1703,22 @@ namespace SpawnDev.ILGPU.Wasm
                     copyOutSkipped++;
                     continue;
                 }
+                // Skip copy-OUT iff this buffer's copy-IN read from a queue-time
+                // snapshot (host wrote between this dispatch's queue and run, so
+                // SharedBuffer has data that's NEWER than what this dispatch
+                // wanted — copy-OUT would write our snapshot data back, clobbering
+                // the newer host write that subsequent dispatches need).
+                // Trace-independent: doesn't rely on the codegen Store-target trace
+                // to identify input-only buffers. Multi-pass kernels with no host
+                // writes (RadixSort) never hit this skip — no snapshots are
+                // materialized — so every dispatch's copy-OUT correctly persists
+                // its kernel writes for the next pass.
+                // (rc.16 RadixSort + host-write-race + ML weight reuse, 2026-05-05.)
+                if (bufIndicesReadFromSnapshot.Contains(i))
+                {
+                    copyOutSkipped++;
+                    continue;
+                }
                 int offset = bufferOffsets[i];
                 var (rangeMin, rangeMax) = bufferRanges[i];
                 if (rangeMin == int.MaxValue) { rangeMin = 0; rangeMax = (int)buf.LengthInBytes; }
@@ -1679,17 +1728,15 @@ namespace SpawnDev.ILGPU.Wasm
                 using var dstView = new Uint8Array(buf.SharedBuffer, rangeMin, rangeSize);
                 dstView.JSRef!.CallVoid("set", srcView);
                 copyOutCount++;
-                // Bump the GPU-write seq ONLY for buffers the kernel actually wrote
-                // (per the codegen Store-target trace). For input-only buffers, copy-OUT
-                // writes back the same bytes the copy-IN wrote, so the cached snapshot
-                // for that buffer is still valid — bumping `_gpuWriteSeq` here would
-                // force every subsequent dispatch to re-allocate + re-copy a fresh
-                // snapshot of an unchanged buffer, which on ML pipelines (weights
-                // uploaded once, read by 100s of dispatches) blows up to multi-GB of
-                // wasted allocations and can hang StyleMosaic etc. Surfaced 2026-05-04
-                // by Data's StyleMosaic Wasm hang at rc.13.
-                if (writtenBufferIndices.Contains(i))
-                    buf.NotifyGpuWrite();
+                // (Obsolete after the lazy-snapshot refactor: the prior eager
+                // `_gpuWriteSeq` bump existed to invalidate cached pre-pass-1
+                // snapshots when the kernel had GPU-written. The lazy snapshot
+                // never caches across the pass-1 boundary in the first place —
+                // multi-pass dispatches just read SharedBuffer post-copy-OUT —
+                // so nothing here needs to fire. The trace-based gate is also
+                // unnecessary; copy-OUT writes back identical bytes for
+                // unwritten buffers and a real write for written ones.
+                // (rc.16 RadixSort multi-pass + StyleMosaic perf, 2026-05-05.)
                 // Read first 4 bytes from Wasm memory at this offset for debugging
                 if (rangeSize >= 4)
                 {
