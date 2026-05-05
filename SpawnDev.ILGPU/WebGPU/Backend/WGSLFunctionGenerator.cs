@@ -77,11 +77,13 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
         /// <summary>
         /// Returns the WGSL parameter-position type for a ViewType.
-        /// Sub-word element types (Int8/Int16/Float16-emulated) lower to
+        /// Address space is read from the ViewType: `Shared` → `workgroup`,
+        /// `Local` → `function`, `Global`/`Generic` → `storage`. Sub-word element
+        /// types (Int8/Int16/Float16-emulated) on storage backing lower to
         /// `ptr&lt;storage, array&lt;atomic&lt;u32&gt;&gt;, read_write&gt;`; full-word lower to
-        /// `ptr&lt;storage, array&lt;{elem}&gt;, read_write&gt;`. Mirrors the kernel-side
-        /// SetupParameterBindings sub-word detection (rc.16 fn-def codegen
-        /// Bug D fix, 2026-05-05).
+        /// `ptr&lt;{addrSpace}, array&lt;{elem}&gt;, read_write&gt;`. Mirrors the kernel-side
+        /// SetupParameterBindings sub-word detection (rc.16 fn-def codegen Bug D
+        /// + 2026-05-05 phase 6 — shared-memory address space propagation).
         /// </summary>
         internal static string GetWgslViewParamType(
             ViewType viewType,
@@ -103,11 +105,30 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 }
             }
 
-            if (isSubWord)
+            // Map ILGPU MemoryAddressSpace to WGSL storage class. Generic falls
+            // back to storage (the typical ArrayView<T> kernel-param case).
+            string addrSpace = viewType.AddressSpace switch
+            {
+                MemoryAddressSpace.Shared => "workgroup",
+                MemoryAddressSpace.Local => "function",
+                _ => "storage",
+            };
+
+            // Sub-word packing into atomic<u32> is the storage-buffer pattern
+            // (CPU-side packing + atomicLoad/atomicAnd/atomicOr in WGSL). For
+            // workgroup-memory sub-word views we'd need a different layout
+            // (workgroup vars don't share host-side packing). Until a test
+            // surfaces that case, route sub-word through the storage form.
+            if (isSubWord && addrSpace == "storage")
                 return "ptr<storage, array<atomic<u32>>, read_write>";
 
             string elemTypeName = typeGenerator[viewType.ElementType];
-            return $"ptr<storage, array<{elemTypeName}>, read_write>";
+            // Non-storage address spaces use `read_write` access mode; WGSL
+            // does not parameterize ptr<workgroup,T> with an explicit access.
+            // Keep the trailing `, read_write` only for storage.
+            return addrSpace == "storage"
+                ? $"ptr<storage, array<{elemTypeName}>, read_write>"
+                : $"ptr<{addrSpace}, array<{elemTypeName}>>";
         }
 
         /// <summary>
