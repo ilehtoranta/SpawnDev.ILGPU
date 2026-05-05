@@ -1148,6 +1148,41 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 return;
             }
 
+            // emu_i64 / emu_u64 dispatch — base path is shared with helpers
+            // (WGSLFunctionGenerator inherits this). Without this dispatch, a
+            // helper that does `long a + long b` would emit `vec2<u32> + vec2<u32>`
+            // which is component-wise (no carry propagation) and produces wrong
+            // results. Mirrors WGSLKernelFunctionGenerator.GenerateCode at line 5397+
+            // for: Add, Sub, Mul, And, Or, Xor — Shl/Shr handled in their own branch
+            // below; Min/Max handled in their own branch above.
+            // (Bug D follow-up, 2026-05-05.)
+            if (Backend.EnableI64Emulation
+                && (TypeGenerator[value.Left.Type] == "emu_i64" || TypeGenerator[value.Left.Type] == "emu_u64"
+                    || TypeGenerator[value.Right.Type] == "emu_i64" || TypeGenerator[value.Right.Type] == "emu_u64"
+                    || value.BasicValueType == BasicValueType.Int64))
+            {
+                bool isUnsignedI64 = TypeGenerator[value.Left.Type] == "emu_u64"
+                    || TypeGenerator[value.Right.Type] == "emu_u64"
+                    || value.IsUnsigned;
+                string? emulI64Func = value.Kind switch
+                {
+                    BinaryArithmeticKind.Add => "i64_add",
+                    BinaryArithmeticKind.Sub => "i64_sub",
+                    BinaryArithmeticKind.Mul => isUnsignedI64 ? "u64_mul" : "i64_mul",
+                    BinaryArithmeticKind.And => "i64_and",
+                    BinaryArithmeticKind.Or => "i64_or",
+                    BinaryArithmeticKind.Xor => "i64_xor",
+                    _ => null
+                };
+                if (emulI64Func != null)
+                {
+                    AppendLine($"{target} = {emulI64Func}({left}, {right});");
+                    return;
+                }
+                // Other kinds (Shl/Shr/Min/Max/Div/Rem) fall through to their
+                // dedicated branches below, which already handle emu_i64 LHS.
+            }
+
             // Handle pointer arithmetic (e.g., &(*ptr)[offset])
             if (value.Kind == BinaryArithmeticKind.Add)
             {
