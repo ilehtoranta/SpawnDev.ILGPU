@@ -8,18 +8,24 @@ Tuvok's Codecs `OpusRangeDecoderGpu_DecodeUint_LargeRanges_BitExactVsCpu` test i
 
 The fix: support `[MethodImpl(MethodImplOptions.NoInlining)]` on helpers that take ArrayView params, so they emit as separate WGSL fn definitions (~60 lines each, Naga validates in ~1s). Currently the fn-def codegen path is broken for ArrayView fn-params — that's Bug D in `Plans/rc16-fn-def-codegen-harden.md`.
 
-## Status (2026-05-05 EOS)
+## Status (2026-05-05 — phases 2/3/5 closed)
 
 | Phase | What | Status | Commit |
 |---|---|---|---|
 | 0 | Reproducer test on master | LANDED | `ef7b4eb` |
 | 1 | WGSLFunctionGenerator emits `ptr<storage, ..., read_write>` for ArrayView fn-params | LANDED | `150670c` |
 | 4 | Kernel emits sub-word alias `let v_X = &paramN;` unconditionally | LANDED | `150670c` |
-| 2 | Sub-word body codegen (LEA + Load + Store inside helpers) | **PENDING** | — |
-| 3 | Helper-to-helper recursive call dispatch | **PENDING** | — |
-| 5 | EmitNonInlinedMethodCall view-arg routing | **PENDING** | — |
+| 2 | Sub-word body codegen (LEA + Load + Store inside helpers) | **LANDED** | `a203e5e` |
+| 3 | Helper-to-helper recursive call dispatch | **LANDED** | `a203e5e` |
+| 5 | EmitNonInlinedMethodCall view-arg routing (verified, no new code needed) | **LANDED** | `a203e5e` |
+| 2a | Cross-block field address inline substitution (follow-on) | LANDED | `a203e5e` |
+| 2b | AddressSpaceCast on local alloca in helper (follow-on) | LANDED | `a203e5e` |
+| 2c | GLSL fn-return fallback uses N-arg struct constructor (follow-on) | LANDED | `a203e5e` |
+| 2d | WebGL struct-defs ordering: top-of-file placeholder (follow-on) | LANDED | `a203e5e` |
+| 2e | SetEmulationFlags + ScanForSubgroupAndBroadcastUsage scan non-inline helpers (Tuvok blocker) | LANDED | `a203e5e` |
 
-When phases 2/3/5 land + Tuvok marks his helpers `[MethodImpl(NoInlining)]`, the test should turn green on WebGPU + WebGPUNoSubgroups.
+Test `Tests23_DecodeUint_LongForm_CompileSmoke` now: 6 pass + 1 skip out of 7.
+WebGL skipped via `UnsupportedTestException` because GLSL ES has no pointer types - ArrayView fn-params can't go through standalone fn defs. Tracked as Bug D follow-up.
 
 ## Reproducer (already on master)
 
