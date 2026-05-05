@@ -59,6 +59,16 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         // (rc.16 Bug D phase 2 follow-up, 2026-05-05.)
         private readonly Dictionary<string, string> _fieldAddressDerefExpr = new(); // varName -> "(*src).fieldName"
 
+        // Helper-side deferred declarations for sub-word LEA targets. Like the kernel-side
+        // `_deferredVarDeclarations`, this collects `var v_X : i32;` lines that need to be
+        // emitted at the helper fn-body top (function scope) so cross-block uses resolve
+        // correctly. Sub-word LEA emit appends here when the helper has multiple WGSL
+        // blocks (nested if/else/loop within the fn body); the body is generated then
+        // `Builder.Insert` injects the deferred decls at the saved fn-body start position.
+        // Tuvok's local.9 walker WGSL `unresolved value 'v_359'` (Bug D phase 7 follow-up,
+        // 2026-05-05).
+        private readonly List<string> _helperDeferredVarDeclarations = new();
+
         /// <summary>
         /// Creates a new WGSL function generator.
         /// </summary>
@@ -88,7 +98,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         internal static string GetWgslViewParamType(
             ViewType viewType,
             WGSLTypeGenerator typeGenerator,
-            bool hasShaderF16)
+            bool hasShaderF16,
+            MemoryAddressSpace? observedAddressSpace = null)
         {
             bool isSubWord = false;
             if (viewType.ElementType is PrimitiveType prim)
@@ -105,9 +116,18 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 }
             }
 
-            // Map ILGPU MemoryAddressSpace to WGSL storage class. Generic falls
-            // back to storage (the typical ArrayView<T> kernel-param case).
-            string addrSpace = viewType.AddressSpace switch
+            // Map ILGPU MemoryAddressSpace to WGSL storage class. The address
+            // space comes from one of two sources:
+            //   1. observedAddressSpace — call-site-observed address space
+            //      from the kernel's pre-body scan (Bug D phase 7). Used when
+            //      ILGPU's IR didn't propagate `Shared` / `Local` into the helper's
+            //      parameter type. Takes precedence when present.
+            //   2. viewType.AddressSpace — IR-level address space on the param
+            //      type. Fallback for the common storage-buffer case where the
+            //      IR has the right address space already.
+            // Generic / Global / unobserved → "storage" (typical kernel param).
+            var effectiveAddressSpace = observedAddressSpace ?? viewType.AddressSpace;
+            string addrSpace = effectiveAddressSpace switch
             {
                 MemoryAddressSpace.Shared => "workgroup",
                 MemoryAddressSpace.Local => "function",
@@ -155,10 +175,19 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     // bare element type. Without this fix, helpers calling
                     // sub-word LEA on a buf param fail because `var v_X : i32 = p_X;`
                     // produces an i32 local that can't be indexed as an array.
+                    //
+                    // Bug D phase 7 (2026-05-05): consult the call-site observation
+                    // table when ILGPU's IR didn't propagate the right address space
+                    // into the helper's parameter type. Without this, a workgroup
+                    // ArrayView passed from the kernel emits as `ptr<storage, ...>`
+                    // and Naga rejects the type mismatch at the call site.
+                    var observedAS = _args.HelperParamAddressSpaces.TryGetValue(
+                        (Method, param.Index), out var asValue) ? asValue : (MemoryAddressSpace?)null;
                     paramType = GetWgslViewParamType(
                         viewType,
                         TypeGenerator,
-                        Backend.HasShaderF16);
+                        Backend.HasShaderF16,
+                        observedAS);
                 }
                 else
                 {
@@ -270,10 +299,13 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 // to override here to keep the binding consistent with the signature.
                 if (param.ParameterType is ViewType viewType)
                 {
+                    var observedAS = _args.HelperParamAddressSpaces.TryGetValue(
+                        (Method, param.Index), out var asValue) ? asValue : (MemoryAddressSpace?)null;
                     string ptrType = GetWgslViewParamType(
                         viewType,
                         TypeGenerator,
-                        Backend.HasShaderF16);
+                        Backend.HasShaderF16,
+                        observedAS);
                     AppendLine($"let {variable.Name} : {ptrType} = p_{param.Id};");
                     // Remember the helper-local var name for this param so the
                     // sub-word Load / Store overrides can emit `(*v_X)[wordIdx]`.
@@ -288,8 +320,21 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     AppendLine($"var {variable.Name} : {variable.Type} = p_{param.Id};");
             }
 
+            // Save the position right after parameter binding — sub-word LEA hoisted
+            // declarations (Bug D phase 7 follow-up, 2026-05-05) get inserted here so
+            // they're visible to every nested block of the helper body.
+            int helperBodyStartPosition = Builder.Length;
+
             // Generate body
             GenerateCodeInternal();
+
+            // Inject hoisted sub-word LEA `var v_X : i32;` declarations at the helper
+            // body root so cross-block uses (nested if/else/loop in WGSL) can resolve.
+            if (_helperDeferredVarDeclarations.Count > 0)
+            {
+                var deferred = string.Join(Environment.NewLine, _helperDeferredVarDeclarations) + Environment.NewLine;
+                Builder.Insert(helperBodyStartPosition, deferred);
+            }
 
             PopIndent();
             Builder.AppendLine("}");
@@ -391,8 +436,31 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 {
                     // Sub-word: store the element offset; Load / Store will compute
                     // word index + bit shift from this i32 at the use site.
+                    //
+                    // Cross-block fix (Bug D phase 7 follow-up, Tuvok's local.9 walker
+                    // `unresolved value 'v_359'` at WGSL L19170, 2026-05-05): if the
+                    // helper has multiple IR blocks (i.e. nested if/else/loop in the
+                    // emitted WGSL fn body), `var v_X : i32 = ...;` is block-scoped and
+                    // a use in a sibling block fails Naga validation. Hoist the var
+                    // declaration to the helper fn body root via deferred-decl insertion
+                    // and emit only the assignment locally.
                     _subWordLEAVars[target.Name] = param.Index;
-                    AppendLine($"var {target.Name} : i32 = {offsetExpr};");
+                    bool helperIsMultiBlock = Method.Blocks.Count > 1;
+                    if (helperIsMultiBlock && declaredVariables.Add(target.Name))
+                    {
+                        _helperDeferredVarDeclarations.Add($"    var {target.Name} : i32;");
+                        AppendLine($"{target.Name} = {offsetExpr};");
+                    }
+                    else if (helperIsMultiBlock)
+                    {
+                        // Already pre-declared via prior call site; just assign locally.
+                        AppendLine($"{target.Name} = {offsetExpr};");
+                    }
+                    else
+                    {
+                        // Single-block helper: combined declaration + assignment.
+                        AppendLine($"var {target.Name} : i32 = {offsetExpr};");
+                    }
                     return;
                 }
 

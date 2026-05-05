@@ -280,6 +280,18 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             // so the rest of the codegen path emits one binding per group instead of one per field.
             DecideCoalesceGroups();
 
+            // Bug D phase 7 (2026-05-05): scan kernel IR for MethodCall nodes and record
+            // observed address spaces for each ViewType arg passed to a NoInlining helper.
+            // Helpers are emitted in PARALLEL with the kernel via WGSLFunctionGenerator;
+            // ILGPU IR doesn't propagate `AddressSpace.Shared` into helper parameter types
+            // at our optimization level, so the helper's signature defaults to
+            // `ptr<storage, ...>` even when the kernel passes a workgroup pointer
+            // (Naga rejects the type mismatch at the call site). This scan runs in the
+            // kernel constructor (sequential, before parallel GenerateCode) and writes
+            // into the shared `_args.HelperParamAddressSpaces` dict — the helper's
+            // GenerateHeaderStub reads from it to override the WGSL ptr type.
+            ScanCallSiteAddressSpaces();
+
             if (!EntryPoint.IsExplicitlyGrouped && method.Parameters.Count > 0)
             {
                 var indexParam = method.Parameters[0];
@@ -319,6 +331,74 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         /// 12 ArrayView<int> fields plus an Out field, all coalesced together, kernel
         /// writes Out[0]=sum into the shared buffer instead of bOut.
         /// </summary>
+        /// <summary>
+        /// Scans the kernel IR (and recursively any reachable NoInlining helpers) for
+        /// `MethodCall` nodes and records the observed `MemoryAddressSpace` for each
+        /// `ViewType` argument passed to non-inlined helpers. Populates
+        /// <c>_args.HelperParamAddressSpaces[(callee, paramIdx)]</c> when the arg's
+        /// IR Type is `AddressSpaceType.Shared` / `Local` (i.e. workgroup or function
+        /// memory). The helper's `GenerateHeaderStub` reads this dict to override the
+        /// WGSL ptr storage class — without it, ILGPU's IR doesn't propagate
+        /// `Shared` into the helper's parameter type and the signature defaults to
+        /// `ptr&lt;storage, ...&gt;` which Naga rejects when the caller passes
+        /// `ptr&lt;workgroup, ...&gt;`. (Bug D phase 7, 2026-05-05.)
+        /// </summary>
+        private void ScanCallSiteAddressSpaces()
+        {
+            var visited = new HashSet<global::ILGPU.IR.Method>();
+            ScanCallSiteAddressSpacesInternal(Method, visited);
+        }
+
+        private void ScanCallSiteAddressSpacesInternal(
+            global::ILGPU.IR.Method m,
+            HashSet<global::ILGPU.IR.Method> visited)
+        {
+            if (!visited.Add(m)) return;
+            foreach (var block in m.Blocks)
+            {
+                foreach (var entry in block)
+                {
+                    if (entry.Value is not MethodCall call) continue;
+                    var callee = call.Target;
+                    // Inline helpers don't get a fn-def signature — only NoInline
+                    // helpers need the address space override.
+                    if (_generatorArgs.HelperMethods.ContainsKey(callee)) continue;
+                    if (callee.HasFlags(global::ILGPU.IR.MethodFlags.External)
+                        || callee.HasFlags(global::ILGPU.IR.MethodFlags.Intrinsic))
+                        continue;
+
+                    for (int argIdx = 0; argIdx < call.Count; argIdx++)
+                    {
+                        var arg = call.Nodes[argIdx].Resolve();
+                        if (arg.Type is global::ILGPU.IR.Types.AddressSpaceType ast)
+                        {
+                            var argAddrSpace = ast.AddressSpace;
+                            // Only record non-Generic / non-Global — those are the
+                            // cases where the helper signature default ("storage")
+                            // would mismatch the caller's actual ptr type. Generic
+                            // and Global both map to "storage" in WGSL so the default
+                            // is correct.
+                            if (argAddrSpace == global::ILGPU.IR.MemoryAddressSpace.Shared
+                                || argAddrSpace == global::ILGPU.IR.MemoryAddressSpace.Local)
+                            {
+                                var key = (callee, argIdx);
+                                // First-write-wins; if multiple call sites pass different
+                                // address spaces for the same param, the first observed
+                                // wins (subsequent calls with mismatched address space
+                                // would need helper monomorphization, deferred to v8).
+                                if (!_generatorArgs.HelperParamAddressSpaces.ContainsKey(key))
+                                    _generatorArgs.HelperParamAddressSpaces[key] = argAddrSpace;
+                            }
+                        }
+                    }
+                    // Recurse into the callee's body so transitive calls are also
+                    // scanned (a kernel-side helper passing the workgroup view to
+                    // another helper still needs the second-level signature override).
+                    ScanCallSiteAddressSpacesInternal(callee, visited);
+                }
+            }
+        }
+
         private void ScanForBodyStructOutputs()
         {
             ScanBlocksForBodyStructOutputs(Method.Blocks);
@@ -4589,7 +4669,27 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                             // Sub-word LEA stores the i32 element index, not a pointer (matches
                             // the direct view-param path emit). The Load/Store codegen will
                             // compute the u32 word index and bit shift from this offset.
-                            AppendLine($"var {target.Name} : i32 = {adjustedOffsetExprBS};");
+                            //
+                            // Cross-block hoist (Bug D phase 7 follow-up, 2026-05-05):
+                            // mirror the direct-param sub-word LEA path — when the LEA value
+                            // has cross-block uses AND we're in deferred-decl mode, hoist the
+                            // var decl to function scope to avoid "unresolved value 'v_X'"
+                            // when the use is in a sibling WGSL block.
+                            bool isCrossBlockBsSubWord = _crossBlockPointers.Contains(value)
+                                && _useDeferredDeclarations;
+                            if (isCrossBlockBsSubWord && declaredVariables.Add(target.Name))
+                            {
+                                _deferredVarDeclarations.Add($"    var {target.Name} : i32;");
+                                AppendLine($"{target.Name} = {adjustedOffsetExprBS};");
+                            }
+                            else if (isCrossBlockBsSubWord)
+                            {
+                                AppendLine($"{target.Name} = {adjustedOffsetExprBS};");
+                            }
+                            else
+                            {
+                                AppendLine($"var {target.Name} : i32 = {adjustedOffsetExprBS};");
+                            }
                             return;
                         }
                     }

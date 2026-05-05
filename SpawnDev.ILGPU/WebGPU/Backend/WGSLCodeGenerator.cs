@@ -196,6 +196,17 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             /// to emit const declarations. Shared across kernel and helper generators.
             /// </summary>
             public Dictionary<(uint Lo, uint Hi), string> I64Constants { get; } = new();
+
+            /// <summary>
+            /// Per-helper-method, per-parameter-index OBSERVED address space at call sites.
+            /// Populated by WGSLKernelFunctionGenerator's pre-body scan of MethodCall nodes
+            /// (kernel constructor, runs sequentially before parallel GenerateCode). Consumed
+            /// by WGSLFunctionGenerator.GetWgslViewParamType to override the WGSL storage
+            /// class for ViewType params — necessary because ILGPU's IR doesn't propagate
+            /// `AddressSpace.Shared` into helper parameter types at our optimization level.
+            /// (Bug D phase 7, 2026-05-05.)
+            /// </summary>
+            public Dictionary<(Method method, int paramIdx), MemoryAddressSpace> HelperParamAddressSpaces { get; } = new();
         }
 
         /// <summary>
