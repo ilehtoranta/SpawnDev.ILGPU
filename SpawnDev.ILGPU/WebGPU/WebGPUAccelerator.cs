@@ -993,7 +993,29 @@ namespace SpawnDev.ILGPU.WebGPU
                             // field's data starts in the coalesced array<u32>/array<i32>/array<f32>.
                             // So the value we send is simply byteOffset / 4 — the stride multiplier
                             // is applied inside the WGSL via offsetExpr * stride for emu_64 reads.
-                            int u32SlotOffset = (int)(runningByteOffset / 4UL);
+                            // Per-member offset value depends on the group's element type:
+                            //   non-sub-word (i32/u32/f32/emu_64 / body-struct):
+                            //     u32-slot offset = runningByteOffset / 4. The WGSL formula
+                            //     `binding[u32SlotOffset + i]` (i32/u32/f32) or
+                            //     `binding[u32SlotOffset + i*2]` (emu_64) gives the correct
+                            //     u32-word index for element i.
+                            //   sub-word (Int8/UInt8/Int16/UInt16/Float16):
+                            //     ELEMENT-count offset = runningByteOffset / SubWordElementByteSize.
+                            //     The sub-word Load formula `binding[(u32(elemIdx)/elemsPerWord)]`
+                            //     consumes the element index directly; storing element offset means
+                            //     elemIdx = elementOffset + i is the global element index in the
+                            //     shared atomic<u32> array, and dividing by elemsPerWord (=4 for
+                            //     1-byte elements, =2 for 2-byte) gives the correct u32-word index.
+                            int slotValue;
+                            if (group.IsDirectParam && group.IsSubWord)
+                            {
+                                int elemBytes = group.SubWordElementByteSize > 0 ? group.SubWordElementByteSize : 1;
+                                slotValue = (int)(runningByteOffset / (ulong)elemBytes);
+                            }
+                            else
+                            {
+                                slotValue = (int)(runningByteOffset / 4UL);
+                            }
                             // Key the offsets dict to match what the codegen wrote into IsCoalesceFieldOffset
                             // entries (CoalesceBodyStructParamIndex, CoalesceFieldIndex):
                             //   body-struct: (BodyStructParamIndex, fieldIdx)  — m.fieldIdx is the IR field index
@@ -1001,7 +1023,7 @@ namespace SpawnDev.ILGPU.WebGPU
                             var offsetKey = group.IsDirectParam
                                 ? (m.fieldIdx, -1)
                                 : (group.BodyStructParamIndex, m.fieldIdx);
-                            coalesceFieldElementOffsets[offsetKey] = u32SlotOffset;
+                            coalesceFieldElementOffsets[offsetKey] = slotValue;
 
                             runningByteOffset += copySize;
                             runningElementCount += m.elementCount;

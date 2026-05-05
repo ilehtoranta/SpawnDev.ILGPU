@@ -1171,6 +1171,22 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         public bool IsDirectParam { get; set; } = false;
 
         /// <summary>
+        /// True when this is a SUB-WORD direct-param coalesce group (Int8/UInt8/Int16/
+        /// UInt16/Float16). The shared binding storage class is `array&lt;atomic&lt;u32&gt;&gt;`
+        /// (matches existing sub-word direct param storage); per-member offsets stored in
+        /// `_scalar_params` are ELEMENT counts (byte_offset / SubWordElementByteSize), not
+        /// u32-slot offsets. Used by the dispatcher to choose the right offset formula.
+        /// (rc.16 direct-param coalesce v2 sub-word, 2026-05-05.)
+        /// </summary>
+        public bool IsSubWord { get; set; } = false;
+
+        /// <summary>
+        /// Element byte size for sub-word groups (1 for Int8/UInt8; 2 for Int16/UInt16/Float16).
+        /// 0 when <see cref="IsSubWord"/> is false.
+        /// </summary>
+        public int SubWordElementByteSize { get; set; } = 0;
+
+        /// <summary>
         /// Element-type key identifying which fields share this binding.
         /// One of: "i32", "u32", "f32", "u32_emu_i64", "u32_emu_f64".
         /// </summary>

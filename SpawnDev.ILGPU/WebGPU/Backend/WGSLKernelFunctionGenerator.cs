@@ -923,20 +923,25 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             // Eligibility — a direct param qualifies when ALL of:
             //   1. It is an ArrayView / View-type param (single AddressSpaceType, not multi-dim).
             //   2. It is NOT atomic.
-            //   3. It is NOT sub-word (Int8/Int16/Half — those use packed atomic<u32>).
-            //   4. It is NOT emulated 64-bit (Int64/Float64) for v1 — those need stride=2 emit
+            //   3. It is NOT emulated 64-bit (Int64/Float64) for v1/v2 — those need stride=2 emit
             //      that the existing direct-param LEA path doesn't yet thread through.
-            //   5. The kernel does NOT WRITE to it (per _directParamOutputs from
+            //   4. The kernel does NOT WRITE to it (per _directParamOutputs from
             //      ScanForBodyStructOutputs).
-            //   6. Its ViewType is not multi-dim (ArrayView2D/3D need stride buffers).
+            //   5. Its ViewType is not multi-dim (ArrayView2D/3D need stride buffers).
+            //
+            // v1 (rc.16 2026-05-05): i32/u32/f32 — single binding type per group, stride=1.
+            // v2 (rc.16 2026-05-05): sub-word (Int8/UInt8/Int16/UInt16/Float16) — shared
+            //   `array<atomic<u32>>` binding per element-byte-size+sign, with each member's
+            //   element offset stored in `_scalar_params[voSlot]`. The Load/Store path uses
+            //   the leader's BindingName via `_subWordBodyStructBindingNames` (same dict that
+            //   serves body-struct sub-word coalesce members).
             //
             // We trigger only when raw bindings still exceed the threshold after
             // body-struct coalesce. Mirrors the body-struct path: largest savings first.
-            // (rc.16 Tuvok AV1 walker WebGPU 11/10 fix, 2026-05-05.)
             if (currentBindings <= CoalesceTriggerThreshold) return;
 
-            var directCandidates = new List<(string typeKey, string wgslType, int stride, List<global::ILGPU.IR.Values.Parameter> members)>();
-            var directBuckets = new Dictionary<string, (string wgslType, int stride, List<global::ILGPU.IR.Values.Parameter> members)>();
+            var directCandidates = new List<(string typeKey, string wgslType, int stride, bool isSubWord, int subWordElemSize, bool subWordIsFloat16, List<global::ILGPU.IR.Values.Parameter> members)>();
+            var directBuckets = new Dictionary<string, (string wgslType, int stride, bool isSubWord, int subWordElemSize, bool subWordIsFloat16, List<global::ILGPU.IR.Values.Parameter> members)>();
             foreach (var param in Method.Parameters)
             {
                 if (param.Index < paramOffset) continue;
@@ -949,41 +954,81 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
                 var elemType = GetBufferElementType(param.ParameterType);
                 if (elemType is not PrimitiveType ept) continue;
-                // Sub-word and emu-64 excluded for v1 (need different binding type & stride emit).
-                switch (ept.BasicValueType)
-                {
-                    case BasicValueType.Int8:
-                    case BasicValueType.Int16:
-                    case BasicValueType.Float16:
-                    case BasicValueType.Int64:
-                    case BasicValueType.Float64:
-                        continue;
-                }
-                var wgslElem = TypeGenerator[elemType];
+                // Emu-64 still excluded (needs stride=2 emit).
+                if (ept.BasicValueType == BasicValueType.Int64
+                    || ept.BasicValueType == BasicValueType.Float64) continue;
+
                 string typeKey;
                 string bindingType;
                 int stride;
-                if (wgslElem == "i32" || wgslElem == "u32" || wgslElem == "f32")
+                bool isSubWord = false;
+                int subWordElemSize = 0;
+                bool subWordIsFloat16 = false;
+
+                // Check sub-word FIRST — TypeGenerator maps Int8/Int16 to "i32" and "f16"
+                // emulated maps to "f32", so falling through to wgslElem checks would
+                // mis-route sub-word ArrayViews into the i32/f32 path. v2 routes them to
+                // the sub-word path via BasicValueType + emulation flag.
+                switch (ept.BasicValueType)
                 {
-                    typeKey = wgslElem; bindingType = wgslElem; stride = 1;
-                }
-                else
-                {
-                    continue; // unsupported element type for direct-param coalesce v1
+                    case BasicValueType.Int8:
+                        typeKey = "swi8"; subWordElemSize = 1; isSubWord = true;
+                        bindingType = "atomic<u32>"; stride = 1;
+                        break;
+                    case BasicValueType.Int16:
+                        typeKey = "swi16"; subWordElemSize = 2; isSubWord = true;
+                        bindingType = "atomic<u32>"; stride = 1;
+                        break;
+                    case BasicValueType.Float16:
+                        // Native f16 (shader-f16 enabled) uses `array<f16>` storage and
+                        // would bucket like a non-sub-word type (`array<f16>` is a valid
+                        // WGSL storage type). We don't currently bucket f16 native — fall
+                        // through to the wgslElem check below where it'll skip (TypeGenerator
+                        // returns "f16" not in our v1 set). Emulated f16 (the common path
+                        // when shader-f16 isn't supported) goes through atomic<u32> packed
+                        // storage like Int8/Int16.
+                        if (!Backend.HasShaderF16)
+                        {
+                            typeKey = "swf16"; subWordElemSize = 2; isSubWord = true;
+                            subWordIsFloat16 = true;
+                            bindingType = "atomic<u32>"; stride = 1;
+                            break;
+                        }
+                        continue; // native f16 not supported in v2 yet
+                    default:
+                        {
+                            var wgslElem = TypeGenerator[elemType];
+                            if (wgslElem == "i32" || wgslElem == "u32" || wgslElem == "f32")
+                            {
+                                // v1 path — same WGSL type per group, no atomic, plain `array<i32|u32|f32>`.
+                                typeKey = wgslElem; bindingType = wgslElem; stride = 1;
+                            }
+                            else
+                            {
+                                continue; // unsupported element type
+                            }
+                            break;
+                        }
                 }
 
                 if (!directBuckets.TryGetValue(typeKey, out var bucket))
                 {
-                    bucket = (bindingType, stride, new List<global::ILGPU.IR.Values.Parameter>());
+                    bucket = (bindingType, stride, isSubWord, subWordElemSize, subWordIsFloat16, new List<global::ILGPU.IR.Values.Parameter>());
                     directBuckets[typeKey] = bucket;
                 }
                 bucket.members.Add(param);
             }
+            // BasicValueType doesn't have separate UInt8/UInt16 cases — sub-word unsigned ArrayViews
+            // surface as Int8/Int16 + a sign flag elsewhere. The existing sub-word direct-param
+            // machinery (_subWordParams + _subWordFloat16Params) keys by IR param index, so
+            // signedness is handled in Load codegen via the IR's target type, not by the bucket.
+            // For coalesce purposes Int8/UInt8 share `swi8` bucket since storage layout is identical
+            // (1 byte per element packed into atomic<u32>). Same for Int16/UInt16 → `swi16`.
             foreach (var bucketKvp in directBuckets)
             {
                 var bucket = bucketKvp.Value;
                 if (bucket.members.Count < 2) continue;
-                directCandidates.Add((bucketKvp.Key, bucket.wgslType, bucket.stride, bucket.members));
+                directCandidates.Add((bucketKvp.Key, bucket.wgslType, bucket.stride, bucket.isSubWord, bucket.subWordElemSize, bucket.subWordIsFloat16, bucket.members));
             }
             directCandidates.Sort((a, b) => (b.members.Count - 1).CompareTo(a.members.Count - 1));
 
@@ -995,6 +1040,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 {
                     BodyStructParamIndex = -1,
                     IsDirectParam = true,
+                    IsSubWord = cand.isSubWord,
+                    SubWordElementByteSize = cand.subWordElemSize,
                     ElementTypeKey = cand.typeKey,
                     BindingName = bindingName,
                     ElementWordsPerSlot = cand.stride,
@@ -1006,12 +1053,23 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     group.MemberDirectParamIndices.Add(p.Index);
                     _directParamCoalesceMembership[p.Index] = group;
                     if (first) { _directParamCoalesceLeaders.Add(p.Index); first = false; }
+
+                    // For sub-word groups, register each member with the existing sub-word
+                    // direct-param machinery so Load/Store finds the leader's binding name
+                    // and the correct element byte size. _subWordFloat16Params tags Float16
+                    // members for the _f16_to_f32 / _f32_to_f16 conversion path.
+                    if (cand.isSubWord)
+                    {
+                        _subWordParams[p.Index] = cand.subWordElemSize;
+                        if (cand.subWordIsFloat16) _subWordFloat16Params.Add(p.Index);
+                        _subWordBodyStructBindingNames[p.Index] = bindingName;
+                    }
                 }
                 _coalesceGroups.Add(group);
                 currentBindings -= (cand.members.Count - 1);
 
                 if (WebGPUBackend.VerboseLogging)
-                    WebGPUBackend.Log($"[WGSL-Coalesce] Grouped {cand.members.Count} direct params [{string.Join(",", cand.members.ConvertAll(p => p.Index))}] ({cand.typeKey}) into '{bindingName}' — bindings now {currentBindings}");
+                    WebGPUBackend.Log($"[WGSL-Coalesce] Grouped {cand.members.Count} direct {(cand.isSubWord ? "sub-word " : "")}params [{string.Join(",", cand.members.ConvertAll(p => p.Index))}] ({cand.typeKey}) into '{bindingName}' — bindings now {currentBindings}");
             }
         }
 
@@ -1805,7 +1863,13 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                             bindingWgslType = dpGroup.BindingWgslType;
                             dpGroup.BindingIndex = bindingIdx;
                             builder.AppendLine($"// Param {param.Index}: direct ArrayView (COALESCE LEADER for {dpGroup.BindingName})");
-                            builder.AppendLine($"@group(0) @binding({bindingIdx}) var<storage, read> {dpGroup.BindingName} : array<{bindingWgslType}>;");
+                            // Use `read_write` storage class for consistency with body-struct
+                            // coalesce leaders (line 1688) and direct view bindings
+                            // (`accessMode` hardcoded to `read_write` because algorithm kernels
+                            // alias SubViews — same rationale applies to coalesced bindings).
+                            // WGSL `atomic<u32>` requires `read_write`; sub-word coalesce groups
+                            // bind `array<atomic<u32>>` and would fail validation under `read`.
+                            builder.AppendLine($"@group(0) @binding({bindingIdx}) var<storage, read_write> {dpGroup.BindingName} : array<{bindingWgslType}>;");
                             viewParamBindingIndices.Add((param.Index, bindingIdx));
                             bindingIdx++;
                         }
@@ -4547,11 +4611,17 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 int paramOffset = KernelParamOffset;
                 if (param.Index >= paramOffset)
                 {
-                    // Direct-param coalesce member: redirect LEA to the leader's shared
-                    // binding name. The runtime fills _scalar_params[voSlot] with this
-                    // member's u32-element offset within the shared coalesced buffer.
+                    // Direct-param coalesce member (NON-sub-word): redirect LEA to the
+                    // leader's shared binding name. The runtime fills _scalar_params[voSlot]
+                    // with this member's u32-element offset within the shared coalesced buffer.
+                    // For SUB-WORD coalesce members (IsSubWord=true), we fall through to the
+                    // existing sub-word LEA path below — _subWordBodyStructBindingNames was
+                    // populated for those members in DecideCoalesceGroups so the sub-word
+                    // Load/Store codegen finds the leader's binding name automatically; the
+                    // adjustedOffsetExpr already includes _scalar_params[voSlot] addition.
                     // (rc.16 direct-param coalesce, 2026-05-05.)
-                    if (_directParamCoalesceMembership.TryGetValue(param.Index, out var dpGroup))
+                    if (_directParamCoalesceMembership.TryGetValue(param.Index, out var dpGroup)
+                        && !dpGroup.IsSubWord)
                     {
                         _bodyReferencesScalarParams = true;
                         int dpVoSlot = _viewOffsetScalarSlots[param.Index];
@@ -4656,10 +4726,16 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                         Builder.AppendLine();
                         if (_crossBlockPointers.Contains(value))
                         {
+                            // Cross-block sub-word ptr expr — must reference the actual bound
+                            // identifier. For sub-word direct-param coalesce members,
+                            // _subWordBodyStructBindingNames maps to the leader's BindingName;
+                            // fall back to `param{N}` only when no coalesce membership exists.
+                            string swBindRef = _subWordBodyStructBindingNames.TryGetValue(param.Index, out var swCoalBindName)
+                                ? swCoalBindName : $"param{param.Index}";
                             if (elemSize == 1) // byte
-                                _crossBlockPointerExprs[target.Name] = $"((u32(atomicLoad(&param{param.Index}[(u32({adjustedOffsetExpr}) / 4u)])) >> ((u32({adjustedOffsetExpr}) % 4u) * 8u)) & 0xFFu)";
+                                _crossBlockPointerExprs[target.Name] = $"((u32(atomicLoad(&{swBindRef}[(u32({adjustedOffsetExpr}) / 4u)])) >> ((u32({adjustedOffsetExpr}) % 4u) * 8u)) & 0xFFu)";
                             else // short (2 bytes)
-                                _crossBlockPointerExprs[target.Name] = $"((u32(atomicLoad(&param{param.Index}[(u32({adjustedOffsetExpr}) / 2u)])) >> ((u32({adjustedOffsetExpr}) % 2u) * 16u)) & 0xFFFFu)";
+                                _crossBlockPointerExprs[target.Name] = $"((u32(atomicLoad(&{swBindRef}[(u32({adjustedOffsetExpr}) / 2u)])) >> ((u32({adjustedOffsetExpr}) % 2u) * 16u)) & 0xFFFFu)";
                         }
                         return;
                     }
@@ -4731,7 +4807,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             // Instead, we treat the 'loaded' value as a pointer/alias to the binding.
 
             // CRITICAL FIX: Only alias if the source IS the parameter node itself.
-            // Do NOT alias if the source is a derived pointer (e.g. LoadElementAddress), 
+            // Do NOT alias if the source is a derived pointer (e.g. LoadElementAddress),
             // as that would prevent loading actual data values.
             // Note: loadVal.Source is a ValueReference struct. To pattern match against Value types (classes),
             // we must use .Resolve() to get the underlying Value object.
@@ -4742,8 +4818,17 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 int paramOffset = KernelParamOffset;
                 if (param.Index >= paramOffset)
                 {
-                    // Alias: let v_X = &paramY;
-                    AppendLine($"let {target} = &param{param.Index};");
+                    // Direct-param coalesce member: redirect alias to leader's binding.
+                    // For non-coalesced direct params, alias the param's own binding.
+                    // (rc.16 direct-param coalesce — handle Load(Parameter ViewType) pattern.)
+                    if (_directParamCoalesceMembership.TryGetValue(param.Index, out var dpLoadAliasGroup))
+                    {
+                        AppendLine($"let {target} = &{dpLoadAliasGroup.BindingName};");
+                    }
+                    else
+                    {
+                        AppendLine($"let {target} = &param{param.Index};");
+                    }
                     return;
                 }
             }
@@ -6327,12 +6412,18 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
 
                             // Field 0 is always the actual pointer to the data.
-                            // Direct-param coalesce member: redirect to the shared binding +
-                            // per-member offset slot. Field-0 access on a coalesce member
+                            // Direct-param coalesce member (NON-sub-word): redirect to the shared
+                            // binding + per-member offset slot. Field-0 access on a coalesce member
                             // returns the pointer to THIS member's data within the shared array.
+                            // Sub-word coalesce members fall through to the default emit (which
+                            // would reference an undeclared `param{N}` and surface as a clear
+                            // WGSL compile error if a kernel ever tries to take field-0 of a
+                            // sub-word coalesce member — sub-word access patterns go through LEA,
+                            // not field-0, so this should not trip in practice).
                             if (value.FieldSpan.Index == 0)
                             {
-                                if (_directParamCoalesceMembership.TryGetValue(param.Index, out var dpFld0Group))
+                                if (_directParamCoalesceMembership.TryGetValue(param.Index, out var dpFld0Group)
+                                    && !dpFld0Group.IsSubWord)
                                 {
                                     int dpFld0VoSlot = _viewOffsetScalarSlots[param.Index];
                                     _bodyReferencesScalarParams = true;

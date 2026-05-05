@@ -506,5 +506,150 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
         });
 
         #endregion
+
+        #region Coalesce Direct ArrayView Sub-Word Parameters (v2)
+        // Sub-word direct-param coalesce — same eligibility as v1 i32/u32/f32, but for
+        // Int8/UInt8/Int16/UInt16/Float16. Shared binding storage class is
+        // `array<atomic<u32>>`; per-member offsets stored in `_scalar_params` are ELEMENT
+        // counts (byte_offset / SubWordElementByteSize), not u32-slot offsets. The Load
+        // path uses the existing sub-word `_subWordBodyStructBindingNames` redirect to
+        // find the leader's binding name.
+
+        // 11 ArrayView<byte> input params + 1 ArrayView<int> output. Output[i] = sum of
+        // input bytes at index i (cast to int). Total raw bindings = 12 + 1 _scalar_params
+        // = 13, well over 10; coalesce groups the 11 byte inputs into one binding.
+        static void DirectParamSubWordByteSumKernel(
+            Index1D idx,
+            ArrayView<int> output,
+            ArrayView<byte> v0, ArrayView<byte> v1, ArrayView<byte> v2,
+            ArrayView<byte> v3, ArrayView<byte> v4, ArrayView<byte> v5,
+            ArrayView<byte> v6, ArrayView<byte> v7, ArrayView<byte> v8,
+            ArrayView<byte> v9, ArrayView<byte> v10)
+        {
+            output[idx] = (int)v0[idx] + (int)v1[idx] + (int)v2[idx]
+                        + (int)v3[idx] + (int)v4[idx] + (int)v5[idx]
+                        + (int)v6[idx] + (int)v7[idx] + (int)v8[idx]
+                        + (int)v9[idx] + (int)v10[idx];
+        }
+
+        [TestMethod]
+        public async Task DirectParam_11ArrayViewByte_CoalesceTest() => await RunEmulatedTest(async accelerator =>
+        {
+            const int len = 256;
+            var refData = new byte[11][];
+            var bufs = new MemoryBuffer1D<byte, Stride1D.Dense>[11];
+            try
+            {
+                for (int f = 0; f < 11; f++)
+                {
+                    refData[f] = new byte[len];
+                    for (int i = 0; i < len; i++)
+                        refData[f][i] = (byte)((f + 1) * 7 + i);
+                    bufs[f] = accelerator.Allocate1D(refData[f]);
+                }
+                using var output = accelerator.Allocate1D<int>(len);
+                var kernel = accelerator.LoadAutoGroupedStreamKernel<
+                    Index1D, ArrayView<int>,
+                    ArrayView<byte>, ArrayView<byte>, ArrayView<byte>,
+                    ArrayView<byte>, ArrayView<byte>, ArrayView<byte>,
+                    ArrayView<byte>, ArrayView<byte>, ArrayView<byte>,
+                    ArrayView<byte>, ArrayView<byte>>(DirectParamSubWordByteSumKernel);
+
+                kernel((Index1D)len, output.View,
+                    bufs[0].View, bufs[1].View, bufs[2].View,
+                    bufs[3].View, bufs[4].View, bufs[5].View,
+                    bufs[6].View, bufs[7].View, bufs[8].View,
+                    bufs[9].View, bufs[10].View);
+                await accelerator.SynchronizeAsync();
+                var result = await output.CopyToHostAsync<int>();
+
+                for (int i = 0; i < len; i++)
+                {
+                    int expected = 0;
+                    for (int f = 0; f < 11; f++) expected += refData[f][i];
+                    if (result[i] != expected)
+                        throw new Exception($"DirectParam sub-word byte coalesce mismatch at i={i}: expected {expected}, got {result[i]}");
+                }
+            }
+            finally
+            {
+                for (int f = 0; f < 11; f++) bufs[f]?.Dispose();
+            }
+        });
+
+        // Per-member sub-word diagnostic — locks down per-member offset slot correctness
+        // for sub-word coalesce. Each input has refData[f][0] = (f+1) * 7; output[f] should
+        // equal that value if member f's slot is wired correctly.
+        static void DirectParamSubWordPerInputDiagnosticKernel(
+            Index1D _,
+            ArrayView<int> output,
+            ArrayView<byte> v0, ArrayView<byte> v1, ArrayView<byte> v2,
+            ArrayView<byte> v3, ArrayView<byte> v4, ArrayView<byte> v5,
+            ArrayView<byte> v6, ArrayView<byte> v7, ArrayView<byte> v8,
+            ArrayView<byte> v9, ArrayView<byte> v10)
+        {
+            output[0] = (int)v0[0];
+            output[1] = (int)v1[0];
+            output[2] = (int)v2[0];
+            output[3] = (int)v3[0];
+            output[4] = (int)v4[0];
+            output[5] = (int)v5[0];
+            output[6] = (int)v6[0];
+            output[7] = (int)v7[0];
+            output[8] = (int)v8[0];
+            output[9] = (int)v9[0];
+            output[10] = (int)v10[0];
+        }
+
+        [TestMethod]
+        public async Task DirectParam_11ArrayViewByte_PerInputDiagnostic() => await RunEmulatedTest(async accelerator =>
+        {
+            const int len = 64;
+            var refData = new byte[11][];
+            var bufs = new MemoryBuffer1D<byte, Stride1D.Dense>[11];
+            try
+            {
+                for (int f = 0; f < 11; f++)
+                {
+                    refData[f] = new byte[len];
+                    for (int i = 0; i < len; i++)
+                        refData[f][i] = (byte)((f + 1) * 7);
+                    bufs[f] = accelerator.Allocate1D(refData[f]);
+                }
+                using var output = accelerator.Allocate1D<int>(11);
+                var kernel = accelerator.LoadAutoGroupedStreamKernel<
+                    Index1D, ArrayView<int>,
+                    ArrayView<byte>, ArrayView<byte>, ArrayView<byte>,
+                    ArrayView<byte>, ArrayView<byte>, ArrayView<byte>,
+                    ArrayView<byte>, ArrayView<byte>, ArrayView<byte>,
+                    ArrayView<byte>, ArrayView<byte>>(DirectParamSubWordPerInputDiagnosticKernel);
+
+                kernel((Index1D)1, output.View,
+                    bufs[0].View, bufs[1].View, bufs[2].View,
+                    bufs[3].View, bufs[4].View, bufs[5].View,
+                    bufs[6].View, bufs[7].View, bufs[8].View,
+                    bufs[9].View, bufs[10].View);
+                await accelerator.SynchronizeAsync();
+                var result = await output.CopyToHostAsync<int>();
+
+                var sb = new System.Text.StringBuilder();
+                bool anyWrong = false;
+                for (int f = 0; f < 11; f++)
+                {
+                    int expected = (f + 1) * 7;
+                    bool ok = result[f] == expected;
+                    if (!ok) anyWrong = true;
+                    sb.Append($"v{f}:{(ok ? "OK" : $"WRONG got={result[f]} expect={expected}")}; ");
+                }
+                if (anyWrong)
+                    throw new Exception("DirectParam sub-word per-input diagnostic: " + sb.ToString());
+            }
+            finally
+            {
+                for (int f = 0; f < 11; f++) bufs[f]?.Dispose();
+            }
+        });
+
+        #endregion
     }
 }
