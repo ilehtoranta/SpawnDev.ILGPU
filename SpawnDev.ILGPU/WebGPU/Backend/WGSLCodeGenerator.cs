@@ -744,6 +744,50 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     return $"{indent}{varName} = {expr};";
                 });
 
+                // SECOND PASS: substitute uses of complex-pointer-LEA `let` bindings.
+                //
+                // The first pass keeps `let v_X = &(*v_Y)[idx];` as block-scoped because the
+                // index might reference a block-local variable. But when v_X is dereferenced
+                // in a sibling case (`v_R = *v_X;` or `*v_X = v_W;`), naga reports
+                // "unresolved value 'v_X'" — the let died with its case scope.
+                //
+                // Fix: text-substitute `*v_X` with `(*v_Y)[idx]` everywhere in the helper
+                // body, then drop the original let. The substitution is sound because:
+                //   - v_Y is either a fn parameter (always visible) or a function-scope alias.
+                //   - idx references function-scope hoisted vars (already in VariableBuilder).
+                // If a future case introduces an idx that references a block-local var, the
+                // resulting WGSL will fail at compile time with a more specific error and we
+                // can refine the fix at that point.
+                {
+                    var ptrLetPattern = new System.Text.RegularExpressions.Regex(
+                        @"^\s*let\s+(v_\d+)\s*=\s*&\s*(.+?);\s*$",
+                        System.Text.RegularExpressions.RegexOptions.Multiline);
+
+                    var ptrLets = new Dictionary<string, string>(); // varName -> deref expression
+                    foreach (System.Text.RegularExpressions.Match m in ptrLetPattern.Matches(processed))
+                    {
+                        var name = m.Groups[1].Value;
+                        var deref = m.Groups[2].Value.Trim();
+                        if (!ptrLets.ContainsKey(name))
+                            ptrLets[name] = deref;
+                    }
+
+                    foreach (var kvp in ptrLets)
+                    {
+                        string varName = kvp.Key;
+                        string derefExpr = kvp.Value;
+                        // `*v_X` -> `(<derefExpr>)`. Wrap in parens so subsequent operators
+                        // (e.g., `*v_X + 1`) bind correctly. We deliberately leave the
+                        // original `let v_X = &expr;` in place — keeps any non-deref use
+                        // (e.g., passing v_X as a pointer arg) resolving inside its own case.
+                        // Cross-case `*v_X` uses now substitute to the deref expression
+                        // directly and no longer depend on the block-scoped let.
+                        var derefUsePattern = new System.Text.RegularExpressions.Regex(
+                            @"\*" + System.Text.RegularExpressions.Regex.Escape(varName) + @"(?![A-Za-z0-9_])");
+                        processed = derefUsePattern.Replace(processed, "(" + derefExpr + ")");
+                    }
+                }
+
                 // Rebuild the code: replace the loop portion with processed version
                 Builder.Remove(deferredInsertPosition, Builder.Length - deferredInsertPosition);
                 Builder.Append(processed);

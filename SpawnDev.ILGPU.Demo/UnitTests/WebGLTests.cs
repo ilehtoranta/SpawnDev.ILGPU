@@ -1511,5 +1511,19 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
             throw new UnsupportedTestException(
                 "WebGL: GLSL ES 3.0 has no pointer types — ArrayView fn-params can't go through " +
                 "the standalone-fn-def path. Tracked as rc.16 Bug D follow-up.");
+
+        [TestMethod]
+        public new Task Tests23_LongOffset_OnSubWordView_NoCodegenError() =>
+            throw new UnsupportedTestException(
+                "WebGL: GLSL ES 3.0 has no pointer types — ArrayView fn-params can't go through " +
+                "the standalone-fn-def path. Same root cause as Tests23_DecodeUint_LongForm_CompileSmoke. " +
+                "Tracked as rc.16 Bug D follow-up.");
+
+        [TestMethod]
+        public new Task Tests23_I64Shift_InHelper_NoCodegenError() =>
+            throw new UnsupportedTestException(
+                "WebGL: GLSL ES 3.0 has no pointer types — ArrayView fn-params can't go through " +
+                "the standalone-fn-def path. Same root cause as Tests23_DecodeUint_LongForm_CompileSmoke. " +
+                "Tracked as rc.16 Bug D follow-up.");
     }
 }
