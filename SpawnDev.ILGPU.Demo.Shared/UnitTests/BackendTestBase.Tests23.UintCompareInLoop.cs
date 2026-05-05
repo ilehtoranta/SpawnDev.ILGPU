@@ -643,6 +643,89 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             if (got[0] != 107) throw new Exception($"TwoShortDense: expected 107 got {got[0]}");
         });
 
+        // Repro for Data's StyleMosaic Wasm hang at rc.16: 24+ sequential InstanceNorm-shape
+        // pairs (Pass1 writes fresh per-call buffer, Pass2 reads it). Per-call buffer
+        // pattern means each pair allocates 2 fresh buffers, never host-written, GPU-written
+        // by Pass 1, GPU-read by Pass 2. With 24+ iterations, 48+ buffers churn through the
+        // dispatcher's snapshot path. Tests23_OutputThenInput_NoStaleSnapshot covers the 1-pair
+        // case; this one stress-tests scaling.
+        static void Tests23_StyleMosaicShape_WriteKernel(
+            Index1D idx, ArrayView<float> input, ArrayView<float> intermediate)
+        {
+            intermediate[idx] = input[idx] * 7.0f + 13.0f;
+        }
+        static void Tests23_StyleMosaicShape_ReadKernel(
+            Index1D idx, ArrayView<float> intermediate, ArrayView<float> output)
+        {
+            output[idx] = intermediate[idx] * 2.0f;
+        }
+
+        [TestMethod]
+        public async Task Tests23_StyleMosaicShape_PairedDispatchesScale() => await RunEmulatedTest(async accelerator =>
+        {
+            const int N = 65536; // 256×256 image scale (StyleMosaic uses ~256×256×3)
+            const int Pairs = 32; // mimics StyleMosaic's 24+ InstanceNorm calls
+
+            using var input = accelerator.Allocate1D<float>(N);
+            var src = new float[N];
+            for (int i = 0; i < N; i++) src[i] = (i + 1) * 0.5f;
+            input.CopyFromCPU(src);
+
+            // Allocate output up front for the final read.
+            using var finalOutput = accelerator.Allocate1D<float>(N);
+
+            var kWrite = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<float>, ArrayView<float>>(
+                Tests23_StyleMosaicShape_WriteKernel);
+            var kRead = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<float>, ArrayView<float>>(
+                Tests23_StyleMosaicShape_ReadKernel);
+
+            // Track all per-call buffers so we can dispose them after sync.
+            var perCallBufs = new System.Collections.Generic.List<MemoryBuffer1D<float, Stride1D.Dense>>(Pairs);
+            try
+            {
+                var prevReadOutput = input;
+                for (int p = 0; p < Pairs; p++)
+                {
+                    // Allocate fresh per-call intermediate buffer (HostWriteCounter==0).
+                    var intermediate = accelerator.Allocate1D<float>(N);
+                    perCallBufs.Add(intermediate);
+
+                    // Pass 1: write to intermediate from prev result.
+                    kWrite((Index1D)N, prevReadOutput.View, intermediate.View);
+
+                    // Pass 2: read intermediate, write to a new fresh per-call output.
+                    var output = accelerator.Allocate1D<float>(N);
+                    perCallBufs.Add(output);
+                    kRead((Index1D)N, intermediate.View, output.View);
+
+                    prevReadOutput = output;
+                }
+
+                // Final read: copy the last output to finalOutput so we can verify.
+                var kCopy = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<float>, ArrayView<float>>(
+                    (Index1D ii, ArrayView<float> a, ArrayView<float> b) => { b[ii] = a[ii]; });
+                kCopy((Index1D)N, prevReadOutput.View, finalOutput.View);
+
+                await accelerator.SynchronizeAsync();
+
+                var got = await finalOutput.CopyToHostAsync<float>();
+                // Expected: each pair multiplies by (7*2 + 13*2) → not exactly, the chain is:
+                //   v_{p+1} = (v_p * 7 + 13) * 2
+                // After Pairs iterations, expected[i] = chain(src[i], Pairs).
+                for (int i = 0; i < N; i++)
+                {
+                    float v = src[i];
+                    for (int p = 0; p < Pairs; p++) v = (v * 7.0f + 13.0f) * 2.0f;
+                    if (System.Math.Abs(got[i] - v) > System.Math.Abs(v) * 1e-3f)
+                        throw new System.Exception($"StyleMosaicShape idx {i}: expected {v} got {got[i]}");
+                }
+            }
+            finally
+            {
+                foreach (var b in perCallBufs) b.Dispose();
+            }
+        });
+
         // Test J: WebGL glWorker.js subview-offset leak across same-program dispatches.
         // Surfaced 2026-05-04 by Data's StyleMosaic node 55 Gather first-divergent
         // capture: WebGL's glWorker.js was conditionally setting the
