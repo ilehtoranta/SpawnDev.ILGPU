@@ -2,6 +2,57 @@
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
 
+## 4.9.5-rc.24 (2026-05-04) — CUDA body-struct ArrayView-field alignment ROOT-CAUSE FIX (#32)
+
+### Fix: ViewType.Alignment was hardcoded 4, should be 8 on 64-bit targets
+
+ILGPU IR `ViewType` constructor at `ILGPU/IR/Types/PointerTypes.cs` was hardcoding `Size = Alignment = 4` regardless of target platform pointer size. After `LowerViews` runs, every `ViewType` becomes a `StructureType` of `{void*, long}` = 16 bytes, 8-byte aligned (per the host-side `ViewImplementation<T>` layout that the argument mapper produces). But the IR carried the pre-lowered `Alignment = 4` metadata when computing body struct alignment.
+
+Body struct containing 2+ `ArrayView<T>` fields propagated `Alignment = max(4, 4) = 4` up. PTX emitted
+
+```ptx
+.param .align 4 .b8 _s_91[32]   // 32 bytes, but only 4-byte aligned
+```
+
+while the host-side argument mapper laid out two `ViewImplementation<T>` fields at 8-byte alignment. `cuLaunchKernel` detected the mismatch and rejected with `CUDA_ERROR_LAUNCH_OUT_OF_RESOURCES` even at `blockDim=1`, even though `cuFuncGetAttribute` reported `MAX_THREADS_PER_BLOCK=1024 / NUM_REGS=24 / no spilling / no shared/local/const mem`.
+
+Fix: `ViewType` now mirrors `PointerType` — `Size = Alignment = 8` on 64-bit targets, 4 on 32-bit:
+
+```csharp
+if (typeContext.TargetPlatform.Is64Bit())
+    Size = Alignment = 8;
+else
+    Size = Alignment = 4;
+```
+
+PTX now emits `.param .align 8 .b8 _s_91[32]`, matches the host buffer, launch succeeds.
+
+### Why single-ArrayView body structs and ArrayView1D Dense kept working pre-fix
+
+Single-ArrayView body structs (`Tests23_OnlyShortBodyStruct`) and `ArrayView1D<T, Stride1D.Dense>` body fields (`Tests23_TwoShortBodyStructDense`) used different alignment-propagation paths in the IR — the inner structure type or the wrapping/single-field case picked up 8-byte alignment from the actual lowered layout, sidestepping the bug. That's why Tuvok's `MaxNumThreadsPerGroup = 1` workaround appeared to "fix register pressure" — it actually changed codegen path enough to avoid the alignment mismatch by coincidence.
+
+### What this unblocks
+
+- **Tuvok's `SilkDecodeCoreGpu` CUDA path** — bump `SpawnDev.Codecs` to `SpawnDev.ILGPU 4.9.5-rc.24` and lift the `MaxNumThreadsPerGroup = 1` workaround.
+- **Any kernel with a body struct containing 2+ `ArrayView<T>` fields on CUDA** — including the `Tests23_RegisterHeavyBody*` shapes that previously failed at launch despite trivial register usage.
+
+### Defense in depth (also in rc.24)
+
+(1) **`CU_JIT_MAX_REGISTERS=255` cap** auto-forwarded to `cuModuleLoadDataEx` — forces ptxas to spill instead of producing kernels that exceed the per-thread hardware cap on any sm_50+ device. Configurable via `CudaAccelerator.DefaultMaxRegistersPerThread` (default 255, set 0 to disable). Closes a separate class of `CUDA_ERROR_LAUNCH_OUT_OF_RESOURCES` failures driven by ptxas overshoot.
+
+(2) **`CU_JIT_INFO_LOG_BUFFER` + `CU_JIT_LOG_VERBOSE`** plumbed — ptxas register/spill/shared-mem info now surfaces via `Trace.WriteLine` when `CudaAccelerator.VerboseModuleLoad = true` (off by default).
+
+(3) **`cuFuncGetAttribute`** via direct `DllImport` in `CudaKernel` — same `VerboseModuleLoad` flag dumps `MAX_THREADS_PER_BLOCK / NUM_REGS / SHARED_SIZE_BYTES / LOCAL_SIZE_BYTES / CONST_SIZE_BYTES / PTX_VERSION / BINARY_VERSION` per loaded kernel. Useful when debugging future CUDA launch errors.
+
+### Lockdown tests
+
+- `Tests23_DeepUnroll_NoLaunchFailure` (new) — 24 live integers through final reduction + chain accumulator, locks down deep-unroll register-pressure shape across all backends.
+- `Tests23_TwoShortBodyStruct`, `Tests23_SilkBodyStructShape`, `Tests23_RegisterHeavyBody_UnitExtent_NoLaunchFailure`, `Tests23_RegisterHeavyBody_LargeExtent_Parallel` — all PASS post-fix on CUDA (FAIL pre-fix).
+
+### Verification
+
+18/18 broader sample sweep across CUDA + OpenCL + CPU + Tests1-23 — no regressions. Cuda non-Tests23 tests sampled: `LocalMemoryRepro_Int64_ShortByteViews`, `QR_GaloisField_Multiply`, `QR_Render_GPU_CPUMatch`, `QR_Decode_RoundTrip`, `KernelTest`, `KernelFloatTest`, `FloatInfinityLiteralTest`, `P2P_Dispatcher_Create` — all PASS.
+
 ## 4.9.5-rc.9 (2026-05-04) — Wasm cast-view byte-length fix
 
 ### Fix: Wasm OOB when an ArrayView's element type differs from its parent buffer's element type
