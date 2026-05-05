@@ -1046,6 +1046,26 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 return;
             }
 
+            // Emulated 64-bit shift dispatch — closes Tests23_I64Shift_InHelper_NoCodegenError
+            // on WebGL (mirrors WGSL local.8 fix `WGSLCodeGenerator.GenerateBinOp`). Pre-fix
+            // GLSL emitted `uvec2 = uvec2 >> int` which performs COMPONENT-WISE shift
+            // (`(a.x >> shift, a.y >> shift)`) — losing the carry from hi to lo. For input
+            // 0x1234567890ABCDEF >> 8 the GLSL produced 0x0090ABCD (just `0x90ABCDEF >> 8`)
+            // instead of 0x7890ABCD. Route emu-i64/u64 shifts through `i64_shl` / `i64_shr`
+            // / `u64_shr` emulation helpers from GLSLEmulationLibrary.
+            string leftType = TypeGenerator[value.Left.Type];
+            bool leftIsEmuI64 = Backend.EnableI64Emulation
+                && (leftType == "uvec2" && value.Left.BasicValueType == BasicValueType.Int64);
+            if (leftIsEmuI64
+                && (value.Kind == BinaryArithmeticKind.Shl || value.Kind == BinaryArithmeticKind.Shr))
+            {
+                string shiftFn = value.Kind == BinaryArithmeticKind.Shl
+                    ? "i64_shl"
+                    : (value.IsUnsigned ? "u64_shr" : "i64_shr");
+                AppendLine($"{target} = {shiftFn}({left}, uint({right}));");
+                return;
+            }
+
             // Check if this is a boolean operation. GLSL requires logical operators
             // (&&, ||) for booleans, not bitwise (&, |).
             // The target variable's Type is set from TypeGenerator[value.Type] in Allocate().

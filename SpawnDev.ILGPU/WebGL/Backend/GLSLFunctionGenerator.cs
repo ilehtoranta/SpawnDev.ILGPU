@@ -28,6 +28,58 @@ namespace SpawnDev.ILGPU.WebGL.Backend
 
         public override void GenerateCode()
         {
+            // Emulation library forward declarations.
+            //
+            // CodeGeneratorBackend merges helpers BEFORE the kernel's content (reverse
+            // merge order). The emulation library lives at the top of the kernel's
+            // Builder, so in the final GLSL, helper fn defs appear BEFORE the i64/f64
+            // emulation function definitions. GLSL ES 3.0 requires fns to be declared
+            // before use — without forward decls, helpers calling `i64_shr` /
+            // `i64_shl` / etc. fail with "no matching overloaded function found".
+            //
+            // Forward decls + later defs is legal GLSL (and conventional). Emitting
+            // the full set up-front (cheap — they're prototypes only) is simpler than
+            // tracking which specific helpers each helper actually uses.
+            // Closes Tests23_I64Shift_InHelper_NoCodegenError on WebGL after the
+            // local.13+ i64 shift dispatch fix routed `>>` on uvec2 through `i64_shr`.
+            Builder.AppendLine("// === Emulation library forward declarations ===");
+            Builder.AppendLine("uvec2 i64_from_i32(int v);");
+            Builder.AppendLine("uvec2 u64_from_u32(uint v);");
+            Builder.AppendLine("int i64_to_i32(uvec2 v);");
+            Builder.AppendLine("uint u64_to_u32(uvec2 v);");
+            Builder.AppendLine("uvec2 i64_add(uvec2 a, uvec2 b);");
+            Builder.AppendLine("uvec2 i64_sub(uvec2 a, uvec2 b);");
+            Builder.AppendLine("uvec2 i64_mul(uvec2 a, uvec2 b);");
+            Builder.AppendLine("uvec2 u64_mul(uvec2 a, uvec2 b);");
+            Builder.AppendLine("uvec2 i64_neg(uvec2 a);");
+            Builder.AppendLine("uvec2 i64_abs(uvec2 a);");
+            Builder.AppendLine("uvec2 i64_and(uvec2 a, uvec2 b);");
+            Builder.AppendLine("uvec2 i64_or(uvec2 a, uvec2 b);");
+            Builder.AppendLine("uvec2 i64_xor(uvec2 a, uvec2 b);");
+            Builder.AppendLine("uvec2 i64_not(uvec2 a);");
+            Builder.AppendLine("uvec2 i64_shl(uvec2 a, uint shift);");
+            Builder.AppendLine("uvec2 i64_shr(uvec2 a, uint shift);");
+            Builder.AppendLine("uvec2 u64_shr(uvec2 a, uint shift);");
+            Builder.AppendLine("bool i64_lt(uvec2 a, uvec2 b);");
+            Builder.AppendLine("bool i64_le(uvec2 a, uvec2 b);");
+            Builder.AppendLine("bool i64_gt(uvec2 a, uvec2 b);");
+            Builder.AppendLine("bool i64_ge(uvec2 a, uvec2 b);");
+            Builder.AppendLine("bool i64_eq(uvec2 a, uvec2 b);");
+            Builder.AppendLine("bool i64_ne(uvec2 a, uvec2 b);");
+            Builder.AppendLine("bool u64_lt(uvec2 a, uvec2 b);");
+            Builder.AppendLine("bool u64_le(uvec2 a, uvec2 b);");
+            Builder.AppendLine("bool u64_gt(uvec2 a, uvec2 b);");
+            Builder.AppendLine("bool u64_ge(uvec2 a, uvec2 b);");
+            Builder.AppendLine("uvec2 i64_min(uvec2 a, uvec2 b);");
+            Builder.AppendLine("uvec2 i64_max(uvec2 a, uvec2 b);");
+            Builder.AppendLine("uvec2 u64_min(uvec2 a, uvec2 b);");
+            Builder.AppendLine("uvec2 u64_max(uvec2 a, uvec2 b);");
+            Builder.AppendLine("vec2 f64_from_ieee754_bits(uint lo, uint hi);");
+            Builder.AppendLine("uvec2 f64_to_ieee754_bits(vec2 v);");
+            Builder.AppendLine("float _f16_to_f32(uint bits);");
+            Builder.AppendLine("uint _f32_to_f16(float v);");
+            Builder.AppendLine();
+
             GenerateHeaderStub(Builder);
             Builder.AppendLine(" {");
             IndentLevel = 1;
