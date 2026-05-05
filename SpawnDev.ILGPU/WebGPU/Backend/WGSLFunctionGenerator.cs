@@ -49,6 +49,19 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         private readonly Dictionary<string, int> _subWordLEAVars = new();       // LEA target Variable name -> paramIdx
         private readonly Dictionary<int, string> _paramIndexToLocalVar = new(); // paramIdx -> "v_X" (the helper's `let v_X : ptr<...> = p_Y;` local name)
 
+        // Emulated 64-bit storage view params (ArrayView<long>/<ulong>/<double>).
+        // Helper signature for these uses `array<u32>` (raw bits, mirroring kernel
+        // binding) rather than `array<emu_i64>` / `array<emu_f64>`. LEA / Load /
+        // Store overrides consult these sets to emit the stride=2 raw u32 access
+        // pattern instead of direct element indexing.
+        // Closes Tuvok's 2026-05-05 walker WGSL L44452 type mismatch.
+        private readonly HashSet<int> _emuI64Params = new();    // ArrayView<long>/<ulong>
+        private readonly HashSet<int> _emuF64Params = new();    // ArrayView<double>
+        // LEA target Variable name -> (paramIdx, isF64). Populated when LEA on an
+        // emu-64 view is emitted; consumed by Load / Store to know which raw-bits
+        // base_idx to dereference.
+        private readonly Dictionary<string, (int paramIdx, bool isF64)> _emu64LEAVars = new();
+
         // Cross-block FieldAddress inline substitution map. Helper bodies emitted as
         // multi-block switch/case state machines define LoadFieldAddress in one case
         // and use it in others; WGSL `let` is case-scoped, so a use in case N of a
@@ -102,6 +115,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             MemoryAddressSpace? observedAddressSpace = null)
         {
             bool isSubWord = false;
+            bool isEmuI64 = false;
+            bool isEmuF64 = false;
             if (viewType.ElementType is PrimitiveType prim)
             {
                 switch (prim.BasicValueType)
@@ -112,6 +127,12 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                         break;
                     case BasicValueType.Float16:
                         if (!hasShaderF16) isSubWord = true;
+                        break;
+                    case BasicValueType.Int64:
+                        isEmuI64 = true;
+                        break;
+                    case BasicValueType.Float64:
+                        isEmuF64 = true;
                         break;
                 }
             }
@@ -141,6 +162,21 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             // surfaces that case, route sub-word through the storage form.
             if (isSubWord && addrSpace == "storage")
                 return "ptr<storage, array<atomic<u32>>, read_write>";
+
+            // Emulated 64-bit element types (Int64/UInt64/Float64) on storage
+            // backing must mirror the kernel's `array<u32>` raw-bits binding
+            // (see WGSLKernelFunctionGenerator.GenerateHeader line 1899-1903).
+            // The kernel binds `array<u32>` so it can spinlock-protected access
+            // each u32 half independently for atomic emu-64 ops; the helper
+            // signature must match or naga rejects the call site as a
+            // ptr<array<u32>> vs ptr<array<emu_i64>> type mismatch.
+            // Closes Tuvok's 2026-05-05 walker `EncodeFrameBody_*` arg type
+            // mismatch at WGSL L44452 where arg N expected `array<vec2<u32>>`
+            // but kernel passed `array<u32>`. Helper-side LEA + Load + Store
+            // for these params use raw u32 stride=2 (lo+hi) access — see
+            // GenerateCode(LoadElementAddress) / Load / Store overrides.
+            if ((isEmuI64 || isEmuF64) && addrSpace == "storage")
+                return "ptr<storage, array<u32>, read_write>";
 
             string elemTypeName = typeGenerator[viewType.ElementType];
             // Non-storage address spaces use `read_write` access mode; WGSL
@@ -310,6 +346,16 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     // Remember the helper-local var name for this param so the
                     // sub-word Load / Store overrides can emit `(*v_X)[wordIdx]`.
                     _paramIndexToLocalVar[param.Index] = variable.Name;
+                    // Track emu-64 ArrayView params so LEA / Load / Store emit
+                    // raw u32 stride=2 access matching the kernel's `array<u32>`
+                    // binding (closes Tuvok L44452 type mismatch).
+                    if (viewType.ElementType is PrimitiveType emuPrim)
+                    {
+                        if (emuPrim.BasicValueType == BasicValueType.Int64)
+                            _emuI64Params.Add(param.Index);
+                        else if (emuPrim.BasicValueType == BasicValueType.Float64)
+                            _emuF64Params.Add(param.Index);
+                    }
                     continue;
                 }
                 // WGSL: pointer types (ptr<workgroup, ...>, ptr<storage, ...>, ptr<function, ...>)
@@ -432,6 +478,25 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     && value.Offset.Resolve().BasicValueType == BasicValueType.Int64;
                 string offsetExpr = offsetIsEmulatedI64 ? $"i64_to_i32({offset})" : $"{offset}";
 
+                // Emu-64 (Int64/UInt64/Float64) ArrayView fn-param: raw u32 storage
+                // (stride=2). Mirror the kernel-side LEA pattern at
+                // `WGSLKernelFunctionGenerator.cs:4789-4794`. Store the u32 base
+                // index (= elementIdx * 2) in a fn-scope `let` and emit `&p_X` as
+                // the binding alias. Load/Store overrides reconstruct emu_i64 /
+                // emu_f64 from two u32 reads at base_idx and base_idx+1.
+                // Closes Tuvok L44452 fn-def call-site type mismatch (helper sig
+                // is `array<u32>` matching kernel binding; need stride-2 access).
+                bool isEmu64 = _emuI64Params.Contains(param.Index)
+                    || _emuF64Params.Contains(param.Index);
+                if (isEmu64)
+                {
+                    bool isF64 = _emuF64Params.Contains(param.Index);
+                    _emu64LEAVars[target.Name] = (param.Index, isF64);
+                    AppendLine($"let {target.Name}_base_idx = i32({offsetExpr}) * 2;");
+                    AppendLine($"let {target.Name} = p_{param.Id};");
+                    return;
+                }
+
                 if (_subWordParams.ContainsKey(param.Index))
                 {
                     // Sub-word: store the element offset; Load / Store will compute
@@ -553,6 +618,30 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 return;
             }
 
+            // Emu-64 LEA result: read two u32 slots and reconstruct.
+            // Mirror the kernel-side path at WGSLKernelFunctionGenerator
+            // GenerateCode(Load) line 4995-5020. The LEA stored the u32 base
+            // index in `{source}_base_idx`; helper-local binding alias is
+            // `source` (ptr<storage, array<u32>, read_write>).
+            if (_emu64LEAVars.TryGetValue(source.ToString(), out var emuInfo))
+            {
+                var target = Load(loadVal);
+                string baseIdxVar = $"{source}_base_idx";
+                string lo = $"(*{source})[u32({baseIdxVar})]";
+                string hi = $"(*{source})[u32({baseIdxVar}) + 1u]";
+                if (emuInfo.isF64)
+                {
+                    Declare(target);
+                    AppendLine($"{target} = f64_from_ieee754_bits({lo}, {hi});");
+                }
+                else
+                {
+                    Declare(target);
+                    AppendLine($"{target} = emu_i64({lo}, {hi});");
+                }
+                return;
+            }
+
             // Case (2): Sub-word LEA result -> extract from packed atomic<u32>.
             if (_subWordLEAVars.TryGetValue(source.ToString(), out var subWordParamIdx))
             {
@@ -623,6 +712,27 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             {
                 var val = Load(storeVal.Value);
                 AppendLine($"{fieldDeref} = {val};");
+                return;
+            }
+
+            // Emu-64 LEA target: split emu_i64 / emu_f64 into two u32 stores.
+            // Mirrors WGSLKernelFunctionGenerator.GenerateCode(Store) emu_64
+            // path at lines 5167-5200.
+            if (_emu64LEAVars.TryGetValue(address.ToString(), out var emuStoreInfo))
+            {
+                var val = Load(storeVal.Value);
+                string baseIdxVar = $"{address}_base_idx";
+                if (emuStoreInfo.isF64)
+                {
+                    AppendLine($"let _bits_{address} = f64_to_ieee754_bits({val});");
+                    AppendLine($"(*{address})[u32({baseIdxVar})] = _bits_{address}.x;");
+                    AppendLine($"(*{address})[u32({baseIdxVar}) + 1u] = _bits_{address}.y;");
+                }
+                else
+                {
+                    AppendLine($"(*{address})[u32({baseIdxVar})] = {val}.x;");
+                    AppendLine($"(*{address})[u32({baseIdxVar}) + 1u] = {val}.y;");
+                }
                 return;
             }
 

@@ -2122,6 +2122,45 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                 throw new System.Exception($"I64Shift in helper: expected {expected:X}, got {got[0]:X}");
         });
 
+        // Tuvok's local.12 PMT exposed a fn-def call-site arg type mismatch: helper
+        // takes ArrayView<long> param, kernel binding for emu-i64 ArrayView is
+        // `array<u32>` (raw bits, see WGSLKernelFunctionGenerator GenerateHeader
+        // line 1899-1903), but pre-fix helper signature was `array<emu_i64>` —
+        // naga rejected the call site as "expected ptr<array<vec2<u32>>>, got
+        // ptr<array<u32>>". Closes 2026-05-05 walker WGSL L44452 family.
+        // Repro shape: helper with [NoInlining] taking ArrayView<long> + an int
+        // index, doing read + write on the i64 view. Minimal pipeline mirrors
+        // Tuvok's `EncodeFrameBody` shape.
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        static void Tests23_I64ArrayViewHelper(
+            ArrayView<long> data,
+            int idx)
+        {
+            long val = data[idx];
+            data[idx] = val + 0x100000000L; // add 1 << 32 to test hi-word write
+        }
+
+        static void Tests23_I64ArrayViewKernel(
+            Index1D _,
+            ArrayView<long> data)
+        {
+            Tests23_I64ArrayViewHelper(data, 0);
+        }
+
+        [TestMethod]
+        public async Task Tests23_I64ArrayView_InHelper_NoCodegenError() => await RunEmulatedTest(async accelerator =>
+        {
+            using var data = accelerator.Allocate1D<long>(1);
+            data.View.CopyFromCPU(new long[] { 0x123456789L });
+            var k = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<long>>(Tests23_I64ArrayViewKernel);
+            k((Index1D)1, data.View);
+            await accelerator.SynchronizeAsync();
+            var got = await data.CopyToHostAsync<long>();
+            long expected = 0x123456789L + 0x100000000L;
+            if (got[0] != expected)
+                throw new System.Exception($"I64 ArrayView in helper: expected {expected:X}, got {got[0]:X}");
+        });
+
         #endregion
     }
 }
