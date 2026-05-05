@@ -7,8 +7,10 @@
 // WGSL function generator for helper device functions.
 // ---------------------------------------------------------------------------------------
 
+using global::ILGPU;
 using global::ILGPU.IR;
 using global::ILGPU.IR.Analyses;
+using global::ILGPU.IR.Types;
 using global::ILGPU.IR.Values;
 using System;
 using System.Collections.Generic;
@@ -53,6 +55,41 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         #region Methods
 
         /// <summary>
+        /// Returns the WGSL parameter-position type for a ViewType.
+        /// Sub-word element types (Int8/Int16/Float16-emulated) lower to
+        /// `ptr&lt;storage, array&lt;atomic&lt;u32&gt;&gt;, read_write&gt;`; full-word lower to
+        /// `ptr&lt;storage, array&lt;{elem}&gt;, read_write&gt;`. Mirrors the kernel-side
+        /// SetupParameterBindings sub-word detection (rc.16 fn-def codegen
+        /// Bug D fix, 2026-05-05).
+        /// </summary>
+        internal static string GetWgslViewParamType(
+            ViewType viewType,
+            WGSLTypeGenerator typeGenerator,
+            bool hasShaderF16)
+        {
+            bool isSubWord = false;
+            if (viewType.ElementType is PrimitiveType prim)
+            {
+                switch (prim.BasicValueType)
+                {
+                    case BasicValueType.Int8:
+                    case BasicValueType.Int16:
+                        isSubWord = true;
+                        break;
+                    case BasicValueType.Float16:
+                        if (!hasShaderF16) isSubWord = true;
+                        break;
+                }
+            }
+
+            if (isSubWord)
+                return "ptr<storage, array<atomic<u32>>, read_write>";
+
+            string elemTypeName = typeGenerator[viewType.ElementType];
+            return $"ptr<storage, array<{elemTypeName}>, read_write>";
+        }
+
+        /// <summary>
         /// Generates a header stub for the current method.
         /// </summary>
         private void GenerateHeaderStub(StringBuilder builder)
@@ -68,7 +105,23 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 if (!first) builder.Append(", ");
                 first = false;
 
-                var paramType = TypeGenerator[param.ParameterType];
+                string paramType;
+                if (param.ParameterType is ViewType viewType)
+                {
+                    // Bug D fix (2026-05-05): ArrayView<T> as a fn-param emits as
+                    // a real WGSL pointer to the kernel's storage binding, not the
+                    // bare element type. Without this fix, helpers calling
+                    // sub-word LEA on a buf param fail because `var v_X : i32 = p_X;`
+                    // produces an i32 local that can't be indexed as an array.
+                    paramType = GetWgslViewParamType(
+                        viewType,
+                        TypeGenerator,
+                        Backend.HasShaderF16);
+                }
+                else
+                {
+                    paramType = TypeGenerator[param.ParameterType];
+                }
                 builder.Append($"p_{param.Id} : {paramType}");
             }
 
@@ -162,6 +215,20 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             foreach (var param in Method.Parameters)
             {
                 var variable = Allocate(param);
+                // Bug D fix (2026-05-05): ViewType params are emitted as ptr<storage, ...>
+                // in the fn signature (see GenerateHeaderStub), so the binding must use
+                // `let` (pointers can't be `var`). The Variable's Type comes from
+                // TypeGenerator[ViewType] which returns the element type (i32) - we have
+                // to override here to keep the binding consistent with the signature.
+                if (param.ParameterType is ViewType viewType)
+                {
+                    string ptrType = GetWgslViewParamType(
+                        viewType,
+                        TypeGenerator,
+                        Backend.HasShaderF16);
+                    AppendLine($"let {variable.Name} : {ptrType} = p_{param.Id};");
+                    continue;
+                }
                 // WGSL: pointer types (ptr<workgroup, ...>, ptr<storage, ...>, ptr<function, ...>)
                 // are not constructible and cannot be used with 'var'. Use 'let' instead.
                 if (variable.Type.StartsWith("ptr<"))

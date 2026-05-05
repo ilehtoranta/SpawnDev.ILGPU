@@ -81,6 +81,40 @@ When a NoInlining helper takes `ArrayView<int>` as a parameter, the WGSL fn sign
 
 This was previously listed as "rc.17+ scope. Tuvok's `Idct16Row` does NOT take views as params... so Bug D is not on Tuvok's critical path." That assumption was wrong: Tuvok's `OpusRangeDecoderGpu` family DOES pass `ArrayView<byte>` through every helper, and his DecodeUint LargeRanges test surfaces it on every WebGPU run.
 
+**2026-05-05 Phase 1 LANDED on master commit `<TBD>`:** WGSLFunctionGenerator emits `ptr<storage, array<atomic<u32>>, read_write>` for sub-word ArrayView params and `ptr<storage, array<{elem}>, read_write>` for full-word. Local binding uses `let v_X : ptr<...> = p_X;`. WGSL signatures verified against the Tests23_DecodeUint_LongForm reproducer:
+
+```wgsl
+fn Tests23_ReadByte_973(p_1404 : ptr<function, struct_51>, p_1405 : ptr<storage, array<atomic<u32>>, read_write>, p_1406 : i32, p_1407 : i32) -> i32 {
+    let v_0 = p_1404;
+    let v_1 : ptr<storage, array<atomic<u32>>, read_write> = p_1405;
+    var v_2 : i32 = p_1406;
+    var v_3 : i32 = p_1407;
+    ...
+```
+
+But body codegen still emits the wrong access pattern at the sub-word LEA + Load:
+
+```wgsl
+let v_10 = &v_1[v_9];        // wrong: indexes into atomic<u32>, type mismatch
+v_11 = *v_10;                 // wrong: tries to load atomic<u32> as i32
+```
+
+Required emit (matches kernel main's existing sub-word load pattern):
+
+```wgsl
+v_11 = i32(((u32(atomicLoad(&(*v_1)[(u32(v_9) / 4u)])) >> ((u32(v_9) % 4u) * 8u)) & 0xFFu));
+```
+
+Phase 1 unblocks any future helper that takes full-word ArrayView (`array<i32>`/`<u32>`/`<f32>`) as a fn-param without further codegen change. Sub-word fn-param body codegen and helper-to-helper recursive calls remain broken — those are the next phases.
+
+**Remaining phases (next sessions):**
+- **Phase 2 — Sub-word body codegen.** Override `GenerateCode(LoadElementAddress)` and `GenerateCode(Load)` and `GenerateCode(Store)` in WGSLFunctionGenerator (or factor the sub-word emit logic into WGSLCodeGenerator base class) so helper bodies emit `atomicLoad(&(*p_buf)[u32(idx)/4u]) >> ((idx % 4) * 8) & 0xFFu` and corresponding atomic stores instead of raw `&p_buf[idx]` / `*ptr`. Will need helper-side `_subWordParams`-equivalent population (scan helper IR params for ViewType element type, populate dict).
+- **Phase 3 — Helper-to-helper call dispatch.** Override `GenerateCode(MethodCall)` in WGSLFunctionGenerator. Mirror the kernel generator's branches: inline-helper (HelperMethods dict), fn-call (HasImplementation && !External && !Intrinsic → EmitNonInlinedMethodCall), fall-through to base for intrinsics. Without this, OpusInit's call to ReadByte falls to "Unmapped fallback".
+- **Phase 4 — Kernel-side alias emission.** In `WGSLKernelFunctionGenerator.SetupParameterBindings`, drop the `if (!_subWordParams.ContainsKey(param.Index))` guard so `let v_X = &paramN;` emits unconditionally. This makes the sub-word ArrayView alias available at fn-call sites in main.
+- **Phase 5 — `EmitNonInlinedMethodCall` view-arg routing.** When passing an ArrayView to a non-inlined helper, ensure the arg variable is the ptr alias (`v_X` from `let v_X = &paramN;`), not the raw param value (which is the byte/element offset i32). Existing arg-string formation may already do the right thing if `Load(arg)` returns the alias variable; verify with the dump.
+
+When phases 2-5 land, the regression test `Tests23_DecodeUint_LongForm_CompileSmoke` should turn green on WebGPU + WebGPUNoSubgroups when Tuvok marks his helpers `[MethodImpl(NoInlining)]`. He can then unskip his `OpusRangeDecoderGpu_DecodeUint_LargeRanges_BitExactVsCpu` test on WebGPU.
+
 ### Bug E: Wasm narrowing fix may be incomplete for iDCT 16x16 (NOT FIXED)
 
 rc.14 added `i32.extend16_s` / `i32.extend8_s` / `0xFFFF`/`0xFF` mask narrowing in `WasmCodeGenerator.GenerateCode(ConvertValue)` for Int16 / Int8 destinations. Tuvok's report says `Vp9Idct16x16Kernel` Wasm tests still fail bit-exact at 256 mismatches per 16x16 block (100% mismatch).

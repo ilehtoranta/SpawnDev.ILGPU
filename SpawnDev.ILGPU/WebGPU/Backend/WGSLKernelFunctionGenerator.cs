@@ -4031,12 +4031,20 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 }
                 else
                 {
-                    // Sub-word params are array<atomic<u32>> - can't take pointer references.
-                    // Sub-word LEA uses element index (not pointer), so skip alias emission.
-                    if (!_subWordParams.ContainsKey(param.Index))
-                    {
-                        AppendLine($"let {variable.Name} = &param{param.Index};");
-                    }
+                    // Emit a `let` alias to the kernel binding so call sites of
+                    // NoInlining helpers can pass the pointer as an argument
+                    // (rc.16 fn-def-codegen Bug D, phase 4 — 2026-05-05).
+                    //
+                    // For full-word ArrayViews this is the existing behavior. For
+                    // sub-word ArrayViews (`array<atomic<u32>>` storage) the
+                    // earlier guard skipped emission because the inline-only sub-
+                    // word LEA path emits `&param{N}[idx]` directly and didn't
+                    // need the alias. With ptr-typed fn params landing in
+                    // WGSLFunctionGenerator.GenerateHeaderStub, kernels need the
+                    // alias variable available so it can be passed by name to
+                    // helpers — emit it for sub-word too. The alias is just a
+                    // pointer; if no helper consumes it, the var is harmless.
+                    AppendLine($"let {variable.Name} = &param{param.Index};");
 
                     if (isView && isMultiDim && (is2DView || is3DView))
                     {
