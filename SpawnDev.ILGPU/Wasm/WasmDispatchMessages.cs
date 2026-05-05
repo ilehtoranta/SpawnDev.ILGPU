@@ -22,8 +22,13 @@ namespace SpawnDev.ILGPU.Wasm
     {
         /// <summary>The async function body sent as the worker script (BuildWasmWorkerScript output).</summary>
         public string script { get; init; } = "";
-        /// <summary>Compiled Wasm module bytes; only sent on first dispatch to a worker (cached thereafter).</summary>
+        /// <summary>Compiled Wasm module bytes; sent only on first dispatch of this kernel to this worker.</summary>
         public byte[]? wasmBytes { get; init; }
+        /// <summary>Stable identifier for the kernel — used by the worker to look up its cached module/instance.
+        /// Multi-kernel pipelines (ML inference) alternate kernels; each gets a distinct kernelId so workers
+        /// can keep multiple compiled modules in their per-kernel cache and skip re-compile on every switch.
+        /// 2026-05-04 root-cause fix for Data's StyleMosaic Wasm 10+ minute hang at rc.16.</summary>
+        public int kernelId { get; init; }
         /// <summary>SharedArrayBuffer-backed WebAssembly.Memory shared across all workers.</summary>
         public JSObject memory { get; init; } = null!;
         /// <summary>Inclusive thread range start for this worker's fiber band.</summary>
@@ -48,8 +53,10 @@ namespace SpawnDev.ILGPU.Wasm
     {
         /// <summary>The async function body sent as the worker script (BuildWasmWorkerScript output).</summary>
         public string script { get; init; } = "";
-        /// <summary>Compiled Wasm module bytes; only sent on first dispatch to a worker (cached thereafter).</summary>
+        /// <summary>Compiled Wasm module bytes; sent only on first dispatch of this kernel to this worker.</summary>
         public byte[]? wasmBytes { get; init; }
+        /// <summary>Stable identifier for the kernel — see WasmBarrierDispatchMessage.kernelId.</summary>
+        public int kernelId { get; init; }
         /// <summary>SharedArrayBuffer-backed WebAssembly.Memory shared across all workers.</summary>
         public JSObject memory { get; init; } = null!;
         /// <summary>Inclusive item index start for this worker's range.</summary>

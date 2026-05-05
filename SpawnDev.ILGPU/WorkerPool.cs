@@ -62,9 +62,16 @@ self.onmessage = function(e) {
         /// The script is an async function body that receives the full message data.
         /// </summary>
         private static readonly string WasmBootstrapScript = @"
-var _cachedModule = null;
-var _cachedInstance = null;
-var _lastMemory = null;
+// Per-kernel module + instance cache. Multi-kernel pipelines (e.g. ML inference
+// alternating Conv2D / InstanceNorm / ReLU) used to re-compile every kernel
+// switch because the worker only kept ONE _cachedModule. With per-kernel
+// caching, each worker compiles each distinct kernel ONCE and keeps it for
+// the lifetime of the worker - subsequent dispatches of the same kernel
+// just look it up by kernelId and re-instantiate (cheap) only when memory
+// changes. Surfaced 2026-05-04 by Data's StyleMosaic Wasm 10+ minute hang.
+var _modulesById = {};
+var _instancesById = {};
+var _lastMemoryBuffer = null;
 var _cachedFn = null;
 var _cachedFnSrc = null;
 const AsyncFunction = Object.getPrototypeOf(async function(){}).constructor;
@@ -84,24 +91,43 @@ const _mathImports = {
 self.onmessage = async function(e) {
   var d = e.data;
   try {
-    // Compile module only when new wasmBytes arrive (first dispatch or kernel change)
+    // kernelId identifies which Wasm module to use. Sent on every dispatch.
+    // The C# side sends wasmBytes only the FIRST time this worker sees this kernel.
+    var kid = d.kernelId;
+    if (kid === undefined || kid === null) {
+      // Backwards-compat path: legacy callers without kernelId. Treat as a single
+      // global kernel slot. (Old WasmBootstrapScript behavior preserved.)
+      kid = 0;
+    }
+    // Compile module on first arrival of this kernelId (or refresh if wasmBytes
+    // explicitly re-sent — e.g. kernel was rebuilt).
     if (d.wasmBytes) {
       var wasmBuf = new Uint8Array(d.wasmBytes).buffer;
-      _cachedModule = await WebAssembly.compile(wasmBuf);
-      _cachedInstance = null; // Force re-instantiate with new module
+      _modulesById[kid] = await WebAssembly.compile(wasmBuf);
+      // Memory or module change invalidates this kernel's cached instance.
+      _instancesById[kid] = null;
     }
-    // Only re-instantiate when module or memory's underlying buffer changes.
-    // PostMessage creates a new Memory wrapper (different object) but the underlying
-    // SharedArrayBuffer is the same. Compare .buffer to avoid wasteful re-instantiation.
-    var memChanged = !_cachedInstance || !_lastMemory || d.memory.buffer !== _lastMemory.buffer;
-    if (memChanged) {
-      _lastMemory = d.memory;
-      _cachedInstance = await WebAssembly.instantiate(_cachedModule, {
+    var module = _modulesById[kid];
+    if (!module) {
+      throw new Error('Module not cached for kernelId ' + kid + ' (C# should have sent wasmBytes on first dispatch to this worker)');
+    }
+    // Memory buffer change invalidates ALL cached instances (they're tied to the
+    // memory's underlying SharedArrayBuffer). PostMessage creates a new Memory
+    // wrapper but the underlying SAB is the same — compare .buffer to detect
+    // genuine memory swaps (e.g. WebAssembly.Memory.grow() that allocates new SAB).
+    if (_lastMemoryBuffer !== d.memory.buffer) {
+      _lastMemoryBuffer = d.memory.buffer;
+      _instancesById = {};
+    }
+    var instance = _instancesById[kid];
+    if (!instance) {
+      instance = await WebAssembly.instantiate(module, {
         env: { memory: d.memory },
         Math: _mathImports
       });
+      _instancesById[kid] = instance;
     }
-    d._instance = _cachedInstance;
+    d._instance = instance;
     if (_cachedFnSrc !== d.script) { _cachedFn = new AsyncFunction('d', d.script); _cachedFnSrc = d.script; }
     await _cachedFn(d);
   } catch(ex) {

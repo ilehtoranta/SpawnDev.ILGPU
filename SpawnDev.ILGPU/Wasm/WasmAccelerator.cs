@@ -71,15 +71,24 @@ namespace SpawnDev.ILGPU.Wasm
 
         /// <summary>
         /// Tracks which pool workers have already received and cached
-        /// the compiled Wasm module, so we don't re-send wasmBytes.
+        /// the compiled Wasm module, KEYED BY wasmBytes reference. Multi-kernel
+        /// pipelines (e.g. ML StyleMosaic alternating Conv2D / InstanceNorm /
+        /// ReLU / Add) share the worker pool and would force a full re-init
+        /// (Wasm module re-compile) on every kernel change if we tracked only a
+        /// single set. With per-kernel tracking, each worker compiles each
+        /// distinct kernel once and reuses the cached instance forever after.
+        ///
+        /// Dictionary key = wasmBytes reference (object identity). Same kernel
+        /// re-loaded with the same WasmCompiledKernel instance shares the byte[]
+        /// reference (CompiledKernel caches its bytes). Different kernel = different
+        /// byte[] = different key.
+        ///
+        /// Surfaced 2026-05-04 by Data's StyleMosaic Wasm 10+ minute hang at rc.16:
+        /// ~100 dispatches × ~6 alternating kernel types × 8 workers = ~4800 wasmBytes
+        /// re-sends and full module re-compiles. Each compile of a non-trivial kernel
+        /// takes 50-100ms; product = 4-8 minutes of Wasm-side compile work alone.
         /// </summary>
-        private readonly HashSet<Worker> _initializedWorkers = new();
-
-        /// <summary>
-        /// Reference to the last wasmBytes sent to workers.
-        /// When a different kernel is dispatched, we clear _initializedWorkers.
-        /// </summary>
-        private byte[]? _lastWasmBytes;
+        private readonly Dictionary<byte[], HashSet<Worker>> _initializedWorkersByKernel = new();
 
         /// <summary>
         /// Per-worker dispatch state for persistent handlers (Hypothesis #1, 2026-04-26).
@@ -818,7 +827,7 @@ namespace SpawnDev.ILGPU.Wasm
                             "eval",
                             $"new WebAssembly.Memory({{ initial: {wasmPages}, maximum: {_maxLinearMemoryPages}, shared: true }})");
                         _cachedMemoryBuffer = _cachedWasmMemory.JSRef!.Get<SharedArrayBuffer>("buffer");
-                        _initializedWorkers.Clear();
+                        _initializedWorkersByKernel.Clear();
                     }
                     else
                     {
@@ -833,7 +842,7 @@ namespace SpawnDev.ILGPU.Wasm
                             // Re-get buffer reference (same SAB but .buffer accessor may update)
                             _cachedMemoryBuffer?.Dispose();
                             _cachedMemoryBuffer = _cachedWasmMemory.JSRef!.Get<SharedArrayBuffer>("buffer");
-                            _initializedWorkers.Clear();
+                            _initializedWorkersByKernel.Clear();
                         }
                     }
                     wasmMemory = _cachedWasmMemory;
@@ -853,7 +862,7 @@ namespace SpawnDev.ILGPU.Wasm
                             "eval",
                             $"new WebAssembly.Memory({{ initial: {wasmPages}, maximum: {_maxLinearMemoryPages}, shared: true }})");
                         _cachedMemoryBuffer = _cachedWasmMemory.JSRef!.Get<SharedArrayBuffer>("buffer");
-                        _initializedWorkers.Clear();
+                        _initializedWorkersByKernel.Clear();
                     }
                     else if (wasmPages > _cachedWasmPages)
                     {
@@ -864,7 +873,7 @@ namespace SpawnDev.ILGPU.Wasm
                         _cachedWasmPages = wasmPages;
                         _cachedMemoryBuffer?.Dispose();
                         _cachedMemoryBuffer = _cachedWasmMemory.JSRef!.Get<SharedArrayBuffer>("buffer");
-                        _initializedWorkers.Clear();
+                        _initializedWorkersByKernel.Clear();
                     }
                     wasmMemory = _cachedWasmMemory;
                     memoryBuffer = _cachedMemoryBuffer!;
@@ -1409,12 +1418,26 @@ namespace SpawnDev.ILGPU.Wasm
                 workers.AddRange(extra);
             }
 
-            // If the kernel changed since last dispatch, invalidate worker caches
-            if (!ReferenceEquals(wasmBytes, _lastWasmBytes))
+            // Per-kernel worker initialization tracking. Look up (or create) the
+            // HashSet<Worker> for this kernel's wasmBytes — workers in the set have
+            // already received and compiled this specific kernel and don't need it
+            // re-sent. Different kernels live in different sets so multi-kernel
+            // pipelines (ML inference) don't thrash the worker-side module cache.
+            //
+            // Surfaced 2026-05-04 by Data's StyleMosaic Wasm 10+ minute hang at rc.16:
+            // ~100 dispatches × ~6 alternating kernel types × 8 workers = ~4800 worker-
+            // side Wasm module re-compiles (50-100ms each) when the prior single-set
+            // tracker was being cleared on every kernel switch. Now each (worker, kernel)
+            // pair compiles once and reuses for the lifetime of the worker.
+            if (!_initializedWorkersByKernel.TryGetValue(wasmBytes, out var kernelInitSet))
             {
-                _initializedWorkers.Clear();
-                _lastWasmBytes = wasmBytes;
+                kernelInitSet = new HashSet<Worker>();
+                _initializedWorkersByKernel[wasmBytes] = kernelInitSet;
             }
+            // Stable per-kernel ID for the worker-side cache lookup. Use object hash
+            // of wasmBytes — same byte[] reference = same ID across dispatches.
+            int kernelId = System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(wasmBytes);
+
             var tasks = new List<Task>();
 
             if (hasBarriers)
@@ -1457,11 +1480,12 @@ namespace SpawnDev.ILGPU.Wasm
                     // re-dispatch can resume the spin loop where it left off.
                     int yieldStateAddr = yieldStateRegionBase + w * 16;
 
-                    bool firstTimeOnWorker = _initializedWorkers.Add(worker);
+                    bool firstTimeOnWorker = kernelInitSet.Add(worker);
                     worker.PostMessage(new WasmBarrierDispatchMessage
                     {
                         script = workerScript,
                         wasmBytes = firstTimeOnWorker ? wasmBytes : null,
+                        kernelId = kernelId,
                         memory = wasmMemory,
                         threadStart = threadStart,
                         threadEnd = threadEnd,
@@ -1502,11 +1526,12 @@ namespace SpawnDev.ILGPU.Wasm
                     handlerState.WorkerCount = workerCount;
                     handlerState.ViewLayoutDiag = _lastViewLayoutDiag;
 
-                    bool firstTimeOnWorker = _initializedWorkers.Add(worker);
+                    bool firstTimeOnWorker = kernelInitSet.Add(worker);
                     worker.PostMessage(new WasmFlatDispatchMessage
                     {
                         script = workerScript,
                         wasmBytes = firstTimeOnWorker ? wasmBytes : null,
+                        kernelId = kernelId,
                         memory = wasmMemory,
                         startIdx = startIdx,
                         endIdx = endIdx,
@@ -2170,7 +2195,7 @@ namespace SpawnDev.ILGPU.Wasm
                         "WasmAccelerator disposed while a kernel dispatch was in flight. The worker pool has been terminated."));
 
                 _pendingWork.Clear();
-                _initializedWorkers.Clear();
+                _initializedWorkersByKernel.Clear();
                 _activeDispatchCount = 0;
                 _cachedMemoryBuffer?.Dispose();
                 _cachedMemoryBuffer = null;
