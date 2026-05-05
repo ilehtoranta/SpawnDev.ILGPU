@@ -2,6 +2,41 @@
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
 
+## 4.9.5-local.4 (2026-05-05) — Wasm: explicit-launch body-struct kernel implicit-index detection + safer struct serialization
+
+Local-feed-only build. Closes `WasmTests.Tests23_RegisterHeavyBody_ExplicitOneByOne_NoLaunchFailure`
+(`MarshalDirectiveException: Type ILGPU.Util.DisposeBase ... must have a StructLayout attribute`).
+
+### Root cause
+
+Two interacting failures, both in WasmKernelFunctionGenerator parameter setup +
+WasmAccelerator dispatcher fallback:
+
+1. **`hasImplicitIndex` mis-classification.** `WasmKernelFunctionGenerator.SetupParameters` checked `IndexType != IndexType.None && !IsViewType(parameters[0].Type)` to decide whether `Method.Parameters[0]` was an implicit Index. For an explicit-launch kernel `LoadStreamKernel<TBody>` whose first user parameter is a multi-view body struct (12 ArrayView<int> fields):
+   - `entryPoint.IndexType == IndexType.KernelConfig` (not `None`).
+   - `IsViewType(body)` returns false (multi-view).
+   - So `hasImplicitIndex` was true and `startIdx = 1`. The body's parameter loop ran `for (int i = 1; i < 1; i++)` — never executed. `_paramInfos` stayed empty.
+
+2. **Dispatcher fallback used `Marshal.StructureToPtr`.** With empty `paramInfos`, the dispatcher's IR-aware struct-serialization path at `WasmAccelerator.RunKernelAsync:1115` failed its `irLayout != null && irLayout.Count > 0 && irStructSize > 0` gate and fell through to `Marshal.StructureToPtr(value, ...)`. ArrayView<T>'s `Buffer` field is a `MemoryBuffer` reference, which derives from `AcceleratorObject` -> `DisposeBase` — none have `[StructLayout]`. The CLR marshaler walked up the inheritance, hit `DisposeBase`, and threw.
+
+### Fix
+
+1. **`LooksLikeIndexType` shape check.** New helper in WasmKernelFunctionGenerator that requires `parameters[0]` to actually look like an index type (PrimitiveType for Index1D/LongIndex1D/KernelConfig, or StructureType with exactly N Int32 leaf fields where N matches `entryPoint.IndexType`'s dimensionality for Index2D/Index3D). Multi-view body structs return false. The `hasImplicitIndex` check now AND's against this — multi-view body structs as `parameters[0]` correctly resolve to `startIdx = 0`, the loop runs once, and paramInfos contains the body's struct layout.
+
+2. **Unsafe.Write everywhere.** Replaced the `Marshal.StructureToPtr` fallback branch with `Unsafe.Write` (which was previously gated on `IsGenericType`). Unsafe.Write is layout-agnostic — works for any value-type struct including those with class-reference fields. Defense in depth: if a future code path falls through to this fallback again, it won't crash with a marshaling exception (though the kernel-side bytes will be wrong without view-pointer patching, signaling a different bug to investigate). The IR-aware path remains the primary serialization route.
+
+### Verified
+
+- `WasmTests.Tests23_RegisterHeavyBody_ExplicitOneByOne_NoLaunchFailure`: PASS (was FAIL `MarshalDirectiveException`).
+- `WasmTests.Tests23_RegisterHeavyBody_UnitExtent_NoLaunchFailure`: PASS.
+- `WasmTests.Tests23_RegisterHeavyBody_LargeExtent_Parallel`: PASS.
+- `WasmTests.Tests23_OnlyShortBodyStruct`: PASS.
+- `WasmTests.Tests23_HostWriteVsQueuedDispatchRace`: PASS.
+- `WasmTests.Tests23_DecodeUint_LongForm_CompileSmoke`: PASS.
+- `WasmTests.AlgorithmRadixSortPairsIntTest`: PASS.
+- `WasmTests.AlgorithmRadixSortNonPairsIntTest`: PASS.
+- 8/8 across the targeted regression filter, 0 failures.
+
 ## 4.9.5-local.3 (2026-05-05) — Wasm: lazy per-HWC snapshot fixes RadixSort regression + perf
 
 Local-feed-only build. Fixes the RadixSort multi-pass data-corruption regression

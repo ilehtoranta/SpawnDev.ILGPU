@@ -533,14 +533,27 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             // IndexType is unreliable: ILGPU overrides it to KernelConfig for ALL kernels
             // using SharedMemory, even those with an actual Index1D first parameter.
             // Instead, we check: (1) IndexType != None (kernel expects some index), AND
-            // (2) parameters[0] is NOT an ArrayView type (views are always user params).
+            // (2) parameters[0] is NOT an ArrayView type (views are always user params), AND
+            // (3) parameters[0] looks like an actual index type — either a PrimitiveType
+            //     (Int1D scalarized) or a StructureType matching the IndexNumFields fingerprint
+            //     (Index2D = 2 i32 fields, Index3D = 3 i32 fields). Without (3), a
+            //     KernelConfig-launched explicit kernel whose first user param happens to be
+            //     a multi-view body struct gets misclassified as having an implicit Index
+            //     and the param-info loop skips its only user param entirely (paramInfos
+            //     stays empty, the dispatcher falls back to Marshal.StructureToPtr which
+            //     fails with "DisposeBase must have StructLayout" on ArrayView<T>'s
+            //     internal MemoryBuffer reference field). Surfaced by
+            //     `Tests23_RegisterHeavyBody_ExplicitOneByOne_NoLaunchFailure`, 2026-05-05.
+            //
             // This correctly handles:
             //   SharedMemoryKernel(Index1D, ArrayView) → param[0]=PrimitiveType → startIdx=1
             //   PrefixSumKernel(ArrayView)             → param[0]=View → startIdx=0
-            //   Kernel2D(Index2D, ArrayView2D)          → param[0]=StructureType(non-view) → startIdx=1
+            //   Kernel2D(Index2D, ArrayView2D)          → param[0]=StructureType(2 i32 fields) → startIdx=1
+            //   ExplicitKernel(BodyStruct{12 views})    → param[0]=StructureType(12 views) → startIdx=0
             bool hasImplicitIndex = entryPoint.IndexType != IndexType.None
                 && parameters.Count > 0
-                && !IsViewType(parameters[0].Type);
+                && !IsViewType(parameters[0].Type)
+                && LooksLikeIndexType(parameters[0].Type, entryPoint.IndexType);
             int startIdx = hasImplicitIndex ? 1 : 0;
 
             // Map the implicit index param to globalIdx
@@ -4070,6 +4083,45 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                     IsViewPtr = fieldType is AddressSpaceType,
                 });
             }
+        }
+
+        /// <summary>
+        /// Conservative check that <paramref name="type"/> matches the shape of an
+        /// implicit Index parameter for the given <paramref name="entryIndexType"/>:
+        /// PrimitiveType (Int32/Int64) for Index1D / KernelConfig, or a StructureType
+        /// containing exactly N Int32 leaf fields where N matches the index dimensionality
+        /// (2 for Index2D, 3 for Index3D). Anything else — particularly multi-view body
+        /// structs — returns false so the dispatcher knows the first user parameter is
+        /// not the implicit index. (rc.16 RegisterHeavyBody explicit-launch fix, 2026-05-05.)
+        /// </summary>
+        private static bool LooksLikeIndexType(TypeNode type, IndexType entryIndexType)
+        {
+            // Index1D / LongIndex1D / KernelConfig (Index1D variant): primitive i32 or i64.
+            if (type is PrimitiveType pt)
+            {
+                return pt.BasicValueType == BasicValueType.Int32
+                    || pt.BasicValueType == BasicValueType.Int64;
+            }
+            // Index2D / Index3D: StructureType with exactly N Int32 fields.
+            if (type is StructureType st)
+            {
+                int expectedFields = entryIndexType switch
+                {
+                    IndexType.Index2D => 2,
+                    IndexType.Index3D => 3,
+                    // Index1D / KernelConfig — when scalarized to a struct (rare), 1 field.
+                    _ => 1,
+                };
+                if (st.NumFields != expectedFields) return false;
+                for (int i = 0; i < st.NumFields; i++)
+                {
+                    if (st.Fields[i] is not PrimitiveType fpt
+                        || fpt.BasicValueType != BasicValueType.Int32)
+                        return false;
+                }
+                return true;
+            }
+            return false;
         }
 
         protected bool IsViewType(TypeNode type)

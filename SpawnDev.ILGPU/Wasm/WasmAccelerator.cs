@@ -1192,28 +1192,37 @@ namespace SpawnDev.ILGPU.Wasm
                             }
                             else if (value.GetType().IsValueType)
                             {
-                                // Fallback: use Unsafe.Write (CLR layout).
-                                // This works for VALUE TYPE structs WITHOUT views.
+                                // Fallback: use Unsafe.Write (works for any value-type struct
+                                // including those with class-reference fields via the GC heap).
+                                // The previous Marshal.StructureToPtr branch (for non-generic
+                                // value types) failed with `MarshalDirectiveException: Type
+                                // ILGPU.Util.DisposeBase ... must have a StructLayout attribute`
+                                // when the struct contained ArrayView<T> fields — ArrayView<T>
+                                // has a `Buffer` reference field of type MemoryBuffer (which
+                                // derives from DisposeBase, no StructLayout). User-authored
+                                // body structs (Tests23_RegisterHeavyBody with 12 ArrayView<int>
+                                // fields) trip this path because their IR struct layout was
+                                // either not populated or not picked up at the IR-aware path
+                                // above. Unsafe.Write is layout-agnostic and works in both
+                                // generic and non-generic cases — switching unconditionally
+                                // closes the marshaling crash without losing correctness for
+                                // the kernel-side bytes (which are then over-written with the
+                                // proper IR layout below by the existing struct-to-scratch
+                                // serialization path that uses NativePtr for view-pointer
+                                // patching). (rc.16 RegisterHeavyBody marshaling fix, 2026-05-05.)
                                 structSize = global::ILGPU.Interop.SizeOf(value.GetType());
                                 bytes = new byte[structSize];
                                 var handle = System.Runtime.InteropServices.GCHandle.Alloc(bytes, System.Runtime.InteropServices.GCHandleType.Pinned);
                                 try
                                 {
-                                    if (value.GetType().IsGenericType)
+                                    unsafe
                                     {
-                                        unsafe
-                                        {
-                                            byte* ptr = (byte*)handle.AddrOfPinnedObject();
-                                            var unsafeWriteMethod = _unsafeWriteCache.GetOrAdd(value.GetType(), t =>
-                                                typeof(Unsafe)
-                                                    .GetMethod("Write", BindingFlags.Public | BindingFlags.Static)!
-                                                    .MakeGenericMethod(t));
-                                            unsafeWriteMethod.Invoke(null, new object[] { (IntPtr)ptr, value });
-                                        }
-                                    }
-                                    else
-                                    {
-                                        System.Runtime.InteropServices.Marshal.StructureToPtr(value, handle.AddrOfPinnedObject(), false);
+                                        byte* ptr = (byte*)handle.AddrOfPinnedObject();
+                                        var unsafeWriteMethod = _unsafeWriteCache.GetOrAdd(value.GetType(), t =>
+                                            typeof(Unsafe)
+                                                .GetMethod("Write", BindingFlags.Public | BindingFlags.Static)!
+                                                .MakeGenericMethod(t));
+                                        unsafeWriteMethod.Invoke(null, new object[] { (IntPtr)ptr, value });
                                     }
                                 }
                                 finally { handle.Free(); }
