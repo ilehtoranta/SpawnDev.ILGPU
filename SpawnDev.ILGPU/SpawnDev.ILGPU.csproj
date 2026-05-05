@@ -4,8 +4,16 @@
 		<TargetFramework>net10.0</TargetFramework>
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>enable</Nullable>
-		<Version>4.9.5-rc.22</Version>
-		<PackageReleaseNotes>v4.9.5-rc.22: WebGL runtime-safe Pow for negative base when exponent comes from a buffer load (e.g., ONNX initializer ArrayView). Closes Data's DistilBERT WebGL drift per his 2026-05-04 first-divergent capture at node 10 Pow.
+		<Version>4.9.5-rc.23</Version>
+		<PackageReleaseNotes>v4.9.5-rc.23: Wasm dispatcher watchdog timeout — defense in depth on top of rc.21's fast-fault. The fast-fault catches worker EXCEPTIONS (kernel OOB, divide-by-zero) immediately. But if a kernel infinite-loops (no error, no post-back), the worker TCS never resolves and Task.WhenAny blocks forever; outer harness hits the 10-minute PMT timeout instead of an actionable error.
+
+Watchdog: per-dispatch timeout (default 120s, configurable via `WasmAccelerator.WasmDispatchWatchdogSeconds`). If worker tasks don't all complete within the window, throw `TimeoutException` with diagnostic context (kernel name, dispatch number, completion ratio). Default 120s leaves room for legitimately-slow Wasm kernels (large Conv2D on big tensors) while surfacing infinite-loop kernels in 2 minutes vs 10+.
+
+Surfaced 2026-05-04 by Data's StyleMosaic Wasm hang at rc.22: fast-fault didn't fire (kernel didn't error, just never posted back). Watchdog provides actionable error path for that scenario.
+
+Verified: snapshot/race/scaling/Pow lockdowns 42/42 PASS — watchdog default doesn't false-fire on any existing test pattern. Set `WasmDispatchWatchdogSeconds=0` to disable if needed.
+
+v4.9.5-rc.22: WebGL runtime-safe Pow for negative base when exponent comes from a buffer load (e.g., ONNX initializer ArrayView). Closes Data's DistilBERT WebGL drift per his 2026-05-04 first-divergent capture at node 10 Pow.
 
 The rc.12 GLSL Pow neg-base fix only catches statically-constant integer exponents via `PrimitiveValue` detection. ONNX LayerNorm's `(x - mean)^pow_initializer_2.0` shape has the exponent loaded from an ArrayView buffer; `value.Right.Resolve()` returns a Load node, not PrimitiveValue. The static fix falls through; native `pow(neg, 2.0)` returns NaN on GLSL ES 3.0 because ANGLE expands it as `exp(2.0 * log(neg))` and `log(neg)` is NaN. NaN cascades through ReduceMean → Sqrt → Mul → Add and produces drift through the entire transformer.
 
