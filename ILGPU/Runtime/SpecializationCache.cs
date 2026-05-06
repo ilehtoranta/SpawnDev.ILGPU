@@ -126,7 +126,10 @@ namespace ILGPU.Runtime
                     handle,
                     kernelContext.VoidType),
                 out var _);
-            kernelMethod.AddFlags(MethodFlags.Inline);
+            // Launcher wrapper inlining is structural (the wrapper is generated
+            // specifically to inline the kernel + bind specialized parameters),
+            // not a heuristic — bypass the Inliner's cumulative IL budget.
+            kernelMethod.AddFlags(MethodFlags.Inline | MethodFlags.ForceInline);
             using (var methodBuilder = targetMethod.CreateBuilder())
             {
                 var location = targetMethod.Location;

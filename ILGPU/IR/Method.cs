@@ -59,6 +59,17 @@ namespace ILGPU.IR
         /// Marks entry-point methods.
         /// </summary>
         EntryPoint = 1 << 3,
+
+        /// <summary>
+        /// Marks a method whose inlining is intentional (explicit
+        /// <c>[MethodImpl(MethodImplOptions.AggressiveInlining)]</c> attribute or
+        /// ILGPU-internal helper). Such methods bypass the Inliner pass's cumulative
+        /// IL budget — their inlining cost is the user's deliberate choice. Without
+        /// this flag, deeply nested ILGPU primitives (bit ops, atomics, view math)
+        /// could be replaced by call sites mid-kernel when the budget is hit, which
+        /// would generate codegen-incompatible call signatures across backends.
+        /// </summary>
+        ForceInline = 1 << 4,
     }
 
     /// <summary>
@@ -477,6 +488,17 @@ namespace ILGPU.IR
         /// Returns the current transformation flags.
         /// </summary>
         public MethodTransformationFlags TransformationFlags => transformationFlags;
+
+        /// <summary>
+        /// IL instruction count of the source method body, captured during
+        /// <see cref="ILGPU.IR.Transformations.Inliner.SetupInliningAttributes"/>.
+        /// 0 for methods without IL (intrinsic, external, or not yet evaluated).
+        /// Used by the Inliner pass to enforce a cumulative-IL budget per
+        /// kernel transformation, preventing 5K-call-site monolithic-inlining
+        /// explosion (e.g. recursive codec entropy walkers blowing past V8's
+        /// 50K Wasm-locals cap).
+        /// </summary>
+        public int ILInstructionCount { get; internal set; }
 
         /// <summary>
         /// Returns all attached parameters.

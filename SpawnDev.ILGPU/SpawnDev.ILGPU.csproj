@@ -4,8 +4,8 @@
 		<TargetFramework>net10.0</TargetFramework>
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>enable</Nullable>
-		<Version>4.9.5-rc.28</Version>
-		<PackageReleaseNotes>v4.9.5-rc.28: WebGPU codegen hardening for NoInlining helpers (cross-block hoist, helper sig coalesce-aware emit closing the L44455 aliased-pointer Naga error, emu-64 raw u32 storage, Group.DimX extent clamp); WebGL explicit-launch body-struct param offset fix + i64 shift dispatch + emulation-library forward decls; ILGPU IR Inliner aggressive-mode cap (MaxNumILInstructionsAggressiveCap=1024) closing the codecs monolithic-inlining (52K Wasm function locals) finding. Tests23 sweep: 269 pass / 4 skip / 0 fail. Full per-fix history: see git log + _DevComms/global/nuget-local-publish-log.md.</PackageReleaseNotes>
+		<Version>4.9.5-local.17</Version>
+		<PackageReleaseNotes>v4.9.5-local.17: ILGPU IR Inliner cumulative-IL budget (CumulativeInlinedILBudget=16384) — catches recursive-helper inlining explosions where individual helpers sit under the per-function cap but their fan-out (e.g. 4-deep partition tree × ~500 IL each) blows past V8's 50K Wasm-locals cap. Adds MethodFlags.ForceInline so AggressiveInlining + ILGPU-internal helpers + launcher wrappers bypass the budget. Method.ILInstructionCount captured in SetupInliningAttributes. Closes Tuvok's codecs Wasm rc.28 retest finding. Full per-fix history: see git log + _DevComms/global/nuget-local-publish-log.md.</PackageReleaseNotes>
 		<GeneratePackageOnBuild>True</GeneratePackageOnBuild>
 		<GenerateDocumentationFile>true</GenerateDocumentationFile>
 		<EmbedAllSources>true</EmbedAllSources>
@@ -59,8 +59,8 @@
 		<ProjectReference Include="..\ILGPU.Algorithms\ILGPU.Algorithms.csproj" />
 	</ItemGroup>
 	<ItemGroup Condition="!Exists('$(MSBuildThisFileDirectory)..\ILGPU\ILGPU.csproj')">
-		<PackageReference Include="SpawnDev.ILGPU.Fork" Version="2.0.5" />
-		<PackageReference Include="SpawnDev.ILGPU.Algorithms.Fork" Version="2.0.5" />
+		<PackageReference Include="SpawnDev.ILGPU.Fork" Version="2.0.6" />
+		<PackageReference Include="SpawnDev.ILGPU.Algorithms.Fork" Version="2.0.6" />
 	</ItemGroup>
 
 	<ItemGroup>
