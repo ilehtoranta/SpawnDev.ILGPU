@@ -2229,5 +2229,109 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
         });
 
         #endregion
+
+        #region Cumulative IL Inliner budget — recursive helper fan-out
+
+        // Regression for the IR Inliner cumulative-IL budget added in
+        // local.17 (`CumulativeInlinedILBudget = 16384`). Mimics the
+        // shape that motivated the fix — a 4-deep recursive partition
+        // tree where each individual helper sits comfortably under
+        // `MaxNumILInstructionsAggressiveCap` (1024) but the transitive
+        // call graph would inline tens of thousands of IL instructions
+        // into the kernel root if not capped.
+        //
+        // Pre-fix (rc.28 with per-function cap only): 4^4 = 256 leaf
+        // call sites × ~50-80 IL each ≈ 13K-20K IL inlined. Combined
+        // with intermediate-level call inlining, the kernel grew large
+        // enough to choke V8's 50K Wasm-locals cap on big real-world
+        // codecs (Tuvok's VP9 EncodeFrameKernel). Synthetic test stays
+        // well clear of the V8 cap so it compiles even pre-fix, but
+        // exercises the budget logic so any regression that disables
+        // or breaks the budget surfaces here on a clean failure mode.
+        //
+        // Post-fix (local.17): the budget kicks in mid-tree and the
+        // remaining helpers stay as fn-defs. Both inlining patterns
+        // must produce the same output as the CPU reference path.
+
+        private static int Tests23_DeepTreeLeaf(int x, int y)
+        {
+            // ~50-80 IL of arithmetic. NOT NoInlining — explicitly
+            // letting the inliner work so the budget logic gets exercised.
+            int a = x ^ y;
+            int b = x + y;
+            int c = a * b;
+            int d = c - (a >> 2);
+            int e = d + (b << 1);
+            int f = e ^ 0x5A5A5A5A;
+            int g = f * 17 + 31;
+            int h = g - (e >> 1);
+            int i = h ^ (a << 1);
+            int j = i + (b >> 3);
+            return j;
+        }
+
+        private static int Tests23_DeepTreeLevel2(int seed)
+        {
+            int s0 = Tests23_DeepTreeLeaf(seed, seed + 1);
+            int s1 = Tests23_DeepTreeLeaf(seed + 2, seed + 3);
+            int s2 = Tests23_DeepTreeLeaf(seed + 4, seed + 5);
+            int s3 = Tests23_DeepTreeLeaf(seed + 6, seed + 7);
+            return s0 + s1 + s2 + s3;
+        }
+
+        private static int Tests23_DeepTreeLevel1(int seed)
+        {
+            int s0 = Tests23_DeepTreeLevel2(seed);
+            int s1 = Tests23_DeepTreeLevel2(seed + 100);
+            int s2 = Tests23_DeepTreeLevel2(seed + 200);
+            int s3 = Tests23_DeepTreeLevel2(seed + 300);
+            return s0 + s1 + s2 + s3;
+        }
+
+        private static int Tests23_DeepTreeLevel0(int seed)
+        {
+            int s0 = Tests23_DeepTreeLevel1(seed);
+            int s1 = Tests23_DeepTreeLevel1(seed + 10000);
+            int s2 = Tests23_DeepTreeLevel1(seed + 20000);
+            int s3 = Tests23_DeepTreeLevel1(seed + 30000);
+            return s0 + s1 + s2 + s3;
+        }
+
+        private static void Tests23_DeepInlineTreeKernel(Index1D _, ArrayView<int> output)
+        {
+            int s0 = Tests23_DeepTreeLevel0(1);
+            int s1 = Tests23_DeepTreeLevel0(2);
+            int s2 = Tests23_DeepTreeLevel0(3);
+            int s3 = Tests23_DeepTreeLevel0(4);
+            output[0] = s0 + s1 + s2 + s3;
+        }
+
+        [TestMethod]
+        public async Task Tests23_DeepInlineTree_BudgetDoesNotBreakCorrectness() => await RunEmulatedTest(async accelerator =>
+        {
+            using var output = accelerator.Allocate1D<int>(1);
+            var k = accelerator.LoadAutoGroupedStreamKernel<
+                Index1D, ArrayView<int>>(Tests23_DeepInlineTreeKernel);
+            k((Index1D)1, output.View);
+            await accelerator.SynchronizeAsync();
+            var got = await output.CopyToHostAsync<int>();
+
+            // Compute the same thing on the CPU. Must match bit-for-bit
+            // regardless of whether the kernel inlined the whole tree
+            // or auto-extracted helpers as fn-defs.
+            int e0 = Tests23_DeepTreeLevel0(1);
+            int e1 = Tests23_DeepTreeLevel0(2);
+            int e2 = Tests23_DeepTreeLevel0(3);
+            int e3 = Tests23_DeepTreeLevel0(4);
+            int expected = e0 + e1 + e2 + e3;
+
+            if (got[0] != expected)
+                throw new System.Exception(
+                    $"DeepInlineTree budget regression: expected {expected}, got {got[0]}. " +
+                    $"Cumulative-IL Inliner budget may be producing wrong fragmentation or " +
+                    $"helper-side codegen lost the result.");
+        });
+
+        #endregion
     }
 }
