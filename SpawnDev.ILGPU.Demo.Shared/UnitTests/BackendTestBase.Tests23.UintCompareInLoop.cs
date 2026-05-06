@@ -2161,6 +2161,73 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                 throw new System.Exception($"I64 ArrayView in helper: expected {expected:X}, got {got[0]:X}");
         });
 
+        // Tuvok's local.13 walker WGSL L44455 — reproduces the "invalid aliased
+        // pointer argument" Naga error. Sub-word coalesce v2 (local.6) merges
+        // 10+ same-element-size sub-word ArrayView kernel params into 1 shared
+        // `array<atomic<u32>>` binding. When those params are then passed to a
+        // [NoInlining] helper as positional ptr args, all the coalesced ones
+        // resolve to the SAME leader binding root — Naga rejects the call site.
+        // Pre-fix on WebGPU only when the kernel exceeds the 10-binding cap and
+        // sub-word v2 fires; below threshold, no coalesce → no aliasing.
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        static void Tests23_CoalesceAliasingHelper(
+            ArrayView<byte> a0, ArrayView<byte> a1, ArrayView<byte> a2,
+            ArrayView<byte> a3, ArrayView<byte> a4, ArrayView<byte> a5,
+            ArrayView<byte> a6, ArrayView<byte> a7, ArrayView<byte> a8,
+            ArrayView<byte> a9,
+            ArrayView<int> output)
+        {
+            int sum = 0;
+            sum += a0[0]; sum += a1[0]; sum += a2[0]; sum += a3[0]; sum += a4[0];
+            sum += a5[0]; sum += a6[0]; sum += a7[0]; sum += a8[0]; sum += a9[0];
+            output[0] = sum;
+        }
+
+        static void Tests23_CoalesceAliasingKernel(
+            Index1D _,
+            ArrayView<byte> a0, ArrayView<byte> a1, ArrayView<byte> a2,
+            ArrayView<byte> a3, ArrayView<byte> a4, ArrayView<byte> a5,
+            ArrayView<byte> a6, ArrayView<byte> a7, ArrayView<byte> a8,
+            ArrayView<byte> a9,
+            ArrayView<int> output)
+        {
+            Tests23_CoalesceAliasingHelper(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, output);
+        }
+
+        [TestMethod]
+        public async Task Tests23_SubWordCoalesceAliasingInHelper_NoCodegenError() => await RunEmulatedTest(async accelerator =>
+        {
+            const int N = 10;
+            var bufs = new MemoryBuffer1D<byte, Stride1D.Dense>[N];
+            try
+            {
+                for (int i = 0; i < N; i++)
+                {
+                    bufs[i] = accelerator.Allocate1D<byte>(1);
+                    bufs[i].View.CopyFromCPU(new byte[] { (byte)(i + 1) });
+                }
+                using var output = accelerator.Allocate1D<int>(1);
+                var k = accelerator.LoadAutoGroupedStreamKernel<
+                    Index1D,
+                    ArrayView<byte>, ArrayView<byte>, ArrayView<byte>, ArrayView<byte>, ArrayView<byte>,
+                    ArrayView<byte>, ArrayView<byte>, ArrayView<byte>, ArrayView<byte>, ArrayView<byte>,
+                    ArrayView<int>>(Tests23_CoalesceAliasingKernel);
+                k((Index1D)1,
+                    bufs[0].View, bufs[1].View, bufs[2].View, bufs[3].View, bufs[4].View,
+                    bufs[5].View, bufs[6].View, bufs[7].View, bufs[8].View, bufs[9].View,
+                    output.View);
+                await accelerator.SynchronizeAsync();
+                var got = await output.CopyToHostAsync<int>();
+                int expected = 1 + 2 + 3 + 4 + 5 + 6 + 7 + 8 + 9 + 10; // = 55
+                if (got[0] != expected)
+                    throw new System.Exception($"Coalesce aliasing helper: expected {expected}, got {got[0]}");
+            }
+            finally
+            {
+                for (int i = 0; i < N; i++) bufs[i]?.Dispose();
+            }
+        });
+
         #endregion
     }
 }

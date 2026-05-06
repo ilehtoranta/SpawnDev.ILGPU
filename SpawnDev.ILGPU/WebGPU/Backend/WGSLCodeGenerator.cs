@@ -207,6 +207,49 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             /// (Bug D phase 7, 2026-05-05.)
             /// </summary>
             public Dictionary<(Method method, int paramIdx), MemoryAddressSpace> HelperParamAddressSpaces { get; } = new();
+
+            /// <summary>
+            /// Per-helper-method, per-parameter-index COALESCE membership info. Populated by
+            /// WGSLKernelFunctionGenerator's pre-body scan of MethodCall nodes when an arg
+            /// resolves to a kernel parameter that's a member of a direct-param coalesce
+            /// group (`_directParamCoalesceMembership`). Consumed by WGSLFunctionGenerator
+            /// at signature emit + LEA emit time.
+            ///
+            /// The fix: when N coalesced ArrayView params are passed positionally to a
+            /// NoInlining helper, each "let v_X = &leader_binding;" alias points to the
+            /// SAME WGSL ptr — Naga rejects with "invalid aliased pointer argument" or
+            /// (more subtly) the helper reads from the same slot N times because the
+            /// kernel-side per-member offset isn't passed across the call.
+            ///
+            /// Fix shape: helper signature collapses N coalesced same-group args into 1
+            /// LEADER ptr + N i32 offset args. The kernel call site emits the leader ptr
+            /// ONCE and the per-arg offset values per member. The helper's LEA on each
+            /// coalesced param uses `&(*leaderPtr)[offsetArg + idxExpr]` instead of
+            /// `&(*p_X)[idxExpr]`. (Local.15+ helper-sig coalesce-aware emit, 2026-05-05.)
+            /// </summary>
+            public Dictionary<(Method method, int paramIdx), HelperParamCoalesceEntry> HelperParamCoalesceInfo { get; } = new();
+        }
+
+        /// <summary>
+        /// Coalesce metadata for a single helper parameter index. See
+        /// <see cref="GeneratorArgs.HelperParamCoalesceInfo"/>.
+        /// </summary>
+        public class HelperParamCoalesceEntry
+        {
+            /// <summary>Group key — same for all params that share a coalesced leader binding.</summary>
+            public string GroupKey { get; set; } = string.Empty;
+            /// <summary>Leader binding name in the kernel (e.g. "param_direct_swi8_coalesced").</summary>
+            public string LeaderBindingName { get; set; } = string.Empty;
+            /// <summary>Leader binding's WGSL element type (e.g. "atomic&lt;u32&gt;").</summary>
+            public string LeaderBindingWgslElementType { get; set; } = string.Empty;
+            /// <summary>True when this param is the FIRST member of its group (gets the leader ptr arg).</summary>
+            public bool IsLeader { get; set; }
+            /// <summary>Per-member offset scalar slot in `_scalar_params`. The kernel call site emits the offset value from this slot.</summary>
+            public int OffsetScalarSlot { get; set; }
+            /// <summary>True when the coalesced group is sub-word (atomic&lt;u32&gt; backing). Affects Load codegen.</summary>
+            public bool IsSubWord { get; set; }
+            /// <summary>Sub-word element byte size (1 or 2). Used by Load codegen for atomic shift/mask.</summary>
+            public int SubWordElementByteSize { get; set; }
         }
 
         /// <summary>

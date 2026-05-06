@@ -367,6 +367,13 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                         || callee.HasFlags(global::ILGPU.IR.MethodFlags.Intrinsic))
                         continue;
 
+                    // Coalesce-aware helper sig (local.15+): track which arg positions
+                    // share a coalesced leader binding so the helper can collapse same-group
+                    // ptr args into 1 leader + N offset args. Builds a per-call group map
+                    // first, then promotes each (callee, argIdx) entry into the shared dict.
+                    var perCallGroups = new Dictionary<string, List<int>>(); // groupKey -> [argIdx1, argIdx2, ...]
+                    var perCallEntryStaging = new Dictionary<int, HelperParamCoalesceEntry>();
+
                     for (int argIdx = 0; argIdx < call.Count; argIdx++)
                     {
                         var arg = call.Nodes[argIdx].Resolve();
@@ -390,6 +397,52 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                                     _generatorArgs.HelperParamAddressSpaces[key] = argAddrSpace;
                             }
                         }
+
+                        // Coalesce-aware sig scan. Resolve the arg to a kernel Parameter (if any).
+                        // If the parameter is a member of a direct-param coalesce group, stage
+                        // a HelperParamCoalesceEntry. After the loop, designate the FIRST member
+                        // per group as the leader (gets the leader ptr arg) and copy all entries
+                        // into _generatorArgs.HelperParamCoalesceInfo.
+                        var argParam = ResolveToParameter(arg);
+                        if (argParam != null
+                            && _directParamCoalesceMembership.TryGetValue(argParam.Index, out var dpGroup))
+                        {
+                            int voSlot = _viewOffsetScalarSlots.TryGetValue(argParam.Index, out var slot) ? slot : -1;
+                            // Element WGSL type for the leader binding (e.g. "atomic<u32>" for sub-word,
+                            // "i32"/"u32"/"f32" for v1).
+                            string leaderElemWgslType = dpGroup.BindingWgslType;
+                            perCallEntryStaging[argIdx] = new HelperParamCoalesceEntry
+                            {
+                                GroupKey = dpGroup.BindingName,
+                                LeaderBindingName = dpGroup.BindingName,
+                                LeaderBindingWgslElementType = leaderElemWgslType,
+                                IsLeader = false, // promoted below
+                                OffsetScalarSlot = voSlot,
+                                IsSubWord = dpGroup.IsSubWord,
+                                SubWordElementByteSize = dpGroup.SubWordElementByteSize,
+                            };
+                            if (!perCallGroups.TryGetValue(dpGroup.BindingName, out var groupList))
+                            {
+                                groupList = new List<int>();
+                                perCallGroups[dpGroup.BindingName] = groupList;
+                            }
+                            groupList.Add(argIdx);
+                        }
+                    }
+
+                    // Designate the first arg in each group as the leader and promote all
+                    // staged entries into the shared HelperParamCoalesceInfo dict.
+                    foreach (var kvp in perCallGroups)
+                    {
+                        if (kvp.Value.Count == 0) continue;
+                        int leaderArgIdx = kvp.Value[0];
+                        perCallEntryStaging[leaderArgIdx].IsLeader = true;
+                    }
+                    foreach (var coalEntry in perCallEntryStaging)
+                    {
+                        var coalKey = (callee, coalEntry.Key);
+                        if (!_generatorArgs.HelperParamCoalesceInfo.ContainsKey(coalKey))
+                            _generatorArgs.HelperParamCoalesceInfo[coalKey] = coalEntry.Value;
                     }
                     // Recurse into the callee's body so transitive calls are also
                     // scanned (a kernel-side helper passing the workgroup view to
@@ -2504,10 +2557,44 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         private void EmitNonInlinedMethodCall(MethodCall methodCall)
         {
             var fnName = WGSLFunctionGenerator.GetMethodName(methodCall.Target);
+            var callee = methodCall.Target;
 
             var argStrs = new List<string>(methodCall.Count);
+            // Coalesce-aware emit (local.15+): when args reference coalesced kernel
+            // params, the helper's signature collapses each group into 1 leader ptr +
+            // N per-member offsets. Emit the leader binding ref ONCE per group, then
+            // emit the per-member offset for every coalesced arg. Non-coalesced args
+            // emit normally.
+            var emittedLeaderGroups = new HashSet<string>();
             for (int i = 0; i < methodCall.Count; i++)
             {
+                var argResolved = methodCall.Nodes[i].Resolve();
+                var argParam = ResolveToParameter(argResolved);
+                if (argParam != null
+                    && _generatorArgs.HelperParamCoalesceInfo.TryGetValue((callee, i), out var coalEntry))
+                {
+                    // Emit leader binding ref ONCE per group.
+                    if (coalEntry.IsLeader && !emittedLeaderGroups.Contains(coalEntry.LeaderBindingName))
+                    {
+                        emittedLeaderGroups.Add(coalEntry.LeaderBindingName);
+                        argStrs.Add($"&{coalEntry.LeaderBindingName}");
+                        _bodyReferencesScalarParams = true;
+                    }
+                    // Always emit per-member offset (i32 element index into the leader).
+                    int voSlot = coalEntry.OffsetScalarSlot;
+                    if (voSlot >= 0)
+                    {
+                        argStrs.Add($"i32(_scalar_params[{voSlot}])");
+                        _bodyReferencesScalarParams = true;
+                    }
+                    else
+                    {
+                        // No offset slot recorded — defensive fallback to 0.
+                        argStrs.Add("0");
+                    }
+                    continue;
+                }
+
                 var argVar = Load(methodCall[i]);
                 argStrs.Add(argVar.ToString());
             }

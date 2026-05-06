@@ -49,6 +49,19 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         private readonly Dictionary<string, int> _subWordLEAVars = new();       // LEA target Variable name -> paramIdx
         private readonly Dictionary<int, string> _paramIndexToLocalVar = new(); // paramIdx -> "v_X" (the helper's `let v_X : ptr<...> = p_Y;` local name)
 
+        // Coalesce-aware fn-param tracking (local.15+): closes Tuvok L44455 walker bug
+        // where N coalesced ArrayView args passed to a NoInlining helper produce N
+        // aliased ptr args at the WGSL call site. The helper's signature collapses
+        // each coalesced group into 1 leader ptr + N per-member offset i32 args.
+        // _coalesceParamInfo: paramIdx -> (helperLocalLeaderPtrName, offsetArgName, entry)
+        //   Used by GenerateCode(LoadElementAddress) and the call-site emit to find
+        //   the leader ptr + offset for each coalesced helper param.
+        // _coalesceGroupLeaderPtrNames: leaderBindingName -> WGSL ptr arg name for the group
+        //   The first member of each group gets the ptr arg; non-leader members reuse
+        //   the leader's ptr name via this dict.
+        private readonly Dictionary<int, (string leaderPtr, string offsetArg, HelperParamCoalesceEntry entry)> _coalesceParamInfo = new();
+        private readonly Dictionary<string, string> _coalesceGroupLeaderPtrNames = new();
+
         // Emulated 64-bit storage view params (ArrayView<long>/<ulong>/<double>).
         // Helper signature for these uses `array<u32>` (raw bits, mirroring kernel
         // binding) rather than `array<emu_i64>` / `array<emu_f64>`. LEA / Load /
@@ -189,6 +202,13 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
         /// <summary>
         /// Generates a header stub for the current method.
+        ///
+        /// Coalesce-aware emit (local.15+): when the caller's pre-body scan recorded
+        /// `HelperParamCoalesceInfo` for params that share a coalesced kernel binding,
+        /// the signature collapses each coalesced group into ONE leader ptr arg + N
+        /// per-member offset i32 args. The non-leader members of the group don't get
+        /// their own ptr arg (just their offset arg), avoiding WGSL's "invalid aliased
+        /// pointer argument" error. Closes Tuvok's L44455 walker bug.
         /// </summary>
         private void GenerateHeaderStub(StringBuilder builder)
         {
@@ -198,10 +218,38 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
             // Emit parameters
             bool first = true;
-            foreach (var param in Method.Parameters)
+            // Track which leader-binding ptrs have already been emitted (one per group).
+            var emittedLeaderPtrs = new HashSet<string>();
+
+            void Emit(string s)
             {
                 if (!first) builder.Append(", ");
                 first = false;
+                builder.Append(s);
+            }
+
+            foreach (var param in Method.Parameters)
+            {
+                // Coalesce-aware path: this param is a member of a direct-param coalesce
+                // group. Emit (leader ptr if first member of group) + per-member offset i32.
+                if (param.ParameterType is ViewType
+                    && _args.HelperParamCoalesceInfo.TryGetValue((Method, param.Index), out var coalEntry))
+                {
+                    if (coalEntry.IsLeader && !emittedLeaderPtrs.Contains(coalEntry.LeaderBindingName))
+                    {
+                        // Emit the LEADER ptr arg ONCE for the group. The leader's name
+                        // pattern is `p_<paramId>_leader_ptr` so the helper body's LEA
+                        // override can find it via the same naming convention.
+                        emittedLeaderPtrs.Add(coalEntry.LeaderBindingName);
+                        // Storage class is "storage" for direct-param coalesce (always backed
+                        // by a kernel storage binding). Element type from the group entry.
+                        string leaderType = $"ptr<storage, array<{coalEntry.LeaderBindingWgslElementType}>, read_write>";
+                        Emit($"p_{param.Id}_leader : {leaderType}");
+                    }
+                    // Always emit the per-member offset arg (i32 element index into the leader).
+                    Emit($"p_{param.Id}_offset : i32");
+                    continue;
+                }
 
                 string paramType;
                 if (param.ParameterType is ViewType viewType)
@@ -229,7 +277,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 {
                     paramType = TypeGenerator[param.ParameterType];
                 }
-                builder.Append($"p_{param.Id} : {paramType}");
+                Emit($"p_{param.Id} : {paramType}");
             }
 
             builder.Append(")");
@@ -327,6 +375,39 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             // Bind parameters to local variables
             foreach (var param in Method.Parameters)
             {
+                // Coalesce-aware binding (local.15+): for params in a coalesced group,
+                // bind the leader ptr alias (per group, only first member's leaderPtr arg
+                // is in the signature) and record the per-member offset arg name. The LEA
+                // override below uses these to emit `&(*leaderPtr)[offsetArg + idxExpr]`.
+                if (param.ParameterType is ViewType
+                    && _args.HelperParamCoalesceInfo.TryGetValue((Method, param.Index), out var coalEntry))
+                {
+                    var coalVariable = Allocate(param);
+                    // For the LEADER param, `p_{param.Id}_leader` is the WGSL ptr-arg name.
+                    // For NON-LEADER members, the leader is referenced by the FIRST member's
+                    // p_{leaderId}_leader name. We need to track the leader's id per group.
+                    string leaderPtrName;
+                    if (coalEntry.IsLeader)
+                    {
+                        leaderPtrName = $"p_{param.Id}_leader";
+                        _coalesceGroupLeaderPtrNames[coalEntry.LeaderBindingName] = leaderPtrName;
+                    }
+                    else
+                    {
+                        // Look up the leader ptr name (set when we processed the leader earlier).
+                        leaderPtrName = _coalesceGroupLeaderPtrNames.TryGetValue(coalEntry.LeaderBindingName, out var name)
+                            ? name
+                            : $"p_{param.Id}_leader"; // fallback (shouldn't happen with proper group ordering)
+                    }
+                    string offsetArgName = $"p_{param.Id}_offset";
+                    _coalesceParamInfo[param.Index] = (leaderPtrName, offsetArgName, coalEntry);
+                    // Bind variable.Name to the local helper alias for the leader ptr.
+                    // Loads on `parameter[i]` will go through the LEA override below.
+                    AppendLine($"// param {param.Index} (coalesced; leader={leaderPtrName}, offset={offsetArgName})");
+                    declaredVariables.Add(coalVariable.Name);
+                    continue;
+                }
+
                 var variable = Allocate(param);
                 // Bug D fix (2026-05-05): ViewType params are emitted as ptr<storage, ...>
                 // in the fn signature (see GenerateHeaderStub), so the binding must use
@@ -477,6 +558,50 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 bool offsetIsEmulatedI64 = Backend.EnableI64Emulation
                     && value.Offset.Resolve().BasicValueType == BasicValueType.Int64;
                 string offsetExpr = offsetIsEmulatedI64 ? $"i64_to_i32({offset})" : $"{offset}";
+
+                // Coalesce-aware LEA (local.15+): if this param was bound via the
+                // coalesced helper-sig path (1 leader ptr + N offset args per group),
+                // the LEA must use `&(*leaderPtr)[offsetArg + idxExpr]` so each member's
+                // accesses go through the SHARED leader binding with the per-member
+                // offset baked in. Sub-word coalesce uses element-offset semantics —
+                // the offsetArg is the byte/short element-index offset, idxExpr is the
+                // element index within that view; subsequent sub-word Load codegen will
+                // divide by elemsPerWord to get the u32 word index.
+                if (_coalesceParamInfo.TryGetValue(param.Index, out var coalInfo))
+                {
+                    if (coalInfo.entry.IsSubWord)
+                    {
+                        // Sub-word: store (offsetArg + element-idx) for the Load chain to
+                        // consume. Mirror the helper-side sub-word LEA path's deferred-decl
+                        // hoisting for cross-block uses.
+                        _subWordLEAVars[target.Name] = param.Index;
+                        // Track that this sub-word param uses the coalesced leader binding
+                        // (so sub-word Load codegen reads from `(*leaderPtr)` instead of
+                        // `(*p_X)`). Map paramIdx -> leaderPtr name in the existing
+                        // _paramIndexToLocalVar dict.
+                        _paramIndexToLocalVar[param.Index] = coalInfo.leaderPtr;
+                        bool helperIsMultiBlock = Method.Blocks.Count > 1;
+                        string composedOffset = $"({coalInfo.offsetArg} + {offsetExpr})";
+                        if (helperIsMultiBlock && declaredVariables.Add(target.Name))
+                        {
+                            _helperDeferredVarDeclarations.Add($"    var {target.Name} : i32;");
+                            AppendLine($"{target.Name} = {composedOffset};");
+                        }
+                        else if (helperIsMultiBlock)
+                        {
+                            AppendLine($"{target.Name} = {composedOffset};");
+                        }
+                        else
+                        {
+                            AppendLine($"var {target.Name} : i32 = {composedOffset};");
+                        }
+                        return;
+                    }
+                    // Full-word coalesced (i32/u32/f32 via v1): emit a ptr alias
+                    // pointing at the leader's element at `offsetArg + idxExpr`.
+                    AppendLine($"let {target.Name} = &(*{coalInfo.leaderPtr})[{coalInfo.offsetArg} + {offsetExpr}];");
+                    return;
+                }
 
                 // Emu-64 (Int64/UInt64/Float64) ArrayView fn-param: raw u32 storage
                 // (stride=2). Mirror the kernel-side LEA pattern at
