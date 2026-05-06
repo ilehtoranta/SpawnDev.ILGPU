@@ -26,9 +26,34 @@ namespace ILGPU.IR.Transformations
         #region Constants
 
         /// <summary>
-        /// The maximum number of IL instructions to inline.
+        /// The maximum number of IL instructions to inline in Conservative mode.
         /// </summary>
         private const int MaxNumILInstructionsToInline = 32;
+
+        /// <summary>
+        /// Hard upper bound for a method's IL instruction count before the inliner
+        /// declines to inline in Aggressive / Default mode. Methods explicitly marked
+        /// with <c>[MethodImpl(MethodImplOptions.AggressiveInlining)]</c> or living
+        /// inside ILGPU's own assembly bypass this cap (their explicit attribute is
+        /// the user's signal that the cost is intentional).
+        ///
+        /// Without this cap, ILGPU's Aggressive (default) mode unconditionally inlines
+        /// every method reachable from the kernel entry, regardless of size. For
+        /// codecs that compose many medium-sized helpers via a recursive partition
+        /// tree (e.g. Tuvok's VP9 EncodeFrameKernel — see
+        /// `tuvok-to-geordi-codecs-wasm-monolithic-inlining-2026-05-06.md`), the
+        /// resulting kernel function balloons to tens of thousands of locals + KB-MB
+        /// of instruction bytes in a single Wasm/WGSL function. wabt's parser rejects
+        /// at &gt;50K locals (`function local count exceeds maximum value`), V8's
+        /// TurboFan tier-up compile latency dwarfs Playwright's 30s test budget, and
+        /// Naga + WebGPU shader-validators choke similarly on the WGSL side.
+        ///
+        /// 1024 instructions is generous enough to inline almost all "real" C#
+        /// helpers (typical 50-200; heavy 500-1000) while preventing 5K+
+        /// mega-helpers from being unconditionally inlined.
+        /// (2026-05-05 codecs Wasm finding.)
+        /// </summary>
+        private const int MaxNumILInstructionsAggressiveCap = 1024;
 
         #endregion
 
@@ -59,9 +84,24 @@ namespace ILGPU.IR.Transformations
                     MethodImplAttributes.AggressiveInlining ||
                     source.Module.Name == Context.FullAssemblyModuleName)
                 {
+                    // Explicit AggressiveInlining attribute or ILGPU-internal helper
+                    // bypasses the size cap. Return immediately so the heuristic
+                    // below doesn't re-evaluate (it's idempotent on the flag, but
+                    // the early return is cheaper + makes intent clearer).
                     method.AddFlags(MethodFlags.Inline);
+                    return;
                 }
             }
+
+            // Hard cap (Aggressive / Default mode): decline to inline methods whose
+            // IL body exceeds the aggressive cap. Without this, kernels composed of
+            // medium-sized helpers via deep call graphs balloon to tens of thousands
+            // of locals + KB-MB instruction bytes in a single emitted Wasm/WGSL
+            // function — see XML comment on `MaxNumILInstructionsAggressiveCap` for
+            // the codec finding that motivated this. Methods opting in explicitly
+            // (AggressiveInlining attribute / ILGPU internal) bypassed this above.
+            if (disassembledMethod.Instructions.Length > MaxNumILInstructionsAggressiveCap)
+                return;
 
             // Evaluate a simple inlining heuristic
             if (context.Properties.InliningMode != InliningMode.Conservative ||
