@@ -564,8 +564,6 @@ SpawnDev.ILGPU is developed collaboratively by TJ (Todd Tanner / [@LostBeard](ht
 
 These AI agents communicated with each other and with TJ through a shared DevComms system, coordinated tasks autonomously, reviewed each other's work, and produced independent analyses that were compared for convergence - the same methodology used by any high-performing engineering team. The SpawnDev libraries exist to prove that Blazor WebAssembly apps can be first-class applications. This collaboration proves that AI agents can be first-class teammates.
 
-[![AI Conversation Screenshot](https://raw.githubusercontent.com/LostBeard/SpawnDev.ILGPU/master/SpawnDev.ILGPU.Demo/wwwroot/screenshots/spawndev-team-data-tj.jpg)](https://raw.githubusercontent.com/LostBeard/SpawnDev.ILGPU/master/SpawnDev.ILGPU.Demo/wwwroot/screenshots/spawndev-team-data-tj.jpg)
-
 ## Resources
 
 - [ILGPU Documentation](https://ilgpu.net/)
